@@ -2040,10 +2040,42 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
 
     let projected_started = Instant::now();
     let mut projected = Projected::new(input);
-    let mut roots = Vec::with_capacity(input.tokenizer.num_states() as usize);
-    for raw in 0..input.tokenizer.num_states() {
-        roots.push(projected.root_row(raw));
-    }
+    // `initial_state_map` is already an exact certified quotient for this L1
+    // branch.  Preserve a raw-state-indexed root table for O(1) transition
+    // lookup, but construct residual roots only for quotient representatives.
+    // Every transition that lands on a raw state therefore enters the same
+    // projected residual as its certified representative instead of rebuilding
+    // duplicate `(terminal, raw-state)` subautomata.
+    let mut roots = if let Some(state_map) = input.initial_state_map {
+        debug_assert_eq!(
+            state_map.original_to_internal.len(),
+            input.tokenizer.num_states() as usize
+        );
+        let representative_rows = state_map
+            .representative_original_ids
+            .iter()
+            .map(|&raw| {
+                assert_ne!(raw, u32::MAX, "L1 state quotient has an unmapped representative");
+                projected.root_row(raw)
+            })
+            .collect::<Vec<_>>();
+        state_map
+            .original_to_internal
+            .iter()
+            .enumerate()
+            .map(|(raw, &class)| {
+                if class == u32::MAX {
+                    projected.root_row(raw as u32)
+                } else {
+                    representative_rows[class as usize].clone()
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        (0..input.tokenizer.num_states())
+            .map(|raw| projected.root_row(raw))
+            .collect::<Vec<_>>()
+    };
     let limit = std::env::var("GLRMASK_L1_SINGLE_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
