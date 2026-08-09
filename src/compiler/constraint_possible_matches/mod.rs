@@ -2420,6 +2420,10 @@ struct BatchedDemandView {
     raw_state_to_index: Vec<u32>,
     byte_transitions: Vec<Vec<u32>>,
     matched_masks: Vec<u128>,
+    /// Conservative demanded-terminal reachability over byte transitions and
+    /// optional token-boundary projection edges. `None` keeps the reference
+    /// traversal unchanged.
+    future_matched_masks: Option<Vec<u128>>,
     is_end: Vec<bool>,
     self_loop_bytes: Vec<U8Set>,
     boundary_state: Option<Vec<u32>>,
@@ -2498,6 +2502,8 @@ struct BatchedDemandProfile {
     matched_events: usize,
     origin_updates: usize,
     range_inserts: usize,
+    future_prunes: usize,
+    future_pruned_origins: usize,
     append_ms: f64,
 }
 
@@ -2530,6 +2536,68 @@ fn append_batched_demand_matches(
     profile.append_ms += elapsed_ms(started_at);
 }
 
+fn batched_future_matched_masks(
+    matched_masks: &[u128],
+    byte_transitions: &[Vec<u32>],
+    boundary_state: Option<&[u32]>,
+) -> Vec<u128> {
+    let num_states = matched_masks.len();
+    let mut predecessors = vec![Vec::<u32>::new(); num_states];
+    for column in byte_transitions {
+        debug_assert_eq!(column.len(), num_states);
+        for (source, &target) in column.iter().enumerate() {
+            if target != u32::MAX {
+                predecessors[target as usize].push(source as u32);
+            }
+        }
+    }
+    if let Some(boundary_state) = boundary_state {
+        debug_assert_eq!(boundary_state.len(), num_states);
+        for (source, &target) in boundary_state.iter().enumerate() {
+            if target != u32::MAX {
+                predecessors[target as usize].push(source as u32);
+            }
+        }
+    }
+    for incoming in &mut predecessors {
+        incoming.sort_unstable();
+        incoming.dedup();
+    }
+
+    let mut future = matched_masks.to_vec();
+    let mut queue = std::collections::VecDeque::<u32>::new();
+    let mut queued = vec![false; num_states];
+    for state in 0..num_states {
+        if future[state] != 0 {
+            queue.push_back(state as u32);
+            queued[state] = true;
+        }
+    }
+    while let Some(target) = queue.pop_front() {
+        queued[target as usize] = false;
+        let target_mask = future[target as usize];
+        for &source in &predecessors[target as usize] {
+            let slot = &mut future[source as usize];
+            let merged = *slot | target_mask;
+            if merged != *slot {
+                *slot = merged;
+                if !queued[source as usize] {
+                    queued[source as usize] = true;
+                    queue.push_back(source);
+                }
+            }
+        }
+    }
+    future
+}
+
+#[inline]
+fn batched_group_has_future_demand(view: &BatchedDemandView, state: u32, remaining: u128) -> bool {
+    view.future_matched_masks
+        .as_ref()
+        .is_none_or(|future| future[state as usize] & remaining != 0)
+}
+
 fn collect_batched_demand_node(
     node: &VocabPrefixTreeNode,
     groups: Vec<BatchedDemandGroup>,
@@ -2546,6 +2614,11 @@ fn collect_batched_demand_node(
         let mut next_groups = Vec::<BatchedDemandGroup>::new();
         group_index.begin_edge();
         for group in &groups {
+            if !batched_group_has_future_demand(view, group.state_index, group.remaining) {
+                profile.future_prunes += 1;
+                profile.future_pruned_origins += group.origins.len();
+                continue;
+            }
             let mut state_index = group.state_index;
             let mut remaining = group.remaining;
             let mut matched = 0u128;
@@ -2562,6 +2635,12 @@ fn collect_batched_demand_node(
                 matched |= newly_matched;
                 remaining &= !newly_matched;
                 if remaining == 0 {
+                    break;
+                }
+                if !batched_group_has_future_demand(view, state_index, remaining) {
+                    profile.future_prunes += 1;
+                    profile.future_pruned_origins += group.origins.len();
+                    live = false;
                     break;
                 }
             }
@@ -2588,6 +2667,11 @@ fn collect_batched_demand_node(
                 if state_index == u32::MAX {
                     continue;
                 }
+            }
+            if !batched_group_has_future_demand(view, state_index, remaining) {
+                profile.future_prunes += 1;
+                profile.future_pruned_origins += group.origins.len();
+                continue;
             }
             if let Some(existing_group_index) = group_index.get(state_index, remaining) {
                 profile.group_merges += 1;
@@ -2709,6 +2793,7 @@ fn collect_batched_demand_possible_matches(
         raw_state_to_index,
         byte_transitions,
         matched_masks,
+        future_matched_masks: None,
         is_end,
         self_loop_bytes,
         boundary_state: None,
@@ -2779,7 +2864,7 @@ fn collect_batched_demand_possible_matches(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
+            "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
             profile.nodes,
             profile.child_edges,
             profile.input_groups,
@@ -2789,6 +2874,8 @@ fn collect_batched_demand_possible_matches(
             profile.matched_events,
             profile.origin_updates,
             profile.range_inserts,
+            profile.future_prunes,
+            profile.future_pruned_origins,
             profile.append_ms,
             walk_ms,
             class_ms,
@@ -2839,10 +2926,22 @@ fn collect_batched_demand_possible_matches_precomputed(
             })
         })
         .collect::<Vec<_>>();
+    let use_future_prune = std::env::var("GLRMASK_PM_POWERSET_FUTURE_DEMAND_PRUNE")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(true);
+    let future_mask_started_at = Instant::now();
+    let future_matched_masks = use_future_prune.then(|| {
+        batched_future_matched_masks(&matched_masks, byte_transitions, Some(boundary_state))
+    });
+    let future_mask_ms = elapsed_ms(future_mask_started_at);
     let view = BatchedDemandView {
         raw_state_to_index: (0..num_states as u32).collect(),
         byte_transitions: byte_transitions.to_vec(),
         matched_masks,
+        future_matched_masks,
         is_end: is_end.to_vec(),
         self_loop_bytes: self_loop_bytes.to_vec(),
         boundary_state: Some(boundary_state.to_vec()),
@@ -2911,7 +3010,7 @@ fn collect_batched_demand_possible_matches_precomputed(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][batched_demand_powerset_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
+            "[glrmask/profile][batched_demand_powerset_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} future_mask_ms={:.3} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
             profile.nodes,
             profile.child_edges,
             profile.input_groups,
@@ -2921,6 +3020,9 @@ fn collect_batched_demand_possible_matches_precomputed(
             profile.matched_events,
             profile.origin_updates,
             profile.range_inserts,
+            profile.future_prunes,
+            profile.future_pruned_origins,
+            future_mask_ms,
             profile.append_ms,
             walk_ms,
             class_ms,
@@ -3826,6 +3928,24 @@ mod tests {
             .original_to_internal
             .iter()
             .all(|&token| token == u32::MAX));
+    }
+
+    #[test]
+    fn batched_future_masks_follow_bytes_and_boundary_edges() {
+        // 0 -a-> 1 -b-> 2, with 3 projecting to 1 at a token boundary.
+        // Only state 2 directly matches demanded bit 0b10; every predecessor
+        // that can reach it must inherit that bit, while disconnected state 4
+        // must remain empty.
+        let mut transitions = vec![vec![u32::MAX; 5]; 256];
+        transitions[b'a' as usize][0] = 1;
+        transitions[b'b' as usize][1] = 2;
+        let boundary = [u32::MAX, u32::MAX, u32::MAX, 1, u32::MAX];
+        let masks = batched_future_matched_masks(
+            &[0, 0, 0b10, 0, 0],
+            &transitions,
+            Some(&boundary),
+        );
+        assert_eq!(masks, vec![0b10, 0b10, 0b10, 0b10, 0]);
     }
 
     #[test]
