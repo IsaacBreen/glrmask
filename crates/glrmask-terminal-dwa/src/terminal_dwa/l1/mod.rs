@@ -313,6 +313,10 @@ pub fn prepared_l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrd
     l1_identity_vocab_order(vocab)
 }
 
+pub fn prepare_l1_finite_vocab_projection(vocab: &Vocab) {
+    implementations::prepare_finite_vocab_projection(vocab);
+}
+
 fn derive_l1_identity_vocab_order_from_parent(
     parent: &L1IdentityVocabOrder,
     subset_vocab: &Vocab,

@@ -14,6 +14,7 @@ mod common;
 mod dense;
 mod frontier;
 mod projected;
+pub(super) use projected::prepare_finite_vocab_projection;
 mod quotient;
 pub mod scalar;
 mod support;

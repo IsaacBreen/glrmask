@@ -1231,6 +1231,7 @@ pub fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
             classify::prepare_vocab_for_terminal_classification(sub_vocab);
             l1::prepare_l1_identity_vocab_order(sub_vocab);
             l1::prepare_l1_token_bounded_analysis_trie(sub_vocab);
+            l1::prepare_l1_finite_vocab_projection(sub_vocab);
         }
     }
 }

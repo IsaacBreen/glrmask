@@ -15,6 +15,7 @@ use rustc_hash::FxHashMap;
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
 use crate::automata::lexer::Lexer;
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
+use crate::Vocab;
 
 const UNKNOWN: u32 = u32::MAX - 1;
 
@@ -1685,6 +1686,81 @@ struct FiniteTrie {
     nodes: Vec<FiniteTrieNode>,
 }
 
+struct FiniteVocabProjection {
+    aliases: Vec<Vec<u32>>,
+    tokens: Vec<Arc<[u8]>>,
+    trie: FiniteTrie,
+}
+
+impl crate::vocab::VocabDerivedArtifact for FiniteVocabProjection {}
+
+fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<FiniteVocabProjection>() {
+        return cached;
+    }
+    let order = super::super::prepared_l1_identity_vocab_order(vocab);
+    let mut tokens = Vec::<Arc<[u8]>>::with_capacity(vocab.len());
+    let mut aliases = Vec::<Vec<u32>>::with_capacity(vocab.len());
+    for (id, bytes) in order.token_entries_sorted.iter() {
+        if tokens
+            .last()
+            .is_some_and(|token| token.as_ref() == bytes.as_ref())
+        {
+            aliases
+                .last_mut()
+                .expect("duplicate token has predecessor")
+                .push(*id);
+        } else {
+            tokens.push(Arc::clone(bytes));
+            aliases.push(vec![*id]);
+        }
+    }
+    debug_assert_eq!(aliases.iter().map(Vec::len).sum::<usize>(), vocab.len());
+    let trie = FiniteTrie::build(&tokens);
+    let projection = Arc::new(FiniteVocabProjection {
+        aliases,
+        tokens,
+        trie,
+    });
+    vocab.vocab_derived_cache_set(Arc::clone(&projection));
+    projection
+}
+
+pub(crate) fn prepare_finite_vocab_projection(vocab: &Vocab) {
+    if vocab.len() >= 50_000 {
+        let _ = build_finite_vocab_projection(vocab);
+    }
+}
+
+fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>, bool, f64) {
+    let started = Instant::now();
+    if input.subset_parent_order.is_none() {
+        let cached = input
+            .vocab
+            .vocab_derived_cache_get::<FiniteVocabProjection>();
+        if let Some(cached) = cached {
+            return (cached, true, started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let projection = build_finite_vocab_projection(input.vocab);
+        return (
+            projection,
+            false,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let (aliases, tokens) = unique_vocab(input);
+    let trie = FiniteTrie::build(&tokens);
+    (
+        Arc::new(FiniteVocabProjection {
+            aliases,
+            tokens,
+            trie,
+        }),
+        false,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
 impl FiniteTrie {
     /// Build a compressed radix trie directly from the byte-sorted unique
     /// vocabulary. Edge labels are slices of one vocabulary token, so the trie
@@ -1851,6 +1927,196 @@ fn collect_finite_profile(
     }
 }
 
+#[derive(Clone, Copy)]
+struct FiniteRowEvent {
+    position: u32,
+    row: u32,
+    signature: u32,
+}
+
+/// Collision-free canonical ID for a mutable vector of finite-row signatures.
+/// Leaves and internal pairs are hash-consed, so the root ID is equal iff the
+/// entire vector is equal. One row update costs O(log rows) and never copies the
+/// full state-class vector.
+struct CanonicalSignatureVector {
+    base: usize,
+    tree: Vec<u32>,
+    leaf_ids: FxHashMap<u32, u32>,
+    pair_ids: FxHashMap<(u32, u32), u32>,
+    next_id: u32,
+}
+
+impl CanonicalSignatureVector {
+    fn new(width: usize) -> Self {
+        let base = width.max(1).next_power_of_two();
+        let mut this = Self {
+            base,
+            tree: vec![0; base * 2],
+            leaf_ids: FxHashMap::default(),
+            pair_ids: FxHashMap::default(),
+            next_id: 0,
+        };
+        let zero = this.intern_leaf(0);
+        this.tree[base..].fill(zero);
+        for node in (1..base).rev() {
+            let left = this.tree[node * 2];
+            let right = this.tree[node * 2 + 1];
+            this.tree[node] = this.intern_pair(left, right);
+        }
+        this
+    }
+
+    fn alloc_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn intern_leaf(&mut self, value: u32) -> u32 {
+        if let Some(&id) = self.leaf_ids.get(&value) {
+            return id;
+        }
+        let id = self.alloc_id();
+        self.leaf_ids.insert(value, id);
+        id
+    }
+
+    fn intern_pair(&mut self, left: u32, right: u32) -> u32 {
+        if let Some(&id) = self.pair_ids.get(&(left, right)) {
+            return id;
+        }
+        let id = self.alloc_id();
+        self.pair_ids.insert((left, right), id);
+        id
+    }
+
+    fn set(&mut self, index: usize, value: u32) {
+        debug_assert!(index < self.base);
+        let mut node = self.base + index;
+        let leaf = self.intern_leaf(value);
+        if self.tree[node] == leaf {
+            return;
+        }
+        self.tree[node] = leaf;
+        node /= 2;
+        while node != 0 {
+            let left = self.tree[node * 2];
+            let right = self.tree[node * 2 + 1];
+            let id = self.intern_pair(left, right);
+            if self.tree[node] == id {
+                break;
+            }
+            self.tree[node] = id;
+            node /= 2;
+        }
+    }
+
+    fn root(&self) -> u32 {
+        self.tree[1]
+    }
+}
+
+fn finite_compact_runs(
+    root_token: Option<usize>,
+    class_fingerprints: &[Vec<u32>],
+    profiles: &[Arc<[ProfileRun]>],
+    token_count: usize,
+) -> (Vec<u32>, Vec<usize>, Vec<Vec<u32>>, usize, usize) {
+    let mut rows = Vec::<Vec<ProfileRun>>::with_capacity(class_fingerprints.len());
+    let mut events = Vec::<FiniteRowEvent>::new();
+    let mut referenced_runs = 0usize;
+    for (row_index, fingerprint) in class_fingerprints.iter().enumerate() {
+        let mut row = Vec::<ProfileRun>::new();
+        let mut offset = 0usize;
+        if let Some(token) = root_token {
+            let signature = fingerprint[0];
+            push_profile_run(&mut row, token as u32, token as u32 + 1, signature);
+            offset = 1;
+        }
+        for &profile in &fingerprint[offset..] {
+            for run in profiles[profile as usize].iter() {
+                push_profile_run(&mut row, run.start, run.end, run.signature);
+            }
+        }
+        referenced_runs += row.len();
+        for run in &row {
+            events.push(FiniteRowEvent {
+                position: run.start,
+                row: row_index as u32,
+                signature: run.signature,
+            });
+            events.push(FiniteRowEvent {
+                position: run.end,
+                row: row_index as u32,
+                signature: 0,
+            });
+        }
+        rows.push(row);
+    }
+
+    // At an adjacent run boundary the old run must end before the new one
+    // starts. Sorting zero-signature events first makes the final value exact.
+    events.sort_unstable_by_key(|event| {
+        (event.position, event.row, u8::from(event.signature != 0))
+    });
+    let mut vector = CanonicalSignatureVector::new(class_fingerprints.len());
+    let mut class_by_root = FxHashMap::<u32, u32>::default();
+    let mut token_class = vec![0u32; token_count];
+    let mut token_reps = Vec::<usize>::new();
+    let mut position = 0usize;
+    let mut event_index = 0usize;
+    while position < token_count {
+        while event_index < events.len() && events[event_index].position as usize == position {
+            let event = events[event_index];
+            vector.set(event.row as usize, event.signature);
+            event_index += 1;
+        }
+        let next_position = events
+            .get(event_index)
+            .map_or(token_count, |event| event.position as usize)
+            .min(token_count);
+        debug_assert!(next_position > position || event_index < events.len());
+        if next_position > position {
+            let root = vector.root();
+            let class = if let Some(&class) = class_by_root.get(&root) {
+                class
+            } else {
+                let class = token_reps.len() as u32;
+                class_by_root.insert(root, class);
+                token_reps.push(position);
+                class
+            };
+            token_class[position..next_position].fill(class);
+            position = next_position;
+        }
+    }
+
+    let mut reps_sorted = token_reps
+        .iter()
+        .enumerate()
+        .map(|(class, &token)| (token, class))
+        .collect::<Vec<_>>();
+    reps_sorted.sort_unstable();
+    let mut compact_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut compact = vec![0u32; token_reps.len()];
+        let mut run_index = 0usize;
+        for &(token, class) in &reps_sorted {
+            while run_index < row.len() && row[run_index].end as usize <= token {
+                run_index += 1;
+            }
+            if let Some(run) = row.get(run_index)
+                && run.start as usize <= token
+                && token < run.end as usize
+            {
+                compact[class] = run.signature;
+            }
+        }
+        compact_rows.push(compact);
+    }
+    (token_class, token_reps, compact_rows, events.len(), referenced_runs)
+}
+
 /// Exact finite-vocabulary L1 projection.
 ///
 /// For one first radix bucket, a raw lexer state matters only through the lexer
@@ -1863,10 +2129,10 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
         return None;
     }
     let total = Instant::now();
-    let prep_started = Instant::now();
-    let (aliases, tokens) = unique_vocab(input);
-    let trie = FiniteTrie::build(&tokens);
-    let prep_ms = prep_started.elapsed().as_secs_f64() * 1000.0;
+    let (finite_vocab, finite_vocab_cache_hit, prep_ms) = finite_vocab_projection(input);
+    let aliases = finite_vocab.aliases.as_slice();
+    let tokens = finite_vocab.tokens.as_slice();
+    let trie = &finite_vocab.trie;
 
     let scan_started = Instant::now();
     let mut scanner = Scanner::new(input);
@@ -1896,7 +2162,7 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
             fingerprint.push(scanner.signature(start));
         }
         for &child in &root_children {
-            let target = scanner.step_bytes(start, trie.edge(child, &tokens));
+            let target = scanner.step_bytes(start, trie.edge(child, tokens));
             if target == DEAD {
                 fingerprint.push(0);
                 continue;
@@ -1909,8 +2175,8 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
                 let mut values = Vec::new();
                 collect_finite_profile(
                     &mut scanner,
-                    &trie,
-                    &tokens,
+                    trie,
+                    tokens,
                     self_loops.as_ref(),
                     child,
                     target,
@@ -1948,35 +2214,61 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
     let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
 
     let materialize_started = Instant::now();
-    let mut rows = Vec::with_capacity(class_fingerprints.len());
-    for fingerprint in &class_fingerprints {
-        let mut row = vec![0u32; aliases.len()];
-        let mut offset = 0usize;
-        if let Some(token) = root_token {
-            row[token] = fingerprint[0];
-            offset = 1;
-        }
-        for &profile in &fingerprint[offset..] {
-            for run in profiles[profile as usize].iter() {
-                row[run.start as usize..run.end as usize].fill(run.signature);
+    let use_run_sweep = std::env::var_os("GLRMASK_DISABLE_L1_FINITE_RUN_SWEEP").is_none();
+    let (finished, run_sweep_events, referenced_runs) = if use_run_sweep {
+        let compact_started = Instant::now();
+        let (token_class, _token_reps, compact_rows, events, referenced_runs) =
+            finite_compact_runs(
+                root_token,
+                &class_fingerprints,
+                &profiles,
+                aliases.len(),
+            );
+        let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
+        let finished = common::finish_compacted(
+            input,
+            aliases,
+            &scanner.signatures,
+            state_class,
+            compact_rows,
+            token_class,
+            prep_ms + scan_ms,
+            compact_ms,
+            || total.elapsed().as_secs_f64() * 1000.0,
+        )?;
+        (finished, events, referenced_runs)
+    } else {
+        let mut rows = Vec::with_capacity(class_fingerprints.len());
+        for fingerprint in &class_fingerprints {
+            let mut row = vec![0u32; aliases.len()];
+            let mut offset = 0usize;
+            if let Some(token) = root_token {
+                row[token] = fingerprint[0];
+                offset = 1;
             }
+            for &profile in &fingerprint[offset..] {
+                for run in profiles[profile as usize].iter() {
+                    row[run.start as usize..run.end as usize].fill(run.signature);
+                }
+            }
+            rows.push(row);
         }
-        rows.push(row);
-    }
+        let materialize_ms = materialize_started.elapsed().as_secs_f64() * 1000.0;
+        let finished = common::finish(
+            input,
+            aliases,
+            &scanner.signatures,
+            state_class,
+            rows,
+            prep_ms + scan_ms + materialize_ms,
+            || total.elapsed().as_secs_f64() * 1000.0,
+        )?;
+        (finished, 0, 0)
+    };
     let materialize_ms = materialize_started.elapsed().as_secs_f64() * 1000.0;
-
-    let finished = common::finish(
-        input,
-        &aliases,
-        &scanner.signatures,
-        state_class,
-        rows,
-        prep_ms + scan_ms + materialize_ms,
-        || total.elapsed().as_secs_f64() * 1000.0,
-    )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_projected] partition={} raw_states={} tokens={} trie_nodes={} configs={} signatures={} bucket_cache={} cache_hits={} pair_visits={} uniform_subtrees={} uniform_tokens={} profile_runs={} profiles={} state_classes={} token_classes={} prep_ms={:.3} scan_ms={:.3} materialize_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_projected] partition={} raw_states={} tokens={} trie_nodes={} configs={} signatures={} bucket_cache={} cache_hits={} pair_visits={} uniform_subtrees={} uniform_tokens={} profile_runs={} profiles={} state_classes={} token_classes={} run_sweep={} run_events={} referenced_runs={} vocab_cache_hit={} prep_ms={:.3} scan_ms={:.3} materialize_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             aliases.len(),
@@ -1992,6 +2284,10 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
             profiles.len(),
             finished.state_classes,
             finished.token_classes,
+            use_run_sweep,
+            run_sweep_events,
+            referenced_runs,
+            finite_vocab_cache_hit,
             prep_ms,
             scan_ms,
             materialize_ms,
@@ -2014,6 +2310,16 @@ fn projected_limit_exceeded(input: BuildInput<'_>, states: usize, limit: usize) 
         );
     }
     true
+}
+
+fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
+    if input.subset_parent_order.is_some() || input.vocab.len() < 50_000 {
+        return usize::MAX;
+    }
+    std::env::var("GLRMASK_L1_RESIDUAL_FINITE_SWITCH_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(9_000)
 }
 
 fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
@@ -2076,6 +2382,18 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .map(|raw| projected.root_row(raw))
             .collect::<Vec<_>>()
     };
+    let finite_switch_states = residual_finite_switch_states(input);
+    if projected.configs.len() > finite_switch_states {
+        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l1_residual_finite_switch] partition={} projected_states={} threshold={} phase=roots action=finite",
+                input.partition_label,
+                projected.configs.len(),
+                finite_switch_states,
+            );
+        }
+        return build_finite_projected(input);
+    }
     let limit = std::env::var("GLRMASK_L1_SINGLE_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -2096,6 +2414,17 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             }
             if projected.configs.len() > before {
                 queue.extend(before as u32..projected.configs.len() as u32);
+                if projected.configs.len() > finite_switch_states {
+                    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][l1_residual_finite_switch] partition={} projected_states={} threshold={} action=finite",
+                            input.partition_label,
+                            projected.configs.len(),
+                            finite_switch_states,
+                        );
+                    }
+                    return build_finite_projected(input);
+                }
                 if projected_limit_exceeded(input, projected.configs.len(), limit) {
                     return build_finite_projected(input);
                 }
@@ -2329,4 +2658,70 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         );
     }
     Some(finished.artifact)
+}
+
+#[cfg(test)]
+mod finite_run_sweep_tests {
+    use super::*;
+
+    #[test]
+    fn run_sweep_matches_dense_token_vector_equivalence() {
+        const ROWS: usize = 17;
+        const TOKENS: usize = 137;
+        let mut dense = vec![vec![0u32; TOKENS]; ROWS];
+        for (row, values) in dense.iter_mut().enumerate() {
+            for (token, value) in values.iter_mut().enumerate() {
+                // Piecewise structure with many adjacent boundaries and repeated
+                // vectors across non-adjacent token intervals.
+                let block = token / (2 + row % 7);
+                *value = if (block + row) % 5 == 0 {
+                    0
+                } else {
+                    1 + ((block * 3 + row * 11) % 9) as u32
+                };
+            }
+        }
+
+        let mut profiles = vec![Arc::<[ProfileRun]>::from([])];
+        let mut fingerprints = Vec::with_capacity(ROWS);
+        for values in &dense {
+            let mut runs = Vec::new();
+            let mut start = 0usize;
+            while start < TOKENS {
+                let signature = values[start];
+                let mut end = start + 1;
+                while end < TOKENS && values[end] == signature {
+                    end += 1;
+                }
+                push_profile_run(&mut runs, start as u32, end as u32, signature);
+                start = end;
+            }
+            let profile = profiles.len() as u32;
+            profiles.push(Arc::from(runs));
+            fingerprints.push(vec![profile]);
+        }
+
+        let (classes, reps, compact_rows, events, referenced_runs) =
+            finite_compact_runs(None, &fingerprints, &profiles, TOKENS);
+        assert!(events > 0);
+        assert!(referenced_runs > 0);
+        assert_eq!(compact_rows.len(), ROWS);
+        assert_eq!(compact_rows[0].len(), reps.len());
+
+        for left in 0..TOKENS {
+            for right in 0..TOKENS {
+                let dense_equal = dense.iter().all(|row| row[left] == row[right]);
+                assert_eq!(
+                    classes[left] == classes[right],
+                    dense_equal,
+                    "token equivalence mismatch for {left} and {right}",
+                );
+            }
+        }
+        for (class, &representative) in reps.iter().enumerate() {
+            for row in 0..ROWS {
+                assert_eq!(compact_rows[row][class], dense[row][representative]);
+            }
+        }
+    }
 }
