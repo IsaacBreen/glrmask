@@ -1153,6 +1153,7 @@ struct PointwiseBehavior {
 #[derive(Default)]
 struct PointwiseBehaviorInterner {
     ids: FxHashMap<PointwiseBehavior, u32>,
+    values: Vec<PointwiseBehavior>,
 }
 
 impl PointwiseBehaviorInterner {
@@ -1161,9 +1162,14 @@ impl PointwiseBehaviorInterner {
         if let Some(&id) = self.ids.get(&behavior) {
             return id;
         }
-        let id = self.ids.len() as u32;
+        let id = self.values.len() as u32;
+        self.values.push(behavior.clone());
         self.ids.insert(behavior, id);
         id
+    }
+
+    fn get(&self, id: u32) -> &PointwiseBehavior {
+        &self.values[id as usize]
     }
 }
 
@@ -1618,6 +1624,20 @@ struct PointwiseMergeGroup {
     /// Exact partial behavior function of all members already in this group.
     behavior_by_tsid: PointwiseBehaviorMap,
     member_classes: Vec<usize>,
+}
+
+struct HybridColoring {
+    coloring: Vec<usize>,
+    direct_builders: Option<Vec<MergedStateBuilder>>,
+}
+
+impl HybridColoring {
+    fn ordinary(coloring: Vec<usize>) -> Self {
+        Self {
+            coloring,
+            direct_builders: None,
+        }
+    }
 }
 
 fn range_set_contains(tokens: &RangeSetBlaze<u32>, value: u32) -> bool {
@@ -2117,7 +2137,7 @@ fn try_build_and_color_pointwise(
     class_profiles: &[ClassProfile],
     pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
-) -> Option<Vec<usize>> {
+) -> Option<HybridColoring> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
     let mut regions = PointwiseRegionInterner::default();
@@ -2254,7 +2274,17 @@ fn try_build_and_color_pointwise(
             behavior_rejects,
         );
     }
-    Some(coloring)
+    let direct_builders = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_POINTWISE_RECONSTRUCT")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .then(|| pointwise_groups_to_builders(&groups, &interner));
+    Some(HybridColoring {
+        coloring,
+        direct_builders,
+    })
 }
 
 /// Exact greedy pointwise coloring using TSID intervals rather than one map
@@ -2316,7 +2346,8 @@ fn try_build_and_color_pointwise_ranges(
             class_profiles,
             pointwise_class_order,
             profile_enabled,
-        );
+        )
+        .map(|result| result.coloring);
     }
 
     let merge_started_at = Instant::now();
@@ -2941,18 +2972,18 @@ fn build_and_color_hybrid(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
     pointwise_class_order: PointwiseClassOrder,
-) -> Vec<usize> {
+) -> HybridColoring {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     if candidates.len() <= 64
         && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_none()
     {
-        return build_and_color_pairwise_greedy(
+        return HybridColoring::ordinary(build_and_color_pairwise_greedy(
             dwa,
             candidates,
             needed,
             old_to_new,
             productive_transitions,
-        );
+        ));
     }
     let total_started_at = Instant::now();
 
@@ -2976,7 +3007,7 @@ fn build_and_color_hybrid(
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return class_coloring;
+        return HybridColoring::ordinary(class_coloring);
     }
 
     // Step 2: Pick one representative state per class and compute the union
@@ -3039,7 +3070,14 @@ fn build_and_color_hybrid(
         .flat_map(|profile| profile.weights.iter())
         .map(|(_, weight)| weight.outer_range_count())
         .sum::<usize>();
-    let prefer_overlap_indexed_merge = num_classes <= 64 && estimated_pointwise_work >= 8_192;
+    let force_overlap_indexed_merge = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_FORCE_OVERLAP_INDEXED")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        });
+    let prefer_overlap_indexed_merge = force_overlap_indexed_merge
+        || (num_classes <= 64 && estimated_pointwise_work >= 8_192);
     let pointwise_coloring = if prefer_overlap_indexed_merge {
         None
     } else if pointwise_tsid_ranges_enabled() {
@@ -3051,6 +3089,7 @@ fn build_and_color_hybrid(
             pointwise_class_order,
             profile_enabled,
         )
+        .map(HybridColoring::ordinary)
     } else {
         try_build_and_color_pointwise(
             candidates,
@@ -3563,7 +3602,7 @@ fn build_and_color_hybrid(
         );
     }
 
-    coloring
+    HybridColoring::ordinary(coloring)
 }
 
 fn partition_refine_coloring_raw(
@@ -3731,6 +3770,88 @@ impl MergedStateBuilder {
         }
     }
 
+}
+
+/// Materialize the exact union behavior already computed by pointwise coloring
+/// directly into one builder per merge group.
+///
+/// Pointwise coloring maintains, for every `(tsid, token)` in a group's live
+/// domain, the complete deterministic behavior: finality plus labelled mapped
+/// targets. Re-expanding all member states after that proof and unioning their
+/// weights again is redundant. Rebuilding weights from this partial function is
+/// exactly the same union, expressed once per output group instead of once per
+/// input member.
+fn pointwise_groups_to_builders(
+    groups: &[PointwiseMergeGroup],
+    interner: &PointwiseBehaviorInterner,
+) -> Vec<MergedStateBuilder> {
+    groups
+        .iter()
+        .map(|group| {
+            let mut entries = match &group.behavior_by_tsid {
+                PointwiseBehaviorMap::Sparse(entries) => entries
+                    .iter()
+                    .map(|(&tsid, region)| (tsid, region))
+                    .collect::<Vec<_>>(),
+                PointwiseBehaviorMap::Dense(entries) => entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(tsid, region)| region.as_ref().map(|region| (tsid as u32, region)))
+                    .collect::<Vec<_>>(),
+            };
+            entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+            let mut final_entries = Vec::<(u32, RangeSetBlaze<u32>)>::new();
+            let mut transition_entries =
+                BTreeMap::<Label, Vec<(u32, RangeSetBlaze<u32>)>>::new();
+
+            for (tsid, region) in entries {
+                let mut final_ranges = Vec::<std::ops::RangeInclusive<u32>>::new();
+                let mut ranges_by_label =
+                    BTreeMap::<Label, Vec<std::ops::RangeInclusive<u32>>>::new();
+                for token_range in region.iter() {
+                    let behavior = interner.get(token_range.behavior);
+                    if behavior.final_active {
+                        final_ranges.push(token_range.start..=token_range.end);
+                    }
+                    for &(label, target) in &behavior.transitions {
+                        debug_assert_eq!(group.targets_by_label.get(&label), Some(&target));
+                        ranges_by_label
+                            .entry(label)
+                            .or_default()
+                            .push(token_range.start..=token_range.end);
+                    }
+                }
+                if !final_ranges.is_empty() {
+                    final_entries.push((tsid, RangeSetBlaze::from_iter(final_ranges)));
+                }
+                for (label, ranges) in ranges_by_label {
+                    transition_entries
+                        .entry(label)
+                        .or_default()
+                        .push((tsid, RangeSetBlaze::from_iter(ranges)));
+                }
+            }
+
+            let mut builder = MergedStateBuilder::default();
+            let final_weight = Weight::from_per_tsid_token_sets(final_entries);
+            if !final_weight.is_empty() {
+                builder.add_final_weight(&final_weight);
+            }
+            for (label, entries) in transition_entries {
+                let weight = Weight::from_per_tsid_token_sets(entries);
+                if weight.is_empty() {
+                    continue;
+                }
+                let target = *group
+                    .targets_by_label
+                    .get(&label)
+                    .expect("pointwise behavior label must have a merged target");
+                builder.add_transition(label, target, weight);
+            }
+            builder
+        })
+        .collect()
 }
 
 /// Build a reconstructed weight in one exact multiway sweep.
@@ -4206,7 +4327,7 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
         }
 
         let color_started_at = Instant::now();
-        let coloring = build_and_color_hybrid(
+        let coloring_result = build_and_color_hybrid(
             &pushed,
             candidates,
             &needed,
@@ -4214,6 +4335,7 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
             &productive_transitions,
             pointwise_class_order,
         );
+        let coloring = &coloring_result.coloring;
         height_color_ms += color_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let merge_started_at = Instant::now();
@@ -4225,19 +4347,24 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
             old_to_new[candidates[idx]] = base_new_id + color as u32;
         }
 
-        // Extend builders
-        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+        if let Some(direct_builders) = coloring_result.direct_builders {
+            debug_assert_eq!(direct_builders.len(), num_colors);
+            new_states.extend(direct_builders);
+        } else {
+            // Extend builders
+            new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
 
-        // Merge states into builders
-        let builders = &mut new_states[base_new_id as usize..];
-        for (idx, &color) in coloring.iter().enumerate() {
-            merge_state_into_builder(
-                candidates[idx],
-                color,
-                &pushed,
-                &old_to_new,
-                builders,
-            );
+            // Merge states into builders
+            let builders = &mut new_states[base_new_id as usize..];
+            for (idx, &color) in coloring.iter().enumerate() {
+                merge_state_into_builder(
+                    candidates[idx],
+                    color,
+                    &pushed,
+                    &old_to_new,
+                    builders,
+                );
+            }
         }
         let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
         color_ms_total += height_color_ms;
