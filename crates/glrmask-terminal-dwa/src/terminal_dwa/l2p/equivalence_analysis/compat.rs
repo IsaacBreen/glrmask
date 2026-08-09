@@ -193,6 +193,82 @@ pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 /// identical action from every residual of every active terminal language.
 /// Replacing one by the other preserves active-terminal match positions and
 /// residuals; grammar follow constraints only filter terminal labels later.
+
+/// Exact byte congruence read directly from the already-built physical lexer.
+/// This can be finer than recompiling active terminal definitions independently,
+/// but never coarser: two bytes are merged only when every active-language
+/// physical source has the same active-language target for both bytes.  States
+/// and targets carrying no active terminal language are semantically dead.
+
+pub fn compute_active_physical_byte_classes_from_flat_trans(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+    flat_trans: &[u32],
+) -> [u8; 256] {
+    let states = tokenizer.num_states() as usize;
+    assert_eq!(flat_trans.len(), states * 256);
+    let active_language = (0..states)
+        .map(|state| {
+            tokenizer
+                .matched_terminals_iter(state as u32)
+                .chain(tokenizer.possible_future_terminals_iter(state as u32))
+                .any(|terminal| active_groups.get(terminal as usize).copied().unwrap_or(false))
+        })
+        .collect::<Vec<_>>();
+
+    #[inline]
+    fn projected_target(
+        flat_trans: &[u32],
+        active_language: &[bool],
+        source: usize,
+        byte: usize,
+    ) -> u32 {
+        if !active_language[source] {
+            return u32::MAX;
+        }
+        let target = flat_trans[source * 256 + byte];
+        if target == u32::MAX || !active_language[target as usize] {
+            u32::MAX
+        } else {
+            target
+        }
+    }
+
+    let mut hashes = [0u64; 256];
+    for source in 0..states {
+        for byte in 0..256 {
+            hashes[byte] = hashes[byte]
+                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                .wrapping_add(projected_target(flat_trans, &active_language, source, byte) as u64);
+        }
+    }
+    let mut classes = [0u8; 256];
+    let mut representatives = Vec::<usize>::new();
+    for byte in 0..256 {
+        let mut found = None;
+        for (class, &representative) in representatives.iter().enumerate() {
+            if hashes[byte] != hashes[representative] {
+                continue;
+            }
+            let equal = (0..states).all(|source| {
+                projected_target(flat_trans, &active_language, source, byte)
+                    == projected_target(flat_trans, &active_language, source, representative)
+            });
+            if equal {
+                found = Some(class as u8);
+                break;
+            }
+        }
+        classes[byte] = found.unwrap_or_else(|| {
+            let class = representatives.len();
+            representatives.push(byte);
+            class as u8
+        });
+    }
+    classes
+}
+
+
 pub fn compute_active_terminal_language_byte_classes(
     tokenizer: &Tokenizer,
     active_groups: &[bool],
@@ -804,6 +880,44 @@ mod sparse_transition_cache_tests {
             same_partition(&filtered_classes, &reference_classes),
             "inactive-only lexer topology changed the active-language byte congruence",
         );
+    }
+
+    #[test]
+    fn direct_active_physical_byte_classes_match_materialized_filtered_view() {
+        use crate::automata::lexer::ast::Expr;
+        use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
+
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"acx".to_vec()),
+            Expr::U8Seq(b"yrr".to_vec()),
+        ];
+        let terminal_count = expressions.len() as u32;
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            terminal_count,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let mut flat_values = Vec::with_capacity(tokenizer.num_states() as usize * 256);
+        for state in 0..tokenizer.num_states() {
+            for byte in 0u16..=255 {
+                flat_values.push(tokenizer.step(state, byte as u8).unwrap_or(u32::MAX));
+            }
+        }
+        let flat = Arc::<[u32]>::from(flat_values);
+        let active = [true, true, false];
+        let direct = compute_active_physical_byte_classes_from_flat_trans(
+            &tokenizer,
+            &active,
+            flat.as_ref(),
+        );
+        let materialized = TokenizerView::new_filtered_from_flat_trans(&flat, &tokenizer, &active);
+        let materialized_classes = compute_byte_classes(materialized.dfa());
+        assert!((0..256).all(|left| {
+            (0..256).all(|right| {
+                (direct[left] == direct[right])
+                    == (materialized_classes[left] == materialized_classes[right])
+            })
+        }));
     }
 
     #[test]

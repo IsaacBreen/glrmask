@@ -39,6 +39,7 @@ use crate::automata::regex::Expr;
 use super::fast::VocabEquivalenceResult;
 
 const MIN_TOKENS: usize = 4_096;
+const MAX_TOKENS: usize = 20_000;
 const MAX_ACTIVE_TERMINALS: usize = 64;
 const MAX_ATOM_STAR_STATES: usize = 64;
 const MIN_REDUCTION_FACTOR: usize = 4;
@@ -514,46 +515,52 @@ fn root_observation(machine: &TraceMachine, input: &[u8]) -> (Vec<u32>, Vec<(u32
     (future_terminals, matches)
 }
 
-fn root_semantic_ids_for_token(
+fn root_semantic_id_at(
     machine: &TraceMachine,
     bytes: &[u8],
+    offset: usize,
     semantic_ids: &mut FxHashMap<Vec<u32>, u32>,
     semantic_by_suffix: &mut FxHashMap<Vec<u8>, u32>,
-) -> Vec<u32> {
-    let mut token_semantic_ids = vec![0u32; bytes.len() + 1];
-    for offset in (0..=bytes.len()).rev() {
-        let suffix = &bytes[offset..];
-        if let Some(&semantic_id) = semantic_by_suffix.get(suffix) {
-            token_semantic_ids[offset] = semantic_id;
-            continue;
-        }
-
-        let (future_terminals, matches) = root_observation(machine, suffix);
-
-        let mut signature = Vec::new();
-        if future_terminals.is_empty() {
-            signature.push(ROOT_DEAD);
-        } else {
-            signature.push(ROOT_LIVE);
-            signature.push(future_terminals.len() as u32);
-            signature.extend(future_terminals);
-        }
-
-        signature.push(ROOT_MATCHES);
-        signature.push(matches.len() as u32);
-        for (terminal, width) in matches {
-            debug_assert!(width > 0 && width <= suffix.len());
-            signature.push(terminal);
-            signature.push(width as u32);
-            signature.push(token_semantic_ids[offset + width]);
-        }
-
-        let next_semantic_id = semantic_ids.len() as u32;
-        let semantic_id = *semantic_ids.entry(signature).or_insert(next_semantic_id);
-        semantic_by_suffix.insert(suffix.to_vec(), semantic_id);
-        token_semantic_ids[offset] = semantic_id;
+    token_memo: &mut [Option<u32>],
+) -> u32 {
+    if let Some(id) = token_memo[offset] {
+        return id;
     }
-    token_semantic_ids
+    let suffix = &bytes[offset..];
+    if let Some(&semantic_id) = semantic_by_suffix.get(suffix) {
+        token_memo[offset] = Some(semantic_id);
+        return semantic_id;
+    }
+    let (future_terminals, matches) = root_observation(machine, suffix);
+    let mut signature = Vec::new();
+    if future_terminals.is_empty() {
+        signature.push(ROOT_DEAD);
+    } else {
+        signature.push(ROOT_LIVE);
+        signature.push(future_terminals.len() as u32);
+        signature.extend(future_terminals);
+    }
+    signature.push(ROOT_MATCHES);
+    signature.push(matches.len() as u32);
+    for (terminal, width) in matches {
+        debug_assert!(width > 0 && offset + width <= bytes.len());
+        let continuation = root_semantic_id_at(
+            machine,
+            bytes,
+            offset + width,
+            semantic_ids,
+            semantic_by_suffix,
+            token_memo,
+        );
+        signature.push(terminal);
+        signature.push(width as u32);
+        signature.push(continuation);
+    }
+    let next_semantic_id = semantic_ids.len() as u32;
+    let semantic_id = *semantic_ids.entry(signature).or_insert(next_semantic_id);
+    semantic_by_suffix.insert(suffix.to_vec(), semantic_id);
+    token_memo[offset] = Some(semantic_id);
+    semantic_id
 }
 
 fn classify_tokens<S: AsRef<[u8]>>(
@@ -565,12 +572,7 @@ fn classify_tokens<S: AsRef<[u8]>>(
     let mut classes = FxHashMap::<Vec<u32>, Vec<usize>>::default();
     for (token_index, token) in tokens.iter().enumerate() {
         let bytes = token.as_ref();
-        let suffix_semantics = root_semantic_ids_for_token(
-            machine,
-            bytes,
-            &mut root_semantic_ids,
-            &mut root_semantic_by_suffix,
-        );
+        let mut token_semantic_memo = vec![None; bytes.len() + 1];
         let mut signature = Vec::with_capacity(machine.tokenizer.num_states() as usize * 6);
         let mut candidate_cuts = Vec::new();
         for start_state in 0..machine.tokenizer.num_states() {
@@ -606,8 +608,16 @@ fn classify_tokens<S: AsRef<[u8]>>(
         signature.push(candidate_cuts.len() as u32);
         for cut in candidate_cuts {
             debug_assert!(cut > 0 && cut <= bytes.len());
+            let semantic_id = root_semantic_id_at(
+                machine,
+                bytes,
+                cut,
+                &mut root_semantic_ids,
+                &mut root_semantic_by_suffix,
+                &mut token_semantic_memo,
+            );
             signature.push(cut as u32);
-            signature.push(suffix_semantics[cut]);
+            signature.push(semantic_id);
         }
         classes.entry(signature).or_default().push(token_index);
     }
@@ -623,6 +633,7 @@ pub fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
 ) -> Option<CommonAtomPreclasses> {
     if std::env::var_os("GLRMASK_DISABLE_L2P_COMMON_ATOM_PRECLASS").is_some()
         || tokens.len() < MIN_TOKENS
+        || tokens.len() > MAX_TOKENS
         || tokens
             .iter()
             .any(|token| token.as_ref().len() > u32::MAX as usize)

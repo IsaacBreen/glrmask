@@ -23,7 +23,7 @@ use super::state_equivalence::nfa::{
     build_relevant_powerset_view_budgeted, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
-use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
+use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup,
@@ -52,7 +52,7 @@ fn common_atom_preclass_enabled() -> bool {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn first_byte_vocab_factor_enabled(partition_label: &str) -> bool {
@@ -2003,38 +2003,35 @@ fn analyze_equivalences_impl(
         let prepare_inputs_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let token_dedup_started_at = Instant::now();
-        let identity_byte_class: [u8; 256] = std::array::from_fn(|byte| byte as u8);
-        let identity_dedup =
-            deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
-        let identity_token_count = identity_dedup.representative_token_bytes.len();
+        let identity_token_count = prepared.token_bytes.len();
         let active_byte_class_started_at = Instant::now();
-        let active_language_byte_classes = (identity_dedup.representative_token_bytes.len()
+        let active_language_byte_classes = (prepared.token_bytes.len()
             >= ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS)
             .then(|| {
-                active_groups.and_then(|active_groups| {
-                    compute_active_terminal_language_byte_classes(tokenizer, active_groups)
+                active_groups.map(|active_groups| {
+                    if let Some(flat_trans) = flat_trans {
+                        super::compat::compute_active_physical_byte_classes_from_flat_trans(
+                            tokenizer,
+                            active_groups,
+                            flat_trans.as_ref(),
+                        )
+                    } else {
+                        let view = TokenizerView::new_filtered(tokenizer, active_groups);
+                        super::compat::compute_byte_classes(view.dfa())
+                    }
                 })
             })
             .flatten();
         let active_mask_filter_ms = active_byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
-        let class_dedup = active_language_byte_classes.as_ref().map(|byte_to_class| {
-            deduplicate_tokens_by_byte_class(
-                &identity_dedup.representative_token_bytes,
-                byte_to_class,
-            )
-        });
-        let dedup = if let Some(class_dedup) = class_dedup {
-            let original_to_repr = identity_dedup
-                .original_to_repr
-                .iter()
-                .map(|&identity_repr| class_dedup.original_to_repr[identity_repr])
-                .collect::<Vec<_>>();
-            TokenDedup {
-                representative_token_bytes: class_dedup.representative_token_bytes,
-                original_to_repr,
-            }
+        // Active-byte equivalence subsumes exact-byte equivalence: equal byte
+        // strings necessarily have equal projected class strings.  When the
+        // active congruence exists, one projected dedup pass therefore replaces
+        // the old identity-dedup + projected-dedup pair exactly.
+        let dedup = if let Some(byte_to_class) = active_language_byte_classes.as_ref() {
+            deduplicate_tokens_by_byte_class(&prepared.token_bytes, byte_to_class)
         } else {
-            identity_dedup
+            let identity_byte_class: [u8; 256] = std::array::from_fn(|byte| byte as u8);
+            deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class)
         };
         let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0
             - active_mask_filter_ms;
