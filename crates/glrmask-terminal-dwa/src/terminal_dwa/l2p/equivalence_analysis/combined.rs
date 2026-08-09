@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -263,19 +264,57 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
     byte_to_class: &[u8; 256],
 ) -> TokenDedup<'a> {
-    let mut hash_to_repr = HashMap::with_capacity(tokens.len() / 2);
+    #[inline]
+    fn same_projected_bytes(left: &[u8], right: &[u8], byte_to_class: &[u8; 256]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(&left, &right)| byte_to_class[left as usize] == byte_to_class[right as usize])
+    }
+
+    // `hash_byte_class_seq` is already the expensive sequence hash we want.
+    // Feeding that u128 through std::HashMap's SipHash a second time was a large
+    // p90 cost on 80k-token partitions. Use FxHash for the outer lookup, but do
+    // not treat the sequence hash as an equality oracle: verify projected bytes
+    // exactly, with a collision side table allocated only if a real hash
+    // collision occurs.
+    let mut hash_to_repr = FxHashMap::<u128, usize>::with_capacity_and_hasher(
+        tokens.len() / 2,
+        Default::default(),
+    );
+    let mut collisions = FxHashMap::<u128, Vec<usize>>::default();
     let mut representative_token_bytes = Vec::new();
     let mut original_to_repr = Vec::with_capacity(tokens.len());
 
     for token in tokens {
         let bytes = token.as_ref();
-        let repr_idx = *hash_to_repr
-            .entry(hash_byte_class_seq(bytes, byte_to_class))
-            .or_insert_with(|| {
+        let hash = hash_byte_class_seq(bytes, byte_to_class);
+        let repr_idx = if let Some(&primary) = hash_to_repr.get(&hash) {
+            if same_projected_bytes(bytes, representative_token_bytes[primary], byte_to_class) {
+                primary
+            } else if let Some(existing) = collisions.get(&hash).and_then(|candidates| {
+                candidates.iter().copied().find(|&candidate| {
+                    same_projected_bytes(
+                        bytes,
+                        representative_token_bytes[candidate],
+                        byte_to_class,
+                    )
+                })
+            }) {
+                existing
+            } else {
                 let idx = representative_token_bytes.len();
                 representative_token_bytes.push(bytes);
+                collisions.entry(hash).or_default().push(idx);
                 idx
-            });
+            }
+        } else {
+            let idx = representative_token_bytes.len();
+            representative_token_bytes.push(bytes);
+            hash_to_repr.insert(hash, idx);
+            idx
+        };
         original_to_repr.push(repr_idx);
     }
 
