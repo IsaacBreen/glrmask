@@ -348,7 +348,7 @@ fn automatic_branch_active_state_map_strategy(
     if active_terminals <= 512
         && vocab_tokens >= 50_000
         && source_reps <= 16_384
-        && work >= 300_000_000
+        && work >= 400_000_000
     {
         return AutomaticBranchActiveStateMapStrategy::SmallSourceVeryLargeVocab;
     }
