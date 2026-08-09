@@ -718,12 +718,24 @@ impl<'a> ReverseSubsets<'a> {
 }
 
 const PROJECTED_CELL_BUDGET: usize = 4_000_000;
+const PROJECTED_SUBSET_CELL_BUDGET: usize = 1_500_000;
 
-fn projected_cell_budget() -> usize {
-    std::env::var("GLRMASK_L1_SINGLE_PROJECTED_CELL_BUDGET")
+fn projected_cell_budget(input: BuildInput<'_>) -> usize {
+    let (env_name, default) = if input.subset_parent_order.is_some() {
+        (
+            "GLRMASK_L1_SINGLE_PROJECTED_SUBSET_CELL_BUDGET",
+            PROJECTED_SUBSET_CELL_BUDGET,
+        )
+    } else {
+        (
+            "GLRMASK_L1_SINGLE_PROJECTED_CELL_BUDGET",
+            PROJECTED_CELL_BUDGET,
+        )
+    };
+    std::env::var(env_name)
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(PROJECTED_CELL_BUDGET)
+        .unwrap_or(default)
 }
 
 fn projected_shape(input: BuildInput<'_>) -> (usize, usize) {
@@ -761,16 +773,17 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     } else {
         let (memberships, vocab_bytes) = projected_shape(input);
         let projected_cells = memberships.saturating_mul(vocab_bytes);
-        let projected_cell_budget = projected_cell_budget();
+        let projected_cell_budget = projected_cell_budget(input);
         let use_established = projected_cells > projected_cell_budget;
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
-                "[glrmask/profile][l1_single_plan] partition={} memberships={} vocab_bytes={} projected_cell_estimate={} budget={} representation={}",
+                "[glrmask/profile][l1_single_plan] partition={} memberships={} vocab_bytes={} projected_cell_estimate={} budget={} subset={} representation={}",
                 input.partition_label,
                 memberships,
                 vocab_bytes,
                 projected_cells,
                 projected_cell_budget,
+                input.subset_parent_order.is_some(),
                 if use_established { "established" } else { "projected" },
             );
         }
