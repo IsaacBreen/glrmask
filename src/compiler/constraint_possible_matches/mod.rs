@@ -2422,6 +2422,7 @@ struct BatchedDemandView {
     matched_masks: Vec<u128>,
     is_end: Vec<bool>,
     self_loop_bytes: Vec<U8Set>,
+    boundary_state: Option<Vec<u32>>,
 }
 
 struct BatchedDemandGroup {
@@ -2582,6 +2583,12 @@ fn collect_batched_demand_node(
             {
                 continue;
             }
+            if let Some(boundary_state) = view.boundary_state.as_ref() {
+                state_index = boundary_state[state_index as usize];
+                if state_index == u32::MAX {
+                    continue;
+                }
+            }
             if let Some(existing_group_index) = group_index.get(state_index, remaining) {
                 profile.group_merges += 1;
                 next_groups[existing_group_index]
@@ -2704,6 +2711,7 @@ fn collect_batched_demand_possible_matches(
         matched_masks,
         is_end,
         self_loop_bytes,
+        boundary_state: None,
     };
 
     let mut outputs = (0..entries.len() * demanded_terminals.len())
@@ -2772,6 +2780,138 @@ fn collect_batched_demand_possible_matches(
     {
         eprintln!(
             "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
+            profile.nodes,
+            profile.child_edges,
+            profile.input_groups,
+            profile.output_groups,
+            profile.group_merges,
+            profile.transition_steps,
+            profile.matched_events,
+            profile.origin_updates,
+            profile.range_inserts,
+            profile.append_ms,
+            walk_ms,
+            class_ms,
+        );
+    }
+    TrieClassBuildResult {
+        state_classes,
+        class_maps,
+    }
+}
+
+/// Batched delayed-terminal collection over an already deterministic powerset
+/// view. This is the same exact existential-prefix computation as
+/// `collect_batched_demand_possible_matches`, but it avoids requiring the raw
+/// epsilon-NFA tokenizer itself to be deterministic.
+fn collect_batched_demand_possible_matches_precomputed(
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    num_states: usize,
+    num_terminals: usize,
+    matched_terminals: &[Box<[TerminalID]>],
+    is_end: &[bool],
+    byte_transitions: &[Vec<u32>],
+    self_loop_bytes: &[U8Set],
+    boundary_state: &[u32],
+    demand: &DelayedTerminalDemand,
+) -> TrieClassBuildResult {
+    let demanded_terminals = demand
+        .terminals
+        .iter()
+        .map(|terminal| terminal as TerminalID)
+        .collect::<Vec<_>>();
+    assert!(!demanded_terminals.is_empty() && demanded_terminals.len() <= 128);
+    let full_mask = if demanded_terminals.len() == 128 {
+        u128::MAX
+    } else {
+        (1u128 << demanded_terminals.len()) - 1
+    };
+    let mut terminal_to_bit = vec![0u128; num_terminals];
+    for (bit, &terminal) in demanded_terminals.iter().enumerate() {
+        terminal_to_bit[terminal as usize] = 1u128 << bit;
+    }
+    let matched_masks = matched_terminals
+        .iter()
+        .map(|terminals| {
+            terminals.iter().fold(0u128, |mask, &terminal| {
+                mask | terminal_to_bit[terminal as usize]
+            })
+        })
+        .collect::<Vec<_>>();
+    let view = BatchedDemandView {
+        raw_state_to_index: (0..num_states as u32).collect(),
+        byte_transitions: byte_transitions.to_vec(),
+        matched_masks,
+        is_end: is_end.to_vec(),
+        self_loop_bytes: self_loop_bytes.to_vec(),
+        boundary_state: Some(boundary_state.to_vec()),
+    };
+
+    let mut outputs = (0..entries.len() * demanded_terminals.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<_>>();
+    if root.has_token() {
+        let token_id = root.token_id() as u32;
+        for (origin, &state) in entries.iter().enumerate() {
+            let matched = view.matched_masks[state as usize];
+            for bit in 0..demanded_terminals.len() {
+                if matched & (1u128 << bit) != 0 {
+                    outputs[origin * demanded_terminals.len() + bit].push((token_id, token_id));
+                }
+            }
+        }
+    }
+    let groups = entries
+        .iter()
+        .enumerate()
+        .map(|(origin, &state)| BatchedDemandGroup {
+            state_index: state,
+            remaining: full_mask,
+            origins: SmallVec::from_slice(&[origin as u32]),
+        })
+        .collect::<Vec<_>>();
+    let mut profile = BatchedDemandProfile::default();
+    let mut group_index = BatchedGroupIndex::new(num_states, demanded_terminals.len());
+    let walk_started_at = Instant::now();
+    collect_batched_demand_node(
+        root,
+        groups,
+        &view,
+        &demanded_terminals,
+        &mut outputs,
+        &mut profile,
+        &mut group_index,
+    );
+    let walk_ms = elapsed_ms(walk_started_at);
+
+    let class_started_at = Instant::now();
+    let mut state_classes = vec![u32::MAX; num_states];
+    let mut class_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
+    let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
+    for (origin, &state) in entries.iter().enumerate() {
+        let start = origin * demanded_terminals.len();
+        let end = start + demanded_terminals.len();
+        let interval_map = interval_map_from_batched_ranges(
+            &mut outputs[start..end],
+            &demanded_terminals,
+        );
+        let class_id = if let Some(&class_id) = map_to_class.get(&interval_map) {
+            class_id
+        } else {
+            let class_id = class_maps.len() as u32;
+            map_to_class.insert(interval_map.clone(), class_id);
+            class_maps.push(Arc::new(interval_map));
+            class_id
+        };
+        state_classes[state as usize] = class_id;
+    }
+    let class_ms = elapsed_ms(class_started_at);
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][batched_demand_powerset_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
             profile.nodes,
             profile.child_edges,
             profile.input_groups,
@@ -3107,7 +3247,32 @@ fn compute_constraint_possible_matches_with_artifacts(
             .collect::<Vec<_>>();
         view_entries.sort_unstable();
         view_entries.dedup();
-        let (view_result, _) =
+        let powerset_batched_requested = std::env::var("GLRMASK_PM_POWERSET_BATCHED_DEMAND")
+            .ok()
+            .is_some_and(|value| {
+                let value = value.trim();
+                value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+            });
+        let powerset_batched_max_states = std::env::var("GLRMASK_PM_POWERSET_BATCHED_MAX_STATES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let powerset_batched =
+            powerset_batched_requested && view_entries.len() <= powerset_batched_max_states;
+        let view_result = if powerset_batched {
+            collect_batched_demand_possible_matches_precomputed(
+                &trie.root,
+                &view_entries,
+                powerset.num_states,
+                tokenizer.num_terminals() as usize,
+                &powerset.matched_terminals,
+                &powerset.is_end,
+                &powerset.byte_transitions,
+                &powerset.self_loop_bytes,
+                &powerset.boundary_state,
+                &demand,
+            )
+        } else {
             collector::collect_possible_matches_interval_trie_class_build_precomputed(
                 &trie.root,
                 &view_entries,
@@ -3118,7 +3283,108 @@ fn compute_constraint_possible_matches_with_artifacts(
                 &powerset.is_end,
                 &powerset.byte_transitions,
                 &powerset.self_loop_bytes,
+            )
+            .0
+        };
+        if powerset_batched
+            && std::env::var_os("GLRMASK_PM_POWERSET_BATCHED_STRICT_REFERENCE").is_some()
+        {
+            let strict_started_at = Instant::now();
+            let (reference, _) =
+                collector::collect_possible_matches_interval_trie_class_build_precomputed(
+                    &trie.root,
+                    &view_entries,
+                    Some(&powerset.boundary_state),
+                    powerset.num_states,
+                    tokenizer.num_terminals() as usize,
+                    &powerset.matched_terminals,
+                    &powerset.is_end,
+                    &powerset.byte_transitions,
+                    &powerset.self_loop_bytes,
+                );
+            for &state in &view_entries {
+                let actual_class = view_result.state_classes[state as usize];
+                let reference_class = reference.state_classes[state as usize];
+                assert_ne!(actual_class, u32::MAX);
+                assert_ne!(reference_class, u32::MAX);
+                let actual = view_result.class_maps[actual_class as usize].as_ref();
+                let expected = reference.class_maps[reference_class as usize].as_ref();
+                let by_terminal = |map: &IntervalPossibleMatchMap| {
+                    let mut result = BTreeMap::<TerminalID, Vec<(u32, u32)>>::new();
+                    for group in map {
+                        for &terminal in group.terminals.iter() {
+                            result
+                                .entry(terminal)
+                                .or_default()
+                                .extend_from_slice(&group.ranges);
+                        }
+                    }
+                    for ranges in result.values_mut() {
+                        normalize_token_ranges(ranges);
+                    }
+                    result
+                };
+                let actual_by_terminal = by_terminal(actual);
+                let expected_by_terminal = by_terminal(expected);
+                if actual_by_terminal != expected_by_terminal {
+                    let terminals = actual_by_terminal
+                        .keys()
+                        .chain(expected_by_terminal.keys())
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    for terminal in terminals {
+                        let actual_ranges = actual_by_terminal
+                            .get(&terminal)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let expected_ranges = expected_by_terminal
+                            .get(&terminal)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        if actual_ranges == expected_ranges {
+                            continue;
+                        }
+                        let contains = |ranges: &[(u32, u32)], token: u32| {
+                            ranges.iter().any(|&(start, end)| start <= token && token <= end)
+                        };
+                        let max_token = actual_ranges
+                            .iter()
+                            .chain(expected_ranges.iter())
+                            .map(|&(_, end)| end)
+                            .max()
+                            .unwrap_or(0);
+                        let witness = (0..=max_token).find(|&token| {
+                            contains(actual_ranges, token) != contains(expected_ranges, token)
+                        });
+                        if let Some(token) = witness {
+                            let bytes = ordered_vocab
+                                .ordered_token_bytes
+                                .get(token as usize)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            eprintln!(
+                                "[glrmask/profile][pm_powerset_batched_mismatch] state={} terminal={} token={} actual={} expected={} bytes={:?} actual_ranges={} expected_ranges={}",
+                                state,
+                                terminal,
+                                token,
+                                contains(actual_ranges, token),
+                                contains(expected_ranges, token),
+                                bytes,
+                                actual_ranges.len(),
+                                expected_ranges.len(),
+                            );
+                            break;
+                        }
+                    }
+                    panic!("powerset batched-demand possible matches differ at view state {state}");
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][pm_powerset_batched_strict_reference] states={} differs=false compare_ms={:.3}",
+                view_entries.len(),
+                elapsed_ms(strict_started_at),
             );
+        }
         let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
         for &raw_state in &trie_build_states {
             let view_state = powerset.raw_start_to_view[raw_state as usize] as usize;
@@ -3128,11 +3394,12 @@ fn compute_constraint_possible_matches_with_artifacts(
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
-                "[glrmask/profile][trie_build_nfa_powerset] raw_states={} view_states={} root_view_states={} classes={} view_build_ms={:.3}",
+                "[glrmask/profile][trie_build_nfa_powerset] raw_states={} view_states={} root_view_states={} classes={} collector={} view_build_ms={:.3}",
                 trie_build_states.len(),
                 powerset.num_states,
                 view_entries.len(),
                 view_result.class_maps.len(),
+                if powerset_batched { "batched_demand" } else { "interval_classes" },
                 view_build_ms,
             );
         }
