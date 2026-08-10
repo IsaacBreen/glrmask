@@ -525,34 +525,27 @@ fn minimize_dag_with_self_loops(
 /// only against themselves, treating already-reduced successor SCC classes as
 /// fixed observations. The result may over-distinguish across SCC boundaries;
 /// the final cross-group minimizer recovers any missed language equivalences.
-struct LocalTransitionView<'a> {
-    transitions: &'a [Vec<(u8, u32)>],
-    states: &'a [u32],
-    local_of_global: &'a [u32],
-    edge_count: usize,
+struct FlatLocalTransitions {
+    offsets: Vec<u32>,
+    edges: Vec<(u8, u32)>,
 }
 
-impl LocalTransitionView<'_> {
+impl FlatLocalTransitions {
     #[inline]
     fn len(&self) -> usize {
-        self.states.len()
+        self.offsets.len().saturating_sub(1)
     }
 
     #[inline]
     fn row(&self, state: usize) -> &[(u8, u32)] {
-        &self.transitions[self.states[state] as usize]
-    }
-
-    #[inline]
-    fn local_target(&self, global_target: u32) -> u32 {
-        let target = self.local_of_global[global_target as usize];
-        debug_assert_ne!(target, u32::MAX);
-        target
+        let start = self.offsets[state] as usize;
+        let end = self.offsets[state + 1] as usize;
+        &self.edges[start..end]
     }
 
     #[inline]
     fn edge_count(&self) -> usize {
-        self.edge_count
+        self.edges.len()
     }
 }
 
@@ -580,7 +573,7 @@ impl SccComponent {
     }
 }
 
-fn tarjan_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccComponent> {
+fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> Vec<SccComponent> {
     let n = transitions.len();
     let mut next_index = 0u32;
     let mut indices = vec![u32::MAX; n];
@@ -591,7 +584,7 @@ fn tarjan_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccCompon
 
     fn visit(
         state: u32,
-        transitions: &LocalTransitionView<'_>,
+        transitions: &FlatLocalTransitions,
         next_index: &mut u32,
         indices: &mut [u32],
         lowlink: &mut [u32],
@@ -607,8 +600,7 @@ fn tarjan_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccCompon
         stack.push(state);
         on_stack[state_usize] = true;
 
-        for &(_, global_target) in transitions.row(state_usize) {
-            let target = transitions.local_target(global_target);
+        for &(_, target) in transitions.row(state_usize) {
             let target_usize = target as usize;
             if indices[target_usize] == u32::MAX {
                 visit(
@@ -672,13 +664,12 @@ fn tarjan_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccCompon
     emitted
 }
 
-fn kosaraju_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccComponent> {
+fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> Vec<SccComponent> {
     let n = transitions.len();
     // Kosaraju, ignoring literal self-loops (they do not affect SCC membership).
     let mut reverse = vec![Vec::<u32>::new(); n];
     for source in 0..n {
-        for &(_, global_target) in transitions.row(source) {
-            let target = transitions.local_target(global_target);
+        for &(_, target) in transitions.row(source) {
             if target as usize != source {
                 reverse[target as usize].push(source as u32);
             }
@@ -697,7 +688,7 @@ fn kosaraju_scc_components(transitions: &LocalTransitionView<'_>) -> Vec<SccComp
             let mut next_index = edge_index;
             let mut descended = false;
             while next_index < row.len() {
-                let target = transitions.local_target(row[next_index].1);
+                let target = row[next_index].1;
                 next_index += 1;
                 if target == state || seen[target as usize] {
                     continue;
@@ -751,16 +742,11 @@ fn canonical_transition_row_key(row: &[(u8, u32)]) -> (usize, u64) {
     (row.len(), hasher.finish())
 }
 
-fn translated_transition_row_key(
-    transitions: &LocalTransitionView<'_>,
-    source_row: &[(u8, u32)],
-    class: &[u32],
-) -> (usize, u64) {
+fn translated_transition_row_key(source_row: &[(u8, u32)], class: &[u32]) -> (usize, u64) {
     let mut hasher = FxHasher::default();
     source_row.len().hash(&mut hasher);
-    for &(symbol, global_target) in source_row {
+    for &(symbol, target) in source_row {
         symbol.hash(&mut hasher);
-        let target = transitions.local_target(global_target);
         let target_class = class[target as usize];
         debug_assert_ne!(target_class, u32::MAX);
         target_class.hash(&mut hasher);
@@ -769,7 +755,6 @@ fn translated_transition_row_key(
 }
 
 fn translated_transition_row_matches(
-    transitions: &LocalTransitionView<'_>,
     source_row: &[(u8, u32)],
     class: &[u32],
     candidate_row: &[(u8, u32)],
@@ -778,14 +763,13 @@ fn translated_transition_row_matches(
         && source_row
             .iter()
             .zip(candidate_row)
-            .all(|(&(source_symbol, global_target), &(candidate_symbol, candidate_target))| {
-                let source_target = transitions.local_target(global_target);
+            .all(|(&(source_symbol, source_target), &(candidate_symbol, candidate_target))| {
                 source_symbol == candidate_symbol
                     && class[source_target as usize] == candidate_target
             })
 }
 
-fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32>, usize, usize) {
+fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, usize, usize) {
     let n = transitions.len();
     if n == 0 {
         return (Vec::new(), Vec::new(), 0, 0);
@@ -827,8 +811,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
         }
         for source in 0..n {
             let source_component = component_of[source];
-        for &(_, global_target) in transitions.row(source) {
-            let target = transitions.local_target(global_target);
+        for &(_, target) in transitions.row(source) {
             let target_component = component_of[target as usize];
             if target_component != source_component {
                 debug_assert!(
@@ -880,9 +863,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
             let symbol_mask = transition_symbol_mask(source_row);
             let best_self_symbol = source_row
                 .iter()
-                .filter_map(|&(symbol, global_target)| {
-                    (transitions.local_target(global_target) == state).then_some(symbol)
-                })
+                .filter_map(|&(symbol, target)| (target == state).then_some(symbol))
                 .min_by_key(|&symbol| {
                     self_classes_by_shape
                         .get(&(symbol, symbol_mask))
@@ -902,13 +883,12 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                     if candidate_row.len() != source_row.len() {
                         continue;
                     }
-                    for (&(source_symbol, global_target), &(candidate_symbol, candidate_target)) in
+                    for (&(source_symbol, source_target), &(candidate_symbol, candidate_target)) in
                         source_row.iter().zip(candidate_row)
                     {
                         if source_symbol != candidate_symbol {
                             continue 'candidate;
                         }
-                        let source_target = transitions.local_target(global_target);
                         let source_target_class = if source_target == state {
                             candidate
                         } else {
@@ -930,8 +910,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                     let new_class = class_rows.len() as u32;
                     let row = source_row
                         .iter()
-                        .map(|&(symbol, global_target)| {
-                            let target = transitions.local_target(global_target);
+                        .map(|&(symbol, target)| {
                             let target_class = if target == state {
                                 new_class
                             } else {
@@ -958,11 +937,10 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                     new_class
                 }
             } else {
-                let key = translated_transition_row_key(transitions, source_row, &class);
+                let key = translated_transition_row_key(source_row, &class);
                 let existing = classes_by_row_key.get(&key).and_then(|candidates| {
                     candidates.iter().copied().find(|&candidate| {
                         translated_transition_row_matches(
-                            transitions,
                             source_row,
                             &class,
                             &class_rows[candidate as usize],
@@ -975,8 +953,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                     let new_class = class_rows.len() as u32;
                     let row = source_row
                         .iter()
-                        .map(|&(symbol, global_target)| {
-                            let target = transitions.local_target(global_target);
+                        .map(|&(symbol, target)| {
                             let target_class = class[target as usize];
                             debug_assert_ne!(target_class, u32::MAX);
                             (symbol, target_class)
@@ -1007,8 +984,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                 for (local, &state) in members.iter().enumerate() {
                     let mut signature =
                         Vec::<(u8, u64)>::with_capacity(transitions.row(state as usize).len());
-                    for &(symbol, global_target) in transitions.row(state as usize) {
-                        let target = transitions.local_target(global_target);
+                    for &(symbol, target) in transitions.row(state as usize) {
                         let target_local = member_index[target as usize];
                         let behavior = if target_local != u32::MAX {
                             (1u64 << 63) | u64::from(local_classes[target_local as usize])
@@ -1046,8 +1022,7 @@ fn minimize_scc_dag(transitions: &LocalTransitionView<'_>) -> (Vec<u32>, Vec<u32
                 let row = transitions
                     .row(representative as usize)
                     .iter()
-                    .map(|&(symbol, global_target)| {
-                        let target = transitions.local_target(global_target);
+                    .map(|&(symbol, target)| {
                         let target_class = class[target as usize];
                         debug_assert_ne!(target_class, u32::MAX);
                         (symbol, target_class)
@@ -1199,16 +1174,23 @@ fn minimize_grouped_local(
             hopcroft_states += states.len();
             let local_classes = if use_scc {
                 let flatten_started = profile_group_timings.then(Instant::now);
-                let edge_count = states
+                let edge_capacity = states
                     .iter()
                     .map(|&global| transitions[global as usize].len())
                     .sum::<usize>();
-                let local_transitions = LocalTransitionView {
-                    transitions,
-                    states,
-                    local_of_global: &local_of_global,
-                    edge_count,
-                };
+                let mut offsets = Vec::with_capacity(states.len() + 1);
+                let mut edges = Vec::with_capacity(edge_capacity);
+                offsets.push(0);
+                for &global in states {
+                    for &(symbol, target) in &transitions[global as usize] {
+                        debug_assert_eq!(groups[target as usize], groups[global as usize]);
+                        let local_target = local_of_global[target as usize];
+                        debug_assert_ne!(local_target, u32::MAX);
+                        edges.push((symbol, local_target));
+                    }
+                    offsets.push(edges.len() as u32);
+                }
+                let local_transitions = FlatLocalTransitions { offsets, edges };
                 profile_group_flatten_ms += flatten_started
                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                 let reduce_started = profile_group_timings.then(Instant::now);
