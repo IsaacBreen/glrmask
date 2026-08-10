@@ -672,21 +672,14 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
         {
-            // Keep the closing quote in the bounded suffix terminal. A bare
-            // `{0,n}` body is nullable, which makes the lexer expose a matched
-            // terminal while the same terminal is still in its future. Besides
-            // creating unnecessary delayed possible-match work, that boundary
-            // also gives L2+ analysis a less useful continuation coordinate.
-            // The quote makes the suffix non-nullable without changing the
-            // accepted JSON strings.
-            let mut parts = vec![lit("\"")];
-            if schema.min_length != 0 {
-                parts.push(self.string_char_exact_ref(schema.min_length));
-            }
-            parts.push(self.string_char_upto_close_ref(
-                max_length.saturating_sub(schema.min_length),
+            // Keep both JSON-string quotes in the bounded terminal. Leaving the
+            // body as a parser-visible variable-length terminal exposes an
+            // accepting prefix after every admissible body length; wrapping the
+            // body moves the observable terminal completion to the closing quote.
+            return Ok(self.string_char_bounded_wrapped_ref(
+                schema.min_length,
+                max_length,
             ));
-            return Ok(seq(parts));
         }
 
         let body = self.string_body_for_length(schema.min_length, schema.max_length);
@@ -1281,6 +1274,24 @@ impl<'a> Lowerer<'a> {
         r(&rule_name)
     }
 
+    fn string_char_bounded_wrapped_ref(&mut self, min: usize, max: usize) -> GrammarExpr {
+        debug_assert!(min <= max);
+        let key = (min, max);
+        if let Some(rule_name) = self.shared_string_bounded_wrapped_rules.get(&key) {
+            return r(rule_name);
+        }
+        let rule_name =
+            self.fresh_rule_name(&format!("json_string_char_bounded_wrapped_{min}_{max}"));
+        let body = GrammarExpr::Quantified(
+            Box::new(r(JSON_STRING_CHAR_RULE)),
+            Quantifier::Range(min, Some(max)),
+        );
+        self.add_terminal_rule(&rule_name, seq(vec![lit("\""), body, lit("\"")]));
+        self.shared_string_bounded_wrapped_rules
+            .insert(key, rule_name.clone());
+        r(&rule_name)
+    }
+
     fn split_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
         let chunk = self.config.string_repeat_chunk_size.max(1);
         if count <= chunk {
@@ -1353,13 +1364,17 @@ impl<'a> Lowerer<'a> {
             }
             choice(alternatives)
         } else if min == max {
-            seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")])
-        } else {
+            seq(vec![self.split_string_exact_open_expr(min), lit("\"")])
+        } else if min > 0 {
             seq(vec![
-                lit("\""),
-                self.split_string_exact_expr(min),
+                self.split_string_exact_open_expr(min),
                 self.split_string_upto_close_expr(max - min),
             ])
+        } else {
+            // min == 0 has no mandatory body chunk to absorb the opening quote.
+            // The large multi-chunk representation above already uses wrapped
+            // first chunks; keep the moderate split form unchanged for now.
+            seq(vec![lit("\""), self.split_string_upto_close_expr(max)])
         }
     }
 

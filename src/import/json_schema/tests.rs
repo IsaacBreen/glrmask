@@ -4007,7 +4007,7 @@ fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
 }
 
 #[test]
-fn bounded_property_string_merges_closing_quote_into_suffix_terminal() {
+fn bounded_property_string_merges_both_quotes_into_terminal() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
@@ -4027,7 +4027,10 @@ fn bounded_property_string_merges_closing_quote_into_suffix_terminal() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_upto_close_20"), "{glrm}");
+    assert!(
+        glrm.contains("json_string_char_bounded_wrapped_0_20"),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 
