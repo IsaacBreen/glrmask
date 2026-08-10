@@ -812,7 +812,11 @@ struct PublicWeightIntersectionMemo {
 
 impl PublicWeightIntersectionMemo {
     fn clear_all(&mut self) {
-        self.results.clear();
+        // Generation invalidation marks the previous compile's memo as dead.
+        // Drop the backing table as well as its entries: keeping capacity here
+        // pins potentially huge per-Rayon-thread hash tables across independent
+        // compiles and progressively degrades long-lived worker processes.
+        self.results = FxHashMap::default();
     }
 
     fn lookup(&mut self, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -871,8 +875,8 @@ impl WeightOpMemo {
     }
 
     fn clear_all(&mut self) {
-        self.results.clear();
-        self.token_set_results.clear();
+        self.results = FxHashMap::default();
+        self.token_set_results = FxHashMap::default();
         self.inserts_since_cleanup = 0;
     }
 
@@ -995,7 +999,7 @@ impl WeightHashMemo {
     }
 
     fn clear_all(&mut self) {
-        self.results.clear();
+        self.results = FxHashMap::default();
         self.inserts_since_cleanup = 0;
     }
 
