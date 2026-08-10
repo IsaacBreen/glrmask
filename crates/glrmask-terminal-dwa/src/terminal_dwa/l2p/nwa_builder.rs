@@ -359,6 +359,8 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
+    deferred_uncolored_future_leaf_buffer: FxHashMap<(u32, TokenizerState), LeafTokenIds>,
+    defer_uncolored_future_leaves: bool,
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<LeafTokenIds, Weight>,
@@ -420,6 +422,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             self_loop_bytes: FxHashMap::default(),
             leaf_token_ids_buffer: Vec::new(),
             future_leaf_buffer: FxHashMap::default(),
+            deferred_uncolored_future_leaf_buffer: FxHashMap::default(),
+            defer_uncolored_future_leaves: std::env::var("GLRMASK_L2P_DEFER_UNCOLORED_FUTURE_LEAVES")
+                .map(|value| {
+                    let value = value.trim();
+                    value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+                })
+                .unwrap_or(true),
             reachable_weight_cache: HashMap::new(),
             pruned_weight_cache: HashMap::new(),
             leaf_weight_cache: HashMap::new(),
@@ -582,6 +591,30 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         internal_token_id: u32,
     ) {
         if !self.use_terminal_coloring {
+            if self.defer_uncolored_future_leaves {
+                // Ignore is the one future label whose first-vs-later source
+                // semantics cannot be deferred into an ordinary leaf edge.
+                // Preserve that label eagerly and defer every other label as
+                // one token-set contribution per (source, scanner state).
+                if let Some(ignore_terminal) = self.ignore_terminal
+                    && self.ignore_terminal_possible_for_state(tokenizer_state)
+                {
+                    self.profile.future_terminal_additions += sources.len() as u64;
+                    self.add_leaf_token_from_sources(
+                        sources,
+                        ignore_terminal,
+                        internal_token_id,
+                    );
+                }
+                for &source in sources {
+                    self.deferred_uncolored_future_leaf_buffer
+                        .entry((source, tokenizer_state))
+                        .or_default()
+                        .push(internal_token_id);
+                }
+                return;
+            }
+
             let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
             self.profile.future_terminal_additions +=
                 (sources.len() * future_terminals.len()) as u64;
@@ -866,6 +899,58 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
         let flush_leaf_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+
+        let deferred_uncolored =
+            std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
+        if !deferred_uncolored.is_empty() {
+            let mut terminal_cache = FxHashMap::<TokenizerState, Vec<TerminalID>>::default();
+            for &(_, tokenizer_state) in deferred_uncolored.keys() {
+                terminal_cache
+                    .entry(tokenizer_state)
+                    .or_insert_with(|| self.possible_future_terminals_for_state(tokenizer_state));
+            }
+
+            let mut deferred_groups = 0usize;
+            let mut deferred_token_ids = 0usize;
+            let mut expanded_labels = 0usize;
+            for ((source, tokenizer_state), token_ids) in deferred_uncolored {
+                if token_ids.is_empty() {
+                    continue;
+                }
+                deferred_groups += 1;
+                deferred_token_ids += token_ids.len();
+                let token_id_count = token_ids.len() as u64;
+                let weight = self.cached_leaf_weight(token_ids);
+                let terminals = &terminal_cache[&tokenizer_state];
+                for &terminal_id in terminals {
+                    if Some(terminal_id) == self.ignore_terminal {
+                        continue;
+                    }
+                    expanded_labels += 1;
+                    // Preserve the historical profile counter semantics: it
+                    // counts logical terminal-token additions, even though the
+                    // deferred path now realizes the whole token set at once.
+                    self.profile.future_terminal_additions += token_id_count;
+                    let entry = leaf_transition_buckets[source as usize]
+                        .entry(terminal_id as i32)
+                        .or_default();
+                    if let Some(existing) = &mut entry.weight {
+                        *existing = existing.union(&weight);
+                    } else {
+                        entry.weight = Some(weight.clone());
+                    }
+                }
+            }
+            if std::env::var_os("GLRMASK_PROFILE_NWA_DEFERRED_FUTURE").is_some() {
+                eprintln!(
+                    "[glrmask/profile][nwa_deferred_uncolored_future] groups={} token_ids={} terminal_states={} expanded_labels={}",
+                    deferred_groups,
+                    deferred_token_ids,
+                    terminal_cache.len(),
+                    expanded_labels,
+                );
+            }
+        }
 
         let future_buf_count = self.future_leaf_buffer.len();
         let flush_future_start = std::time::Instant::now();
@@ -1662,6 +1747,22 @@ mod tests {
         id_map: &InternalIdMap,
         self_loop_subtree_skip_enabled: bool,
     ) -> LocalIdMapTerminalDwa {
+        build_baseline_test_artifact_with_options(
+            tokenizer,
+            tree,
+            id_map,
+            self_loop_subtree_skip_enabled,
+            false,
+        )
+    }
+
+    fn build_baseline_test_artifact_with_options(
+        tokenizer: &Tokenizer,
+        tree: &VocabPrefixTree,
+        id_map: &InternalIdMap,
+        self_loop_subtree_skip_enabled: bool,
+        defer_uncolored_future_leaves: bool,
+    ) -> LocalIdMapTerminalDwa {
         let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
         let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
         let leaf = nwa.add_state();
@@ -1691,10 +1792,57 @@ mod tests {
             None,
         );
         builder.self_loop_subtree_skip_enabled = self_loop_subtree_skip_enabled;
+        builder.defer_uncolored_future_leaves = defer_uncolored_future_leaves;
         builder.build_from_trie(&tree.root, &roots);
         builder.flush_transition_buffer();
         drop(builder);
         finish_test_artifact(&nwa, id_map.clone())
+    }
+
+    #[test]
+    fn deferred_uncolored_future_leaves_match_eager_expansion() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: None,
+            },
+            Expr::U8Seq(b"ac".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tree = VocabPrefixTree::build(&[
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"aba".to_vec()),
+            (4, b"abb".to_vec()),
+            (5, b"ac".to_vec()),
+            (6, b"b".to_vec()),
+            (7, b"ba".to_vec()),
+        ]);
+        let id_map = singleton_id_map(tokenizer.num_states(), 8);
+
+        let eager = build_baseline_test_artifact_with_options(
+            &tokenizer,
+            &tree,
+            &id_map,
+            false,
+            false,
+        );
+        let deferred = build_baseline_test_artifact_with_options(
+            &tokenizer,
+            &tree,
+            &id_map,
+            false,
+            true,
+        );
+
+        compare_terminal_dwa(&eager, &deferred)
+            .expect("deferred future-leaf expansion must preserve the exact terminal language");
     }
 
     #[test]
