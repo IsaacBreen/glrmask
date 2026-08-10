@@ -2274,13 +2274,20 @@ fn try_build_and_color_pointwise(
             behavior_rejects,
         );
     }
-    let direct_builders = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_POINTWISE_RECONSTRUCT")
+    // Pointwise coloring has already materialized the exact union behavior of
+    // every merge group. Reusing that summary is cheaper than walking every
+    // member state again and rebuilding the same final/transition unions. Keep
+    // the historical environment variable as a diagnostic kill switch, but
+    // make the proven direct reconstruction path the production default.
+    let direct_reconstruct = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_POINTWISE_RECONSTRUCT")
         .ok()
-        .is_some_and(|value| {
+        .map(|value| {
             let value = value.trim();
-            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+            !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
         })
-        .then(|| pointwise_groups_to_builders(&groups, &interner));
+        .unwrap_or(true);
+    let direct_builders =
+        direct_reconstruct.then(|| pointwise_groups_to_builders(&groups, &interner));
     Some(HybridColoring {
         coloring,
         direct_builders,
