@@ -285,6 +285,20 @@ fn singleton_dfa_cache() -> &'static Mutex<HashMap<Expr, SingletonDfaCell>> {
 }
 
 fn cached_singleton_dfa(expr: &Expr) -> (Arc<DFA>, bool, Duration) {
+    if std::env::var("GLRMASK_DEFINITION_SINGLETON_DFA_CACHE")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value == "0" || value.eq_ignore_ascii_case("false")
+        })
+    {
+        let started_at = Instant::now();
+        return (
+            Arc::new(compile_terminal_expr_dfa(expr)),
+            true,
+            started_at.elapsed(),
+        );
+    }
     let cell = {
         let mut cache = singleton_dfa_cache()
             .lock()
