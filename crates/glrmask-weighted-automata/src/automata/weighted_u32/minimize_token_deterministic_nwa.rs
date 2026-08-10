@@ -21,6 +21,7 @@ const UNMAPPED: u32 = u32::MAX;
 fn profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_TOKEN_NWA_MINIMIZE").is_some()
 }
 
 fn topo_order(nwa: &NWA) -> Option<Vec<usize>> {
@@ -296,6 +297,188 @@ fn profiles_match_on_domain(left: &BranchProfile, right: &BranchProfile, domain:
     }
 }
 
+/// Remove epsilon edges from an acyclic weighted NWA by folding each state's
+/// weighted epsilon closure into its final weight and labelled outgoing edges.
+/// The result accepts exactly the same weighted labelled language.
+pub fn eliminate_acyclic_epsilons(nwa: &NWA) -> Result<NWA, GlrMaskError> {
+    let n = nwa.states().len();
+    let mut indegree = vec![0usize; n];
+    for state in nwa.states() {
+        for (target, _) in &state.epsilons {
+            let target = *target as usize;
+            if target >= n {
+                return Err(GlrMaskError::Compilation("epsilon target out of range".into()));
+            }
+            indegree[target] += 1;
+        }
+        for branches in state.transitions.values() {
+            for (target, _) in branches {
+                let target = *target as usize;
+                if target >= n {
+                    return Err(GlrMaskError::Compilation("transition target out of range".into()));
+                }
+                indegree[target] += 1;
+            }
+        }
+    }
+    let mut queue = Vec::<usize>::with_capacity(n);
+    for (state_id, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push(state_id);
+        }
+    }
+    let mut head = 0usize;
+    let mut topo = Vec::with_capacity(n);
+    while head < queue.len() {
+        let state_id = queue[head];
+        head += 1;
+        topo.push(state_id);
+        let state = &nwa.states()[state_id];
+        for target in state
+            .epsilons
+            .iter()
+            .map(|(target, _)| *target)
+            .chain(
+                state
+                    .transitions
+                    .values()
+                    .flatten()
+                    .map(|(target, _)| *target),
+            )
+        {
+            let target = target as usize;
+            indegree[target] -= 1;
+            if indegree[target] == 0 {
+                queue.push(target);
+            }
+        }
+    }
+    if topo.len() != n {
+        return Err(GlrMaskError::Compilation(
+            "epsilon elimination requires an acyclic NWA".into(),
+        ));
+    }
+
+    #[inline]
+    fn intersect_cached(
+        cache: &mut FxHashMap<(usize, usize), Weight>,
+        left: &Weight,
+        right: &Weight,
+    ) -> Weight {
+        if left.is_empty() || right.is_empty() {
+            return Weight::empty();
+        }
+        if left.is_full() {
+            return right.clone();
+        }
+        if right.is_full() || left.storage_ptr_eq(right) {
+            return left.clone();
+        }
+        let left_id = weight_id(left);
+        let right_id = weight_id(right);
+        let key = if left_id <= right_id {
+            (left_id, right_id)
+        } else {
+            (right_id, left_id)
+        };
+        if let Some(existing) = cache.get(&key) {
+            return existing.clone();
+        }
+        let result = left.intersection(right);
+        cache.insert(key, result.clone());
+        result
+    }
+
+    // Reverse topological DP.  Once a target is processed it already contains
+    // its complete epsilon-free behaviour, so an epsilon edge can be folded by
+    // composing its weight directly with that target.  This avoids building a
+    // closure map and then walking the same closure again during materialization.
+    let mut states = vec![super::nwa::NWAState::default(); n];
+    let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
+    for &state_id in topo.iter().rev() {
+        let source = &nwa.states()[state_id];
+        let mut final_parts = SmallVec::<[Weight; 4]>::new();
+        if let Some(final_weight) = &source.final_weight {
+            if !final_weight.is_empty() {
+                final_parts.push(final_weight.clone());
+            }
+        }
+        let mut branch_parts =
+            BTreeMap::<(Label, u32), SmallVec<[Weight; 2]>>::new();
+        for (&label, branches) in &source.transitions {
+            for (target, weight) in branches {
+                if !weight.is_empty() {
+                    branch_parts
+                        .entry((label, *target))
+                        .or_default()
+                        .push(weight.clone());
+                }
+            }
+        }
+
+        for (target, epsilon_weight) in &source.epsilons {
+            if epsilon_weight.is_empty() {
+                continue;
+            }
+            let expanded_target = &states[*target as usize];
+            if let Some(final_weight) = &expanded_target.final_weight {
+                let contribution =
+                    intersect_cached(&mut intersection_cache, epsilon_weight, final_weight);
+                if !contribution.is_empty() {
+                    final_parts.push(contribution);
+                }
+            }
+            for (&label, branches) in &expanded_target.transitions {
+                for (branch_target, branch_weight) in branches {
+                    let contribution =
+                        intersect_cached(&mut intersection_cache, epsilon_weight, branch_weight);
+                    if !contribution.is_empty() {
+                        branch_parts
+                            .entry((label, *branch_target))
+                            .or_default()
+                            .push(contribution);
+                    }
+                }
+            }
+        }
+
+        let final_weight = Weight::union_all(final_parts.iter());
+        let mut expanded = super::nwa::NWAState::default();
+        if !final_weight.is_empty() {
+            expanded.final_weight = Some(final_weight);
+        }
+        for ((label, target), parts) in branch_parts {
+            let weight = Weight::union_all(parts.iter());
+            if !weight.is_empty() {
+                expanded
+                    .transitions
+                    .entry(label)
+                    .or_default()
+                    .push((target, weight));
+            }
+        }
+        states[state_id] = expanded;
+    }
+
+    Ok(NWA::from_parts(states, nwa.start_states().to_vec()))
+}
+
+/// Check the exact structural precondition required by the direct NWA quotient:
+/// no epsilon edges and pairwise-disjoint token weights for branches sharing a label.
+pub fn is_token_deterministic_epsilon_free(nwa: &NWA) -> bool {
+    for state in nwa.states() {
+        if !state.epsilons.is_empty() { return false; }
+        for branches in state.transitions.values() {
+            for i in 0..branches.len() {
+                for j in (i + 1)..branches.len() {
+                    if !branches[i].1.is_disjoint(&branches[j].1) { return false; }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Minimize an acyclic NWA that is deterministic over `(label, token)`.
 ///
 /// The output retains that property. It intentionally does not introduce a
@@ -485,6 +668,40 @@ mod tests {
             0,
             RangeSetBlaze::from_iter(values.iter().copied().map(|value| value..=value)),
         )))
+    }
+
+    #[test]
+    fn acyclic_epsilon_elimination_preserves_weighted_language() {
+        let mut nwa = NWA::new(0, 0);
+        let start = nwa.add_state();
+        let mid = nwa.add_state();
+        let tail = nwa.add_state();
+        let direct = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        // Token 1 reaches label 7 through an epsilon prefix. Token 2 uses a
+        // direct labelled branch. The epsilon branch itself has a wider domain
+        // than the labelled suffix so composition must intersect the weights.
+        nwa.add_epsilon(start, mid, tokens(&[0, 1]));
+        nwa.add_transition(mid, 7, tail, tokens(&[1, 3]));
+        nwa.set_final_weight(tail, tokens(&[1, 3]));
+        nwa.add_transition(start, 7, direct, tokens(&[2]));
+        nwa.set_final_weight(direct, tokens(&[2]));
+
+        // Add a second epsilon path to the same labelled residual so epsilon
+        // path weights must union before/while materializing the transition.
+        let alt = nwa.add_state();
+        nwa.add_epsilon(start, alt, tokens(&[3]));
+        nwa.add_transition(alt, 7, tail, tokens(&[3]));
+
+        let reference = determinize(&nwa).unwrap();
+        let eliminated = eliminate_acyclic_epsilons(&nwa).unwrap();
+        assert!(eliminated
+            .states()
+            .iter()
+            .all(|state| state.epsilons.is_empty()));
+        let candidate = determinize(&eliminated).unwrap();
+        assert_eq!(find_difference(&reference, &candidate).unwrap(), None);
     }
 
     #[test]
