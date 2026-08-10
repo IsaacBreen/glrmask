@@ -1783,7 +1783,7 @@ fn build_pointwise_profile(
         return None;
     }
 
-    let transitions: Vec<(Label, u32, &Weight)> = profile
+    let transitions: SmallVec<[(Label, u32, &Weight); 4]> = profile
         .weights
         .iter()
         .map(|(label, weight)| Some((*label, profile_target_for_label(profile, *label)?, weight)))
@@ -1794,7 +1794,7 @@ fn build_pointwise_profile(
     // transition's complete range list per window would be O(windows * ranges).
     // Monotone cursors below then advance forward as windows advance, making the
     // per-window range gathering O(ranges + overlaps) overall.
-    let final_full: Vec<(u32, u32, &RangeSetBlaze<u32>)> = profile
+    let final_full: SmallVec<[(u32, u32, &RangeSetBlaze<u32>); 8]> = profile
         .final_weight
         .as_ref()
         .map(|fw| {
@@ -1803,7 +1803,9 @@ fn build_pointwise_profile(
                 .collect()
         })
         .unwrap_or_default();
-    let transition_full: Vec<Vec<(u32, u32, &RangeSetBlaze<u32>)>> = transitions
+    let transition_full: SmallVec<
+        [SmallVec<[(u32, u32, &RangeSetBlaze<u32>); 8]>; 4],
+    > = transitions
         .iter()
         .map(|(_, _, weight)| {
             weight
@@ -1815,15 +1817,18 @@ fn build_pointwise_profile(
 
     let mut by_tsid = Vec::new();
     let mut final_scan = 0usize;
-    let mut transition_scan = vec![0usize; transitions.len()];
-    for (domain_start, domain_end, domain_tokens) in domain.compact_entries()? {
+    let mut transition_scan: SmallVec<[usize; 4]> =
+        std::iter::repeat_n(0usize, transitions.len()).collect();
+    for (domain_start, domain_end, domain_tokens) in domain.range_entries() {
         // Build the TSID boundaries and, in the same pass, collect each source's
         // token-set ranges clipped to the domain window. The clipped range lists
         // let a coordinated sweep read the active token set per interval with a
         // monotone cursor instead of a binary-search `get` per interval per
         // transition, which is the dominant color-step cost.
-        let mut boundaries = vec![u64::from(domain_start), u64::from(domain_end) + 1];
-        let mut final_ranges: Vec<(u32, u32, &RangeSetBlaze<u32>)> = Vec::new();
+        let mut boundaries: SmallVec<[u64; 32]> = SmallVec::new();
+        boundaries.push(u64::from(domain_start));
+        boundaries.push(u64::from(domain_end) + 1);
+        let mut final_ranges: SmallVec<[(u32, u32, &RangeSetBlaze<u32>); 8]> = SmallVec::new();
         // Advance the monotone scan cursor past ranges ending before this window;
         // windows are visited left to right so earlier ranges are never revisited.
         while final_scan < final_full.len() && final_full[final_scan].1 < domain_start {
@@ -1841,14 +1846,16 @@ fn build_pointwise_profile(
             }
             peek += 1;
         }
-        let mut transition_ranges: Vec<Vec<(u32, u32, &RangeSetBlaze<u32>)>> =
-            Vec::with_capacity(transitions.len());
+        let mut transition_ranges: SmallVec<
+            [SmallVec<[(u32, u32, &RangeSetBlaze<u32>); 8]>; 4],
+        > = SmallVec::new();
+        transition_ranges.reserve(transitions.len());
         for (index, full) in transition_full.iter().enumerate() {
             let cursor = &mut transition_scan[index];
             while *cursor < full.len() && full[*cursor].1 < domain_start {
                 *cursor += 1;
             }
-            let mut clipped: Vec<(u32, u32, &RangeSetBlaze<u32>)> = Vec::new();
+            let mut clipped: SmallVec<[(u32, u32, &RangeSetBlaze<u32>); 8]> = SmallVec::new();
             let mut peek = *cursor;
             while peek < full.len() && full[peek].0 <= domain_end {
                 let (range_start, range_end, tokens) = full[peek];
@@ -1870,7 +1877,7 @@ fn build_pointwise_profile(
         // ever be active in an interval; skipping the empties keeps the sweep
         // inner loop proportional to the live transitions rather than the full
         // transition count. Indices stay ascending so push order is unchanged.
-        let active_indices: Vec<usize> = transition_ranges
+        let active_indices: SmallVec<[usize; 4]> = transition_ranges
             .iter()
             .enumerate()
             .filter(|(_, ranges)| !ranges.is_empty())
@@ -1880,7 +1887,8 @@ fn build_pointwise_profile(
         // Monotone cursors: TSID intervals are visited left to right, and every
         // clipped range list is sorted, so each cursor only advances forward.
         let mut final_cursor = 0usize;
-        let mut transition_cursors = vec![0usize; transitions.len()];
+        let mut transition_cursors: SmallVec<[usize; 4]> =
+            std::iter::repeat_n(0usize, transitions.len()).collect();
         for pair in boundaries.windows(2) {
             let start64 = pair[0];
             let next = pair[1];
@@ -1896,7 +1904,8 @@ fn build_pointwise_profile(
                 .get(final_cursor)
                 .filter(|(start, _, _)| *start <= tsid_start)
                 .map(|(_, _, tokens)| *tokens);
-            let mut active_transitions = Vec::new();
+            let mut active_transitions: SmallVec<[(Label, u32, &RangeSetBlaze<u32>); 4]> =
+                SmallVec::new();
             for &index in &active_indices {
                 let (label, target, _) = &transitions[index];
                 let ranges = &transition_ranges[index];
@@ -1913,7 +1922,7 @@ fn build_pointwise_profile(
             let region = build_token_behavior_region(
                 domain_tokens.as_ref(),
                 final_tokens,
-                &active_transitions,
+                active_transitions.as_slice(),
                 behaviors,
                 regions,
                 build_cache,
