@@ -159,6 +159,15 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut target_partial = 0usize;
     let mut reachable_parts = 0usize;
     let mut pushed_transitions = 0usize;
+    let subset_fastpath = std::env::var("GLRMASK_WEIGHTED_PUSH_SUBSET_FASTPATH")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        });
+    let mut subset_checks = 0usize;
+    let mut subset_hits = 0usize;
+    let mut subset_ms = 0.0;
     let mut intersection_ms = 0.0;
     let mut union_ms = 0.0;
     let mut apply_ms = 0.0;
@@ -204,22 +213,38 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 // Contributes nothing to acc
             } else {
                 target_partial += 1;
-                let intersection_started_at = profile_enabled.then(Instant::now);
-                let index = (incoming_transition_counts[t] >= 8).then(|| {
-                    let key = reachable[t].ptr_key();
-                    intersection_indexes
-                        .entry(key)
-                        .or_insert_with(|| reachable[t].intersection_index())
-                });
-                if index.is_some() {
-                    indexed_intersection_uses += 1;
+                let subset_started_at = (profile_enabled && subset_fastpath).then(Instant::now);
+                let already_subset = if subset_fastpath {
+                    subset_checks += 1;
+                    let result = w.is_subset(&reachable[t]);
+                    subset_hits += usize::from(result);
+                    result
+                } else {
+                    false
+                };
+                if let Some(started_at) = subset_started_at {
+                    subset_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
-                let new_w = memoized_intersection(
-                    &mut intersection_cache,
-                    w,
-                    &reachable[t],
-                    index.as_deref(),
-                );
+                let intersection_started_at = profile_enabled.then(Instant::now);
+                let new_w = if already_subset {
+                    w.clone()
+                } else {
+                    let index = (incoming_transition_counts[t] >= 8).then(|| {
+                        let key = reachable[t].ptr_key();
+                        intersection_indexes
+                            .entry(key)
+                            .or_insert_with(|| reachable[t].intersection_index())
+                    });
+                    if index.is_some() {
+                        indexed_intersection_uses += 1;
+                    }
+                    memoized_intersection(
+                        &mut intersection_cache,
+                        w,
+                        &reachable[t],
+                        index.as_deref(),
+                    )
+                };
                 if let Some(started_at) = intersection_started_at {
                     intersection_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
@@ -291,12 +316,15 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} intersection_indexes={} indexed_intersection_uses={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
+            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} subset_checks={} subset_hits={} subset_ms={:.3} intersection_ms={:.3} intersection_cache_entries={} intersection_indexes={} indexed_intersection_uses={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
             n,
             topo_ms,
             target_full,
             target_empty,
             target_partial,
+            subset_checks,
+            subset_hits,
+            subset_ms,
             intersection_ms,
             intersection_cache.len(),
             intersection_indexes.len(),
