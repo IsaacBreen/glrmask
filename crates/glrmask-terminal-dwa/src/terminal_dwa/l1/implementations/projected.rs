@@ -558,14 +558,96 @@ fn transition_symbol_mask(row: &[(u8, u32)]) -> [u64; 4] {
     mask
 }
 
-fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, usize, usize) {
+fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<Vec<u32>>) {
     let n = transitions.len();
-    if n == 0 {
-        return (Vec::new(), Vec::new(), 0, 0);
-    }
-    let profiling = std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some();
-    let phase_started = profiling.then(Instant::now);
+    let mut next_index = 0u32;
+    let mut indices = vec![u32::MAX; n];
+    let mut lowlink = vec![0u32; n];
+    let mut stack = Vec::<u32>::with_capacity(n);
+    let mut on_stack = vec![false; n];
+    let mut emitted = Vec::<Vec<u32>>::new();
 
+    fn visit(
+        state: u32,
+        transitions: &FlatLocalTransitions,
+        next_index: &mut u32,
+        indices: &mut [u32],
+        lowlink: &mut [u32],
+        stack: &mut Vec<u32>,
+        on_stack: &mut [bool],
+        emitted: &mut Vec<Vec<u32>>,
+    ) {
+        let state_usize = state as usize;
+        let index = *next_index;
+        *next_index += 1;
+        indices[state_usize] = index;
+        lowlink[state_usize] = index;
+        stack.push(state);
+        on_stack[state_usize] = true;
+
+        for &(_, target) in transitions.row(state_usize) {
+            let target_usize = target as usize;
+            if indices[target_usize] == u32::MAX {
+                visit(
+                    target,
+                    transitions,
+                    next_index,
+                    indices,
+                    lowlink,
+                    stack,
+                    on_stack,
+                    emitted,
+                );
+                lowlink[state_usize] = lowlink[state_usize].min(lowlink[target_usize]);
+            } else if on_stack[target_usize] {
+                lowlink[state_usize] = lowlink[state_usize].min(indices[target_usize]);
+            }
+        }
+
+        if lowlink[state_usize] == indices[state_usize] {
+            let mut members = Vec::<u32>::new();
+            loop {
+                let member = stack.pop().expect("Tarjan root must remain on stack");
+                on_stack[member as usize] = false;
+                members.push(member);
+                if member == state {
+                    break;
+                }
+            }
+            emitted.push(members);
+        }
+    }
+
+    for state in 0..n as u32 {
+        if indices[state as usize] == u32::MAX {
+            visit(
+                state,
+                transitions,
+                &mut next_index,
+                &mut indices,
+                &mut lowlink,
+                &mut stack,
+                &mut on_stack,
+                &mut emitted,
+            );
+        }
+    }
+    debug_assert!(stack.is_empty());
+
+    // Tarjan emits sink SCCs first. Normalize to the source-to-sink order used
+    // by the reducer so reverse iteration solves every successor first.
+    emitted.reverse();
+    let mut component_of = vec![u32::MAX; n];
+    for (component, members) in emitted.iter().enumerate() {
+        for &state in members {
+            component_of[state as usize] = component as u32;
+        }
+    }
+    (component_of, emitted)
+}
+
+fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let n = transitions.len();
     // Kosaraju, ignoring literal self-loops (they do not affect SCC membership).
     let mut reverse = vec![Vec::<u32>::new(); n];
     for source in 0..n {
@@ -628,6 +710,27 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
         }
         components.push(members);
     }
+    (component_of, components)
+}
+
+fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, usize, usize) {
+    let n = transitions.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new(), 0, 0);
+    }
+    let profiling = std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some();
+    let phase_started = profiling.then(Instant::now);
+
+    // Recursive Tarjan is substantially cheaper for the ~2k-state projected
+    // groups that dominate the p99 cohort: one edge traversal and no reverse
+    // graph. Keep iterative Kosaraju for larger components to avoid deep-stack
+    // risk on arbitrary grammars.
+    const TARJAN_SMALL_STATE_LIMIT: usize = 8_192;
+    let (component_of, components) = if n <= TARJAN_SMALL_STATE_LIMIT {
+        tarjan_scc_components(transitions)
+    } else {
+        kosaraju_scc_components(transitions)
+    };
 
     let decompose_ms = phase_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let condensation_started = profiling.then(Instant::now);
