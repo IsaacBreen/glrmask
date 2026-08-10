@@ -730,6 +730,30 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             return Some(self.cached_reachable_weight(child_node.reachable_token_ids()));
         }
 
+        let remove_leaf = remaining_segment.is_empty() && child_node.has_token();
+        let possible_matches = end_state.map(|end_state| {
+            self.possible_matches
+                .possible_matches_for_suffix_and_node(
+                    remaining_segment,
+                    child_node,
+                    end_state,
+                )
+        });
+        let matches_for_terminal = possible_matches
+            .as_ref()
+            .and_then(|matches| matches.get(&terminal_id));
+
+        // Most continuations do not actually exclude anything. In that case the
+        // exact continuation domain is simply the child's reachable-token set,
+        // whose uniform weight is already cached by node identity. Avoid cloning
+        // the token set and rebuilding/reinterning the same weight per match.
+        if !remove_leaf && matches_for_terminal.is_none() {
+            return Some(self.cached_reachable_weight(child_node.reachable_token_ids()));
+        }
+
+        // The context-keyed cache is useful only for the rare genuinely pruned
+        // continuations. Checking it after the no-pruning fast path avoids a hash
+        // lookup on the overwhelmingly common case.
         let cache_key = (
             child_node as *const VocabPrefixTreeNode as usize,
             remaining_segment.len(),
@@ -741,21 +765,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         let mut remaining = child_node.reachable_token_ids().clone();
-        if remaining_segment.is_empty() && child_node.has_token() {
+        if remove_leaf {
             remaining.remove(leaf_token_id as usize);
         }
-
-        if let Some(end_state) = end_state {
-            let possible_matches = self
-                .possible_matches
-                .possible_matches_for_suffix_and_node(
-                    remaining_segment,
-                    child_node,
-                    end_state,
-                );
-            if let Some(matches_for_terminal) = possible_matches.get(&terminal_id) {
-                subtract_possible_matches(&mut remaining, matches_for_terminal);
-            }
+        if let Some(matches_for_terminal) = matches_for_terminal {
+            subtract_possible_matches(&mut remaining, matches_for_terminal);
         }
 
         if remaining.is_empty() {
