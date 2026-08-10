@@ -1683,7 +1683,7 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
     union_all_multiway_impl(weights, false)
 }
 
-fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
+fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
     let mut boundaries = Vec::with_capacity(all_entries.len() * 2);
     for entry in &all_entries {
         boundaries.push(u64::from(entry.start));
@@ -1695,8 +1695,6 @@ fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
     if boundaries.len() < 2 {
         return Weight::empty();
     }
-
-    all_entries.sort_unstable_by_key(|entry| entry.start);
 
     let mut builder = CompactRangeBuilder::new();
     let mut scan_start = 0usize;
@@ -1735,9 +1733,8 @@ fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
     builder.finish()
 }
 
-fn union_all_multiway_incremental(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
-    all_entries.sort_unstable_by_key(|entry| entry.start);
-
+fn union_all_multiway_incremental(all_entries: Vec<WeightRangeEntry>) -> Weight {
+    // Entries are already sorted by start in `union_all_multiway_impl`.
     // End events are exclusive so entries ending at `boundary - 1` leave the
     // active set before entries beginning at `boundary` enter it.
     let mut end_events: Vec<(u64, SharedTokenSet)> = all_entries
