@@ -267,7 +267,11 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 }
             }
             let union_started_at = profile_enabled.then(Instant::now);
-            let result = Weight::union_all(state_reachable_parts.iter());
+            let result = if std::env::var_os("GLRMASK_WEIGHTED_PUSH_DIRECT_UNION").is_some() {
+                Weight::union_all_direct(state_reachable_parts.iter())
+            } else {
+                Weight::union_all(state_reachable_parts.iter())
+            };
             if let Some(started_at) = union_started_at {
                 union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
             }
