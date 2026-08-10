@@ -124,6 +124,16 @@ fn memoized_intersection(
 /// Returns (changed, topo_order, reachable_sets) so callers can reuse them.
 pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    // The backward pass performs many one-shot unions of two to four complex
+    // weights.  The direct multi-way implementation avoids allocating the
+    // pairwise intermediate weights in exactly that regime.  Keep an explicit
+    // diagnostic kill switch so the previous scheduling can be A/B tested.
+    let direct_union = std::env::var("GLRMASK_WEIGHTED_PUSH_DIRECT_UNION")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
     let n = dwa.states().len();
     if n == 0 {
         return (false, Some(Vec::new()), Vec::new());
@@ -267,7 +277,11 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 }
             }
             let union_started_at = profile_enabled.then(Instant::now);
-            let result = Weight::union_all(state_reachable_parts.iter());
+            let result = if direct_union {
+                Weight::union_all_direct(state_reachable_parts.iter())
+            } else {
+                Weight::union_all(state_reachable_parts.iter())
+            };
             if let Some(started_at) = union_started_at {
                 union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
             }
@@ -1214,10 +1228,14 @@ struct PointwiseRegionInterner {
 
 impl Default for PointwiseRegionInterner {
     fn default() -> Self {
+        // Pointwise groups repeatedly overlay the same tiny set of interned
+        // behavior regions.  A 128-entry direct-mapped cache captures that
+        // locality at negligible memory cost; setting the variable to 0 keeps
+        // the exact historical no-cache path available for diagnostics.
         let requested_slots = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
+            .unwrap_or(128);
         let slot_count = if requested_slots == 0 {
             0
         } else {
@@ -1267,21 +1285,31 @@ impl PointwiseRegionInterner {
         if Arc::ptr_eq(left, right) {
             return Arc::clone(left);
         }
-        let Some(cache) = self.direct_overlay.as_mut() else {
+        let Some(cache) = self.direct_overlay.as_ref() else {
             return self.intern(overlay_compatible_token_behavior_ranges(
                 left.as_ref(),
                 right.as_ref(),
             ));
         };
-
-        let left_id = *cache
+        // PointwiseBehaviorMap is also used by tests/helpers that can feed it
+        // externally-created region Arcs. Those regions have no local compact
+        // ID, so bypass only the lookup cache and retain the exact interning
+        // path. Production pointwise profiles are locally interned and hit the
+        // fast path below.
+        let Some((&left_id, &right_id)) = cache
             .region_ids_by_ptr
             .get(&(Arc::as_ptr(left) as usize))
-            .expect("interned pointwise region must have a compact ID");
-        let right_id = *cache
-            .region_ids_by_ptr
-            .get(&(Arc::as_ptr(right) as usize))
-            .expect("interned pointwise region must have a compact ID");
+            .zip(cache.region_ids_by_ptr.get(&(Arc::as_ptr(right) as usize)))
+        else {
+            return self.intern(overlay_compatible_token_behavior_ranges(
+                left.as_ref(),
+                right.as_ref(),
+            ));
+        };
+        let cache = self
+            .direct_overlay
+            .as_mut()
+            .expect("direct overlay cache must remain enabled");
         let (low, high) = if left_id <= right_id {
             (left_id, right_id)
         } else {
