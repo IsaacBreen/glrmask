@@ -2648,7 +2648,10 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
 
     let projected_started = Instant::now();
+    let projected_init_started = Instant::now();
     let mut projected = Projected::new(input);
+    let projected_init_ms = projected_init_started.elapsed().as_secs_f64() * 1000.0;
+    let projected_roots_started = Instant::now();
     // `initial_state_map` is already an exact certified quotient for this L1
     // branch.  Preserve a raw-state-indexed root table for O(1) transition
     // lookup, but construct residual roots only for quotient representatives.
@@ -2685,6 +2688,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .map(|raw| projected.root_row(raw))
             .collect::<Vec<_>>()
     };
+    let projected_roots_ms = projected_roots_started.elapsed().as_secs_f64() * 1000.0;
     if projected.configs.len() > finite_switch_states {
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
@@ -2704,6 +2708,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         !projected_limit_exceeded(input, projected.configs.len(), limit),
         "projected L1 exceeded GLRMASK_L1_SINGLE_MAX_STATES; raise the projected-state limit for this diagnostic guard"
     );
+    let projected_expand_started = Instant::now();
     let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
     let mut expanded = 0usize;
     while let Some(state) = queue.pop_front() {
@@ -2758,6 +2763,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         projected.transitions[state as usize] = row;
         expanded += 1;
     }
+    let projected_expand_ms = projected_expand_started.elapsed().as_secs_f64() * 1000.0;
     let projected_ms = projected_started.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started = Instant::now();
@@ -2911,13 +2917,16 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_SUMMARY").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_summary] partition={} projected_states={} minimized_states={} grouped_local_states={} grouped_local_ms={:.3} grouped_global_ms={:.3} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_summary] partition={} projected_states={} minimized_states={} grouped_local_states={} grouped_local_ms={:.3} grouped_global_ms={:.3} project_init_ms={:.3} project_roots_ms={:.3} project_expand_ms={:.3} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             projected.configs.len(),
             minimized.state_count,
             grouped_minimize.as_ref().map_or(0, |stats| stats.local_states),
             grouped_minimize.as_ref().map_or(0.0, |stats| stats.local_ms),
             grouped_minimize.as_ref().map_or(0.0, |stats| stats.global_ms),
+            projected_init_ms,
+            projected_roots_ms,
+            projected_expand_ms,
             projected_ms,
             minimize_ms,
             root_vectors_ms,
