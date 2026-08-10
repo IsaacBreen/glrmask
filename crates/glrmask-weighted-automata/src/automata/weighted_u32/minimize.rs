@@ -33,6 +33,15 @@ pub fn minimize_owned(dwa: DWA) -> DWA {
     minimize_owned_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_owned)
 }
 
+/// Minimize an acyclic DWA whose edge weights already encode cumulative live
+/// path domains from an upstream backward-pushed construction.
+pub fn minimize_owned_path_conditioned(dwa: DWA) -> DWA {
+    minimize_owned_if_acyclic(
+        dwa,
+        super::minimize_acyclic::minimize_acyclic_owned_path_conditioned,
+    )
+}
+
 /// Minimize an acyclic DWA using an explicit exact pointwise grouping order.
 /// The ordinary entry point keeps the stable historical order.
 pub fn minimize_owned_with_pointwise_class_order(
