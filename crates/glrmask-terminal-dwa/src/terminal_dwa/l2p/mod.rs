@@ -947,9 +947,16 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 env_selects_partition("GLRMASK_ASSERT_L2P_PREMINIMIZE_TOKEN_NWA");
             let preminimize_input_states = nwa.states().len();
             let preminimize_input_transitions = nwa.num_transitions();
+            let preminimize_input_epsilon_edges =
+                nwa.states().iter().map(|state| state.epsilons.len()).sum::<usize>();
+            let preminimize_input_acyclic = nwa.is_acyclic();
+            let preminimize_supported =
+                preminimize_input_acyclic && preminimize_input_epsilon_edges == 0;
+            let preminimize_applied = preminimize_token_nwa && preminimize_supported;
             let preminimize_started_at = Instant::now();
-            let reference_nwa = assert_preminimize_token_nwa.then(|| nwa.clone());
-            if preminimize_token_nwa {
+            let reference_nwa =
+                (assert_preminimize_token_nwa && preminimize_applied).then(|| nwa.clone());
+            if preminimize_applied {
                 nwa = minimize_token_deterministic_nwa_owned(nwa)
                     .expect("L2+ token-deterministic NWA pre-minimization failed");
             }
@@ -967,19 +974,20 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 );
             }
             if l2p_timing_profile_enabled() && (preminimize_token_nwa || assert_preminimize_token_nwa) {
-                let epsilon_edges = nwa.states().iter().map(|state| state.epsilons.len()).sum::<usize>();
                 eprintln!(
-                    "[glrmask/profile][l2p_token_nwa_preminimize] partition={} selected={} input_states={} input_transitions={} output_states={} output_transitions={} epsilon_edges={} acyclic={} preminimize_ms={:.3} strict_equivalence={}",
+                    "[glrmask/profile][l2p_token_nwa_preminimize] partition={} requested={} supported={} applied={} input_states={} input_transitions={} input_epsilon_edges={} input_acyclic={} output_states={} output_transitions={} preminimize_ms={:.3} strict_equivalence={}",
                     partition_label,
                     preminimize_token_nwa,
+                    preminimize_supported,
+                    preminimize_applied,
                     preminimize_input_states,
                     preminimize_input_transitions,
+                    preminimize_input_epsilon_edges,
+                    preminimize_input_acyclic,
                     nwa.states().len(),
                     nwa.num_transitions(),
-                    epsilon_edges,
-                    nwa.is_acyclic(),
                     preminimize_ms,
-                    assert_preminimize_token_nwa,
+                    assert_preminimize_token_nwa && preminimize_applied,
                 );
             }
 
