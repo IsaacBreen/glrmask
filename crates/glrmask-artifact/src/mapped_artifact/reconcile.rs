@@ -1229,6 +1229,12 @@ fn remap_weight_with_disjoint_tsid_runs(
         if mapped_tokens.is_empty() {
             continue;
         }
+        if let Some(lookup) = tsid_map.contiguous_interval_lookup.as_ref() {
+            if let Some((start, end)) = lookup.remap(local_start, local_end) {
+                entries.push((start, end, Arc::clone(&mapped_tokens)));
+            }
+            continue;
+        }
         for local_tsid in local_start..=local_end {
             for &(start, end) in tsid_map.runs_by_local.get(local_tsid as usize)? {
                 entries.push((start, end, Arc::clone(&mapped_tokens)));
@@ -1511,7 +1517,9 @@ pub fn remap_weights_with_maps(
             }
         };
 
-    const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 256;
+    // Parser-family reconciliation often has 100-200 unique weights whose remaps
+    // are individually substantial; 256 leaves that expensive middle regime serial.
+    const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 128;
     let unique_remap_started_at = profiling.then(Instant::now);
     let remapped_unique: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
         && rayon::current_num_threads() > 1
@@ -1875,6 +1883,42 @@ mod tests {
         );
 
         assert_eq!(entries_key(&fast), entries_key(&general));
+    }
+
+    #[test]
+    fn contiguous_disjoint_tsid_range_remap_matches_general() {
+        let tokens_a = Arc::new(RangeSetBlaze::from_iter([0..=1]));
+        let tokens_b = Arc::new(RangeSetBlaze::from_iter([2..=3]));
+        let weight = Weight::from_tsid_ranges_shared([
+            (0, 1, Arc::clone(&tokens_a)),
+            (3, 3, Arc::clone(&tokens_b)),
+        ]);
+        let tsid_map = vec![vec![0, 1], vec![2, 3], vec![], vec![4, 5]];
+        let token_map = (0..4).map(|token| vec![token]).collect::<Vec<_>>();
+        let run_map =
+            DisjointRunLocalMap::from_local_to_common(&tsid_map, 6).expect("disjoint TSID runs");
+        assert!(run_map.contiguous_interval_lookup.is_some());
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 6);
+        let fast = remap_weight_with_disjoint_tsid_runs(
+            &weight,
+            &run_map,
+            None,
+            DisjointRunLocalMap::from_local_to_common(&token_map, 4).as_ref(),
+            None,
+            &token_map,
+            &mut HashMap::new(),
+        )
+        .expect("disjoint TSID run remap");
+
+        assert_eq!(entries_key(&fast), entries_key(&general));
+        assert_eq!(
+            entries_key(&fast)
+                .into_iter()
+                .map(|(start, end, _)| (start, end))
+                .collect::<Vec<_>>(),
+            vec![(0, 3), (4, 5)],
+        );
     }
 
     #[test]
