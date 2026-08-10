@@ -632,33 +632,22 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     let decompose_ms = phase_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let condensation_started = profiling.then(Instant::now);
 
-    // Process sink SCCs first so every edge leaving the current SCC already has
-    // a final reduced class.
-    let mut successors = vec![Vec::<u32>::new(); components.len()];
-    let mut predecessors = vec![Vec::<u32>::new(); components.len()];
+    // Kosaraju's second pass above discovers condensation components in
+    // source-to-sink topological order. Process that order backwards and every
+    // cross-component successor is already solved. The old implementation
+    // rebuilt the full condensation graph, sorted/deduplicated all component
+    // edges, and ran a ready queue merely to recover this same order.
+    #[cfg(debug_assertions)]
     for source in 0..n {
         let source_component = component_of[source];
         for &(_, target) in transitions.row(source) {
             let target_component = component_of[target as usize];
             if target_component != source_component {
-                successors[source_component as usize].push(target_component);
+                debug_assert!(
+                    source_component < target_component,
+                    "Kosaraju component order must be source-to-sink"
+                );
             }
-        }
-    }
-    for edges in &mut successors {
-        edges.sort_unstable();
-        edges.dedup();
-    }
-    for (source, edges) in successors.iter().enumerate() {
-        for &target in edges {
-            predecessors[target as usize].push(source as u32);
-        }
-    }
-    let mut remaining_successors = successors.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut ready = VecDeque::<u32>::new();
-    for (component, &remaining) in remaining_successors.iter().enumerate() {
-        if remaining == 0 {
-            ready.push_back(component as u32);
         }
     }
 
@@ -684,11 +673,8 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
         FxHashMap::<(u8, [u64; 4]), Vec<u32>>::default();
     let mut cyclic_components = 0usize;
     let mut cyclic_states = 0usize;
-    let mut processed_components = 0usize;
-
-    while let Some(component) = ready.pop_front() {
-        processed_components += 1;
-        let members = &components[component as usize];
+    for component in (0..components.len()).rev() {
+        let members = &components[component];
         if members.len() == 1 {
             let state = members[0];
             let source_row = transitions.row(state as usize);
@@ -869,15 +855,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
             }
         }
 
-        for &predecessor in &predecessors[component as usize] {
-            let remaining = &mut remaining_successors[predecessor as usize];
-            *remaining -= 1;
-            if *remaining == 0 {
-                ready.push_back(predecessor);
-            }
-        }
     }
-    debug_assert_eq!(processed_components, components.len());
     debug_assert!(class.iter().all(|&value| value != u32::MAX));
     debug_assert_eq!(class_rows.len(), representatives.len());
     if profiling {
