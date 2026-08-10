@@ -7,10 +7,11 @@
 //! one distinguished start state.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
 use crate::automata::lexer::Lexer;
@@ -933,6 +934,8 @@ fn minimize_grouped_local(
         })
         .unwrap_or(true);
     let projected_edge_count = transitions.iter().map(Vec::len).sum::<usize>();
+    let profile_group_shapes = std::env::var_os("GLRMASK_PROFILE_L1_GROUP_SHAPES").is_some();
+    let mut group_shapes = BTreeMap::<(usize, usize, u64), Vec<usize>>::new();
     let use_scc = std::env::var("GLRMASK_L1_PROJECTED_SCC_MINIMIZE")
         .map(|value| {
             let value = value.trim();
@@ -954,6 +957,26 @@ fn minimize_grouped_local(
     {
         for (local, &global) in states.iter().enumerate() {
             local_of_global[global as usize] = local as u32;
+        }
+        if profile_group_shapes && states.len() >= 128 {
+            let mut hasher = FxHasher::default();
+            states.len().hash(&mut hasher);
+            let mut edge_count = 0usize;
+            for &global in states {
+                let row = &transitions[global as usize];
+                row.len().hash(&mut hasher);
+                edge_count += row.len();
+                for &(symbol, target) in row {
+                    symbol.hash(&mut hasher);
+                    let local_target = local_of_global[target as usize];
+                    debug_assert_ne!(local_target, u32::MAX);
+                    local_target.hash(&mut hasher);
+                }
+            }
+            group_shapes
+                .entry((states.len(), edge_count, hasher.finish()))
+                .or_default()
+                .push(group_id);
         }
         // Large projected terminal components in the p90 shapes are almost
         // DAGs but contain one tiny SCC. Probing them with a full DAG walk and
@@ -1044,6 +1067,31 @@ fn minimize_grouped_local(
         }
     }
     let local_ms = local_started.elapsed().as_secs_f64() * 1000.0;
+    if profile_group_shapes {
+        let total_large_groups = group_shapes.values().map(Vec::len).sum::<usize>();
+        let unique_shapes = group_shapes.len();
+        let duplicate_groups = total_large_groups.saturating_sub(unique_shapes);
+        let mut ranked = group_shapes
+            .iter()
+            .map(|(&(states, edges, hash), groups)| (groups.len(), states, edges, hash, groups))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        eprintln!(
+            "[glrmask/profile][l1_projected_group_shapes] large_groups={} unique_shapes={} duplicate_groups={} reuse_pct={:.2}",
+            total_large_groups,
+            unique_shapes,
+            duplicate_groups,
+            if total_large_groups == 0 { 0.0 } else { duplicate_groups as f64 * 100.0 / total_large_groups as f64 },
+        );
+        for (uses, states, edges, hash, groups) in ranked.into_iter().take(20) {
+            if uses > 1 {
+                eprintln!(
+                    "[glrmask/profile][l1_projected_group_shape] uses={} states={} edges={} hash={:016x} groups={:?}",
+                    uses, states, edges, hash, groups,
+                );
+            }
+        }
+    }
 
     let global_started = Instant::now();
     let mut reduced_transitions = Vec::with_capacity(reduced_representatives.len());
