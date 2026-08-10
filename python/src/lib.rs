@@ -24,7 +24,7 @@ mod allocation_tracking;
 static GLOBAL: allocation_tracking::TrackingAllocator =
     allocation_tracking::TrackingAllocator(mimalloc::MiMalloc);
 
-#[cfg(not(feature = "allocation-tracking"))]
+#[cfg(all(not(feature = "allocation-tracking"), not(feature = "system-allocator")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
