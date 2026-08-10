@@ -1055,19 +1055,53 @@ fn minimize_grouped_local(
                 .collect::<Vec<_>>(),
         );
     }
-    let reduced = minimize(&reduced_transitions, alphabet);
+    let skip_global = std::env::var("GLRMASK_L1_PROJECTED_SKIP_GLOBAL_MINIMIZE")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        });
+    let (classes, columns, byte_class, state_count, global_rounds) = if skip_global {
+        let state_count = reduced_transitions.len();
+        let mut byte_class = [0u8; 256];
+        for (symbol, &byte) in alphabet.iter().enumerate() {
+            byte_class[byte as usize] = symbol as u8;
+        }
+        let mut columns = vec![vec![DEAD; state_count]; alphabet.len()];
+        for (source, row) in reduced_transitions.iter().enumerate() {
+            for &(symbol, target) in row {
+                columns[symbol as usize][source] = target;
+            }
+        }
+        (
+            reduced_of_state,
+            columns.into_iter().map(Vec::into_boxed_slice).collect::<Vec<_>>(),
+            byte_class,
+            state_count,
+            0usize,
+        )
+    } else {
+        let reduced = minimize(&reduced_transitions, alphabet);
+        let classes = reduced_of_state
+            .into_iter()
+            .map(|local_class| reduced.classes[local_class as usize])
+            .collect::<Vec<_>>();
+        (
+            classes,
+            reduced.columns,
+            reduced.byte_class,
+            reduced.state_count,
+            reduced.rounds,
+        )
+    };
     let global_ms = global_started.elapsed().as_secs_f64() * 1000.0;
-    let classes = reduced_of_state
-        .into_iter()
-        .map(|local_class| reduced.classes[local_class as usize])
-        .collect::<Vec<_>>();
     (
         Minimized {
             classes,
-            columns: reduced.columns,
-            byte_class: reduced.byte_class,
-            state_count: reduced.state_count,
-            rounds: local_rounds + reduced.rounds,
+            columns,
+            byte_class,
+            state_count,
+            rounds: local_rounds + global_rounds,
         },
         GroupedMinimizeStats {
             local_states: reduced_representatives.len(),
