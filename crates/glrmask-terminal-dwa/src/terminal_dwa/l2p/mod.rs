@@ -960,7 +960,16 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
                 })
                 .unwrap_or(false);
-            let dwa = if skip_minimize { det } else { minimize_owned(det) };
+            let dwa = if skip_minimize {
+                det
+            } else if std::env::var_os("GLRMASK_L2P_DESCENDING_POINTWISE_ORDER").is_some() {
+                minimize_owned_with_pointwise_class_order(
+                    det,
+                    PointwiseClassOrder::DescendingDomain,
+                )
+            } else {
+                minimize_owned(det)
+            };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
 
