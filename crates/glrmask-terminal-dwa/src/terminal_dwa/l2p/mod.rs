@@ -32,6 +32,7 @@ use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
+use crate::automata::weighted::minimize_token_deterministic_nwa::minimize_token_deterministic_nwa_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -930,6 +931,45 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
+
+            let preminimize_token_nwa =
+                std::env::var_os("GLRMASK_L2P_PREMINIMIZE_TOKEN_NWA").is_some();
+            let assert_preminimize_token_nwa =
+                std::env::var_os("GLRMASK_ASSERT_L2P_PREMINIMIZE_TOKEN_NWA").is_some();
+            let preminimize_input_states = nwa.states().len();
+            let preminimize_input_transitions = nwa.num_transitions();
+            let preminimize_started_at = Instant::now();
+            let reference_nwa = assert_preminimize_token_nwa.then(|| nwa.clone());
+            if preminimize_token_nwa {
+                nwa = minimize_token_deterministic_nwa_owned(nwa)
+                    .expect("L2+ token-deterministic NWA pre-minimization failed");
+            }
+            let preminimize_ms = preminimize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if let Some(reference_nwa) = reference_nwa {
+                let reference =
+                    determinize(&reference_nwa).expect("L2+ pre-minimization reference determinization failed");
+                let candidate =
+                    determinize(&nwa).expect("L2+ pre-minimization candidate determinization failed");
+                assert_eq!(
+                    find_difference(&candidate, &reference)
+                        .expect("L2+ token-NWA pre-minimization equivalence check failed"),
+                    None,
+                    "token-NWA pre-minimization changed the L2+ weighted language",
+                );
+            }
+            if l2p_timing_profile_enabled() && (preminimize_token_nwa || assert_preminimize_token_nwa) {
+                eprintln!(
+                    "[glrmask/profile][l2p_token_nwa_preminimize] partition={} selected={} input_states={} input_transitions={} output_states={} output_transitions={} preminimize_ms={:.3} strict_equivalence={}",
+                    partition_label,
+                    preminimize_token_nwa,
+                    preminimize_input_states,
+                    preminimize_input_transitions,
+                    nwa.states().len(),
+                    nwa.num_transitions(),
+                    preminimize_ms,
+                    assert_preminimize_token_nwa,
+                );
+            }
 
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
