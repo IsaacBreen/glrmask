@@ -2709,6 +2709,23 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         "projected L1 exceeded GLRMASK_L1_SINGLE_MAX_STATES; raise the projected-state limit for this diagnostic guard"
     );
     let projected_expand_started = Instant::now();
+    // Singleton projected residuals share the same raw tokenizer transition
+    // rows across many terminal groups. Precompute the live transitions over
+    // the already-quotiented byte alphabet once per raw state instead of
+    // rescanning `flat_trans` for every `(group, raw_state)` residual.
+    let raw_state_count = input.tokenizer.num_states() as usize;
+    let mut raw_symbol_transitions = Vec::<Vec<(u8, u32)>>::with_capacity(raw_state_count);
+    for source in 0..raw_state_count {
+        let flat_base = source * 256;
+        let mut row = Vec::with_capacity(bytes.len());
+        for (symbol, &byte) in bytes.iter().enumerate() {
+            let target = input.flat_trans[flat_base + byte as usize];
+            if target != DEAD {
+                row.push((symbol as u8, target));
+            }
+        }
+        raw_symbol_transitions.push(row);
+    }
     let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
     let mut expanded = 0usize;
     while let Some(state) = queue.pop_front() {
@@ -2716,22 +2733,20 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             (group, ConfigStates::One(source)) => Some((*group as usize, *source as usize)),
             (_, ConfigStates::Many(_)) => None,
         };
-        let mut row = Vec::with_capacity(bytes.len());
+        let mut row = if let Some((_, source)) = singleton {
+            Vec::with_capacity(raw_symbol_transitions[source].len())
+        } else {
+            Vec::with_capacity(bytes.len())
+        };
         if let Some((group, source)) = singleton {
             // Almost every projected residual in real tokenizer graphs is a
             // singleton. Such a transition cannot intern a new projected state:
             // it only follows one raw DFA edge and selects the already-built
-            // residual root for this terminal group. Keep the invariant values
-            // out of the byte loop and avoid the generic mutable step/queue path.
-            let flat_base = source * 256;
-            for (symbol, &byte) in bytes.iter().enumerate() {
-                let raw_target = input.flat_trans[flat_base + byte as usize];
-                if raw_target == DEAD {
-                    continue;
-                }
+            // residual root for this terminal group.
+            for &(symbol, raw_target) in &raw_symbol_transitions[source] {
                 let target = roots[raw_target as usize][group];
                 if target != DEAD {
-                    row.push((symbol as u8, target));
+                    row.push((symbol, target));
                 }
             }
         } else {
