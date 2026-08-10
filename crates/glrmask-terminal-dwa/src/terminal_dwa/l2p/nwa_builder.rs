@@ -362,6 +362,9 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     reachable_weight_cache: HashMap<usize, Weight>,
     pruned_weight_cache: HashMap<(usize, usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<LeafTokenIds, Weight>,
+    continuation_fast_reachable: u64,
+    continuation_pruned_hits: u64,
+    continuation_pruned_misses: u64,
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
     pub profile: TerminalDwaBuildProfile,
@@ -423,6 +426,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             reachable_weight_cache: HashMap::new(),
             pruned_weight_cache: HashMap::new(),
             leaf_weight_cache: HashMap::new(),
+            continuation_fast_reachable: 0,
+            continuation_pruned_hits: 0,
+            continuation_pruned_misses: 0,
             transition_buffer: FxHashMap::default(),
             epsilon_buffer: FxHashMap::default(),
             profile: TerminalDwaBuildProfile::default(),
@@ -694,6 +700,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         remaining_segment: &[u8],
     ) -> Option<Weight> {
         if end_state.is_none() && !(remaining_segment.is_empty() && child_node.has_token()) {
+            self.continuation_fast_reachable += 1;
             return Some(self.cached_reachable_weight(child_node.reachable_token_ids()));
         }
 
@@ -704,8 +711,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             terminal_id,
         );
         if let Some(weight) = self.pruned_weight_cache.get(&cache_key) {
+            self.continuation_pruned_hits += 1;
             return Some(weight.clone());
         }
+        self.continuation_pruned_misses += 1;
 
         let mut remaining = child_node.reachable_token_ids().clone();
         if remaining_segment.is_empty() && child_node.has_token() {
@@ -1454,6 +1463,18 @@ pub fn build_nwa_via_trie_walk<'a>(
     builder.flush_transition_buffer();
     let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
     builder.profile.flush_ms = flush_ms;
+
+    if builder.profile_timing {
+        eprintln!(
+            "[glrmask/profile][nwa_continuation_cache] fast_reachable={} pruned_hits={} pruned_misses={} pruned_entries={} reachable_entries={} leaf_entries={}",
+            builder.continuation_fast_reachable,
+            builder.continuation_pruned_hits,
+            builder.continuation_pruned_misses,
+            builder.pruned_weight_cache.len(),
+            builder.reachable_weight_cache.len(),
+            builder.leaf_weight_cache.len(),
+        );
+    }
 
     let profile = builder.profile;
     // Drop builder to release the mutable borrow on nwa before reading nwa.states.
