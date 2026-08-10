@@ -1009,6 +1009,95 @@ fn remap_weight_with_injective_maps(
     finalize_weight_map(map)
 }
 
+struct PrecomputedTokenOrdinals {
+    ordinal_by_ptr: FxHashMap<usize, u32>,
+    tokens: Vec<SharedTokenSet>,
+}
+
+impl PrecomputedTokenOrdinals {
+    fn from_precomputed(precomputed: &FxHashMap<usize, SharedTokenSet>) -> Self {
+        let mut ordinal_by_ptr = FxHashMap::default();
+        let mut tokens = Vec::with_capacity(precomputed.len());
+        for (&ptr, mapped) in precomputed {
+            let ordinal = tokens.len() as u32;
+            ordinal_by_ptr.insert(ptr, ordinal);
+            tokens.push(Arc::clone(mapped));
+        }
+        Self { ordinal_by_ptr, tokens }
+    }
+}
+
+fn remap_weight_with_dense_injective_tsids(
+    weight: &Weight,
+    tsid_map: &InjectiveLocalMap,
+    precomputed_tokens: &PrecomputedTokenOrdinals,
+    common_tsid_count: usize,
+) -> Option<Weight> {
+    if weight.is_empty() {
+        return Some(weight.clone());
+    }
+    if weight.is_full() {
+        return None;
+    }
+
+    // Zero means empty; token ordinals are stored +1. Keeping only integers in
+    // the destination slots avoids Arc cloning/reference-count traffic per TSID.
+    let mut slots = vec![0u32; common_tsid_count];
+    for (local_start, local_end, tokens) in weight.range_entries() {
+        let ordinal = *precomputed_tokens
+            .ordinal_by_ptr
+            .get(&(Arc::as_ptr(tokens) as usize))?
+            + 1;
+        for local_tsid in local_start..=local_end {
+            let common_tsid = tsid_map.destination(local_tsid)? as usize;
+            debug_assert!(common_tsid < slots.len());
+            debug_assert_eq!(slots[common_tsid], 0);
+            slots[common_tsid] = ordinal;
+        }
+    }
+
+    let mut runs = Vec::<(u32, u32, SharedTokenSet)>::new();
+    let mut run_start = 0u32;
+    let mut run_end = 0u32;
+    let mut run_ordinal = 0u32;
+    for (tsid, ordinal) in slots.into_iter().enumerate() {
+        let tsid = tsid as u32;
+        if ordinal == 0 {
+            if run_ordinal != 0 {
+                runs.push((
+                    run_start,
+                    run_end,
+                    Arc::clone(&precomputed_tokens.tokens[(run_ordinal - 1) as usize]),
+                ));
+                run_ordinal = 0;
+            }
+            continue;
+        }
+        if run_ordinal == ordinal && run_end.checked_add(1) == Some(tsid) {
+            run_end = tsid;
+            continue;
+        }
+        if run_ordinal != 0 {
+            runs.push((
+                run_start,
+                run_end,
+                Arc::clone(&precomputed_tokens.tokens[(run_ordinal - 1) as usize]),
+            ));
+        }
+        run_start = tsid;
+        run_end = tsid;
+        run_ordinal = ordinal;
+    }
+    if run_ordinal != 0 {
+        runs.push((
+            run_start,
+            run_end,
+            Arc::clone(&precomputed_tokens.tokens[(run_ordinal - 1) as usize]),
+        ));
+    }
+    Some(Weight::from_tsid_runs_shared(runs))
+}
+
 fn remap_weight_with_disjoint_tsid_runs(
     weight: &Weight,
     tsid_map: &DisjointRunLocalMap,
@@ -1257,6 +1346,20 @@ pub fn remap_weights_with_maps(
     let precompute_ms = precompute_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    let use_dense_injective_tsid_remap = !identity_tsids
+        && tsid_map.is_some()
+        && precomputed_token_sets.is_some()
+        && common_tsid_count <= 4_096
+        && unique_weights.len() >= 256
+        && std::env::var_os("GLRMASK_DISABLE_DENSE_INJECTIVE_TSID_REMAP").is_none();
+    let dense_token_ordinals = use_dense_injective_tsid_remap
+        .then(|| {
+            PrecomputedTokenOrdinals::from_precomputed(
+                precomputed_token_sets
+                    .as_ref()
+                    .expect("dense TSID remap requires precomputed token sets"),
+            )
+        });
 
     let token_set_profile = profiling.then(|| {
         let mut seen = BTreeSet::new();
@@ -1292,6 +1395,17 @@ pub fn remap_weights_with_maps(
                     precomputed_token_sets,
                     local_to_common_tokens,
                 );
+            }
+            if let (Some(tsid_map), Some(precomputed_tokens)) =
+                (tsid_map.as_ref(), dense_token_ordinals.as_ref())
+                && let Some(remapped) = remap_weight_with_dense_injective_tsids(
+                    weight,
+                    tsid_map,
+                    precomputed_tokens,
+                    common_tsid_count,
+                )
+            {
+                return remapped;
             }
             match (&tsid_map, &token_map) {
         (Some(tsid_map), Some(token_map)) if !weight.is_full() => {
@@ -1390,7 +1504,7 @@ pub fn remap_weights_with_maps(
         let (token_set_refs, unique_token_sets, unique_local_tokens, unique_local_ranges) =
             token_set_profile.unwrap_or_default();
         eprintln!(
-            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} identity_tsids={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} identity_tsids={} dense_injective_tsids={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
             weights.len(),
             unique_weights.len(),
             token_set_refs,
@@ -1398,6 +1512,7 @@ pub fn remap_weights_with_maps(
             unique_local_tokens,
             unique_local_ranges,
             identity_tsids,
+            use_dense_injective_tsid_remap,
             tsid_map.is_some(),
             tsid_run_map.is_some(),
             token_map.is_some(),
@@ -1675,6 +1790,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dense_injective_tsid_remap_matches_general_with_token_splits() {
+        let tokens_a = Arc::new(RangeSetBlaze::from_iter([0..=1]));
+        let tokens_b = Arc::new(RangeSetBlaze::from_iter([2..=3]));
+        let weight = Weight::from_tsid_ranges_shared([
+            (0, 1, Arc::clone(&tokens_a)),
+            (3, 3, Arc::clone(&tokens_b)),
+        ]);
+        let tsid_map = vec![vec![2], vec![0], vec![3], vec![1]];
+        // Split two local token classes so this exercises the same precomputed
+        // token-set route used by parser-family reconciliation.
+        let token_map = vec![vec![0, 4], vec![1], vec![2, 5], vec![3]];
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 4);
+
+        let injective_tsids =
+            InjectiveLocalMap::from_local_to_common(&tsid_map, 4).expect("injective tsids");
+        let token_runs =
+            DisjointRunLocalMap::from_local_to_common(&token_map, 6).expect("disjoint token runs");
+        let mut precomputed = FxHashMap::<usize, SharedTokenSet>::default();
+        for tokens in [&tokens_a, &tokens_b] {
+            precomputed.insert(
+                Arc::as_ptr(tokens) as usize,
+                remap_token_set_with_disjoint_runs_uncached(tokens, &token_runs),
+            );
+        }
+        let ordinals = PrecomputedTokenOrdinals::from_precomputed(&precomputed);
+        let dense = remap_weight_with_dense_injective_tsids(
+            &weight,
+            &injective_tsids,
+            &ordinals,
+            4,
+        )
+        .expect("dense injective remap");
+
+        assert_eq!(entries_key(&dense), entries_key(&general));
     }
 
     #[test]
