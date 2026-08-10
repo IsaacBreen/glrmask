@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
-use crate::ds::weight::{Weight, WeightIntersectionIndex};
+use crate::ds::weight::{SharedTokenSet, Weight, WeightIntersectionIndex};
 
 type Label = i32;
 
@@ -2286,8 +2286,19 @@ fn try_build_and_color_pointwise(
             !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
         })
         .unwrap_or(true);
-    let direct_builders =
-        direct_reconstruct.then(|| pointwise_groups_to_builders(&groups, &interner));
+    let run_builders = std::env::var("GLRMASK_WEIGHTED_POINTWISE_RUN_BUILDERS")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        });
+    let direct_builders = direct_reconstruct.then(|| {
+        if run_builders {
+            pointwise_groups_to_builders_runs(&groups, &interner)
+        } else {
+            pointwise_groups_to_builders(&groups, &interner)
+        }
+    });
     Some(HybridColoring {
         coloring,
         direct_builders,
@@ -3777,6 +3788,118 @@ impl MergedStateBuilder {
         }
     }
 
+}
+
+#[derive(Clone)]
+struct ConvertedPointwiseRegion {
+    final_tokens: Option<SharedTokenSet>,
+    transition_tokens: Vec<(Label, SharedTokenSet)>,
+}
+
+fn convert_pointwise_region(
+    region: &Arc<Vec<TokenBehaviorRange>>,
+    interner: &PointwiseBehaviorInterner,
+) -> ConvertedPointwiseRegion {
+    let mut final_ranges = Vec::<std::ops::RangeInclusive<u32>>::new();
+    let mut ranges_by_label = BTreeMap::<Label, Vec<std::ops::RangeInclusive<u32>>>::new();
+    for token_range in region.iter() {
+        let behavior = interner.get(token_range.behavior);
+        if behavior.final_active {
+            final_ranges.push(token_range.start..=token_range.end);
+        }
+        for &(label, _) in &behavior.transitions {
+            ranges_by_label
+                .entry(label)
+                .or_default()
+                .push(token_range.start..=token_range.end);
+        }
+    }
+    let final_tokens = (!final_ranges.is_empty())
+        .then(|| Arc::new(RangeSetBlaze::from_iter(final_ranges)));
+    let transition_tokens = ranges_by_label
+        .into_iter()
+        .map(|(label, ranges)| (label, Arc::new(RangeSetBlaze::from_iter(ranges))))
+        .collect();
+    ConvertedPointwiseRegion {
+        final_tokens,
+        transition_tokens,
+    }
+}
+
+fn push_shared_tsid_run(
+    runs: &mut Vec<(u32, u32, SharedTokenSet)>,
+    tsid: u32,
+    tokens: SharedTokenSet,
+) {
+    if let Some((_, end, previous_tokens)) = runs.last_mut()
+        && end.checked_add(1) == Some(tsid)
+        && (Arc::ptr_eq(previous_tokens, &tokens) || previous_tokens.as_ref() == tokens.as_ref())
+    {
+        *end = tsid;
+        return;
+    }
+    runs.push((tsid, tsid, tokens));
+}
+
+fn pointwise_groups_to_builders_runs(
+    groups: &[PointwiseMergeGroup],
+    interner: &PointwiseBehaviorInterner,
+) -> Vec<MergedStateBuilder> {
+    let mut converted_regions = FxHashMap::<usize, ConvertedPointwiseRegion>::default();
+    let mut result = Vec::with_capacity(groups.len());
+    for group in groups {
+        let mut entries = match &group.behavior_by_tsid {
+            PointwiseBehaviorMap::Sparse(entries) => entries
+                .iter()
+                .map(|(&tsid, region)| (tsid, region))
+                .collect::<Vec<_>>(),
+            PointwiseBehaviorMap::Dense(entries) => entries
+                .iter()
+                .enumerate()
+                .filter_map(|(tsid, region)| region.as_ref().map(|region| (tsid as u32, region)))
+                .collect::<Vec<_>>(),
+        };
+        entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+        let mut final_runs = Vec::<(u32, u32, SharedTokenSet)>::new();
+        let mut transition_runs =
+            BTreeMap::<Label, Vec<(u32, u32, SharedTokenSet)>>::new();
+        for (tsid, region) in entries {
+            let key = Arc::as_ptr(region) as usize;
+            let converted = converted_regions.entry(key).or_insert_with(|| {
+                convert_pointwise_region(region, interner)
+            });
+            if let Some(tokens) = &converted.final_tokens {
+                push_shared_tsid_run(&mut final_runs, tsid, Arc::clone(tokens));
+            }
+            for (label, tokens) in &converted.transition_tokens {
+                push_shared_tsid_run(
+                    transition_runs.entry(*label).or_default(),
+                    tsid,
+                    Arc::clone(tokens),
+                );
+            }
+        }
+
+        let mut builder = MergedStateBuilder::default();
+        let final_weight = Weight::from_tsid_runs_shared(final_runs);
+        if !final_weight.is_empty() {
+            builder.add_final_weight(&final_weight);
+        }
+        for (label, runs) in transition_runs {
+            let weight = Weight::from_tsid_runs_shared(runs);
+            if weight.is_empty() {
+                continue;
+            }
+            let target = *group
+                .targets_by_label
+                .get(&label)
+                .expect("pointwise behavior label must have a merged target");
+            builder.add_transition(label, target, weight);
+        }
+        result.push(builder);
+    }
+    result
 }
 
 /// Materialize the exact union behavior already computed by pointwise coloring
