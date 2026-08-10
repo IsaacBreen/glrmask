@@ -525,32 +525,9 @@ fn minimize_dag_with_self_loops(
 /// only against themselves, treating already-reduced successor SCC classes as
 /// fixed observations. The result may over-distinguish across SCC boundaries;
 /// the final cross-group minimizer recovers any missed language equivalences.
-#[derive(Clone, Copy)]
-struct LocalEdge(u32);
-
-impl LocalEdge {
-    const TARGET_LIMIT: u32 = 1 << 24;
-
-    #[inline]
-    fn new(symbol: u8, target: u32) -> Self {
-        debug_assert!(target < Self::TARGET_LIMIT);
-        Self((target << 8) | u32::from(symbol))
-    }
-
-    #[inline]
-    fn symbol(self) -> u8 {
-        self.0 as u8
-    }
-
-    #[inline]
-    fn target(self) -> u32 {
-        self.0 >> 8
-    }
-}
-
 struct FlatLocalTransitions {
     offsets: Vec<u32>,
-    edges: Vec<LocalEdge>,
+    edges: Vec<(u8, u32)>,
 }
 
 impl FlatLocalTransitions {
@@ -560,7 +537,7 @@ impl FlatLocalTransitions {
     }
 
     #[inline]
-    fn row(&self, state: usize) -> &[LocalEdge] {
+    fn row(&self, state: usize) -> &[(u8, u32)] {
         let start = self.offsets[state] as usize;
         let end = self.offsets[state + 1] as usize;
         &self.edges[start..end]
@@ -576,16 +553,6 @@ impl FlatLocalTransitions {
 fn transition_symbol_mask(row: &[(u8, u32)]) -> [u64; 4] {
     let mut mask = [0u64; 4];
     for &(symbol, _) in row {
-        mask[symbol as usize >> 6] |= 1u64 << (symbol & 63);
-    }
-    mask
-}
-
-#[inline]
-fn local_transition_symbol_mask(row: &[LocalEdge]) -> [u64; 4] {
-    let mut mask = [0u64; 4];
-    for &edge in row {
-        let symbol = edge.symbol();
         mask[symbol as usize >> 6] |= 1u64 << (symbol & 63);
     }
     mask
@@ -618,8 +585,7 @@ fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<V
         stack.push(state);
         on_stack[state_usize] = true;
 
-        for &edge in transitions.row(state_usize) {
-            let target = edge.target();
+        for &(_, target) in transitions.row(state_usize) {
             let target_usize = target as usize;
             if indices[target_usize] == u32::MAX {
                 visit(
@@ -685,8 +651,7 @@ fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec
     // Kosaraju, ignoring literal self-loops (they do not affect SCC membership).
     let mut reverse = vec![Vec::<u32>::new(); n];
     for source in 0..n {
-        for &edge in transitions.row(source) {
-            let target = edge.target();
+        for &(_, target) in transitions.row(source) {
             if target as usize != source {
                 reverse[target as usize].push(source as u32);
             }
@@ -705,7 +670,7 @@ fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec
             let mut next_index = edge_index;
             let mut descended = false;
             while next_index < row.len() {
-                let target = row[next_index].target();
+                let target = row[next_index].1;
                 next_index += 1;
                 if target == state || seen[target as usize] {
                     continue;
@@ -758,12 +723,12 @@ fn canonical_transition_row_key(row: &[(u8, u32)]) -> (usize, u64) {
     (row.len(), hasher.finish())
 }
 
-fn translated_transition_row_key(source_row: &[LocalEdge], class: &[u32]) -> (usize, u64) {
+fn translated_transition_row_key(source_row: &[(u8, u32)], class: &[u32]) -> (usize, u64) {
     let mut hasher = FxHasher::default();
     source_row.len().hash(&mut hasher);
-    for &edge in source_row {
-        edge.symbol().hash(&mut hasher);
-        let target_class = class[edge.target() as usize];
+    for &(symbol, target) in source_row {
+        symbol.hash(&mut hasher);
+        let target_class = class[target as usize];
         debug_assert_ne!(target_class, u32::MAX);
         target_class.hash(&mut hasher);
     }
@@ -771,7 +736,7 @@ fn translated_transition_row_key(source_row: &[LocalEdge], class: &[u32]) -> (us
 }
 
 fn translated_transition_row_matches(
-    source_row: &[LocalEdge],
+    source_row: &[(u8, u32)],
     class: &[u32],
     candidate_row: &[(u8, u32)],
 ) -> bool {
@@ -779,9 +744,9 @@ fn translated_transition_row_matches(
         && source_row
             .iter()
             .zip(candidate_row)
-            .all(|(&source_edge, &(candidate_symbol, candidate_target))| {
-                source_edge.symbol() == candidate_symbol
-                    && class[source_edge.target() as usize] == candidate_target
+            .all(|(&(source_symbol, source_target), &(candidate_symbol, candidate_target))| {
+                source_symbol == candidate_symbol
+                    && class[source_target as usize] == candidate_target
             })
 }
 
@@ -815,8 +780,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     #[cfg(debug_assertions)]
     for source in 0..n {
         let source_component = component_of[source];
-        for &edge in transitions.row(source) {
-            let target = edge.target();
+        for &(_, target) in transitions.row(source) {
             let target_component = component_of[target as usize];
             if target_component != source_component {
                 debug_assert!(
@@ -864,10 +828,10 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
             // known, so exact row interning suffices. With a self-loop, candidate
             // C must semantically self-loop on that same symbol; test only those
             // indexed candidates and interpret physical SELF as C.
-            let symbol_mask = local_transition_symbol_mask(source_row);
+            let symbol_mask = transition_symbol_mask(source_row);
             let best_self_symbol = source_row
                 .iter()
-                .filter_map(|&edge| (edge.target() == state).then_some(edge.symbol()))
+                .filter_map(|&(symbol, target)| (target == state).then_some(symbol))
                 .min_by_key(|&symbol| {
                     self_classes_by_shape
                         .get(&(symbol, symbol_mask))
@@ -887,13 +851,12 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                     if candidate_row.len() != source_row.len() {
                         continue;
                     }
-                    for (&source_edge, &(candidate_symbol, candidate_target)) in
+                    for (&(source_symbol, source_target), &(candidate_symbol, candidate_target)) in
                         source_row.iter().zip(candidate_row)
                     {
-                        if source_edge.symbol() != candidate_symbol {
+                        if source_symbol != candidate_symbol {
                             continue 'candidate;
                         }
-                        let source_target = source_edge.target();
                         let source_target_class = if source_target == state {
                             candidate
                         } else {
@@ -915,9 +878,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                     let new_class = class_rows.len() as u32;
                     let row = source_row
                         .iter()
-                        .map(|&edge| {
-                            let symbol = edge.symbol();
-                            let target = edge.target();
+                        .map(|&(symbol, target)| {
                             let target_class = if target == state {
                                 new_class
                             } else {
@@ -960,9 +921,8 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                     let new_class = class_rows.len() as u32;
                     let row = source_row
                         .iter()
-                        .map(|&edge| {
-                            let symbol = edge.symbol();
-                            let target_class = class[edge.target() as usize];
+                        .map(|&(symbol, target)| {
+                            let target_class = class[target as usize];
                             debug_assert_ne!(target_class, u32::MAX);
                             (symbol, target_class)
                         })
@@ -991,9 +951,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                 for (local, &state) in members.iter().enumerate() {
                     let mut signature =
                         Vec::<(u8, u64)>::with_capacity(transitions.row(state as usize).len());
-                    for &edge in transitions.row(state as usize) {
-                        let symbol = edge.symbol();
-                        let target = edge.target();
+                    for &(symbol, target) in transitions.row(state as usize) {
                         let target_local = member_index[target as usize];
                         let behavior = if target_local != u32::MAX {
                             (1u64 << 63) | u64::from(local_classes[target_local as usize])
@@ -1031,9 +989,8 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                 let row = transitions
                     .row(representative as usize)
                     .iter()
-                    .map(|&edge| {
-                        let symbol = edge.symbol();
-                        let target_class = class[edge.target() as usize];
+                    .map(|&(symbol, target)| {
+                        let target_class = class[target as usize];
                         debug_assert_ne!(target_class, u32::MAX);
                         (symbol, target_class)
                     })
@@ -1196,7 +1153,7 @@ fn minimize_grouped_local(
                         debug_assert_eq!(groups[target as usize], groups[global as usize]);
                         let local_target = local_of_global[target as usize];
                         debug_assert_ne!(local_target, u32::MAX);
-                        edges.push(LocalEdge::new(symbol, local_target));
+                        edges.push((symbol, local_target));
                     }
                     offsets.push(edges.len() as u32);
                 }
