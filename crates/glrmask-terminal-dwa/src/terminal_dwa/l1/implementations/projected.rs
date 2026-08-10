@@ -11,6 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHasher};
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
@@ -1069,6 +1070,152 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     (class, representatives, cyclic_components, cyclic_states)
 }
 
+struct LocalGroupReduction {
+    group_id: usize,
+    local_classes: Vec<u32>,
+    representatives: Vec<u32>,
+    rounds: usize,
+    used_dag: bool,
+    flatten_ms: f64,
+    reduce_ms: f64,
+    representatives_ms: f64,
+    shape: Option<(usize, usize, u64)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_projected_group_local(
+    group_id: usize,
+    states: &[u32],
+    transitions: &[Vec<(u8, u32)>],
+    groups: &[u32],
+    alphabet: &[u8],
+    local_of_global: &[u32],
+    dag_enabled: bool,
+    use_scc: bool,
+    profile_group_shapes: bool,
+    profile_group_timings: bool,
+) -> LocalGroupReduction {
+    let shape = profile_group_shapes.then(|| {
+        let mut hasher = FxHasher::default();
+        states.len().hash(&mut hasher);
+        let mut edge_count = 0usize;
+        for &global in states {
+            let row = &transitions[global as usize];
+            row.len().hash(&mut hasher);
+            edge_count += row.len();
+            for &(symbol, target) in row {
+                symbol.hash(&mut hasher);
+                let local_target = local_of_global[target as usize];
+                debug_assert_ne!(local_target, u32::MAX);
+                local_target.hash(&mut hasher);
+            }
+        }
+        (states.len(), edge_count, hasher.finish())
+    });
+
+    // Large projected terminal components in the p90/p99 shapes are almost
+    // DAGs but contain one tiny SCC. Probing them with a full DAG walk and then
+    // rebuilding the same graph for SCC reduction doubles the edge traffic.
+    let direct_scc = use_scc && states.len() >= 128;
+    let dag_result = (!direct_scc && dag_enabled)
+        .then(|| minimize_dag_with_self_loops(transitions, states, local_of_global))
+        .flatten();
+    if let Some((local_classes, representatives)) = dag_result {
+        return LocalGroupReduction {
+            group_id,
+            local_classes,
+            representatives,
+            rounds: 0,
+            used_dag: true,
+            flatten_ms: 0.0,
+            reduce_ms: 0.0,
+            representatives_ms: 0.0,
+            shape,
+        };
+    }
+
+    let flatten_started = (profile_group_timings && use_scc).then(Instant::now);
+    let (local_classes, rounds, flatten_ms, reduce_ms) = if use_scc {
+        let edge_capacity = states
+            .iter()
+            .map(|&global| transitions[global as usize].len())
+            .sum::<usize>();
+        let mut offsets = Vec::with_capacity(states.len() + 1);
+        let mut edges = Vec::with_capacity(edge_capacity);
+        offsets.push(0);
+        for &global in states {
+            for &(symbol, target) in &transitions[global as usize] {
+                debug_assert_eq!(groups[target as usize], groups[global as usize]);
+                let local_target = local_of_global[target as usize];
+                debug_assert_ne!(local_target, u32::MAX);
+                edges.push((symbol, local_target));
+            }
+            offsets.push(edges.len() as u32);
+        }
+        let local_transitions = FlatLocalTransitions { offsets, edges };
+        let flatten_ms = flatten_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let reduce_started = profile_group_timings.then(Instant::now);
+        let (classes, _representatives, cyclic_components, cyclic_states) =
+            minimize_scc_dag(&local_transitions);
+        let reduce_ms = reduce_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l1_projected_group_scc] group={} states={} edges={} cyclic_sccs={} cyclic_states={} mode=scc_dag",
+                group_id,
+                states.len(),
+                local_transitions.edge_count(),
+                cyclic_components,
+                cyclic_states,
+            );
+        }
+        (classes, 0usize, flatten_ms, reduce_ms)
+    } else {
+        let mut local_transitions = Vec::with_capacity(states.len());
+        for &global in states {
+            let mut row = Vec::with_capacity(transitions[global as usize].len());
+            for &(symbol, target) in &transitions[global as usize] {
+                debug_assert_eq!(groups[target as usize], groups[global as usize]);
+                let local_target = local_of_global[target as usize];
+                debug_assert_ne!(local_target, u32::MAX);
+                row.push((symbol, local_target));
+            }
+            local_transitions.push(row);
+        }
+        let local_minimized = minimize(&local_transitions, alphabet);
+        (local_minimized.classes, local_minimized.rounds, 0.0, 0.0)
+    };
+
+    let representatives_started = profile_group_timings.then(Instant::now);
+    let state_count = local_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut representatives = vec![u32::MAX; state_count];
+    for (local, &global) in states.iter().enumerate() {
+        let class = local_classes[local] as usize;
+        if representatives[class] == u32::MAX {
+            representatives[class] = global;
+        }
+    }
+    let representatives_ms = representatives_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    LocalGroupReduction {
+        group_id,
+        local_classes,
+        representatives,
+        rounds,
+        used_dag: false,
+        flatten_ms,
+        reduce_ms,
+        representatives_ms,
+        shape,
+    }
+}
+
 fn minimize_grouped_local(
     transitions: &[Vec<(u8, u32)>],
     groups: &[u32],
@@ -1124,148 +1271,108 @@ fn minimize_grouped_local(
                 && projected_edge_count >= transitions.len().saturating_mul(10)
         });
 
-    for (group_id, states) in states_by_group
-        .iter()
-        .enumerate()
-        .filter(|(_, states)| !states.is_empty())
-    {
-        let profile_map_started = profile_group_timings.then(Instant::now);
+    // The terminal groups are disconnected: every transition remains inside
+    // its group. Establish the global -> group-local coordinate once, then it
+    // is immutable and every local quotient can run independently.
+    let profile_map_started = profile_group_timings.then(Instant::now);
+    for states in states_by_group.iter().filter(|states| !states.is_empty()) {
         for (local, &global) in states.iter().enumerate() {
             local_of_global[global as usize] = local as u32;
         }
-        profile_group_map_ms += profile_map_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        if profile_group_shapes && states.len() >= 128 {
-            let mut hasher = FxHasher::default();
-            states.len().hash(&mut hasher);
-            let mut edge_count = 0usize;
-            for &global in states {
-                let row = &transitions[global as usize];
-                row.len().hash(&mut hasher);
-                edge_count += row.len();
-                for &(symbol, target) in row {
-                    symbol.hash(&mut hasher);
-                    let local_target = local_of_global[target as usize];
-                    debug_assert_ne!(local_target, u32::MAX);
-                    local_target.hash(&mut hasher);
-                }
-            }
-            group_shapes
-                .entry((states.len(), edge_count, hasher.finish()))
-                .or_default()
-                .push(group_id);
-        }
-        // Large projected terminal components in the p90 shapes are almost
-        // DAGs but contain one tiny SCC. Probing them with a full DAG walk and
-        // then rebuilding the same graph for SCC reduction doubles the edge
-        // traffic. Both reducers are exact, so route large components directly
-        // to SCC when that kernel is enabled; retain the cheaper DAG probe for
-        // small components.
-        let direct_scc = use_scc && states.len() >= 128;
-        let dag_result = (!direct_scc && dag_enabled)
-            .then(|| minimize_dag_with_self_loops(transitions, states, &local_of_global))
-            .flatten();
-        let (local_classes, representatives) = if let Some(result) = dag_result {
+    }
+    profile_group_map_ms += profile_map_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let active_groups = states_by_group
+        .iter()
+        .enumerate()
+        .filter_map(|(group_id, states)| (!states.is_empty()).then_some(group_id))
+        .collect::<Vec<_>>();
+    let parallel_groups = std::env::var("GLRMASK_L1_PROJECTED_PARALLEL_GROUPS")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or_else(|_| transitions.len() >= 20_000 && active_groups.len() >= 8);
+
+    let reduce_group = |&group_id: &usize| {
+        reduce_projected_group_local(
+            group_id,
+            &states_by_group[group_id],
+            transitions,
+            groups,
+            alphabet,
+            &local_of_global,
+            dag_enabled,
+            use_scc,
+            profile_group_shapes,
+            profile_group_timings,
+        )
+    };
+    let local_results = if parallel_groups {
+        active_groups.par_iter().map(reduce_group).collect::<Vec<_>>()
+    } else {
+        active_groups.iter().map(reduce_group).collect::<Vec<_>>()
+    };
+
+    for result in local_results {
+        let states = &states_by_group[result.group_id];
+        if result.used_dag {
             dag_groups += 1;
             dag_states += states.len();
-            result
         } else {
             hopcroft_groups += 1;
             hopcroft_states += states.len();
-            let local_classes = if use_scc {
-                let flatten_started = profile_group_timings.then(Instant::now);
-                let edge_capacity = states
-                    .iter()
-                    .map(|&global| transitions[global as usize].len())
-                    .sum::<usize>();
-                let mut offsets = Vec::with_capacity(states.len() + 1);
-                let mut edges = Vec::with_capacity(edge_capacity);
-                offsets.push(0);
-                for &global in states {
-                    for &(symbol, target) in &transitions[global as usize] {
-                        debug_assert_eq!(groups[target as usize], groups[global as usize]);
-                        let local_target = local_of_global[target as usize];
-                        debug_assert_ne!(local_target, u32::MAX);
-                        edges.push((symbol, local_target));
-                    }
-                    offsets.push(edges.len() as u32);
-                }
-                let local_transitions = FlatLocalTransitions { offsets, edges };
-                profile_group_flatten_ms += flatten_started
-                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                let reduce_started = profile_group_timings.then(Instant::now);
-                let (classes, _representatives, cyclic_components, cyclic_states) =
-                    minimize_scc_dag(&local_transitions);
-                profile_group_reduce_ms += reduce_started
-                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
-                    eprintln!(
-                        "[glrmask/profile][l1_projected_group_scc] group={} states={} edges={} cyclic_sccs={} cyclic_states={} mode=scc_dag",
-                        group_id,
-                        states.len(),
-                        local_transitions.edge_count(),
-                        cyclic_components,
-                        cyclic_states,
-                    );
-                }
-                classes
-            } else {
-                let mut local_transitions = Vec::with_capacity(states.len());
-                for &global in states {
-                    let mut row = Vec::with_capacity(transitions[global as usize].len());
-                    for &(symbol, target) in &transitions[global as usize] {
-                        debug_assert_eq!(groups[target as usize], groups[global as usize]);
-                        let local_target = local_of_global[target as usize];
-                        debug_assert_ne!(local_target, u32::MAX);
-                        row.push((symbol, local_target));
-                    }
-                    local_transitions.push(row);
-                }
-                let local_minimized = minimize(&local_transitions, alphabet);
-                local_rounds += local_minimized.rounds;
-                local_minimized.classes
-            };
-            let representatives_started = profile_group_timings.then(Instant::now);
-            let state_count = local_classes
-                .iter()
-                .copied()
-                .max()
-                .map_or(0usize, |class| class as usize + 1);
-            let mut representatives = vec![u32::MAX; state_count];
-            for (local, &global) in states.iter().enumerate() {
-                let class = local_classes[local] as usize;
-                if representatives[class] == u32::MAX {
-                    representatives[class] = global;
-                }
+        }
+        local_rounds += result.rounds;
+        profile_group_flatten_ms += result.flatten_ms;
+        profile_group_reduce_ms += result.reduce_ms;
+        profile_group_representatives_ms += result.representatives_ms;
+        if let Some((shape_states, edge_count, hash)) = result.shape {
+            if shape_states >= 128 {
+                group_shapes
+                    .entry((shape_states, edge_count, hash))
+                    .or_default()
+                    .push(result.group_id);
             }
-            profile_group_representatives_ms += representatives_started
-                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            (local_classes, representatives)
-        };
+        }
 
         let writeback_started = profile_group_timings.then(Instant::now);
         let base = reduced_representatives.len() as u32;
         for (local, &global) in states.iter().enumerate() {
-            reduced_of_state[global as usize] = base + local_classes[local];
+            reduced_of_state[global as usize] = base + result.local_classes[local];
         }
-        reduced_representatives.extend(representatives);
-        for &global in states {
-            local_of_global[global as usize] = u32::MAX;
-        }
+        reduced_representatives.extend(result.representatives);
         profile_group_writeback_ms += writeback_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     }
     let local_ms = local_started.elapsed().as_secs_f64() * 1000.0;
     if profile_group_timings {
+        // The per-group phase timers below are additive work totals. In
+        // parallel mode they intentionally overlap in wall time, so subtracting
+        // them from `local_total_ms` would produce a meaningless negative
+        // residual. Keep the work totals useful for profiling, but only remove
+        // them from the residual on the serial path.
+        let residual_ms = if parallel_groups {
+            local_ms - profile_group_map_ms - profile_group_writeback_ms
+        } else {
+            local_ms
+                - profile_group_map_ms
+                - profile_group_flatten_ms
+                - profile_group_reduce_ms
+                - profile_group_representatives_ms
+                - profile_group_writeback_ms
+        };
         eprintln!(
-            "[glrmask/profile][l1_projected_group_wrapper] local_total_ms={:.3} map_ms={:.3} flatten_ms={:.3} reduce_ms={:.3} representatives_ms={:.3} writeback_ms={:.3} residual_ms={:.3}",
+            "[glrmask/profile][l1_projected_group_wrapper] parallel_groups={} local_total_ms={:.3} map_ms={:.3} flatten_work_ms={:.3} reduce_work_ms={:.3} representatives_work_ms={:.3} writeback_ms={:.3} residual_ms={:.3}",
+            parallel_groups,
             local_ms,
             profile_group_map_ms,
             profile_group_flatten_ms,
             profile_group_reduce_ms,
             profile_group_representatives_ms,
             profile_group_writeback_ms,
-            local_ms - profile_group_map_ms - profile_group_flatten_ms - profile_group_reduce_ms - profile_group_representatives_ms - profile_group_writeback_ms,
+            residual_ms,
         );
     }
     if profile_group_shapes {
