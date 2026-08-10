@@ -1634,7 +1634,7 @@ fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
 /// boundary, which is quadratic for long overlapping ranges.  The event sweep
 /// maintains the active distinct token sets incrementally instead.
 fn union_all_multiway_impl(weights: &[&Weight], coalesce_repeated_token_ranges: bool) -> Weight {
-    let total_entry_hint: usize = weights.iter().map(|w| w.0.ranges().count()).sum();
+    let total_entry_hint: usize = weights.iter().map(|w| w.0.range_values_len()).sum();
     let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
     for weight in weights {
         for (range, tokens) in weight.0.range_values() {
@@ -2705,7 +2705,7 @@ impl Weight {
     #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn num_ranges(&self) -> usize {
-        self.0.ranges().count()
+        self.0.range_values_len()
     }
 
     /// Return the set of TSID ranges covered by this weight, ignoring token
@@ -3011,7 +3011,7 @@ impl Weight {
     #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn outer_range_count(&self) -> usize {
-        self.0.ranges().count()
+        self.0.range_values_len()
     }
 
     #[cfg(feature = "internal-api")]
