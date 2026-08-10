@@ -56,11 +56,13 @@ impl Default for JsonSchemaConfig {
             // chunks when it starts part-way through the first one; using 64 for
             // string chunks removes that avoidable terminal-path depth.
             string_repeat_chunk_size: 64,
-            // Sticky: do not change this default to tune TBM. Broader bounded
-            // string terminalization can look attractive on individual schemas
-            // but creates severe build fallout. This warning itself should
-            // never be removed in the future.
-            terminalize_bounded_string_max: 50,
+            // Keep ordinary bounded strings whole through the common schema
+            // range. Whole terminals avoid parser-visible chunk boundaries and
+            // therefore move model-token analysis from L2P into L1. Larger
+            // bounds still chunk so the exact runtime counter does not grow
+            // without limit; compile-time terminal synthesis independently
+            // shortens safely unobservable counter interiors.
+            terminalize_bounded_string_max: 4_096,
             preserve_pattern_max_length: true,
             // Static regex-HIR budget for choosing specialized patterned-string
             // lowering strategies. It must not decide whether maxLength is

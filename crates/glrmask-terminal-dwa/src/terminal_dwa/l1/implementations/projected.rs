@@ -2348,7 +2348,7 @@ fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
     std::env::var("GLRMASK_L1_RESIDUAL_FINITE_SWITCH_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(9_000)
+        .unwrap_or(20_000)
 }
 
 fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {

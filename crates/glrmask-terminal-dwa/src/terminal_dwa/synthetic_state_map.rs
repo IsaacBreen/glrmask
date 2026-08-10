@@ -915,6 +915,10 @@ impl BoundedTerminalCandidateScanner {
         let full_estimate = estimated_expression_state_volume(expression);
         vocabulary_only_probe_is_worthwhile(expression, full_estimate)
     }
+
+    pub fn has_reducible_repeat(&mut self, expression: &Expr) -> bool {
+        self.analysis.has_reducible_repeat(expression)
+    }
 }
 
 pub struct BoundedTerminalAnalysisCache {
@@ -1533,6 +1537,16 @@ pub fn synthesize_bounded_terminal_expressions(
     let max_token_len = vocab.max_token_byte_len();
     let allow_vocab_only_candidates =
         std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    // Consider every repeat that the ordinary full-vocabulary conservative
+    // stencil can shorten. This does not use the unsafe 64-byte aggressive
+    // horizon; the exact global structural/vocabulary certificate remains
+    // authoritative. Keep an opt-out for controlled A/Bs.
+    let allow_all_reducible = std::env::var("GLRMASK_SYNTHETIC_ALL_REDUCIBLE")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true);
     let mut analysis = BoundedTerminalAnalysisCache::new(max_token_len);
     let candidates = expressions
         .iter()
@@ -1543,6 +1557,7 @@ pub fn synthesize_bounded_terminal_expressions(
                 return None;
             }
             let conservative_pathological = analysis.is_pathological_candidate(expression);
+            let conservatively_reducible = analysis.has_reducible_repeat(expression);
             let guarded_large_candidate = !conservative_pathological
                 && vocabulary_only_probe_is_worthwhile(expression, full_estimate);
             // Vocabulary-only candidate discovery is materially more expensive
@@ -1552,6 +1567,7 @@ pub fn synthesize_bounded_terminal_expressions(
             // it. Conservative-pathological terminals still use vocabulary
             // horizons to tighten an already justified synthesis attempt.
             if !conservative_pathological
+                && !(allow_all_reducible && conservatively_reducible)
                 && !allow_vocab_only_candidates
                 && !guarded_large_candidate
             {
@@ -1563,6 +1579,7 @@ pub fn synthesize_bounded_terminal_expressions(
             // large, input-sensitive planning costs. Check the full expression
             // shape before compiling any repeat-body DFA.
             if !conservative_pathological
+                && !allow_all_reducible
                 && !structural_pair_component_count(expression, expression)
                     .is_some_and(|components| components >= 2)
             {
@@ -1573,6 +1590,7 @@ pub fn synthesize_bounded_terminal_expressions(
                 full_estimate,
                 conservative_pathological,
                 guarded_large_candidate,
+                conservatively_reducible,
             ))
         })
         .collect::<Vec<_>>();
@@ -1585,24 +1603,40 @@ pub fn synthesize_bounded_terminal_expressions(
     let synthesized_candidates = candidates
         .par_iter()
         .map(
-            |&(terminal, full_estimate, conservative_pathological, guarded_large_candidate)| {
+            |&(terminal, full_estimate, conservative_pathological, guarded_large_candidate, conservatively_reducible)| {
             let expression = &expressions[terminal];
-            let (candidate, changed, used_vocab) =
-                synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons);
+            let newly_admitted_conservative = allow_all_reducible
+                && conservatively_reducible
+                && !conservative_pathological
+                && !guarded_large_candidate;
+            let (candidate, changed, used_vocab) = if newly_admitted_conservative {
+                // All-reducible broadens candidate admission; it must not
+                // replace the stronger synthesis method for candidates the
+                // production planner already selected. Newly admitted regular
+                // bounded repeats use the ordinary full-vocabulary-safe byte
+                // horizon directly and rely on the exact global certificate.
+                let (candidate, changed) = synthesize_expression(expression, max_token_len);
+                (candidate, changed, false)
+            } else {
+                synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons)
+            };
             let vocabulary_shape_supported = !used_vocab
                 || conservative_pathological
                 || structural_pair_component_count(expression, &candidate)
                     .is_some_and(|components| components >= 2);
             let synthesized_estimate = estimated_expression_state_volume(&candidate);
-            let conservative_reduction_is_strong =
-                conservative_non_vocabulary_reduction_is_strong(
+            let conservative_reduction_is_strong = allow_all_reducible
+                || conservative_non_vocabulary_reduction_is_strong(
                     conservative_pathological,
                     used_vocab,
                     full_estimate,
                     synthesized_estimate,
                 );
             let profitable = changed
-                && (conservative_pathological || used_vocab || guarded_large_candidate)
+                && (conservative_pathological
+                    || (allow_all_reducible && conservatively_reducible)
+                    || used_vocab
+                    || guarded_large_candidate)
                 && vocabulary_shape_supported
                 && conservative_reduction_is_strong
                 && estimated_synthesis_reduction_is_profitable(expression, &candidate);

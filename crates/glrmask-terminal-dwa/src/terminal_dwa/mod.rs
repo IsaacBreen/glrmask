@@ -8,8 +8,8 @@ use crate::automata::lexer::Lexer;
 use crate::automata::lexer::compile::{
     compile_further_synthesized_tokenizer_with_structural_map,
     compile_partitioned_expression_pair_with_structural_map, factor_regex_expr,
-    precompile_further_synthesis_pairs, PrecompiledFurtherSynthesisPairs,
-    VocabularyRepeatHorizonCache,
+    precompile_further_synthesis_pairs, FurtherSynthesisSourceMapCache,
+    PrecompiledFurtherSynthesisPairs, VocabularyRepeatHorizonCache,
 };
 pub mod classify;
 mod definition_skeleton;
@@ -86,6 +86,7 @@ struct ReadyPartitionLocalTokenizer {
 
 pub struct PreparedPartitionLocalTokenizers {
     entries: Vec<Mutex<Option<PreparedPartitionLocalTokenizer>>>,
+    source_map_cache: FurtherSynthesisSourceMapCache,
 }
 
 fn direct_regular_language_uses_at_most_one_terminal(
@@ -261,6 +262,7 @@ impl PreparedPartitionLocalTokenizers {
             global_tokenizer,
             prepared,
             vocab,
+            &self.source_map_cache,
         )
         .map(|local| {
             let flat_trans: Arc<[u32]> =
@@ -687,6 +689,7 @@ fn build_partition_local_tokenizer(
                 max_token_len,
                 &relevant_bytes,
                 None,
+                None,
             )
     {
         let local_nullable = local_tokenizer.isolate_start_state_and_drain_nullable_terminals();
@@ -888,6 +891,7 @@ fn finish_prepared_partition_local_tokenizer(
     global_tokenizer: &Tokenizer,
     prepared: PreparedPartitionLocalTokenizer,
     vocab: &Vocab,
+    source_map_cache: &FurtherSynthesisSourceMapCache,
 ) -> Option<PartitionLocalTokenizer> {
     let finish_started_at = Instant::now();
     let (mut local_tokenizer, global_to_local) =
@@ -901,6 +905,7 @@ fn finish_prepared_partition_local_tokenizer(
             prepared.max_token_len,
             &prepared.relevant_bytes,
             Some(&prepared.pairs),
+            Some(source_map_cache),
         )?;
     if !local_tokenizer
         .isolate_start_state_and_drain_nullable_terminals()
@@ -983,7 +988,10 @@ pub fn prepare_partition_local_tokenizers(
             )
         })
         .collect();
-    Some(Arc::new(PreparedPartitionLocalTokenizers { entries }))
+    Some(Arc::new(PreparedPartitionLocalTokenizers {
+        entries,
+        source_map_cache: FurtherSynthesisSourceMapCache::new(plan.expressions.len()),
+    }))
 }
 
 fn lift_partition_terminal_dwas_to_global(
@@ -1064,13 +1072,19 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CharTypeSubVocabs {
-    p0_overflow_threshold: Option<usize>,
-    p1_overflow_threshold: Option<usize>,
-    p2_overflow_threshold: Option<usize>,
-    p4_overflow_threshold: Option<usize>,
-    sub_vocabs: Arc<[Vocab]>,
+    variants: Mutex<
+        BTreeMap<
+            (
+                Option<usize>,
+                Option<usize>,
+                Option<usize>,
+                Option<usize>,
+            ),
+            Arc<[Vocab]>,
+        >,
+    >,
 }
 
 impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
@@ -1155,14 +1169,28 @@ fn build_char_type_sub_vocabs(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
         automatic_bounded_synthesis_overflow.then_some(32),
     );
-    if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
-        if cached.p0_overflow_threshold == p0_overflow_threshold
-            && cached.p1_overflow_threshold == p1_overflow_threshold
-            && cached.p2_overflow_threshold == p2_overflow_threshold
-            && cached.p4_overflow_threshold == p4_overflow_threshold
-        {
-            return Arc::clone(&cached.sub_vocabs);
-        }
+    let cache = if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
+        cached
+    } else {
+        let cache = Arc::new(CharTypeSubVocabs::default());
+        vocab.vocab_derived_cache_set(Arc::clone(&cache));
+        vocab
+            .vocab_derived_cache_get::<CharTypeSubVocabs>()
+            .unwrap_or(cache)
+    };
+    let key = (
+        p0_overflow_threshold,
+        p1_overflow_threshold,
+        p2_overflow_threshold,
+        p4_overflow_threshold,
+    );
+    if let Some(cached) = cache
+        .variants
+        .lock()
+        .ok()
+        .and_then(|variants| variants.get(&key).cloned())
+    {
+        return cached;
     }
 
     let partition_count = if p0_overflow_threshold.is_some() {
@@ -1211,13 +1239,9 @@ fn build_char_type_sub_vocabs(
         })
         .collect::<Vec<_>>()
         .into();
-    vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
-        p0_overflow_threshold,
-        p1_overflow_threshold,
-        p2_overflow_threshold,
-        p4_overflow_threshold,
-        sub_vocabs: Arc::clone(&sub_vocabs),
-    }));
+    if let Ok(mut variants) = cache.variants.lock() {
+        return Arc::clone(variants.entry(key).or_insert_with(|| Arc::clone(&sub_vocabs)));
+    }
     sub_vocabs
 }
 

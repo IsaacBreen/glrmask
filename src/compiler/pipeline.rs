@@ -902,6 +902,7 @@ mod lexer_partition_plan_tests {
             std::time::Instant::now(),
             false,
             false,
+            true,
         )
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
@@ -1162,12 +1163,21 @@ fn plan_synthetic_tokenizer(
         std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
     let allow_vocab_only_candidates =
         std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    let allow_all_reducible =
+        env_flag_enabled_by_default("GLRMASK_SYNTHETIC_ALL_REDUCIBLE");
     let has_candidate = aggressive_partition_horizon
         || allow_vocab_only_candidates
-        || grammar_has_potential_bounded_terminal_synthesis(
-            grammar,
-            vocab.max_token_byte_len(),
-        );
+        || if allow_all_reducible {
+            grammar_has_reducible_bounded_terminal_synthesis(
+                grammar,
+                vocab.max_token_byte_len(),
+            )
+        } else {
+            grammar_has_potential_bounded_terminal_synthesis(
+                grammar,
+                vocab.max_token_byte_len(),
+            )
+        };
     if !has_candidate {
         if profile {
             eprintln!(
@@ -1195,7 +1205,25 @@ fn plan_synthetic_tokenizer(
         plan_started_at,
         aggressive_partition_horizon,
         allow_vocab_only_candidates,
+        allow_all_reducible,
     )
+}
+
+fn grammar_has_reducible_bounded_terminal_synthesis(
+    grammar: &GrammarDef,
+    max_token_len: usize,
+) -> bool {
+    let mut scanner = BoundedTerminalCandidateScanner::new(max_token_len);
+    grammar.terminals.iter().any(|terminal| match terminal {
+        Terminal::Expr { expr, .. } => scanner.has_reducible_repeat(expr),
+        Terminal::Pattern { pattern, utf8, .. } if pattern.as_bytes().contains(&b'{') => {
+            let expr = parse_regex(pattern, *utf8);
+            scanner.has_reducible_repeat(&expr)
+        }
+        Terminal::Literal { .. }
+        | Terminal::Pattern { .. }
+        | Terminal::SpecialToken { .. } => false,
+    })
 }
 
 fn grammar_has_potential_bounded_terminal_synthesis(
@@ -1222,6 +1250,7 @@ fn plan_synthetic_tokenizer_enabled(
     plan_started_at: Instant,
     aggressive_partition_horizon: bool,
     allow_vocab_only_candidates: bool,
+    allow_all_reducible: bool,
 ) -> Option<SyntheticTokenizerPlan> {
     // The normal path uses exact vocabulary-relative repeat horizons. The
     // legacy fixed 64-byte candidate remains available only as an explicitly
@@ -1271,7 +1300,13 @@ fn plan_synthetic_tokenizer_enabled(
     }
 
     let preflight_started_at = Instant::now();
-    if !aggressive_partition_horizon {
+    // Conservative all-reducible candidates are still accepted only after
+    // the exact global structural/vocabulary certificate. Re-running the same
+    // terminal-pair proof here was pure duplicate work and dominated planning
+    // on schemas with several bounded strings.
+    let skip_synthetic_preflight = allow_all_reducible
+        || std::env::var_os("GLRMASK_SYNTHETIC_SKIP_PREFLIGHT").is_some();
+    if !aggressive_partition_horizon && !skip_synthetic_preflight {
         const MAX_LOCAL_PREFLIGHT_ESTIMATE: u128 = 4_000_000;
         const MIN_LOCAL_STATE_SAVING: usize = 1_024;
         const MAX_SYNTHESIZED_RATIO_NUMERATOR: usize = 3;
@@ -3066,7 +3101,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     .is_some()
                     .then_some(prepared_partition_local_tokenizers)
                     .flatten();
-
+                let tokenizer = Arc::new(tokenizer);
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
                     // Finishing the exact runtime tokenizer is independent of
                     // terminal-DWA construction. Delaying large tokenizers was
@@ -3119,7 +3154,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
 
                 let tokenizer_lane = TokenizerDagLane {
-                    tokenizer: Arc::new(tokenizer),
+                    tokenizer,
                     initial_state_map,
                     partition_local_synthesis_plan,
                     prepared_partition_local_tokenizers,

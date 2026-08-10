@@ -138,6 +138,13 @@ impl RepeatBodyLanguageKey {
 }
 
 #[derive(Default)]
+struct VocabRepeatHorizonArtifact {
+    horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
+}
+
+impl glrmask_vocab::__private::VocabDerivedArtifact for VocabRepeatHorizonArtifact {}
+
+#[derive(Default)]
 pub struct VocabularyRepeatHorizonCache {
     horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
@@ -158,16 +165,43 @@ impl VocabularyRepeatHorizonCache {
             return cached;
         }
 
-        // Compute outside the cache lock and never block a Rayon worker on an
-        // in-progress value. The horizon computation itself uses nested Rayon
-        // work; an OnceLock per key lets sibling terminal jobs occupy every
-        // worker while waiting for the initializer, starving that initializer's
-        // children and deadlocking a cold build. Concurrent misses may duplicate
-        // this bounded computation, then race to publish the same deterministic
-        // result.
+        // Repeat-boundary horizons are vocabulary-derived facts. Persist them
+        // on the Vocab so every constraint using the same tokenizer can reuse
+        // the proof instead of rescanning the full token trie. Keep the small
+        // per-plan cache above as the cheapest hot lookup.
+        let shared = if let Some(shared) =
+            vocab.vocab_derived_cache_get::<VocabRepeatHorizonArtifact>()
+        {
+            shared
+        } else {
+            let shared = Arc::new(VocabRepeatHorizonArtifact::default());
+            vocab.vocab_derived_cache_set(Arc::clone(&shared));
+            vocab
+                .vocab_derived_cache_get::<VocabRepeatHorizonArtifact>()
+                .unwrap_or(shared)
+        };
+        if let Some(cached) = shared
+            .horizons
+            .lock()
+            .ok()
+            .and_then(|horizons| horizons.get(&key).copied())
+        {
+            if let Ok(mut local) = self.horizons.lock() {
+                local.insert(key, cached);
+            }
+            return cached;
+        }
+
+        // Compute outside both locks. Concurrent cold misses may duplicate this
+        // bounded computation, then race to publish the same deterministic fact.
         let computed = vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab);
-        let mut horizons = self.horizons.lock().ok()?;
-        *horizons.entry(key).or_insert(computed)
+        if let Ok(mut horizons) = shared.horizons.lock() {
+            horizons.entry(key.clone()).or_insert(computed);
+        }
+        if let Ok(mut local) = self.horizons.lock() {
+            local.insert(key, computed);
+        }
+        computed
     }
 
     pub fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
@@ -5448,17 +5482,54 @@ pub struct ExtractedDispatchComponent {
     pub dfa: DFA,
 }
 
+struct PrecompiledFurtherSynthesisPair {
+    pair: CompiledTerminalExpressionPair,
+    minimized_full: DFA,
+    full_to_minimized: Vec<u32>,
+}
+
 pub struct PrecompiledFurtherSynthesisPairs {
-    pairs: Mutex<BTreeMap<usize, CompiledTerminalExpressionPair>>,
+    pairs: Mutex<BTreeMap<usize, PrecompiledFurtherSynthesisPair>>,
     pub build_ms: f64,
 }
 
 impl PrecompiledFurtherSynthesisPairs {
-    fn take(&self, terminal: usize) -> Option<CompiledTerminalExpressionPair> {
+    fn take(&self, terminal: usize) -> Option<PrecompiledFurtherSynthesisPair> {
         self.pairs
             .lock()
             .expect("precompiled synthesis-pair cache poisoned")
             .remove(&terminal)
+    }
+
+
+}
+
+pub struct FurtherSynthesisSourceMapCache {
+    maps: Vec<OnceLock<Option<Vec<u32>>>>,
+}
+
+impl FurtherSynthesisSourceMapCache {
+    pub fn new(num_terminals: usize) -> Self {
+        Self {
+            maps: (0..num_terminals).map(|_| OnceLock::new()).collect(),
+        }
+    }
+
+    fn get_or_compute<'a>(
+        &'a self,
+        terminal: usize,
+        minimized_rebuilt: &DFA,
+        source: &DFA,
+    ) -> Option<&'a [u32]> {
+        let slot = self.maps.get(terminal)?;
+        slot.get_or_init(|| {
+            if dfa_has_same_numbered_layout(minimized_rebuilt, source) {
+                Some((0..source.num_states() as u32).collect::<Vec<_>>())
+            } else {
+                deterministic_component_homomorphism_state_map(minimized_rebuilt, source)
+            }
+        })
+        .as_deref()
     }
 }
 
@@ -5506,7 +5577,18 @@ pub fn precompile_further_synthesis_pairs(
                 relevant_bytes,
                 StructuralPairProof::VocabularyTokenQuotient,
             )
-            .map(|pair| (terminal, pair))
+            .map(|pair| {
+                let (minimized_full, full_to_minimized) =
+                    pair.full.dfa.minimize_with_state_mapping();
+                (
+                    terminal,
+                    PrecompiledFurtherSynthesisPair {
+                        pair,
+                        minimized_full,
+                        full_to_minimized,
+                    },
+                )
+            })
         })
         .collect::<Option<BTreeMap<_, _>>>()?;
     Some(Arc::new(PrecompiledFurtherSynthesisPairs {
@@ -5808,6 +5890,93 @@ pub fn extract_augmented_singleton_dispatch_components(
     Some(extracted)
 }
 
+fn transport_synthesized_map_through_source_quotient(
+    terminal: usize,
+    source: &DFA,
+    rebuilt: &DFA,
+    rebuilt_to_synthesized: &[u32],
+    precomputed_minimized: Option<(&DFA, &[u32])>,
+    source_map_cache: Option<&FurtherSynthesisSourceMapCache>,
+) -> Option<Vec<u32>> {
+    if rebuilt_to_synthesized.len() != rebuilt.num_states() {
+        return None;
+    }
+    // The source component may already be an exact minimization/quotient of
+    // the rebuilt structured terminal.  Compose rebuilt→source with the new
+    // rebuilt→synthesized certificate.  Because the new local observation is
+    // no stronger than the source's full-vocabulary observation, every rebuilt
+    // state merged into one source state must agree on the synthesized target.
+    let owned_minimized;
+    let owned_mapping;
+    let (minimized_rebuilt, rebuilt_to_minimized) = if let Some((minimized, mapping)) = precomputed_minimized
+        && mapping.len() == rebuilt.num_states()
+    {
+        (minimized, mapping)
+    } else {
+        (owned_minimized, owned_mapping) = rebuilt.minimize_with_state_mapping();
+        (&owned_minimized, owned_mapping.as_slice())
+    };
+    let same_layout = dfa_has_same_numbered_layout(minimized_rebuilt, source);
+    let owned_minimized_to_source;
+    let minimized_to_source: &[u32] = if let Some(cache) = source_map_cache {
+        cache.get_or_compute(terminal, minimized_rebuilt, source)?
+    } else {
+        owned_minimized_to_source = if same_layout {
+            (0..source.num_states() as u32).collect::<Vec<_>>()
+        } else {
+            deterministic_component_homomorphism_state_map(minimized_rebuilt, source)?
+        };
+        &owned_minimized_to_source
+    };
+    let rebuilt_to_source = rebuilt_to_minimized
+        .iter()
+        .copied()
+        .map(|state| {
+            if state == u32::MAX {
+                Some(u32::MAX)
+            } else {
+                minimized_to_source.get(state as usize).copied()
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut source_to_synthesized = vec![u32::MAX; source.num_states()];
+    for (rebuilt_state, &source_state) in rebuilt_to_source.iter().enumerate() {
+        if source_state == u32::MAX {
+            continue;
+        }
+        let synthesized_state = rebuilt_to_synthesized[rebuilt_state];
+        let slot = source_to_synthesized.get_mut(source_state as usize)?;
+        if *slot == u32::MAX {
+            *slot = synthesized_state;
+        } else if *slot != synthesized_state {
+            if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                eprintln!(
+                    "[glrmask/profile][partition_local_quotient_transport] stage=conflict source_state={} first={} second={} rebuilt_state={} rebuilt={} minimized={} source={}",
+                    source_state, *slot, synthesized_state, rebuilt_state, rebuilt.num_states(), minimized_rebuilt.num_states(), source.num_states()
+                );
+            }
+            return None;
+        }
+    }
+    let missing = source_to_synthesized.iter().filter(|&&state| state == u32::MAX).count();
+    if missing != 0 {
+        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][partition_local_quotient_transport] stage=missing missing={} rebuilt={} minimized={} source={} same_layout={}",
+                missing, rebuilt.num_states(), minimized_rebuilt.num_states(), source.num_states(), same_layout
+            );
+        }
+        return None;
+    }
+    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][partition_local_quotient_transport] stage=success rebuilt={} minimized={} source={} same_layout={}",
+            rebuilt.num_states(), minimized_rebuilt.num_states(), source.num_states(), same_layout
+        );
+    }
+    Some(source_to_synthesized)
+}
+
 fn augment_component_from_verified_prefix(
     source: &DFA,
     rebuilt: &DFA,
@@ -5885,6 +6054,7 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
     max_token_len: usize,
     relevant_bytes: &[u8],
     precompiled_pairs: Option<&PrecompiledFurtherSynthesisPairs>,
+    source_map_cache: Option<&FurtherSynthesisSourceMapCache>,
 ) -> Option<(Tokenizer, Vec<u32>)> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
@@ -5917,9 +6087,11 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         return reject("unchanged");
     }
 
+    let extract_started_at = profile.then(Instant::now);
     let Some(extracted) = extract_dispatch_components(source) else {
         return reject("extract_dispatch");
     };
+    let extract_ms = extract_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let mut output_components = Vec::<LexerComponent>::with_capacity(extracted.len());
     let mut component_maps = Vec::<(Vec<u32>, Vec<u32>)>::with_capacity(extracted.len());
     let mut handled_changed = vec![false; changed.len()];
@@ -5953,21 +6125,25 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         }
         let terminal = changed_terminals[0];
         handled_changed[terminal] = true;
-        let Some(pair) = precompiled_pairs
-            .and_then(|pairs| pairs.take(terminal))
-            .or_else(|| {
-                compile_terminal_expression_pair_with_structural_map_and_proof(
-                    &source_expressions[terminal],
-                    &synthesized_expressions[terminal],
-                    vocab,
-                    repeat_horizons,
-                    max_token_len,
-                    relevant_bytes,
-                    StructuralPairProof::VocabularyTokenQuotient,
-                )
-            })
-        else {
-            return reject("protected_pair");
+        let precompiled = precompiled_pairs.and_then(|pairs| pairs.take(terminal));
+        let (pair, precomputed_minimized) = if let Some(precompiled) = precompiled {
+            let PrecompiledFurtherSynthesisPair {
+                pair,
+                minimized_full,
+                full_to_minimized,
+            } = precompiled;
+            (pair, Some((minimized_full, full_to_minimized)))
+        } else {
+            let pair = compile_terminal_expression_pair_with_structural_map_and_proof(
+                &source_expressions[terminal],
+                &synthesized_expressions[terminal],
+                vocab,
+                repeat_horizons,
+                max_token_len,
+                relevant_bytes,
+                StructuralPairProof::VocabularyTokenQuotient,
+            )?;
+            (pair, None)
         };
         effective_synthesized_expressions[terminal] = pair.synthesized_expression.clone();
         let (mut synthesized, synthesized_nullable) =
@@ -5976,12 +6152,34 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         if !synthesized_nullable.is_empty() || !rebuilt_nullable.is_empty() {
             return reject("protected_nullable");
         }
-        let Some(source_to_synthesized) = augment_component_from_verified_prefix(
-            &component.dfa,
-            &rebuilt,
-            &mut synthesized,
-            &pair.full_to_synthesized,
-        ) else {
+        let transport_started_at = profile.then(Instant::now);
+        let source_to_synthesized =
+            transport_synthesized_map_through_source_quotient(
+                terminal,
+                &component.dfa,
+                &rebuilt,
+                &pair.full_to_synthesized,
+                precomputed_minimized
+                    .as_ref()
+                    .map(|(dfa, mapping)| (dfa, mapping.as_slice())),
+                source_map_cache,
+            )
+            .or_else(|| {
+                augment_component_from_verified_prefix(
+                    &component.dfa,
+                    &rebuilt,
+                    &mut synthesized,
+                    &pair.full_to_synthesized,
+                )
+            });
+        let transport_ms = transport_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][partition_local_component_transport] terminal={} source_states={} rebuilt_states={} synthesized_states={} elapsed_ms={:.3}",
+                terminal, component.dfa.num_states(), rebuilt.num_states(), synthesized.num_states(), transport_ms
+            );
+        }
+        let Some(source_to_synthesized) = source_to_synthesized else {
             if profile {
                 eprintln!(
                     "[glrmask/profile][partition_local_component_reuse_detail] terminal={} source_states={} rebuilt_states={} synthesized_states={}",
@@ -6025,10 +6223,12 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         }
         offset = offset.checked_add(component.dfa.num_states() as u32)?;
     }
+    let combine_started_at = profile.then(Instant::now);
     let mut dfa = combine_lexer_components_under_epsilon_root(
         output_components,
         source_expressions.len(),
     );
+    let combine_ms = combine_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     // Nullable-start isolation and prior structural augmentation may retain
     // unreachable raw states outside the live dispatch components. They remain
     // part of the compiler's raw-state coordinate, so clone them after the live
@@ -6071,9 +6271,11 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
     );
     if profile {
         eprintln!(
-            "[glrmask/profile][partition_local_component_reuse] selected=true source_states={} synthesized_states={} elapsed_ms={:.3}",
+            "[glrmask/profile][partition_local_component_reuse] selected=true source_states={} synthesized_states={} extract_ms={:.3} combine_ms={:.3} elapsed_ms={:.3}",
             source.dfa.num_states(),
             tokenizer.dfa.num_states(),
+            extract_ms,
+            combine_ms,
             started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
         );
     }
@@ -6151,6 +6353,7 @@ fn prepare_partitioned_expression_pair_with_proof(
     if let Some(shared_duplicates) = &shared_duplicates {
         prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
     }
+    let synthesized_quotient_cache = SynthesizedDfaQuotientCache::default();
 
     let compiled = grouped
         .into_iter()
@@ -6228,6 +6431,7 @@ fn prepare_partitioned_expression_pair_with_proof(
                 relevant_bytes,
                 true,
                 proof,
+                Some(&synthesized_quotient_cache),
             );
             let Some(pair) = pair else {
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -6489,7 +6693,7 @@ fn product_state_single_visible_finalizer_with_layout(
         }
     }
 
-    let mut visible_accepting = accepting.first().copied().unwrap_or(false);
+    let mut visible_accepting = accepting.first().copied().unwrap_or(true);
     if visible_accepting
         && exclusions
             .get(&0)
@@ -7763,6 +7967,54 @@ fn zero_min_repeat_suffix_candidate(
         .map(|tail| synthesized_trace.prefix_len as u32 + tail)
 }
 
+fn zero_min_repeat_suffix_primary_state_map_any_layout(
+    full_expr: &Expr,
+    synthesized_expr: &Expr,
+    full: &DFA,
+    synthesized: &DFA,
+    max_token_len: usize,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+) -> Option<Vec<u32>> {
+    let full_trace = Arc::new(zero_min_repeat_suffix_component_trace(full_expr)?);
+    let synthesized_trace = Arc::new(zero_min_repeat_suffix_component_trace(synthesized_expr)?);
+
+    let full_to_trace = if dfa_has_same_numbered_layout(&full_trace.dfa, full) {
+        (0..full.num_states() as u32).collect::<Vec<_>>()
+    } else {
+        deterministic_component_homomorphism_state_map(full, &full_trace.dfa)?
+    };
+    let trace_to_synthesized =
+        if dfa_has_same_numbered_layout(&synthesized_trace.dfa, synthesized) {
+            (0..synthesized.num_states() as u32).collect::<Vec<_>>()
+        } else {
+            deterministic_component_homomorphism_state_map(&synthesized_trace.dfa, synthesized)?
+        };
+
+    let trace_mapping = zero_min_repeat_suffix_state_map(
+        full_expr,
+        synthesized_expr,
+        &full_trace.dfa,
+        &synthesized_trace.dfa,
+        Some(Arc::clone(&full_trace)),
+        Some(Arc::clone(&synthesized_trace)),
+        max_token_len,
+        Some(vocab),
+        Some(repeat_horizons),
+    )?;
+
+    full_to_trace
+        .into_iter()
+        .map(|trace_state| {
+            let synthesized_trace_state =
+                *trace_mapping.primary.get(trace_state as usize)?;
+            trace_to_synthesized
+                .get(synthesized_trace_state as usize)
+                .copied()
+        })
+        .collect()
+}
+
 fn zero_min_repeat_suffix_state_map(
     full_expr: &Expr,
     synthesized_expr: &Expr,
@@ -8153,6 +8405,156 @@ fn direct_bounded_suffix_shape(expr: &Expr) -> Option<DirectBoundedSuffixShape<'
 /// most `ceil(K / minimum_body_width) + 1` repetition boundaries. We therefore
 /// retain low counts exactly, retain that many upper-bound layers exactly, and
 /// map every deeper interior layer to one synthesized interior layer.
+fn compile_direct_bounded_suffix_compressed(
+    expr: &Expr,
+) -> Option<(DFA, CompressedTransitionSegment)> {
+    const MIN_COMPRESSED_MAX: usize = 1_024;
+    let shape = direct_bounded_suffix_shape(expr)?;
+    if shape.max < MIN_COMPRESSED_MAX || shape.suffix.is_empty() {
+        return None;
+    }
+    let base = compile_direct_bounded_repeat_base_dfa_unconditionally(shape.body)?;
+    let base_states = base.states();
+    let base_state_count = base_states.len();
+    if base_state_count == 0 || base_states[0].transitions.get(shape.suffix[0]).is_some() {
+        return None;
+    }
+
+    let (_, initial_classes) = compute_dfa_byte_equivalence_classes(&[&base]);
+    let mut partitions = initial_classes
+        .into_iter()
+        .map(|bytes| {
+            let mut set = U8Set::empty();
+            for byte in bytes {
+                set.insert(byte);
+            }
+            set
+        })
+        .collect::<Vec<_>>();
+    for &byte in shape.prefix.iter().chain(shape.suffix.iter()) {
+        partitions = refine_u8_partitions(partitions, U8Set::single(byte));
+    }
+    let mut byte_to_class = [0u8; 256];
+    let class_members = partitions
+        .iter()
+        .enumerate()
+        .map(|(class, bytes)| {
+            let members = bytes.iter().collect::<Vec<_>>();
+            for &byte in &members {
+                byte_to_class[byte as usize] = class as u8;
+            }
+            members.into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+
+    let prefix_states = shape.prefix.len();
+    let repeat_states = (shape.max + 1).checked_mul(base_state_count)?;
+    let suffix_states = shape.suffix.len();
+    let total_states = prefix_states
+        .checked_add(repeat_states)?
+        .checked_add(suffix_states)?;
+    let repeat_offset = prefix_states;
+    let suffix_offset = prefix_states + repeat_states;
+    let mut dfa = DFA::new(total_states);
+    dfa.ensure_group_capacity(1);
+    dfa.set_group_u8set(0, expr_u8set(expr));
+    let mut row_offsets = Vec::<u32>::with_capacity(total_states + 1);
+    let mut row_classes = Vec::<u8>::new();
+    let mut row_targets = Vec::<u32>::new();
+    let mut expanded_transition_count = 0usize;
+    row_offsets.push(0);
+
+    let mut push_row = |entries: &mut Vec<(u8, u32)>| -> Option<()> {
+        entries.sort_unstable_by_key(|&(class, _)| class);
+        entries.dedup();
+        for &(class, target) in entries.iter() {
+            expanded_transition_count = expanded_transition_count
+                .checked_add(class_members[class as usize].len())?;
+            row_classes.push(class);
+            row_targets.push(target);
+        }
+        row_offsets.push(u32::try_from(row_classes.len()).ok()?);
+        Some(())
+    };
+
+    for (index, &byte) in shape.prefix.iter().enumerate() {
+        let mut future = BitSet::new(1);
+        future.set(0);
+        dfa.overwrite_state_metadata(index as u32, BitSet::new(1), future);
+        let target = if index + 1 == prefix_states {
+            repeat_offset as u32
+        } else {
+            index as u32 + 1
+        };
+        let mut entries = vec![(byte_to_class[byte as usize], target)];
+        push_row(&mut entries)?;
+    }
+
+    for completed in 0..=shape.max {
+        for (body_state, state) in base_states.iter().enumerate() {
+            let local = completed * base_state_count + body_state;
+            let mapped_state = (repeat_offset + local) as u32;
+            let mut future = BitSet::new(1);
+            let accepting_position = body_state == 0 && completed >= shape.min;
+            if completed < shape.max || accepting_position {
+                future.set(0);
+            }
+            dfa.overwrite_state_metadata(mapped_state, BitSet::new(1), future);
+            let mut entries = Vec::<(u8, u32)>::new();
+            if completed < shape.max && base.finalizers(body_state as u32).is_empty() {
+                for (class, members) in class_members.iter().enumerate() {
+                    let representative = *members.first()?;
+                    if let Some(target) = base.step(body_state as u32, representative) {
+                        let mapped_target = if !base.finalizers(target).is_empty() {
+                            repeat_offset + (completed + 1) * base_state_count
+                        } else {
+                            repeat_offset + completed * base_state_count + target as usize
+                        };
+                        entries.push((class as u8, mapped_target as u32));
+                    }
+                }
+            }
+            if accepting_position {
+                entries.push((
+                    byte_to_class[shape.suffix[0] as usize],
+                    suffix_offset as u32,
+                ));
+            }
+            push_row(&mut entries)?;
+        }
+    }
+
+    for suffix_index in 0..suffix_states {
+        let state = (suffix_offset + suffix_index) as u32;
+        let mut entries = Vec::<(u8, u32)>::new();
+        if suffix_index + 1 < suffix_states {
+            let mut future = BitSet::new(1);
+            future.set(0);
+            dfa.overwrite_state_metadata(state, BitSet::new(1), future);
+            entries.push((
+                byte_to_class[shape.suffix[suffix_index + 1] as usize],
+                state + 1,
+            ));
+        } else {
+            let mut finalizers = BitSet::new(1);
+            finalizers.set(0);
+            dfa.overwrite_state_metadata(state, finalizers, BitSet::new(1));
+        }
+        push_row(&mut entries)?;
+    }
+    debug_assert_eq!(row_offsets.len(), total_states + 1);
+    let segment = CompressedTransitionSegment {
+        state_offset: 0,
+        state_count: total_states as u32,
+        byte_to_class: Arc::from(byte_to_class.to_vec().into_boxed_slice()),
+        class_members: Arc::from(class_members),
+        row_offsets: Arc::from(row_offsets),
+        entries: CompressedTransitionEntries::from_parts(row_classes, row_targets),
+        expanded_transition_count,
+    };
+    Some((dfa, segment))
+}
+
 fn direct_bounded_suffix_state_map(
     full_expr: &Expr,
     synthesized_expr: &Expr,
@@ -8499,6 +8901,41 @@ struct PreparedTerminalExpressionPair {
     synthesized_expression: Expr,
 }
 
+#[derive(Clone)]
+struct CachedSynthesizedDfaQuotient {
+    minimized: DFA,
+    raw_to_minimized: Vec<u32>,
+}
+
+#[derive(Default)]
+struct SynthesizedDfaQuotientCache {
+    entries: Mutex<FxHashMap<Expr, Arc<OnceLock<CachedSynthesizedDfaQuotient>>>>,
+}
+
+impl SynthesizedDfaQuotientCache {
+    fn get_or_compute(&self, expression: &Expr, raw: &DFA) -> CachedSynthesizedDfaQuotient {
+        let slot = {
+            let mut entries = self
+                .entries
+                .lock()
+                .expect("synthesized DFA quotient cache poisoned");
+            Arc::clone(
+                entries
+                    .entry(expression.clone())
+                    .or_insert_with(|| Arc::new(OnceLock::new())),
+            )
+        };
+        slot.get_or_init(|| {
+            let (minimized, raw_to_minimized) = raw.minimize_all_states_with_mapping();
+            CachedSynthesizedDfaQuotient {
+                minimized,
+                raw_to_minimized,
+            }
+        })
+        .clone()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StructuralPairProof {
     RawHomomorphism,
@@ -8553,6 +8990,7 @@ fn prepare_terminal_expression_pair_with_structural_map(
         relevant_bytes,
         true,
         StructuralPairProof::RawHomomorphism,
+        None,
     )
 }
 
@@ -8565,6 +9003,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     relevant_bytes: &[u8],
     allow_component_identity_fallback: bool,
     proof: StructuralPairProof,
+    synthesized_quotient_cache: Option<&SynthesizedDfaQuotientCache>,
 ) -> Option<PreparedTerminalExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
@@ -8608,28 +9047,122 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     // though one deterministic component admits the same exact finite-horizon
     // refinement directly.
     if full_component_expressions.len() == 1 {
+        let preserve_bounded_counter_layout = proof == StructuralPairProof::VocabularyTokenQuotient
+            && full_plan.exclusions.is_empty()
+            && full_plan.intersections.is_empty()
+            && synthesized_plan.exclusions.is_empty()
+            && synthesized_plan.intersections.is_empty()
+            && direct_bounded_suffix_shape(&full_plan.compiled_exprs[0]).is_some()
+            && direct_bounded_suffix_shape(&synthesized_plan.compiled_exprs[0]).is_some();
+        let direct_full_expr = preserve_bounded_counter_layout
+            .then(|| full_plan.compiled_exprs[0].clone());
+        let direct_synthesized_expr = preserve_bounded_counter_layout
+            .then(|| synthesized_plan.compiled_exprs[0].clone());
         let product_build_started_at = profile.then(Instant::now);
-        let (full_dfa, synthesized_dfa) = rayon::join(
-            || compile_with_plan(full_plan),
-            || compile_with_plan(synthesized_plan),
-        );
+        let ((mut full_dfa, mut full_segment), mut synthesized_dfa) =
+            if let (Some(full_expr), Some(synthesized_expr)) =
+                (direct_full_expr, direct_synthesized_expr)
+            {
+                rayon::join(
+                    || {
+                        if let Some((dfa, segment)) =
+                            compile_direct_bounded_suffix_compressed(&full_expr)
+                        {
+                            (dfa, Some(segment))
+                        } else {
+                            (compile_single_expr_dfa(&full_expr), None)
+                        }
+                    },
+                    || compile_single_expr_dfa(&synthesized_expr),
+                )
+            } else {
+                let (full, synthesized) = rayon::join(
+                    || compile_with_plan(full_plan),
+                    || compile_with_plan(synthesized_plan),
+                );
+                ((full, None), synthesized)
+            };
         let product_build_ms = product_build_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let map_started_at = profile.then(Instant::now);
-        let homomorphism = deterministic_component_homomorphism_state_map(
-            &full_dfa,
-            &synthesized_dfa,
-        );
+        let homomorphism = full_segment
+            .is_none()
+            .then(|| {
+                deterministic_component_homomorphism_state_map(
+                    &full_dfa,
+                    &synthesized_dfa,
+                )
+            })
+            .flatten();
         let used_homomorphism = homomorphism.is_some();
-        let full_to_synthesized = homomorphism.or_else(|| {
-            exact_kbounded_single_group_state_map(
+        // Single visible components used to skip the direct bounded-repeat
+        // transport that the multi-component product path already uses, and
+        // fell straight from raw homomorphism to an O(K * states) Moore proof.
+        // For a vocabulary-token quotient, the direct transport is the same
+        // exact finite-token-horizon certificate and yields a unique primary
+        // state because there is no product tuple to reconcile.
+        let bounded_transport = if used_homomorphism
+            || proof == StructuralPairProof::RawHomomorphism
+        {
+            None
+        } else {
+            let conservative_only = std::env::var("GLRMASK_SYNTHETIC_ALL_REDUCIBLE")
+                .map(|value| {
+                    let normalized = value.trim().to_ascii_lowercase();
+                    !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+                })
+                .unwrap_or(false);
+            direct_bounded_suffix_state_map(
+                full_expression,
+                synthesized_expression,
                 &full_dfa,
                 &synthesized_dfa,
                 max_token_len,
                 relevant_bytes,
+                (!conservative_only).then_some(vocab),
+                (!conservative_only).then_some(repeat_horizons),
             )
-        });
-        let Some(full_to_synthesized) = full_to_synthesized else {
+            .map(|mapping| mapping.primary)
+        };
+        let used_bounded_transport = bounded_transport.is_some();
+        if !used_bounded_transport
+            && let Some(segment) = full_segment.take()
+        {
+            // The compressed exact runtime coordinate is valid only because the
+            // direct bounded-layer certificate understands its implicit rows.
+            // If that proof lane declines, materialize before any generic
+            // fallback so correctness never depends on hidden transitions.
+            segment.materialize_into_dfa(&mut full_dfa);
+        }
+        let dominance_transport = if used_homomorphism
+            || used_bounded_transport
+            || proof == StructuralPairProof::RawHomomorphism
+        {
+            None
+        } else {
+            zero_min_repeat_suffix_primary_state_map_any_layout(
+                full_expression,
+                synthesized_expression,
+                &full_dfa,
+                &synthesized_dfa,
+                max_token_len,
+                vocab,
+                repeat_horizons,
+            )
+        };
+        let used_dominance_transport = dominance_transport.is_some();
+        let full_to_synthesized = homomorphism
+            .or(bounded_transport)
+            .or(dominance_transport)
+            .or_else(|| {
+                exact_kbounded_single_group_state_map(
+                    &full_dfa,
+                    &synthesized_dfa,
+                    max_token_len,
+                    relevant_bytes,
+                )
+            });
+        let Some(mut full_to_synthesized) = full_to_synthesized else {
             if profile {
                 eprintln!(
                     "[glrmask/profile][tokenizer] structural_pair_rejected stage=single_component_map full_states={} synthesized_states={} depth={}",
@@ -8651,6 +9184,34 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             }
             return None;
         }
+        if preserve_bounded_counter_layout {
+            let states_before = synthesized_dfa.num_states();
+            let quotient = if let Some(cache) = synthesized_quotient_cache {
+                cache.get_or_compute(&synthesized_component_expressions[0], &synthesized_dfa)
+            } else {
+                let (minimized, raw_to_minimized) =
+                    synthesized_dfa.minimize_all_states_with_mapping();
+                CachedSynthesizedDfaQuotient {
+                    minimized,
+                    raw_to_minimized,
+                }
+            };
+            for state in &mut full_to_synthesized {
+                let mapped = *quotient.raw_to_minimized.get(*state as usize)?;
+                if mapped == u32::MAX {
+                    return None;
+                }
+                *state = mapped;
+            }
+            synthesized_dfa = quotient.minimized;
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] structural_single_component_post_cert_minimize states_before={} states_after={}",
+                    states_before,
+                    synthesized_dfa.num_states(),
+                );
+            }
+        }
         let map_ms = map_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if profile {
@@ -8659,16 +9220,32 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 full_dfa.num_states(),
                 synthesized_dfa.num_states(),
                 max_token_len,
-                if used_homomorphism { "deterministic_homomorphism" } else { "moore" },
+                if used_homomorphism {
+                    "deterministic_homomorphism"
+                } else if used_bounded_transport {
+                    "layered_bounded_suffix"
+                } else if used_dominance_transport {
+                    "zero_min_repeat_suffix_dominance"
+                } else {
+                    "moore"
+                },
                 product_build_ms,
                 map_ms,
             );
         }
+        let full = if let Some(segment) = full_segment {
+            DeferredDfa::ReadyCompressed {
+                dfa: full_dfa,
+                segment,
+            }
+        } else {
+            DeferredDfa::Ready(full_dfa)
+        };
         return Some(PreparedTerminalExpressionPair {
             synthesized: Regex {
                 dfa: synthesized_dfa,
             },
-            full: DeferredDfa::Ready(full_dfa),
+            full,
             full_to_synthesized,
             synthesized_expression: synthesized_expression.clone(),
         });
@@ -9024,6 +9601,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             relevant_bytes,
             false,
             proof,
+            synthesized_quotient_cache,
         );
     }
     let Some(component_maps) = component_maps.into_iter().collect::<Option<Vec<_>>>() else {
@@ -9361,6 +9939,7 @@ fn compile_terminal_expression_pair_with_structural_map_and_proof(
         relevant_bytes,
         true,
         proof,
+        None,
     )?;
     Some(CompiledTerminalExpressionPair {
         synthesized: prepared.synthesized,

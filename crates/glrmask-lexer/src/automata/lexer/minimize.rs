@@ -520,6 +520,18 @@ impl DFA {
         self.minimize_impl(true)
     }
 
+    /// Minimize while retaining every raw residual state, including states not
+    /// reachable from state zero. Synthetic compile coordinates need this when
+    /// the surrounding lexer can enter a terminal residual from an external
+    /// root even though that residual is unreachable from the terminal's own
+    /// start state.
+    pub(super) fn minimize_all_states_with_mapping(&self) -> (DFA, Vec<u32>) {
+        if self.has_epsilon_transitions() {
+            return (self.clone(), (0..self.states().len() as u32).collect());
+        }
+        self.minimize_impl(false)
+    }
+
     fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {

@@ -3270,6 +3270,10 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
 #[test]
 fn large_simple_bounded_string_pattern_uses_exact_chunked_prefix_tail() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _terminalize_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
+    );
     let schema = json!({
         "type": "string",
         "maxLength": 512,
@@ -3315,6 +3319,10 @@ fn chunked_anchored_prefix_pattern_preserves_bounds_and_search_semantics() {
 #[test]
 fn chunked_anchored_prefix_pattern_is_structural_not_literal_specific() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _terminalize_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
+    );
     let _compat = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "string",
@@ -3337,6 +3345,11 @@ fn chunked_anchored_prefix_pattern_is_structural_not_literal_specific() {
 
 #[test]
 fn chunked_anchored_prefix_pattern_rejects_prefix_longer_than_max() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _terminalize_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
+    );
     let schema = json!({
         "type": "string",
         "maxLength": 70,
@@ -3415,7 +3428,7 @@ fn json_string_char_terminal_requires_valid_utf8_sequences() {
 }
 
 #[test]
-fn medium_bounded_string_uses_split_chunk_rules_by_default() {
+fn medium_bounded_string_terminalizes_by_default() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
@@ -3428,7 +3441,7 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     assert!(
-        !grammar
+        grammar
             .rules
             .iter()
             .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
@@ -3437,7 +3450,7 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_64"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -3446,8 +3459,9 @@ fn generic_repeat_chunk_env_does_not_change_string_chunking() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _generic_chunk = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_REPEAT_CHUNK", "17");
     let _string_chunk = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_STRING_REPEAT_CHUNK");
-    let _terminalize_guard = EnvVarGuard::unset(
+    let _terminalize_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
     );
 
     let schema = json!({
@@ -4083,8 +4097,9 @@ fn moderately_large_prefix_only_string_terminalizes_without_chunk_helper_rules()
 #[test]
 fn split_bounded_string_chunks_do_not_overlap_at_boundary() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _terminalize_guard = EnvVarGuard::unset(
+    let _terminalize_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
     );
 
     let schema = json!({
@@ -6147,6 +6162,10 @@ fn recognized_formats_are_pattern_singletons_before_adaptive_determinization() {
 #[test]
 fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_partitions() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _terminalize_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "50",
+    );
     let _depth = EnvVarGuard::set("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH", "full");
     let schema = json!({
         "type": "object",
