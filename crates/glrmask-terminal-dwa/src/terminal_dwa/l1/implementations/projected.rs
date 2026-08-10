@@ -927,6 +927,11 @@ fn minimize_grouped_local(
     let mut dag_states = 0usize;
     let mut hopcroft_groups = 0usize;
     let mut hopcroft_states = 0usize;
+    let mut profile_group_map_ms = 0.0f64;
+    let mut profile_group_flatten_ms = 0.0f64;
+    let mut profile_group_reduce_ms = 0.0f64;
+    let mut profile_group_representatives_ms = 0.0f64;
+    let mut profile_group_writeback_ms = 0.0f64;
     let dag_enabled = std::env::var("GLRMASK_L1_PROJECTED_DAG_MINIMIZE")
         .map(|value| {
             let value = value.trim();
@@ -955,9 +960,12 @@ fn minimize_grouped_local(
         .enumerate()
         .filter(|(_, states)| !states.is_empty())
     {
+        let profile_map_started = profile_group_shapes.then(Instant::now);
         for (local, &global) in states.iter().enumerate() {
             local_of_global[global as usize] = local as u32;
         }
+        profile_group_map_ms += profile_map_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if profile_group_shapes && states.len() >= 128 {
             let mut hasher = FxHasher::default();
             states.len().hash(&mut hasher);
@@ -996,6 +1004,7 @@ fn minimize_grouped_local(
             hopcroft_groups += 1;
             hopcroft_states += states.len();
             let local_classes = if use_scc {
+                let flatten_started = profile_group_shapes.then(Instant::now);
                 let edge_capacity = states
                     .iter()
                     .map(|&global| transitions[global as usize].len())
@@ -1013,8 +1022,13 @@ fn minimize_grouped_local(
                     offsets.push(edges.len() as u32);
                 }
                 let local_transitions = FlatLocalTransitions { offsets, edges };
+                profile_group_flatten_ms += flatten_started
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                let reduce_started = profile_group_shapes.then(Instant::now);
                 let (classes, _representatives, cyclic_components, cyclic_states) =
                     minimize_scc_dag(&local_transitions);
+                profile_group_reduce_ms += reduce_started
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                 if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
                     eprintln!(
                         "[glrmask/profile][l1_projected_group_scc] group={} states={} edges={} cyclic_sccs={} cyclic_states={} mode=scc_dag",
@@ -1042,6 +1056,7 @@ fn minimize_grouped_local(
                 local_rounds += local_minimized.rounds;
                 local_minimized.classes
             };
+            let representatives_started = profile_group_shapes.then(Instant::now);
             let state_count = local_classes
                 .iter()
                 .copied()
@@ -1054,9 +1069,12 @@ fn minimize_grouped_local(
                     representatives[class] = global;
                 }
             }
+            profile_group_representatives_ms += representatives_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (local_classes, representatives)
         };
 
+        let writeback_started = profile_group_shapes.then(Instant::now);
         let base = reduced_representatives.len() as u32;
         for (local, &global) in states.iter().enumerate() {
             reduced_of_state[global as usize] = base + local_classes[local];
@@ -1065,9 +1083,21 @@ fn minimize_grouped_local(
         for &global in states {
             local_of_global[global as usize] = u32::MAX;
         }
+        profile_group_writeback_ms += writeback_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     }
     let local_ms = local_started.elapsed().as_secs_f64() * 1000.0;
     if profile_group_shapes {
+        eprintln!(
+            "[glrmask/profile][l1_projected_group_wrapper] local_total_ms={:.3} map_ms={:.3} flatten_ms={:.3} reduce_ms={:.3} representatives_ms={:.3} writeback_ms={:.3} residual_ms={:.3}",
+            local_ms,
+            profile_group_map_ms,
+            profile_group_flatten_ms,
+            profile_group_reduce_ms,
+            profile_group_representatives_ms,
+            profile_group_writeback_ms,
+            local_ms - profile_group_map_ms - profile_group_flatten_ms - profile_group_reduce_ms - profile_group_representatives_ms - profile_group_writeback_ms,
+        );
         let total_large_groups = group_shapes.values().map(Vec::len).sum::<usize>();
         let unique_shapes = group_shapes.len();
         let duplicate_groups = total_large_groups.saturating_sub(unique_shapes);
