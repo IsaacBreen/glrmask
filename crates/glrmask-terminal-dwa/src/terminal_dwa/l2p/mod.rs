@@ -30,7 +30,8 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::{determinize, determinize_depth2};
 use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::{
-    PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
+    PointwiseClassOrder, minimize_owned, minimize_owned_path_conditioned,
+    minimize_owned_with_pointwise_class_order,
 };
 use crate::automata::weighted_u32::minimize_token_deterministic_nwa::{
     eliminate_acyclic_epsilons, is_token_deterministic_epsilon_free,
@@ -945,7 +946,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 && nwa.states().len() >= 256
                 && num_active_terminals >= 256
                 && std::env::var_os("GLRMASK_DISABLE_L2P_PREMINIMIZE_NWA").is_none();
-            let nwa = if preminimize_nwa {
+            let (nwa, path_conditioned_after_preminimize) = if preminimize_nwa {
                 let epsilon_eliminate_started_at = Instant::now();
                 let epsilon_free = eliminate_acyclic_epsilons(&nwa)
                     .expect("L2+ epsilon elimination failed");
@@ -978,12 +979,12 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                             "pre-minimized NWA differs from original",
                         );
                     }
-                    minimized
+                    (minimized, true)
                 } else {
-                    nwa
+                    (nwa, false)
                 }
             } else {
-                nwa
+                (nwa, false)
             };
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
@@ -1014,7 +1015,15 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
                 })
                 .unwrap_or(false);
-            let dwa = if skip_minimize { det } else { minimize_owned(det) };
+            let dwa = if skip_minimize {
+                det
+            } else if path_conditioned_after_preminimize
+                && std::env::var_os("GLRMASK_DISABLE_PATH_CONDITIONED_MINIMIZE").is_none()
+            {
+                minimize_owned_path_conditioned(det)
+            } else {
+                minimize_owned(det)
+            };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
 

@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
+use super::equivalence::find_difference;
 use crate::ds::weight::{Weight, WeightIntersectionIndex};
 
 type Label = i32;
@@ -379,6 +380,41 @@ fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
     } else {
         None // cyclic
     }
+}
+
+/// Recover the live path domain of an already path-conditioned DWA from its
+/// incoming edge weights. Determinization emits cumulative path weights on
+/// edges; for such a DWA, all incoming weights to a state describe exactly the
+/// token contexts in which that residual is reachable.
+fn compute_forward_path_domains(dwa: &DWA) -> Option<(Vec<usize>, Vec<Weight>)> {
+    let topo = compute_topo_order(dwa)?;
+    let n = dwa.states().len();
+    let mut incoming = vec![SmallVec::<[Weight; 2]>::new(); n];
+    for state in dwa.states() {
+        for (target, weight) in state.transitions.values() {
+            let target = *target as usize;
+            if target < n && !weight.is_empty() {
+                incoming[target].push(weight.clone());
+            }
+        }
+    }
+    let mut domains = vec![Weight::empty(); n];
+    let start = dwa.start_state() as usize;
+    if start < n {
+        domains[start] = Weight::all();
+    }
+    for state in 0..n {
+        if state == start || incoming[state].is_empty() {
+            continue;
+        }
+        // Determinized residuals commonly have many identical incoming path
+        // domains. Pointer-dedup keeps the union proportional to distinct
+        // domains without hashing the full weight value.
+        incoming[state].sort_unstable_by_key(Weight::ptr_key);
+        incoming[state].dedup_by_key(|weight| weight.ptr_key());
+        domains[state] = Weight::union_all(incoming[state].iter());
+    }
+    Some((topo, domains))
 }
 
 /// Needed sets: for each state, the set of tokens that can flow from that
@@ -4237,9 +4273,24 @@ pub fn minimize_acyclic_owned(pushed: DWA) -> DWA {
     minimize_acyclic_owned_with_pointwise_class_order(pushed, PointwiseClassOrder::Stable)
 }
 
+/// Minimize a DWA produced from an already backward-pushed, path-conditioned
+/// automaton. Determinization carries cumulative path domains on incoming
+/// edges, so those domains can replace a second backward-needed union pass.
+pub fn minimize_acyclic_owned_path_conditioned(pushed: DWA) -> DWA {
+    minimize_acyclic_owned_impl(pushed, PointwiseClassOrder::Stable, true)
+}
+
 pub fn minimize_acyclic_owned_with_pointwise_class_order(
+    pushed: DWA,
+    pointwise_class_order: PointwiseClassOrder,
+) -> DWA {
+    minimize_acyclic_owned_impl(pushed, pointwise_class_order, false)
+}
+
+fn minimize_acyclic_owned_impl(
     mut pushed: DWA,
     pointwise_class_order: PointwiseClassOrder,
+    use_forward_domains: bool,
 ) -> DWA {
     if pushed.states().is_empty() {
         return pushed;
@@ -4250,29 +4301,32 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
         return minimized;
     }
 
+    let strict_forward_reference =
+        (use_forward_domains
+            && std::env::var_os("GLRMASK_ASSERT_WEIGHTED_MINIMIZE_FORWARD_DOMAINS").is_some())
+        .then(|| pushed.clone());
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let total_started_at = Instant::now();
     let input_states = pushed.num_states();
     let input_transitions = pushed.num_transitions();
 
-    // Push weights in-place on the owned determinized DWA.
     let push_started_at = Instant::now();
-    let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
+    let (topo, needed) = if use_forward_domains {
+        match compute_forward_path_domains(&pushed) {
+            Some(result) => result,
+            None => return pushed,
+        }
+    } else {
+        let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
+        let topo = match topo_from_push {
+            Some(t) => t,
+            None => return pushed,
+        };
+        (topo, reachable_from_push)
+    };
     let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Reuse topo order from push_weights (graph structure unchanged by push).
-    let topo = match topo_from_push {
-        Some(t) => t,
-        None => return pushed, // cyclic — fall back
-    };
-
-    // Reuse backward-reachable token sets from push_weights as needed sets.
-    // Proof: push_weights computes reachable[u] = final(u) ∪ union(w(u,t) ∩ reachable[t]).
-    // a fresh needed-set pass on the pushed DWA uses the same recurrence (since
-    // w_pushed = w_orig ∩ reachable[t], and A ∩ A = A in the needed recurrence).
-    // Both produce identical results, so we skip the redundant recomputation.
     let start_state = pushed.start_state() as usize;
-    let needed = reachable_from_push;
     #[cfg(debug_assertions)]
     debug_assert_pushed_weights_within_needed(&pushed, &needed);
     if needed[start_state].is_empty() {
@@ -4454,6 +4508,15 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
         );
     }
 
+    if let Some(reference) = strict_forward_reference {
+        assert_eq!(
+            find_difference(&minimized, &reference)
+                .expect("forward-domain minimizer equivalence check failed"),
+            None,
+            "forward-domain minimizer changed weighted language",
+        );
+    }
+
     minimized
 }
 
@@ -4461,7 +4524,9 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
 mod tests {
     use super::{
         batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
-        memberwise_group_compatible, minimize_acyclic, push_weights,
+        find_difference,
+        memberwise_group_compatible, minimize_acyclic, minimize_acyclic_owned_path_conditioned,
+        push_weights,
         overlay_compatible_token_behavior_ranges,
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
@@ -4646,6 +4711,37 @@ mod tests {
             );
         }
         assert_eq!(sparse.region_entry_count(), dense.region_entry_count());
+    }
+
+    #[test]
+    fn path_conditioned_minimizer_preserves_weighted_language() {
+        // The two middle states represent the same structural residual under
+        // disjoint cumulative path domains. This is the shape emitted by
+        // determinizing an already backward-pushed token-conditional NWA.
+        let left_domain = Weight::from_uniform(1..=1, token_set(&[(10, 19)]));
+        let right_domain = Weight::from_uniform(1..=1, token_set(&[(20, 29)]));
+        let all_domain = left_domain.union(&right_domain);
+
+        let mut start = DWAState::default();
+        start.transitions.insert(1, (1, left_domain.clone()));
+        start.transitions.insert(2, (2, right_domain.clone()));
+
+        let mut left = DWAState::default();
+        left.transitions.insert(3, (3, left_domain.clone()));
+        let mut right = DWAState::default();
+        right.transitions.insert(3, (3, right_domain.clone()));
+
+        let mut leaf = DWAState::default();
+        leaf.final_weight = Some(all_domain);
+
+        let original = DWA::from_parts(vec![start, left, right, leaf], 0);
+        let minimized = minimize_acyclic_owned_path_conditioned(original.clone());
+        assert_eq!(
+            find_difference(&original, &minimized).unwrap(),
+            None,
+            "path-conditioned minimization changed the weighted language",
+        );
+        assert!(minimized.num_states() < original.num_states());
     }
 
     #[test]
