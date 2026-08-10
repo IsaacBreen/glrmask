@@ -2674,28 +2674,51 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
     let mut expanded = 0usize;
     while let Some(state) = queue.pop_front() {
-        let mut row = Vec::new();
-        for (symbol, &byte) in bytes.iter().enumerate() {
-            let before = projected.configs.len();
-            let target = projected.step(state, byte, &roots);
-            if target != DEAD {
-                row.push((symbol as u8, target));
-            }
-            if projected.configs.len() > before {
-                queue.extend(before as u32..projected.configs.len() as u32);
-                if projected.configs.len() > finite_switch_states {
-                    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
-                        eprintln!(
-                            "[glrmask/profile][l1_residual_finite_switch] partition={} projected_states={} threshold={} action=finite",
-                            input.partition_label,
-                            projected.configs.len(),
-                            finite_switch_states,
-                        );
-                    }
-                    return build_finite_projected(input);
+        let singleton = match &projected.configs[state as usize] {
+            (group, ConfigStates::One(source)) => Some((*group as usize, *source as usize)),
+            (_, ConfigStates::Many(_)) => None,
+        };
+        let mut row = Vec::with_capacity(bytes.len());
+        if let Some((group, source)) = singleton {
+            // Almost every projected residual in real tokenizer graphs is a
+            // singleton. Such a transition cannot intern a new projected state:
+            // it only follows one raw DFA edge and selects the already-built
+            // residual root for this terminal group. Keep the invariant values
+            // out of the byte loop and avoid the generic mutable step/queue path.
+            let flat_base = source * 256;
+            for (symbol, &byte) in bytes.iter().enumerate() {
+                let raw_target = input.flat_trans[flat_base + byte as usize];
+                if raw_target == DEAD {
+                    continue;
                 }
-                if projected_limit_exceeded(input, projected.configs.len(), limit) {
-                    return build_finite_projected(input);
+                let target = roots[raw_target as usize][group];
+                if target != DEAD {
+                    row.push((symbol as u8, target));
+                }
+            }
+        } else {
+            for (symbol, &byte) in bytes.iter().enumerate() {
+                let before = projected.configs.len();
+                let target = projected.step(state, byte, &roots);
+                if target != DEAD {
+                    row.push((symbol as u8, target));
+                }
+                if projected.configs.len() > before {
+                    queue.extend(before as u32..projected.configs.len() as u32);
+                    if projected.configs.len() > finite_switch_states {
+                        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                            eprintln!(
+                                "[glrmask/profile][l1_residual_finite_switch] partition={} projected_states={} threshold={} action=finite",
+                                input.partition_label,
+                                projected.configs.len(),
+                                finite_switch_states,
+                            );
+                        }
+                        return build_finite_projected(input);
+                    }
+                    if projected_limit_exceeded(input, projected.configs.len(), limit) {
+                        return build_finite_projected(input);
+                    }
                 }
             }
         }
