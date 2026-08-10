@@ -1830,6 +1830,114 @@ fn build_token_behavior_region(
     result
 }
 
+#[inline]
+fn pointwise_cursor_at<'a, I>(
+    iter: &mut std::iter::Peekable<I>,
+    pos: u32,
+    window_end_exclusive: u64,
+) -> (Option<&'a RangeSetBlaze<u32>>, u64)
+where
+    I: Iterator<Item = (std::ops::RangeInclusive<u32>, &'a Arc<RangeSetBlaze<u32>>)>,
+{
+    while iter
+        .peek()
+        .is_some_and(|(range, _)| *range.end() < pos)
+    {
+        iter.next();
+    }
+    let Some((range, tokens)) = iter.peek() else {
+        return (None, window_end_exclusive);
+    };
+    let start = *range.start();
+    let end = *range.end();
+    if start <= pos {
+        let shared: &'a Arc<RangeSetBlaze<u32>> = *tokens;
+        (
+            Some(shared.as_ref()),
+            (u64::from(end) + 1).min(window_end_exclusive),
+        )
+    } else {
+        (None, u64::from(start).min(window_end_exclusive))
+    }
+}
+
+/// Exact k-way monotone sweep over the sorted outer TSID ranges. Unlike the
+/// boundary-materializing path, this never copies source range lists, clips
+/// them into temporary vectors, or sorts/deduplicates change points.
+fn build_pointwise_profile_monotone(
+    domain: &Weight,
+    profile: &ClassProfile,
+    behaviors: &mut PointwiseBehaviorInterner,
+    regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
+) -> Option<PointwiseProfile> {
+    if domain.is_full()
+        || profile.final_weight.as_ref().is_some_and(Weight::is_full)
+        || profile.weights.iter().any(|(_, weight)| weight.is_full())
+    {
+        return None;
+    }
+
+    let transitions: SmallVec<[(Label, u32, &Weight); 4]> = profile
+        .weights
+        .iter()
+        .map(|(label, weight)| Some((*label, profile_target_for_label(profile, *label)?, weight)))
+        .collect::<Option<_>>()?;
+    let mut final_iter = profile
+        .final_weight
+        .as_ref()
+        .map(|weight| weight.raw_range_values().peekable());
+    let mut transition_iters: SmallVec<[_; 4]> = transitions
+        .iter()
+        .map(|(_, _, weight)| weight.raw_range_values().peekable())
+        .collect();
+
+    let mut by_tsid = Vec::new();
+    for (domain_start, domain_end, domain_tokens) in domain.range_entries() {
+        let window_end_exclusive = u64::from(domain_end) + 1;
+        let mut pos = domain_start;
+        loop {
+            let (final_tokens, mut next_change) = if let Some(iter) = final_iter.as_mut() {
+                pointwise_cursor_at(iter, pos, window_end_exclusive)
+            } else {
+                (None, window_end_exclusive)
+            };
+            let mut active_transitions: SmallVec<[(Label, u32, &RangeSetBlaze<u32>); 4]> =
+                SmallVec::new();
+            for (index, iter) in transition_iters.iter_mut().enumerate() {
+                let (tokens, transition_change) =
+                    pointwise_cursor_at(iter, pos, window_end_exclusive);
+                next_change = next_change.min(transition_change);
+                if let Some(tokens) = tokens {
+                    let (label, target, _) = transitions[index];
+                    active_transitions.push((label, target, tokens));
+                }
+            }
+            debug_assert!(next_change > u64::from(pos));
+            if next_change <= u64::from(pos) {
+                return None;
+            }
+            let interval_end = (next_change - 1) as u32;
+            let region = build_token_behavior_region(
+                domain_tokens.as_ref(),
+                final_tokens,
+                active_transitions.as_slice(),
+                behaviors,
+                regions,
+                build_cache,
+            )?;
+            for tsid in pos..=interval_end {
+                by_tsid.push((tsid, Arc::clone(&region)));
+            }
+            if next_change >= window_end_exclusive {
+                break;
+            }
+            pos = next_change as u32;
+        }
+    }
+    Some(PointwiseProfile { by_tsid })
+}
+
 /// Materialize a complete observable behavior function. A profile is constant
 /// over large TSID intervals, so build its token behavior once per interval
 /// then share that immutable region for every TSID in the interval.
@@ -1839,7 +1947,13 @@ fn build_pointwise_profile(
     behaviors: &mut PointwiseBehaviorInterner,
     regions: &mut PointwiseRegionInterner,
     build_cache: &mut PointwiseRegionBuildCache,
+    monotone_pointwise: bool,
 ) -> Option<PointwiseProfile> {
+    if monotone_pointwise {
+        return build_pointwise_profile_monotone(
+            domain, profile, behaviors, regions, build_cache,
+        );
+    }
     if domain.is_full()
         || profile.final_weight.as_ref().is_some_and(Weight::is_full)
         || profile.weights.iter().any(|(_, weight)| weight.is_full())
@@ -2210,6 +2324,7 @@ fn try_build_and_color_pointwise(
     class_profiles: &[ClassProfile],
     pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
+    monotone_pointwise: bool,
 ) -> Option<HybridColoring> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
@@ -2224,6 +2339,7 @@ fn try_build_and_color_pointwise(
             &mut interner,
             &mut regions,
             &mut region_build_cache,
+            monotone_pointwise,
         )?);
     }
     let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2377,6 +2493,7 @@ fn try_build_and_color_pointwise_ranges(
     class_profiles: &[ClassProfile],
     pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
+    monotone_pointwise: bool,
 ) -> Option<Vec<usize>> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
@@ -2426,6 +2543,7 @@ fn try_build_and_color_pointwise_ranges(
             class_profiles,
             pointwise_class_order,
             profile_enabled,
+            monotone_pointwise,
         )
         .map(|result| result.coloring);
     }
@@ -3052,6 +3170,7 @@ fn build_and_color_hybrid(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
     pointwise_class_order: PointwiseClassOrder,
+    monotone_pointwise: bool,
 ) -> HybridColoring {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     if candidates.len() <= 64
@@ -3168,6 +3287,7 @@ fn build_and_color_hybrid(
             &class_profiles,
             pointwise_class_order,
             profile_enabled,
+            monotone_pointwise,
         )
         .map(HybridColoring::ordinary)
     } else {
@@ -3178,6 +3298,7 @@ fn build_and_color_hybrid(
             &class_profiles,
             pointwise_class_order,
             profile_enabled,
+            monotone_pointwise,
         )
     };
     if profile_enabled && prefer_overlap_indexed_merge {
@@ -4432,6 +4553,8 @@ fn minimize_acyclic_owned_impl(
             &old_to_new,
             &productive_transitions,
             pointwise_class_order,
+            use_forward_domains
+                && std::env::var_os("GLRMASK_DISABLE_MONOTONE_POINTWISE").is_none(),
         );
         let coloring = &coloring_result.coloring;
         height_color_ms += color_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -4534,7 +4657,7 @@ mod tests {
         weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
         PointwiseBehaviorMap, PointwiseBehaviorMapLayout, PointwiseProfile,
         PointwiseRegionBuildCache, PointwiseRegionInterner, TokenBehaviorRange,
-        build_token_behavior_region,
+        build_pointwise_profile, build_token_behavior_region,
     };
     use crate::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
@@ -4591,6 +4714,60 @@ mod tests {
             weights_equal_on_domain_intersection(a, b, left, right),
             weights_equal_on_domain(a, b, &overlap),
         );
+    }
+
+    #[test]
+    fn monotone_pointwise_profile_matches_boundary_materialization() {
+        let domain = Weight::from_per_tsid_token_sets(
+            [0u32, 1, 2, 4, 5, 6]
+                .into_iter()
+                .map(|tsid| (tsid, token_set(&[(0, 3)]))),
+        );
+        let primary = domain.clone();
+        let secondary = Weight::from_per_tsid_token_sets(
+            [1u32, 2, 4, 5]
+                .into_iter()
+                .map(|tsid| (tsid, token_set(&[(2, 3)]))),
+        );
+        let final_weight = Weight::from_per_tsid_token_sets(
+            [0u32, 2, 5]
+                .into_iter()
+                .map(|tsid| (tsid, token_set(&[(0, 1)]))),
+        );
+        let profile = ClassProfile {
+            targets: vec![(7, 1), (8, 2)],
+            weights: vec![(7, primary), (8, secondary)],
+            final_weight: Some(final_weight),
+        };
+
+        let mut behaviors = PointwiseBehaviorInterner::default();
+        let mut regions = PointwiseRegionInterner::default();
+        let old = build_pointwise_profile(
+            &domain,
+            &profile,
+            &mut behaviors,
+            &mut regions,
+            &mut PointwiseRegionBuildCache::default(),
+            false,
+        )
+        .unwrap();
+        let monotone = build_pointwise_profile(
+            &domain,
+            &profile,
+            &mut behaviors,
+            &mut regions,
+            &mut PointwiseRegionBuildCache::default(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(old.by_tsid.len(), monotone.by_tsid.len());
+        for ((old_tsid, old_region), (new_tsid, new_region)) in
+            old.by_tsid.iter().zip(&monotone.by_tsid)
+        {
+            assert_eq!(old_tsid, new_tsid);
+            assert_eq!(old_region.as_ref(), new_region.as_ref(), "tsid={old_tsid}");
+        }
     }
 
     #[test]
