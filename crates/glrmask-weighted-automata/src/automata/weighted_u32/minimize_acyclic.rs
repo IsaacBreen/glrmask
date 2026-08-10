@@ -2134,13 +2134,60 @@ fn overlay_compatible_token_behavior_ranges(
     result
 }
 
-fn pointwise_profile_compatible(group: &PointwiseMergeGroup, profile: &PointwiseProfile) -> bool {
-    profile.by_tsid.iter().all(|(tsid, ranges)| {
-        group.behavior_by_tsid.get(*tsid).is_none_or(|existing| {
-            Arc::ptr_eq(existing, ranges)
-                || token_behavior_ranges_compatible(existing.as_ref(), ranges.as_ref())
-        })
-    })
+#[derive(Default)]
+struct PointwiseRegionCompatibilityCache {
+    entries: FxHashMap<(usize, usize), bool>,
+    hits: usize,
+    misses: usize,
+}
+
+impl PointwiseRegionCompatibilityCache {
+    #[inline]
+    fn compatible(
+        &mut self,
+        left: &Arc<Vec<TokenBehaviorRange>>,
+        right: &Arc<Vec<TokenBehaviorRange>>,
+    ) -> bool {
+        if Arc::ptr_eq(left, right) {
+            return true;
+        }
+        let left_ptr = Arc::as_ptr(left) as usize;
+        let right_ptr = Arc::as_ptr(right) as usize;
+        let key = if left_ptr <= right_ptr {
+            (left_ptr, right_ptr)
+        } else {
+            (right_ptr, left_ptr)
+        };
+        if let Some(&result) = self.entries.get(&key) {
+            self.hits += 1;
+            return result;
+        }
+        self.misses += 1;
+        let result = token_behavior_ranges_compatible(left.as_ref(), right.as_ref());
+        self.entries.insert(key, result);
+        result
+    }
+}
+
+fn pointwise_profile_compatible(
+    group: &PointwiseMergeGroup,
+    profile: &PointwiseProfile,
+    compatibility_cache: Option<&mut PointwiseRegionCompatibilityCache>,
+) -> bool {
+    match compatibility_cache {
+        Some(cache) => profile.by_tsid.iter().all(|(tsid, ranges)| {
+            group
+                .behavior_by_tsid
+                .get(*tsid)
+                .is_none_or(|existing| cache.compatible(existing, ranges))
+        }),
+        None => profile.by_tsid.iter().all(|(tsid, ranges)| {
+            group.behavior_by_tsid.get(*tsid).is_none_or(|existing| {
+                Arc::ptr_eq(existing, ranges)
+                    || token_behavior_ranges_compatible(existing.as_ref(), ranges.as_ref())
+            })
+        }),
+    }
 }
 
 fn merge_pointwise_profile_into_group(
@@ -2194,6 +2241,9 @@ fn try_build_and_color_pointwise(
 
     let merge_started_at = Instant::now();
     let mut groups = Vec::<PointwiseMergeGroup>::new();
+    let compatibility_cache_enabled =
+        std::env::var_os("GLRMASK_WEIGHTED_REGION_COMPAT_CACHE").is_some();
+    let mut compatibility_cache = PointwiseRegionCompatibilityCache::default();
     let mut group_attempts = 0usize;
     let mut target_rejects = 0usize;
     let mut behavior_rejects = 0usize;
@@ -2217,7 +2267,11 @@ fn try_build_and_color_pointwise(
                 target_rejects += 1;
                 continue;
             }
-            if !pointwise_profile_compatible(group, pointwise_profile) {
+            if !pointwise_profile_compatible(
+                group,
+                pointwise_profile,
+                compatibility_cache_enabled.then_some(&mut compatibility_cache),
+            ) {
                 behavior_rejects += 1;
                 continue;
             }
@@ -2275,7 +2329,7 @@ fn try_build_and_color_pointwise(
             })
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_last_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_last_hits={} region_build_cache_misses={} region_compat_cache_entries={} region_compat_cache_hits={} region_compat_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
@@ -2286,6 +2340,9 @@ fn try_build_and_color_pointwise(
             region_build_cache.hits,
             region_build_cache.last_hits,
             region_build_cache.misses,
+            compatibility_cache.entries.len(),
+            compatibility_cache.hits,
+            compatibility_cache.misses,
             direct_overlay_slots,
             direct_overlay_hits,
             direct_overlay_misses,
