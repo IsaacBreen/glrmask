@@ -558,6 +558,21 @@ fn transition_symbol_mask(row: &[(u8, u32)]) -> [u64; 4] {
     mask
 }
 
+#[inline]
+fn transition_symbol_and_self_masks(row: &[(u8, u32)], state: u32) -> ([u64; 4], [u64; 4]) {
+    let mut symbols = [0u64; 4];
+    let mut self_symbols = [0u64; 4];
+    for &(symbol, target) in row {
+        let word = symbol as usize >> 6;
+        let bit = 1u64 << (symbol & 63);
+        symbols[word] |= bit;
+        if target == state {
+            self_symbols[word] |= bit;
+        }
+    }
+    (symbols, self_symbols)
+}
+
 enum SccComponent {
     Single(u32),
     Many(Vec<u32>),
@@ -860,15 +875,31 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
             // known, so exact row interning suffices. With a self-loop, candidate
             // C must semantically self-loop on that same symbol; test only those
             // indexed candidates and interpret physical SELF as C.
-            let symbol_mask = transition_symbol_mask(source_row);
-            let best_self_symbol = source_row
-                .iter()
-                .filter_map(|&(symbol, target)| (target == state).then_some(symbol))
-                .min_by_key(|&symbol| {
-                    self_classes_by_shape
+            let (symbol_mask, self_symbol_mask) =
+                transition_symbol_and_self_masks(source_row, state);
+            let mut best_self_symbol = None;
+            let mut best_self_bucket = usize::MAX;
+            for (word_index, &word) in self_symbol_mask.iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let symbol = (word_index * 64 + bit) as u8;
+                    let bucket = self_classes_by_shape
                         .get(&(symbol, symbol_mask))
-                        .map_or(0, Vec::len)
-                });
+                        .map_or(0, Vec::len);
+                    if bucket < best_self_bucket {
+                        best_self_bucket = bucket;
+                        best_self_symbol = Some(symbol);
+                        if bucket == 0 {
+                            break;
+                        }
+                    }
+                    bits &= bits - 1;
+                }
+                if best_self_bucket == 0 {
+                    break;
+                }
+            }
             let state_class = if let Some(self_symbol) = best_self_symbol {
                 let mut matched = None;
                 let candidates = self_classes_by_shape
