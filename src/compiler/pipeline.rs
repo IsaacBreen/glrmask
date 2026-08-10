@@ -245,6 +245,17 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    if std::env::var_os("GLRMASK_FRESH_COMPILE_THREAD_POOL").is_some() {
+        if let Some(thread_count) = compile_thread_count() {
+            if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+                .num_threads(thread_count)
+                .build()
+            {
+                return pool.install(f);
+            }
+        }
+        return f();
+    }
     if let Some(pool) = &*COMPILE_THREAD_POOL {
         pool.install(f)
     } else {
