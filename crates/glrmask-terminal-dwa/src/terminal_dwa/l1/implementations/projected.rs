@@ -2715,6 +2715,26 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         0.0,
         || total.elapsed().as_secs_f64() * 1000.0,
     )?;
+    if std::env::var_os("GLRMASK_PROFILE_L1_SUMMARY").is_some() {
+        eprintln!(
+            "[glrmask/profile][l1_summary] partition={} projected_states={} minimized_states={} grouped_local_states={} grouped_local_ms={:.3} grouped_global_ms={:.3} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            input.partition_label,
+            projected.configs.len(),
+            minimized.state_count,
+            grouped_minimize.as_ref().map_or(0, |stats| stats.local_states),
+            grouped_minimize.as_ref().map_or(0.0, |stats| stats.local_ms),
+            grouped_minimize.as_ref().map_or(0.0, |stats| stats.global_ms),
+            projected_ms,
+            minimize_ms,
+            root_vectors_ms,
+            reverse_ms,
+            incidence_ms,
+            signature_ms,
+            traverse_ms,
+            finished.build_ms,
+            total.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         let live_edges = projected.transitions.iter().map(Vec::len).sum::<usize>();
         let max_live_edges = projected.transitions.iter().map(Vec::len).max().unwrap_or(0);
