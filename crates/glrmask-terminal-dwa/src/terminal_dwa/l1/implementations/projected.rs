@@ -203,16 +203,25 @@ impl<'a> Projected<'a> {
         row
     }
 
-    fn step_many(&mut self, state: u32, byte: u8) -> u32 {
+    fn step(&mut self, state: u32, byte: u8, roots: &[Vec<u32>]) -> u32 {
         let group = self.configs[state as usize].0;
-        let ConfigStates::Many(config) = &self.configs[state as usize].1 else {
-            unreachable!("singleton projected states use the direct expansion path");
-        };
-        let config = Arc::clone(config);
-        self.intern(
-            group,
-            self.input.tokenizer.step_all(config.as_ref(), byte).to_vec(),
-        )
+        match &self.configs[state as usize].1 {
+            ConfigStates::One(source) => {
+                let target = self.input.flat_trans[*source as usize * 256 + byte as usize];
+                if target == DEAD {
+                    DEAD
+                } else {
+                    roots[target as usize][group as usize]
+                }
+            }
+            ConfigStates::Many(config) => {
+                let config = Arc::clone(config);
+                self.intern(
+                    group,
+                    self.input.tokenizer.step_all(config.as_ref(), byte).to_vec(),
+                )
+            }
+        }
     }
 }
 
@@ -2613,7 +2622,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     // Every transition that lands on a raw state therefore enters the same
     // projected residual as its certified representative instead of rebuilding
     // duplicate `(terminal, raw-state)` subautomata.
-    let mut roots_by_raw = if let Some(state_map) = input.initial_state_map {
+    let mut roots = if let Some(state_map) = input.initial_state_map {
         debug_assert_eq!(
             state_map.original_to_internal.len(),
             input.tokenizer.num_states() as usize
@@ -2643,15 +2652,6 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .map(|raw| projected.root_row(raw))
             .collect::<Vec<_>>()
     };
-    let raw_state_count = roots_by_raw.len();
-    let group_count = projected.active_by_group.len();
-    let mut roots_by_group = vec![DEAD; raw_state_count * group_count];
-    for (raw, row) in roots_by_raw.iter().enumerate() {
-        debug_assert_eq!(row.len(), group_count);
-        for (group, &target) in row.iter().enumerate() {
-            roots_by_group[group * raw_state_count + raw] = target;
-        }
-    }
     if projected.configs.len() > finite_switch_states {
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
@@ -2691,7 +2691,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
                 if raw_target == DEAD {
                     continue;
                 }
-                let target = roots_by_group[group * raw_state_count + raw_target as usize];
+                let target = roots[raw_target as usize][group];
                 if target != DEAD {
                     row.push((symbol as u8, target));
                 }
@@ -2699,7 +2699,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         } else {
             for (symbol, &byte) in bytes.iter().enumerate() {
                 let before = projected.configs.len();
-                let target = projected.step_many(state, byte);
+                let target = projected.step(state, byte, &roots);
                 if target != DEAD {
                     row.push((symbol as u8, target));
                 }
@@ -2750,7 +2750,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             minimized.byte_class[input_byte_representative[byte as usize] as usize];
     }
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
-    for row in &mut roots_by_raw {
+    for row in &mut roots {
         for state in row {
             if *state != DEAD {
                 *state = minimized.classes[*state as usize];
@@ -2763,8 +2763,8 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     // Full residual-root vectors exactly preclassify raw lexer states.
     let mut root_vector_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut root_vectors = Vec::<Vec<u32>>::new();
-    let mut raw_root_class = vec![0u32; roots_by_raw.len()];
-    for (raw, root_row) in roots_by_raw.iter().enumerate() {
+    let mut raw_root_class = vec![0u32; roots.len()];
+    for (raw, root_row) in roots.iter().enumerate() {
         let next = root_vectors.len() as u32;
         raw_root_class[raw] = *root_vector_ids.entry(root_row.clone()).or_insert_with(|| {
             root_vectors.push(root_row.clone());
@@ -2772,7 +2772,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         });
     }
 
-    let mut used_classes = roots_by_raw
+    let mut used_classes = roots
         .iter()
         .flatten()
         .copied()
