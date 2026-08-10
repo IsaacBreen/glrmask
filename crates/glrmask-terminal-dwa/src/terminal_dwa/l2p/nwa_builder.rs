@@ -716,22 +716,58 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         self.continuation_pruned_misses += 1;
 
-        let mut remaining = child_node.reachable_token_ids().clone();
-        if remaining_segment.is_empty() && child_node.has_token() {
-            remaining.remove(leaf_token_id as usize);
+        let remove_leaf = remaining_segment.is_empty() && child_node.has_token();
+        let possible_matches = end_state.map(|end_state| {
+            self.possible_matches.possible_matches_for_suffix_and_node(
+                remaining_segment,
+                child_node,
+                end_state,
+            )
+        });
+        let matches_for_terminal = possible_matches
+            .as_ref()
+            .and_then(|possible_matches| possible_matches.get(&terminal_id));
+
+        if std::env::var_os("GLRMASK_L2P_RANGE_SUBTRACT_PM").is_some() {
+            // Most continuation queries have no terminal-specific exclusions.
+            // In that case the exact answer is the node's already-cached
+            // reachable weight; avoid cloning/rebuilding the token set entirely.
+            if !remove_leaf && matches_for_terminal.is_none() {
+                let weight = self.cached_reachable_weight(child_node.reachable_token_ids());
+                self.pruned_weight_cache.insert(cache_key, weight.clone());
+                return Some(weight);
+            }
+
+            // RangeSetBlaze's set difference is a sorted range sweep. Construct
+            // only the small exclusion set (possible matches plus the endpoint
+            // token when needed), rather than cloning the reachable set and
+            // deleting every matching token ID one at a time.
+            let exclusion_ranges = matches_for_terminal
+                .into_iter()
+                .flat_map(|matches| {
+                    matches
+                        .ranges()
+                        .map(|range| (*range.start() as usize)..=(*range.end() as usize))
+                })
+                .chain(remove_leaf.then_some(
+                    (leaf_token_id as usize)..=(leaf_token_id as usize),
+                ));
+            let exclusions = RangeSetBlaze::<usize>::from_iter(exclusion_ranges);
+            let remaining = child_node.reachable_token_ids() - &exclusions;
+            if remaining.is_empty() {
+                return None;
+            }
+            let weight = self.token_set_weight_fast(&remaining);
+            self.pruned_weight_cache.insert(cache_key, weight.clone());
+            return Some(weight);
         }
 
-        if let Some(end_state) = end_state {
-            let possible_matches = self
-                .possible_matches
-                .possible_matches_for_suffix_and_node(
-                    remaining_segment,
-                    child_node,
-                    end_state,
-                );
-            if let Some(matches_for_terminal) = possible_matches.get(&terminal_id) {
-                subtract_possible_matches(&mut remaining, matches_for_terminal);
-            }
+        let mut remaining = child_node.reachable_token_ids().clone();
+        if remove_leaf {
+            remaining.remove(leaf_token_id as usize);
+        }
+        if let Some(matches_for_terminal) = matches_for_terminal {
+            subtract_possible_matches(&mut remaining, matches_for_terminal);
         }
 
         if remaining.is_empty() {
