@@ -1625,6 +1625,7 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(clear_weight_op_caches, &internal)?)?;
     internal.add_function(wrap_pyfunction!(clear_weight_caches, &internal)?)?;
     internal.add_function(wrap_pyfunction!(clear_weight_interners, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(collect_mimalloc, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compiler_cache_stats, &internal)?)?;
     internal.add_function(wrap_pyfunction!(prepare_vocab_for_compile, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compile_grammar_def_json, &internal)?)?;
@@ -1730,6 +1731,11 @@ fn clear_weight_caches() {
 #[pyfunction]
 fn clear_weight_interners() {
     glrmask::Constraint::clear_weight_interners();
+}
+
+#[pyfunction]
+fn collect_mimalloc(force: bool) {
+    unsafe { libmimalloc_sys::mi_collect(force) };
 }
 
 #[pyfunction]
