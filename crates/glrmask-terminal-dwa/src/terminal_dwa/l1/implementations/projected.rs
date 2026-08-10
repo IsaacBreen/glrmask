@@ -558,14 +558,29 @@ fn transition_symbol_mask(row: &[(u8, u32)]) -> [u64; 4] {
     mask
 }
 
-fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<Vec<u32>>) {
+enum SccComponent {
+    Single(u32),
+    Many(Vec<u32>),
+}
+
+impl SccComponent {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Many(members) => members.len(),
+        }
+    }
+}
+
+fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> Vec<SccComponent> {
     let n = transitions.len();
     let mut next_index = 0u32;
     let mut indices = vec![u32::MAX; n];
     let mut lowlink = vec![0u32; n];
     let mut stack = Vec::<u32>::with_capacity(n);
     let mut on_stack = vec![false; n];
-    let mut emitted = Vec::<Vec<u32>>::new();
+    let mut emitted = Vec::<SccComponent>::new();
 
     fn visit(
         state: u32,
@@ -575,7 +590,7 @@ fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<V
         lowlink: &mut [u32],
         stack: &mut Vec<u32>,
         on_stack: &mut [bool],
-        emitted: &mut Vec<Vec<u32>>,
+        emitted: &mut Vec<SccComponent>,
     ) {
         let state_usize = state as usize;
         let index = *next_index;
@@ -605,16 +620,25 @@ fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<V
         }
 
         if lowlink[state_usize] == indices[state_usize] {
-            let mut members = Vec::<u32>::new();
-            loop {
-                let member = stack.pop().expect("Tarjan root must remain on stack");
-                on_stack[member as usize] = false;
-                members.push(member);
-                if member == state {
-                    break;
+            let first = stack.pop().expect("Tarjan root must remain on stack");
+            on_stack[first as usize] = false;
+            if first == state {
+                // This is overwhelmingly the common case for projected L1:
+                // avoid allocating one heap Vec for every singleton SCC.
+                emitted.push(SccComponent::Single(state));
+            } else {
+                let mut members = Vec::<u32>::with_capacity(8);
+                members.push(first);
+                loop {
+                    let member = stack.pop().expect("Tarjan root must remain on stack");
+                    on_stack[member as usize] = false;
+                    members.push(member);
+                    if member == state {
+                        break;
+                    }
                 }
+                emitted.push(SccComponent::Many(members));
             }
-            emitted.push(members);
         }
     }
 
@@ -634,19 +658,13 @@ fn tarjan_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<V
     }
     debug_assert!(stack.is_empty());
 
-    // Tarjan emits sink SCCs first. Normalize to the source-to-sink order used
-    // by the reducer so reverse iteration solves every successor first.
+    // Tarjan emits sink SCCs first. Normalize to source-to-sink order; the
+    // reducer walks this vector backwards so every successor is solved first.
     emitted.reverse();
-    let mut component_of = vec![u32::MAX; n];
-    for (component, members) in emitted.iter().enumerate() {
-        for &state in members {
-            component_of[state as usize] = component as u32;
-        }
-    }
-    (component_of, emitted)
+    emitted
 }
 
-fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<Vec<u32>>) {
+fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> Vec<SccComponent> {
     let n = transitions.len();
     // Kosaraju, ignoring literal self-loops (they do not affect SCC membership).
     let mut reverse = vec![Vec::<u32>::new(); n];
@@ -688,18 +706,15 @@ fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec
     }
 
     seen.fill(false);
-    let mut component_of = vec![u32::MAX; n];
-    let mut components = Vec::<Vec<u32>>::new();
+    let mut components = Vec::<SccComponent>::new();
     for &root in order.iter().rev() {
         if seen[root as usize] {
             continue;
         }
-        let component = components.len() as u32;
         seen[root as usize] = true;
         let mut members = Vec::<u32>::new();
         let mut stack = vec![root];
         while let Some(state) = stack.pop() {
-            component_of[state as usize] = component;
             members.push(state);
             for &source in &reverse[state as usize] {
                 if !seen[source as usize] {
@@ -708,9 +723,13 @@ fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec
                 }
             }
         }
-        components.push(members);
+        if members.len() == 1 {
+            components.push(SccComponent::Single(members[0]));
+        } else {
+            components.push(SccComponent::Many(members));
+        }
     }
-    (component_of, components)
+    components
 }
 
 fn canonical_transition_row_key(row: &[(u8, u32)]) -> (usize, u64) {
@@ -763,7 +782,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     // graph. Keep iterative Kosaraju for larger components to avoid deep-stack
     // risk on arbitrary grammars.
     const TARJAN_SMALL_STATE_LIMIT: usize = 8_192;
-    let (component_of, components) = if n <= TARJAN_SMALL_STATE_LIMIT {
+    let components = if n <= TARJAN_SMALL_STATE_LIMIT {
         tarjan_scc_components(transitions)
     } else {
         kosaraju_scc_components(transitions)
@@ -778,8 +797,20 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     // rebuilt the full condensation graph, sorted/deduplicated all component
     // edges, and ran a ready queue merely to recover this same order.
     #[cfg(debug_assertions)]
-    for source in 0..n {
-        let source_component = component_of[source];
+    {
+        let mut component_of = vec![u32::MAX; n];
+        for (component, members) in components.iter().enumerate() {
+            match members {
+                SccComponent::Single(state) => component_of[*state as usize] = component as u32,
+                SccComponent::Many(states) => {
+                    for &state in states {
+                        component_of[state as usize] = component as u32;
+                    }
+                }
+            }
+        }
+        for source in 0..n {
+            let source_component = component_of[source];
         for &(_, target) in transitions.row(source) {
             let target_component = component_of[target as usize];
             if target_component != source_component {
@@ -789,6 +820,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                 );
             }
         }
+    }
     }
 
     let condensation_ms = condensation_started.map_or(0.0, |started| {
@@ -818,9 +850,9 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     let mut cyclic_components = 0usize;
     let mut cyclic_states = 0usize;
     for component in (0..components.len()).rev() {
-        let members = &components[component];
-        if members.len() == 1 {
-            let state = members[0];
+        match &components[component] {
+        SccComponent::Single(state) => {
+            let state = *state;
             let source_row = transitions.row(state as usize);
 
             // A singleton SCC may be language-equivalent to an already-solved
@@ -934,7 +966,8 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                 }
             };
             class[state as usize] = state_class;
-        } else {
+        }
+        SccComponent::Many(members) => {
             cyclic_components += 1;
             cyclic_states += members.len();
             let mut member_index = vec![u32::MAX; n];
@@ -1010,7 +1043,7 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                 representatives.push(representative);
             }
         }
-
+        }
     }
     debug_assert!(class.iter().all(|&value| value != u32::MAX));
     debug_assert_eq!(class_rows.len(), representatives.len());
