@@ -32,6 +32,10 @@ use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
+use crate::automata::weighted_u32::minimize_token_deterministic_nwa::{
+    eliminate_acyclic_epsilons, is_token_deterministic_epsilon_free,
+    minimize_token_deterministic_nwa_owned,
+};
 use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -947,6 +951,56 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
 
+            let structural_depth = max_structural_label_depth_to_final(&nwa);
+            // Generic weighted subset construction becomes expensive in the broad p0
+            // regime, but the epsilon-free token-conditional NWA often quotients to
+            // the same tiny state count as the final minimized DWA. Keep this
+            // conservative so small/ordinary p0s stay on the cheaper generic path.
+            let preminimize_nwa = partition_label == "p0"
+                && structural_depth.is_some_and(|depth| depth > 2)
+                && nwa.states().len() >= 256
+                && num_active_terminals >= 256
+                && std::env::var_os("GLRMASK_DISABLE_L2P_PREMINIMIZE_NWA").is_none();
+            let nwa = if preminimize_nwa {
+                let epsilon_eliminate_started_at = Instant::now();
+                let epsilon_free = eliminate_acyclic_epsilons(&nwa)
+                    .expect("L2+ epsilon elimination failed");
+                if std::env::var_os("GLRMASK_PROFILE_TOKEN_NWA_MINIMIZE").is_some() {
+                    let epsilon_free_transitions: usize = epsilon_free
+                        .states()
+                        .iter()
+                        .map(|state| state.transitions.values().map(Vec::len).sum::<usize>())
+                        .sum();
+                    eprintln!(
+                        "[glrmask/profile][l2p_epsilon_eliminate] partition={} states={} transitions={} total_ms={:.3}",
+                        partition_label,
+                        epsilon_free.states().len(),
+                        epsilon_free_transitions,
+                        epsilon_eliminate_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                if is_token_deterministic_epsilon_free(&epsilon_free) {
+                    let minimized = minimize_token_deterministic_nwa_owned(epsilon_free)
+                        .expect("L2+ direct NWA minimization failed");
+                    if std::env::var_os("GLRMASK_ASSERT_L2P_PREMINIMIZE_NWA").is_some() {
+                        let reference = determinize(&nwa)
+                            .expect("L2+ reference determinization failed");
+                        let candidate = determinize(&minimized)
+                            .expect("L2+ minimized-NWA determinization failed");
+                        assert_eq!(
+                            find_difference(&candidate, &reference)
+                                .expect("pre-minimized NWA equivalence check failed"),
+                            None,
+                            "pre-minimized NWA differs from original",
+                        );
+                    }
+                    minimized
+                } else {
+                    nwa
+                }
+            } else {
+                nwa
+            };
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
             let use_depth2 = structural_depth.is_some_and(|depth| depth <= 2);
