@@ -1194,7 +1194,9 @@ struct PointwiseRegionBuildKey {
 #[derive(Default)]
 struct PointwiseRegionBuildCache {
     entries: FxHashMap<PointwiseRegionBuildKey, Option<Arc<Vec<TokenBehaviorRange>>>>,
+    last: Option<(PointwiseRegionBuildKey, Option<Arc<Vec<TokenBehaviorRange>>>)>,
     hits: usize,
+    last_hits: usize,
     misses: usize,
 }
 
@@ -1714,9 +1716,23 @@ fn build_token_behavior_region(
             })
             .collect(),
     };
+    let last_cache_enabled =
+        std::env::var_os("GLRMASK_WEIGHTED_REGION_LAST_CACHE").is_some();
+    if last_cache_enabled
+        && let Some((last_key, last_value)) = build_cache.last.as_ref()
+        && last_key == &key
+    {
+        build_cache.hits += 1;
+        build_cache.last_hits += 1;
+        return last_value.clone();
+    }
     if let Some(existing) = build_cache.entries.get(&key) {
         build_cache.hits += 1;
-        return existing.clone();
+        let result = existing.clone();
+        if last_cache_enabled {
+            build_cache.last = Some((key, result.clone()));
+        }
+        return result;
     }
     build_cache.misses += 1;
     let mut boundaries = Vec::<u64>::new();
@@ -1766,7 +1782,10 @@ fn build_token_behavior_region(
         push_token_behavior_range(&mut token_ranges, start, end, behavior);
     }
     let result = (!token_ranges.is_empty()).then(|| regions.intern(token_ranges));
-    build_cache.entries.insert(key, result.clone());
+    build_cache.entries.insert(key.clone(), result.clone());
+    if last_cache_enabled {
+        build_cache.last = Some((key, result.clone()));
+    }
     result
 }
 
@@ -2256,7 +2275,7 @@ fn try_build_and_color_pointwise(
             })
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_last_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
@@ -2265,6 +2284,7 @@ fn try_build_and_color_pointwise(
             region_entries,
             region_build_cache.entries.len(),
             region_build_cache.hits,
+            region_build_cache.last_hits,
             region_build_cache.misses,
             direct_overlay_slots,
             direct_overlay_hits,
@@ -2450,7 +2470,7 @@ fn try_build_and_color_pointwise_ranges(
             .map(|group| group.behavior_by_tsid.region_entry_count())
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges] candidates={} classes={} groups={} behaviors={} interned_regions={} profile_ranges={} profile_tsid_cells={} group_tsid_ranges={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges] candidates={} classes={} groups={} behaviors={} interned_regions={} profile_ranges={} profile_tsid_cells={} group_tsid_ranges={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_last_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
@@ -2462,6 +2482,7 @@ fn try_build_and_color_pointwise_ranges(
             region_entries,
             region_build_cache.entries.len(),
             region_build_cache.hits,
+            region_build_cache.last_hits,
             region_build_cache.misses,
             direct_overlay_slots,
             direct_overlay_hits,
