@@ -713,6 +713,43 @@ fn kosaraju_scc_components(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec
     (component_of, components)
 }
 
+fn canonical_transition_row_key(row: &[(u8, u32)]) -> (usize, u64) {
+    let mut hasher = FxHasher::default();
+    row.len().hash(&mut hasher);
+    for &(symbol, target) in row {
+        symbol.hash(&mut hasher);
+        target.hash(&mut hasher);
+    }
+    (row.len(), hasher.finish())
+}
+
+fn translated_transition_row_key(source_row: &[(u8, u32)], class: &[u32]) -> (usize, u64) {
+    let mut hasher = FxHasher::default();
+    source_row.len().hash(&mut hasher);
+    for &(symbol, target) in source_row {
+        symbol.hash(&mut hasher);
+        let target_class = class[target as usize];
+        debug_assert_ne!(target_class, u32::MAX);
+        target_class.hash(&mut hasher);
+    }
+    (source_row.len(), hasher.finish())
+}
+
+fn translated_transition_row_matches(
+    source_row: &[(u8, u32)],
+    class: &[u32],
+    candidate_row: &[(u8, u32)],
+) -> bool {
+    source_row.len() == candidate_row.len()
+        && source_row
+            .iter()
+            .zip(candidate_row)
+            .all(|(&(source_symbol, source_target), &(candidate_symbol, candidate_target))| {
+                source_symbol == candidate_symbol
+                    && class[source_target as usize] == candidate_target
+            })
+}
+
 fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, usize, usize) {
     let n = transitions.len();
     if n == 0 {
@@ -771,7 +808,11 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
     // must itself transition on b to C; index those candidates by b so the
     // fixed-point test only scans a tiny exact candidate set.
     let mut class_rows = Vec::<Vec<(u8, u32)>>::new();
-    let mut row_ids = FxHashMap::<Vec<(u8, u32)>, u32>::default();
+    // Most singleton SCCs collapse onto a tiny number of quotient rows. Hash
+    // the translated row without allocating it, then exact-compare only the
+    // handful of canonical rows in that bucket. Materialize a Vec only for a
+    // genuinely new class.
+    let mut classes_by_row_key = FxHashMap::<(usize, u64), Vec<u32>>::default();
     let mut self_classes_by_shape =
         FxHashMap::<(u8, [u64; 4]), Vec<u32>>::default();
     let mut cyclic_components = 0usize;
@@ -857,25 +898,36 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                                 .push(new_class);
                         }
                     }
-                    row_ids.entry(row.clone()).or_insert(new_class);
+                    let key = canonical_transition_row_key(&row);
+                    classes_by_row_key.entry(key).or_default().push(new_class);
                     class_rows.push(row);
                     representatives.push(state);
                     new_class
                 }
             } else {
-                let row = source_row
-                    .iter()
-                    .map(|&(symbol, target)| {
-                        let target_class = class[target as usize];
-                        debug_assert_ne!(target_class, u32::MAX);
-                        (symbol, target_class)
+                let key = translated_transition_row_key(source_row, &class);
+                let existing = classes_by_row_key.get(&key).and_then(|candidates| {
+                    candidates.iter().copied().find(|&candidate| {
+                        translated_transition_row_matches(
+                            source_row,
+                            &class,
+                            &class_rows[candidate as usize],
+                        )
                     })
-                    .collect::<Vec<_>>();
-                if let Some(&existing) = row_ids.get(&row) {
+                });
+                if let Some(existing) = existing {
                     existing
                 } else {
                     let new_class = class_rows.len() as u32;
-                    row_ids.insert(row.clone(), new_class);
+                    let row = source_row
+                        .iter()
+                        .map(|&(symbol, target)| {
+                            let target_class = class[target as usize];
+                            debug_assert_ne!(target_class, u32::MAX);
+                            (symbol, target_class)
+                        })
+                        .collect::<Vec<_>>();
+                    classes_by_row_key.entry(key).or_default().push(new_class);
                     class_rows.push(row);
                     representatives.push(state);
                     new_class
@@ -952,7 +1004,8 @@ fn minimize_scc_dag(transitions: &FlatLocalTransitions) -> (Vec<u32>, Vec<u32>, 
                             .push(global_class);
                     }
                 }
-                row_ids.entry(row.clone()).or_insert(global_class);
+                let key = canonical_transition_row_key(&row);
+                classes_by_row_key.entry(key).or_default().push(global_class);
                 class_rows.push(row);
                 representatives.push(representative);
             }
