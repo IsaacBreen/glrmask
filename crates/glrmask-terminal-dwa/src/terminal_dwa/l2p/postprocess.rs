@@ -12,6 +12,78 @@ use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 
+
+/// Eliminate weighted epsilon edges from an acyclic NWA exactly.
+///
+/// Process states in reverse topological order so every epsilon successor is
+/// already epsilon-free. An epsilon edge `(u --w--> v)` contributes `w ∩ F(v)`
+/// to `F(u)` and `w ∩ T(v,label,target)` to each labeled branch of `u`.
+/// Parallel contributions are unioned. Embedding the successor's complete
+/// epsilon-free behavior into `u` preserves the weighted language while
+/// removing every epsilon edge without subset construction.
+pub fn eliminate_acyclic_epsilons(nwa: &mut NWA) -> bool {
+    if nwa.states().iter().all(|state| state.epsilons.is_empty()) {
+        return true;
+    }
+    let topo = topological_order(nwa);
+    if topo.len() != nwa.states().len() {
+        return false;
+    }
+
+    for state_id in topo.into_iter().rev() {
+        let epsilons = std::mem::take(&mut nwa.states_mut()[state_id].epsilons);
+        if epsilons.is_empty() {
+            continue;
+        }
+
+        // Successors are later in topological order and have already had their
+        // epsilon behavior folded into ordinary final/transition weights.
+        for (target, epsilon_weight) in epsilons {
+            if epsilon_weight.is_empty() {
+                continue;
+            }
+            let successor = nwa.states()[target as usize].clone();
+
+            if let Some(successor_final) = successor.final_weight.as_ref() {
+                let contribution = epsilon_weight.intersection(successor_final);
+                if !contribution.is_empty() {
+                    let final_weight = &mut nwa.states_mut()[state_id].final_weight;
+                    match final_weight {
+                        Some(existing) => *existing = existing.union(&contribution),
+                        None => *final_weight = Some(contribution),
+                    }
+                }
+            }
+
+            for (label, branches) in successor.transitions {
+                let state = &mut nwa.states_mut()[state_id];
+                let output = state.transitions.entry(label).or_default();
+                for (branch_target, branch_weight) in branches {
+                    let contribution = epsilon_weight.intersection(&branch_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    if let Some((_, existing)) = output
+                        .iter_mut()
+                        .find(|(existing_target, _)| *existing_target == branch_target)
+                    {
+                        *existing = existing.union(&contribution);
+                    } else {
+                        output.push((branch_target, contribution));
+                    }
+                }
+                output.retain(|(_, weight)| !weight.is_empty());
+                output.sort_unstable_by_key(|(target, _)| *target);
+            }
+        }
+        nwa.states_mut()[state_id]
+            .transitions
+            .retain(|_, branches| !branches.is_empty());
+    }
+    debug_assert!(nwa.states().iter().all(|state| state.epsilons.is_empty()));
+    true
+}
+
 // ─── Canonicalize ────────────────────────────────────────────────────────────
 
 fn structural_hash_nwa_state(state: &NWAStateType) -> u64 {

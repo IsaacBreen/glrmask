@@ -61,7 +61,7 @@ use terminal_interchangeability::{
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    max_structural_label_depth_to_final, prune_non_coreachable_states,
+    eliminate_acyclic_epsilons, max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -941,6 +941,52 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                         || value == partition_label
                 })
             };
+            let eliminate_epsilons =
+                env_selects_partition("GLRMASK_L2P_ELIMINATE_EPSILONS");
+            let assert_eliminate_epsilons =
+                env_selects_partition("GLRMASK_ASSERT_L2P_ELIMINATE_EPSILONS");
+            let epsilon_reference_nwa =
+                (assert_eliminate_epsilons && eliminate_epsilons).then(|| nwa.clone());
+            let epsilon_input_states = nwa.states().len();
+            let epsilon_input_transitions = nwa.num_transitions();
+            let epsilon_input_edges =
+                nwa.states().iter().map(|state| state.epsilons.len()).sum::<usize>();
+            let epsilon_started_at = Instant::now();
+            if eliminate_epsilons {
+                assert!(
+                    eliminate_acyclic_epsilons(&mut nwa),
+                    "L2+ epsilon elimination requires an acyclic NWA",
+                );
+            }
+            let epsilon_eliminate_ms = epsilon_started_at.elapsed().as_secs_f64() * 1000.0;
+            if let Some(reference_nwa) = epsilon_reference_nwa {
+                let reference = determinize(&reference_nwa)
+                    .expect("L2+ epsilon-elimination reference determinization failed");
+                let candidate = determinize(&nwa)
+                    .expect("L2+ epsilon-elimination candidate determinization failed");
+                assert_eq!(
+                    find_difference(&candidate, &reference)
+                        .expect("L2+ epsilon-elimination equivalence check failed"),
+                    None,
+                    "acyclic epsilon elimination changed the L2+ weighted language",
+                );
+            }
+            if l2p_timing_profile_enabled() && (eliminate_epsilons || assert_eliminate_epsilons) {
+                eprintln!(
+                    "[glrmask/profile][l2p_epsilon_eliminate] partition={} selected={} input_states={} input_transitions={} input_epsilon_edges={} output_states={} output_transitions={} output_epsilon_edges={} eliminate_ms={:.3} strict_equivalence={}",
+                    partition_label,
+                    eliminate_epsilons,
+                    epsilon_input_states,
+                    epsilon_input_transitions,
+                    epsilon_input_edges,
+                    nwa.states().len(),
+                    nwa.num_transitions(),
+                    nwa.states().iter().map(|state| state.epsilons.len()).sum::<usize>(),
+                    epsilon_eliminate_ms,
+                    assert_eliminate_epsilons && eliminate_epsilons,
+                );
+            }
+
             let preminimize_token_nwa =
                 env_selects_partition("GLRMASK_L2P_PREMINIMIZE_TOKEN_NWA");
             let assert_preminimize_token_nwa =
