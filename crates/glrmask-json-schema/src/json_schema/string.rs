@@ -669,6 +669,26 @@ impl<'a> Lowerer<'a> {
             return Ok(self.lower_split_bounded_string(schema.min_length, max_length));
         }
 
+        if schema.pattern.is_none()
+            && let Some(max_length) = schema.max_length
+        {
+            // Keep the closing quote in the bounded suffix terminal. A bare
+            // `{0,n}` body is nullable, which makes the lexer expose a matched
+            // terminal while the same terminal is still in its future. Besides
+            // creating unnecessary delayed possible-match work, that boundary
+            // also gives L2+ analysis a less useful continuation coordinate.
+            // The quote makes the suffix non-nullable without changing the
+            // accepted JSON strings.
+            let mut parts = vec![lit("\"")];
+            if schema.min_length != 0 {
+                parts.push(self.string_char_exact_ref(schema.min_length));
+            }
+            parts.push(self.string_char_upto_close_ref(
+                max_length.saturating_sub(schema.min_length),
+            ));
+            return Ok(seq(parts));
+        }
+
         let body = self.string_body_for_length(schema.min_length, schema.max_length);
 
         Ok(seq(vec![lit("\""), body, lit("\"")]))

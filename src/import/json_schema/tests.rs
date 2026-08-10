@@ -4007,6 +4007,31 @@ fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
 }
 
 #[test]
+fn bounded_property_string_merges_closing_quote_into_suffix_terminal() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": "string",
+                "maxLength": 20
+            }
+        },
+        "required": ["value"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_upto_close_20"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn moderately_bounded_string_terminalizes_by_default() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _terminalize_guard = EnvVarGuard::unset(
