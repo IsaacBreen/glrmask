@@ -2366,8 +2366,16 @@ fn analyze_equivalences_impl(
                 rows.into_iter().take(16).collect::<Vec<_>>(),
             );
         }
-        let vocab_first = dedup.representative_token_bytes.len() >= 512
-            && query_view_states.len() >= 256;
+        let p0_vocab_first = partition_label == "p0"
+            && std::env::var("GLRMASK_P0_VOCAB_FIRST")
+                .map(|value| {
+                    let value = value.trim();
+                    value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+                })
+                .unwrap_or(true);
+        let vocab_first = p0_vocab_first
+            || (dedup.representative_token_bytes.len() >= 512
+                && query_view_states.len() >= 256);
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
                 "[glrmask/profile][epsilon_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
