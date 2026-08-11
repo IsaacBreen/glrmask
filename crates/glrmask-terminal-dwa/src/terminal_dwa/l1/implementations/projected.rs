@@ -1555,6 +1555,22 @@ enum ProjectedKernel {
 }
 
 fn projected_kernel(input: BuildInput<'_>) -> ProjectedKernel {
+    let p2_finite_state_limit = std::env::var("GLRMASK_P2_FINITE_MAX_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(160);
+    let p2_finite = input.partition_label == "p2"
+        && input.subset_parent_order.is_none()
+        && input.tokenizer.num_states() <= p2_finite_state_limit
+        && std::env::var("GLRMASK_P2_FINITE_PROJECTED")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false);
+    if p2_finite {
+        return ProjectedKernel::Finite;
+    }
     if let Ok(value) = std::env::var("GLRMASK_L1_PROJECTED_KERNEL") {
         return match value.trim().to_ascii_lowercase().as_str() {
             "finite" | "vocab" | "trie" => ProjectedKernel::Finite,
@@ -1893,8 +1909,13 @@ fn collect_finite_profile(
     pair_visits: &mut usize,
     uniform_subtrees: &mut usize,
     uniform_tokens: &mut usize,
-) {
+    max_profile_runs: usize,
+    max_pair_visits: usize,
+) -> bool {
     *pair_visits += 1;
+    if *pair_visits > max_pair_visits {
+        return false;
+    }
     let current = &trie.nodes[node as usize];
     if let Some(state) = scanner.singleton_state(config) {
         let loops = self_loops[state as usize];
@@ -1909,22 +1930,28 @@ fn collect_finite_profile(
             );
             *uniform_subtrees += 1;
             *uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
-            return;
+            return out.len() <= max_profile_runs;
         }
     }
     if let Some(token) = current.token {
         let signature = scanner.signature(config);
         push_profile_run(out, token as u32, token as u32 + 1, signature);
+        if out.len() > max_profile_runs {
+            return false;
+        }
     }
     for &child in &current.children {
         let target = scanner.step_bytes(config, trie.edge(child, tokens));
         if target != DEAD {
-            collect_finite_profile(
+            if !collect_finite_profile(
                 scanner, trie, tokens, self_loops, child, target, out, pair_visits,
-                uniform_subtrees, uniform_tokens,
-            );
+                uniform_subtrees, uniform_tokens, max_profile_runs, max_pair_visits,
+            ) {
+                return false;
+            }
         }
     }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -2155,6 +2182,14 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
     let mut uniform_subtrees = 0usize;
     let mut uniform_tokens = 0usize;
     let self_loops = input.tokenizer.all_self_loop_bytes();
+    let adaptive_budget = input.partition_label == "p2" && input.subset_parent_order.is_none();
+    let profile_run_budget = if adaptive_budget {
+        std::env::var("GLRMASK_P2_FINITE_MAX_PROFILE_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_048)
+    } else { usize::MAX };
+    let pair_visit_budget = if adaptive_budget {
+        std::env::var("GLRMASK_P2_FINITE_MAX_PAIR_VISITS").ok().and_then(|v| v.parse().ok()).unwrap_or(150_000)
+    } else { usize::MAX };
+    let mut profile_run_count = 0usize;
 
     for (start, raw_states) in starts {
         let mut fingerprint = Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
@@ -2173,7 +2208,8 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
                 profile
             } else {
                 let mut values = Vec::new();
-                collect_finite_profile(
+                let remaining_runs = profile_run_budget.saturating_sub(profile_run_count);
+                if !collect_finite_profile(
                     &mut scanner,
                     trie,
                     tokens,
@@ -2184,7 +2220,18 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
                     &mut pair_visits,
                     &mut uniform_subtrees,
                     &mut uniform_tokens,
-                );
+                    remaining_runs,
+                    pair_visit_budget,
+                ) {
+                    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][l1_finite_budget_abort] partition={} profile_runs={} pair_visits={} max_profile_runs={} max_pair_visits={} action=residual",
+                            input.partition_label, profile_run_count + values.len(), pair_visits,
+                            profile_run_budget, pair_visit_budget,
+                        );
+                    }
+                    return build_binary_without_finite_switch(input);
+                }
                 let values: Arc<[ProfileRun]> = Arc::from(values);
                 let profile = if values.is_empty() {
                     0
@@ -2192,10 +2239,14 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
                     profile
                 } else {
                     let profile = profiles.len() as u32;
+                    profile_run_count += values.len();
                     profile_ids.insert(Arc::clone(&values), profile);
                     profiles.push(values);
                     profile
                 };
+                if profile_run_count > profile_run_budget {
+                    return build_binary_without_finite_switch(input);
+                }
                 bucket_cache.insert(key, profile);
                 profile
             };
@@ -2352,12 +2403,20 @@ fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
 }
 
 fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    build_binary_impl(input, true)
+}
+
+fn build_binary_without_finite_switch(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    build_binary_impl(input, false)
+}
+
+fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option<LocalIdMapTerminalDwa> {
     if input.vocab.is_empty() {
         return None;
     }
     let total = Instant::now();
-    let finite_switch_states = residual_finite_switch_states(input);
-    let use_finite_precheck = std::env::var("GLRMASK_L1_RESIDUAL_FINITE_PRECHECK")
+    let finite_switch_states = if allow_finite_switch { residual_finite_switch_states(input) } else { usize::MAX };
+    let use_finite_precheck = allow_finite_switch && std::env::var("GLRMASK_L1_RESIDUAL_FINITE_PRECHECK")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
