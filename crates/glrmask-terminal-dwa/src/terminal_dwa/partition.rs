@@ -374,6 +374,29 @@ pub fn build_partition_id_map_and_terminal_dwa(
     let has_split_l1 = l2p_vocab_split
         .as_ref()
         .is_some_and(|split| split.single_tokens != 0);
+    // A p1 partition with both ordinary L1 terminals and split-off L2P-single
+    // work otherwise scans essentially the same large vocab twice.  The union
+    // of those single-terminal relations can be built in one projected-L1 pass:
+    // any L2P-terminal single path on a boundary token is already contained in
+    // the exact boundary L2P relation, so including it here does not change the
+    // union.  Keep a kill switch for same-binary validation.
+    let combine_l1_single = partition_label == "p1"
+        && has_l1
+        && has_split_l1
+        && std::env::var("GLRMASK_COMBINE_L1_SINGLE")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+    let combined_l1_mask = combine_l1_single.then(|| {
+        l1_mask
+            .iter()
+            .zip(&l2p_mask)
+            .map(|(&l1, &l2p)| l1 || l2p)
+            .collect::<Vec<_>>()
+    });
+    let l1_build_mask = combined_l1_mask.as_deref().unwrap_or(&l1_mask);
     // Classification already initializes this shared byte-major DFA table.
     // L1 exact equivalence walks many states at a fixed token byte, for which
     // the transposed layout avoids a 256-word stride through the row-major table.
@@ -395,7 +418,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
     // The split-off L1 branch observes only the L2P terminal set. Large lexer
     // components belonging exclusively to other terminals are exact empty
     // residuals for this branch and can be collapsed before token replay.
-    let split_l1_structural_state_map = has_split_l1
+    let split_l1_structural_state_map = (has_split_l1 && !combine_l1_single)
         .then(|| {
             super::synthetic_state_map::inactive_dispatch_component_state_map(
                 tokenizer,
@@ -449,7 +472,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                     );
                 let branch_state_map = inactive_component_branch_state_map(
                     tokenizer,
-                    &l1_mask,
+                    l1_build_mask,
                     initial_state_map,
                     &branch_label,
                 )
@@ -457,7 +480,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                     build_branch_active_state_map(
                         tokenizer,
                         vocab,
-                        &l1_mask,
+                        l1_build_mask,
                         initial_state_map,
                         &branch_label,
                         state_map_requested,
@@ -469,7 +492,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                             super::synthetic_state_map::materialize_active_tokenizer(
                                 tokenizer,
                                 vocab,
-                                &l1_mask,
+                                l1_build_mask,
                                 map.clone(),
                             )
                         })
@@ -486,7 +509,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                         use_terminal_coloring,
                         ignore_terminal,
                         grammar,
-                        &l1_mask,
+                        l1_build_mask,
                         &branch_flat_trans,
                         None,
                         None,
@@ -515,7 +538,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                         use_terminal_coloring,
                         ignore_terminal,
                         grammar,
-                        &l1_mask,
+                        l1_build_mask,
                         flat_trans,
                         l1_transitions_by_byte,
                         branch_initial_state_map,
@@ -734,7 +757,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                         }
                     },
                     || {
-                        if split.single_tokens == 0 {
+                        if split.single_tokens == 0 || combine_l1_single {
                             (None, 0.0)
                         } else {
                             let started_at = Instant::now();
