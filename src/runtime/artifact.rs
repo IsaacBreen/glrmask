@@ -236,6 +236,7 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
+    Flat(Arc<[u32]>),
     Hybrid {
         state_to_dense_row: Vec<u32>,
         dense_rows: Vec<Box<[u32; 256]>>,
@@ -260,6 +261,10 @@ impl FastTokenizerTransitions {
             Self::Dense(rows) => rows
                 .get(state as usize)
                 .map_or(u32::MAX, |row| row[byte as usize]),
+            Self::Flat(flat) => flat
+                .get(state as usize * 256 + byte as usize)
+                .copied()
+                .unwrap_or(u32::MAX),
             Self::Hybrid {
                 state_to_dense_row,
                 dense_rows,
@@ -280,6 +285,7 @@ impl FastTokenizerTransitions {
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Dense(rows) => rows.len(),
+            Self::Flat(flat) => flat.len() / 256,
             Self::Hybrid {
                 state_to_dense_row,
                 ..
@@ -294,6 +300,19 @@ impl FastTokenizerTransitions {
         self,
         children: &[(&FastTokenizerTransitions, u32)],
     ) -> Option<Self> {
+        fn flat_rows(flat: &[u32]) -> Option<Vec<Box<[u32; 256]>>> {
+            let chunks = flat.chunks_exact(256);
+            if !chunks.remainder().is_empty() {
+                return None;
+            }
+            chunks
+                .map(|chunk| {
+                    let row: &[u32; 256] = chunk.try_into().ok()?;
+                    Some(Box::new(*row))
+                })
+                .collect()
+        }
+
         fn rebased_row(row: &[u32; 256], offset: u32) -> Box<[u32; 256]> {
             let mut rebased = Box::new(*row);
             for target in rebased.iter_mut() {
@@ -325,6 +344,11 @@ impl FastTokenizerTransitions {
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
+                    Self::Flat(flat) => {
+                        let rows = flat_rows(&flat)?;
+                        let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
+                        (state_to_dense_row, rows)
+                    }
                     Self::Hybrid {
                         state_to_dense_row,
                         dense_rows,
@@ -339,6 +363,14 @@ impl FastTokenizerTransitions {
                             for row in rows {
                                 let dense = dense_rows.len() as u32;
                                 dense_rows.push(rebased_row(row, *offset));
+                                state_to_dense_row.push(dense);
+                            }
+                        }
+                        Self::Flat(flat) => {
+                            let rows = flat_rows(flat)?;
+                            for row in rows {
+                                let dense = dense_rows.len() as u32;
+                                dense_rows.push(rebased_row(&row, *offset));
                                 state_to_dense_row.push(dense);
                             }
                         }

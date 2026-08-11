@@ -1963,6 +1963,7 @@ struct TerminalDagResult {
     terminal_dwas: TerminalDwaFamilies,
     terminal_phase_profile: TerminalDwaPhaseProfile,
     classify_ms: f64,
+    flat_trans: Arc<[u32]>,
     flat_trans_ms: f64,
     global_max_length_ms: f64,
     flat_global_started_ms: f64,
@@ -2015,6 +2016,7 @@ struct CompileDagResult {
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     templates_ms: f64,
     classify_ms: f64,
+    flat_trans: Arc<[u32]>,
     flat_trans_ms: f64,
     global_max_length_ms: f64,
     flat_global_started_ms: f64,
@@ -2535,6 +2537,7 @@ fn launch_parser_dag_if_ready<'scope>(
             mut terminal_dwas,
             terminal_phase_profile,
             classify_ms,
+            flat_trans,
             flat_trans_ms,
             global_max_length_ms,
             flat_global_started_ms,
@@ -2622,6 +2625,7 @@ fn launch_parser_dag_if_ready<'scope>(
             template_dfas_by_terminal,
             templates_ms,
             classify_ms,
+            flat_trans,
             flat_trans_ms,
             global_max_length_ms,
             flat_global_started_ms,
@@ -2722,6 +2726,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 terminal_dwas,
                 terminal_phase_profile,
                 classify_ms: classify.classify_ms,
+                flat_trans: flat_global.flat_trans,
                 flat_trans_ms: flat_global.flat_trans_ms,
                 global_max_length_ms: flat_global.global_max_length_ms,
                 flat_global_started_ms: flat_global.started_ms,
@@ -3462,6 +3467,7 @@ fn compile_prepared_with_profile_and_table_construction(
             template_dfas_by_terminal,
             templates_ms,
             classify_ms,
+            flat_trans,
             flat_trans_ms,
             global_max_length_ms,
             flat_global_started_ms,
@@ -3986,6 +3992,14 @@ fn compile_prepared_with_profile_and_table_construction(
         let ignore_expr = prepared_grammar
             .ignore_terminal
             .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
+        let reuse_compile_flat_transitions = runtime_tokenizer.is_none()
+            && flat_trans.len() == tokenizer.num_states() as usize * 256
+            && env_flag_enabled_by_default("GLRMASK_REUSE_COMPILE_FLAT_TRANSITIONS");
+        let prebuilt_tokenizer_fast_transitions = if reuse_compile_flat_transitions {
+            crate::runtime::FastTokenizerTransitions::Flat(flat_trans)
+        } else {
+            crate::runtime::FastTokenizerTransitions::default()
+        };
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
@@ -4052,7 +4066,7 @@ fn compile_prepared_with_profile_and_table_construction(
             dwa_fast_transitions: Vec::new(),
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),
-            tokenizer_fast_transitions: Default::default(),
+            tokenizer_fast_transitions: prebuilt_tokenizer_fast_transitions,
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),
