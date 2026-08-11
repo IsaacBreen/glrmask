@@ -2412,7 +2412,15 @@ impl Constraint {
         if self.internal_token_buf_masks.is_empty() {
             return (Vec::new(), 0, 0);
         }
-        let n_groups = self.internal_token_buf_masks.len().div_ceil(block_size);
+        // Byte/quad subgroup caches are only consulted when the entire subgroup
+        // is valid; a trailing partial subgroup can never be selected.  A
+        // 64-token word group is different: runtime also uses its final partial
+        // group under the word's exact valid-bit mask.
+        let n_groups = if block_size == 64 {
+            self.internal_token_buf_masks.len().div_ceil(block_size)
+        } else {
+            self.internal_token_buf_masks.len() / block_size
+        };
         let mask_words = self.mask_len();
         let build_group = |group_id: usize| {
                 let group_start = group_id * block_size;
@@ -2473,6 +2481,15 @@ impl Constraint {
             return Vec::new();
         }
         let n_word_groups = self.internal_token_buf_masks.len().div_ceil(64);
+        // Runtime only consults a dense sliding window when `remaining >=
+        // word_group_len`.  The old builder nevertheless materialized a dense
+        // mask for every start position, including truncated suffix windows and
+        // entire window tiers wider than the constraint.  Those entries were
+        // unreachable.
+        let n_windows = n_word_groups.saturating_sub(word_group_len).saturating_add(1);
+        if n_windows == 0 {
+            return Vec::new();
+        }
         let mask_words = self.mask_len();
         let build_group = |word_group_start: usize| {
             let group_start = word_group_start * 64;
@@ -2486,9 +2503,9 @@ impl Constraint {
             dense.into_boxed_slice()
         };
         if rayon::current_num_threads() == 1 {
-            (0..n_word_groups).map(build_group).collect()
+            (0..n_windows).map(build_group).collect()
         } else {
-            (0..n_word_groups).into_par_iter().map(build_group).collect()
+            (0..n_windows).into_par_iter().map(build_group).collect()
         }
     }
 
