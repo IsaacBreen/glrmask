@@ -1768,6 +1768,12 @@ impl Constraint {
     ) -> TokenMaskCacheBuildProfile {
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
+        let skip_small_group_caches = std::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
         let build_word_blocks = || {
             let started = profile.then(std::time::Instant::now);
             let result = self.compute_token_block_sparse_masks(64);
@@ -1776,13 +1782,21 @@ impl Constraint {
         };
         let build_quad_blocks = || {
             let started = profile.then(std::time::Instant::now);
-            let result = self.compute_token_block_sparse_masks(4);
+            let result = if skip_small_group_caches {
+                (Vec::new(), 0, 0)
+            } else {
+                self.compute_token_block_sparse_masks(4)
+            };
             let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (result, ms)
         };
         let build_byte_blocks = || {
             let started = profile.then(std::time::Instant::now);
-            let result = self.compute_token_block_sparse_masks(8);
+            let result = if skip_small_group_caches {
+                (Vec::new(), 0, 0)
+            } else {
+                self.compute_token_block_sparse_masks(8)
+            };
             let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (result, ms)
         };
