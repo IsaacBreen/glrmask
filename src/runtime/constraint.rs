@@ -2366,7 +2366,13 @@ impl Constraint {
             return Vec::new();
         }
 
-        if !self.original_token_to_internal.is_empty() {
+        let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+        if !grouped && !self.original_token_to_internal.is_empty() {
             let mut masks = vec![Vec::<(u16, u32)>::new(); self.internal_token_to_tokens.len()];
             for (original, &internal) in self.original_token_to_internal.iter().enumerate() {
                 if internal == u32::MAX {
