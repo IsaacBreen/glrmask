@@ -1388,6 +1388,38 @@ pub fn build_global_max_length_state_map_with_initial(
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
     let num_states = num_states_u32 as usize;
+
+    // Below 50k states the automatic global max-length pass cannot be selected.
+    // If the user also did not request an explicit global equivalence pass, the
+    // exact output is simply the inherited coordinate (or identity). Avoid the
+    // vocabulary-wide max-length statistic that the generic empty pipeline
+    // otherwise prepares eagerly.
+    let small_default_pipeline_fast_path = num_states <= 50_000
+        && global_max_length_env_override() != Some(true)
+        && std::env::var_os("GLRMASK_DISABLE_SMALL_GLOBAL_EQUIV_FAST_PATH").is_none();
+    if small_default_pipeline_fast_path {
+        let config = resolve_global_pipeline_config(false);
+        if config.passes.is_empty() {
+            let state_map = initial_state_map.cloned().unwrap_or_else(|| {
+                let ids = (0..num_states_u32).collect::<Vec<_>>();
+                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                    ids.clone(),
+                    ids,
+                )
+            });
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 stable_signature_cells=0 stable_signature_cell_limit={} fast_small=true ms={:.3}",
+                    num_states,
+                    state_map.representative_original_ids.len(),
+                    global_max_length_stable_signature_cell_limit(),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return state_map;
+        }
+    }
+
     let global_statistic =
         l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
     let max_token_len = global_statistic.max_token_len();
