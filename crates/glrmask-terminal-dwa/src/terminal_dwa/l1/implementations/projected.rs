@@ -1567,7 +1567,7 @@ fn projected_kernel(input: BuildInput<'_>) -> ProjectedKernel {
                 let value = value.trim();
                 value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
     if p2_finite {
         return ProjectedKernel::Finite;
     }
