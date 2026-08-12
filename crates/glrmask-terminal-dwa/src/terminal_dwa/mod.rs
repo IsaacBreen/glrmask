@@ -74,6 +74,13 @@ fn dedicated_p0_max_tokenizer_states() -> u32 {
         .unwrap_or(512)
 }
 
+fn proven_disjoint_immediate_merge_max_tokenizer_states() -> u32 {
+    std::env::var("GLRMASK_PROVEN_DISJOINT_IMMEDIATE_MERGE_MAX_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(512)
+}
+
 #[derive(Clone)]
 pub struct PartitionLocalSynthesisPlan {
     pub expressions: Arc<[Expr]>,
@@ -1932,12 +1939,27 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     // the L1 family even though its active terminal mask is the L2P mask.
     let mut l1_pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
     let mut l2p_pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
-    for (result, _idx) in partition_results {
+    // Character partitions assign every original vocabulary token to exactly
+    // one partition. Keep the proof only when no partition contributes both
+    // ordinary-L1 and split-L1 artifacts. Large schemas retain the historical
+    // global class ordering because it is materially better for downstream tails.
+    let mut l1_partition_seen = vec![false; sub_vocabs.len()];
+    let mut l1_token_domains_proven_disjoint = partition_scheme == "char_type"
+        && tokenizer.num_states() <= proven_disjoint_immediate_merge_max_tokenizer_states();
+    for (result, idx) in partition_results {
         if let Some((parts, _)) = result {
             if let Some(l1) = parts.l1 {
+                if l1_partition_seen[idx] {
+                    l1_token_domains_proven_disjoint = false;
+                }
+                l1_partition_seen[idx] = true;
                 l1_pairs.push(l1);
             }
             if let Some(split_l1) = parts.l2p_single_l1 {
+                if l1_partition_seen[idx] {
+                    l1_token_domains_proven_disjoint = false;
+                }
+                l1_partition_seen[idx] = true;
                 l1_pairs.push(split_l1);
             }
             if let Some(l2p) = parts.l2p {
@@ -1984,11 +2006,19 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let (l1_family, l2p_family) = rayon::join(
         || {
             (!l1_pairs.is_empty()).then(|| {
-                let family = merge::merge_id_maps_and_terminal_dwas(
-                    l1_pairs,
-                    num_tokenizer_states,
-                    max_token_id,
-                );
+                let family = if l1_token_domains_proven_disjoint {
+                    merge::merge_id_maps_and_terminal_dwas_proven_disjoint(
+                        l1_pairs,
+                        num_tokenizer_states,
+                        max_token_id,
+                    )
+                } else {
+                    merge::merge_id_maps_and_terminal_dwas(
+                        l1_pairs,
+                        num_tokenizer_states,
+                        max_token_id,
+                    )
+                };
                 let profile = family.profile;
                 (
                     MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),

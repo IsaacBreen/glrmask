@@ -1521,6 +1521,25 @@ pub fn merge_id_maps_and_terminal_dwas(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> LocalIdMapTerminalDwa {
+    merge_id_maps_and_terminal_dwas_impl(inputs, num_tokenizer_states, max_token_id, false)
+}
+
+/// Merge terminal-DWA pieces whose vocabulary domains are proven disjoint by
+/// their caller. Generic callers should use `merge_id_maps_and_terminal_dwas`.
+pub fn merge_id_maps_and_terminal_dwas_proven_disjoint(
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> LocalIdMapTerminalDwa {
+    merge_id_maps_and_terminal_dwas_impl(inputs, num_tokenizer_states, max_token_id, true)
+}
+
+fn merge_id_maps_and_terminal_dwas_impl(
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+    token_domains_proven_disjoint: bool,
+) -> LocalIdMapTerminalDwa {
     assert!(!inputs.is_empty(), "merge_id_maps_and_terminal_dwas called with empty inputs");
 
     if inputs.len() == 1 {
@@ -1533,6 +1552,7 @@ pub fn merge_id_maps_and_terminal_dwas(
         &inputs,
         num_tokenizer_states,
         max_token_id,
+        token_domains_proven_disjoint,
     ) {
         return merged;
     }
@@ -1753,6 +1773,7 @@ fn try_merge_immediate_terminal_dwas(
     inputs: &[LocalIdMapTerminalDwa],
     num_tokenizer_states: usize,
     max_token_id: u32,
+    token_domains_proven_disjoint: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     if inputs.len() < 2
         || inputs
@@ -1774,7 +1795,7 @@ fn try_merge_immediate_terminal_dwas(
             num_tokenizer_states,
             max_token_id,
             None,
-            false,
+            token_domains_proven_disjoint,
         );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -1941,17 +1962,9 @@ fn build_unified_global_id_map_fast(
     }
 
     let (vocab_tokens, token_maps) = if require_direct_token_maps {
-        let (vocab_tokens, direct_maps) = build_unified_global_token_id_map_disjoint(
-            inputs,
-            max_token_id,
-        )
-        .expect("caller proved disjoint token domains");
-        (
-            vocab_tokens,
-            FastGlobalTokenMaps::Direct(
-                direct_maps.expect("disjoint builder must return direct token maps"),
-            ),
-        )
+        let (vocab_tokens, direct_maps) =
+            build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
+        (vocab_tokens, FastGlobalTokenMaps::Direct(direct_maps))
     } else {
         let use_two_source_fast_path = std::env::var("GLRMASK_TWO_SOURCE_TOKEN_MERGE")
             .map(|value| {
@@ -3258,6 +3271,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn assume_disjoint_token_map_matches_checked_disjoint() {
+        let first = id_map_with_vocab_partition(
+            vec![0, 0, u32::MAX, u32::MAX, 1, 1],
+            2,
+        );
+        let second = id_map_with_vocab_partition(
+            vec![u32::MAX, u32::MAX, 0, 0, u32::MAX, u32::MAX],
+            1,
+        );
+        let inputs = [&first, &second];
+        let (assumed, assumed_maps) =
+            build_unified_global_token_id_map_assume_disjoint(&inputs, 5);
+        let (checked, checked_maps) = build_unified_global_token_id_map_disjoint(&inputs, 5)
+            .expect("fixture token domains are disjoint");
+
+        assert_eq!(assumed.original_to_internal, checked.original_to_internal);
+        assert_eq!(assumed.internal_to_originals, checked.internal_to_originals);
+        assert_eq!(
+            assumed.representative_original_ids,
+            checked.representative_original_ids
+        );
+        assert_eq!(assumed_maps, checked_maps.expect("checked path returns direct maps"));
     }
 
     #[test]
