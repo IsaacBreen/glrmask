@@ -188,7 +188,7 @@ fn try_reconcile_refinement_fast_path(
     false
 }
 
-fn remap_weights_into_existing_common(
+pub(super) fn remap_weights_into_existing_common(
     weights: &mut [&mut Weight],
     local_id_map: &InternalIdMap,
     common_id_map: &InternalIdMap,
@@ -206,7 +206,7 @@ fn remap_weights_into_existing_common(
     );
 }
 
-fn internal_id_map_refines(finer: &InternalIdMap, coarser: &InternalIdMap) -> bool {
+pub(super) fn internal_id_map_refines(finer: &InternalIdMap, coarser: &InternalIdMap) -> bool {
     many_to_one_id_map_refines(&finer.tokenizer_states, &coarser.tokenizer_states, false)
         && many_to_one_id_map_refines(&finer.vocab_tokens, &coarser.vocab_tokens, true)
 }
@@ -244,7 +244,7 @@ fn many_to_one_id_map_refines(
     true
 }
 
-fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
+pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     let num_tokenizer_states = inputs
         .iter()
         .map(|input| input.tokenizer_states.original_to_internal.len())

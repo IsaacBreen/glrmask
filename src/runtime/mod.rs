@@ -18,6 +18,7 @@ pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]
 pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use constraint::Constraint;
+pub(crate) use constraint::TokenMaskCachePrebuild;
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;
 pub use state::ConstraintState;

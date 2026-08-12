@@ -1989,6 +1989,7 @@ struct TemplatesDagResult {
 struct ParserDagJoinState {
     terminal: Option<TerminalDagResult>,
     templates: Option<TemplatesDagResult>,
+    possible_matches_id_map: Option<InternalIdMap>,
     launched: bool,
 }
 
@@ -2029,6 +2030,7 @@ struct CompileDagResult {
     templates_finished_ms: f64,
     terminal_run_collapse_ms: f64,
     prebuilt_parser_dwa: Option<(MappedParserDwa, f64, f64, f64)>,
+    prebuilt_token_mask_caches: Option<(InternalIdMap, crate::runtime::TokenMaskCachePrebuild)>,
 }
 
 fn build_parser_dwa_for_terminal_family(
@@ -2432,6 +2434,45 @@ struct TerminalFamilyLayout {
     has_special: bool,
 }
 
+fn common_terminal_family_id_map(terminal_dwas: &TerminalDwaFamilies) -> InternalIdMap {
+    // Ordinary parser-family merge keeps the deeper L2P family as the primary
+    // coordinate and folds the immediate L1 top-accept overlay into it. Mirror
+    // that left-to-right ordering so map-only construction gets identical class
+    // numbering, not merely the same equivalence partition.
+    let maps = [
+        terminal_dwas.l2p.as_ref().map(MappedArtifact::id_map),
+        terminal_dwas.l1.as_ref().map(MappedArtifact::id_map),
+        terminal_dwas.special.as_ref().map(MappedArtifact::id_map),
+    ];
+    let mut maps = maps.into_iter().flatten();
+    let mut common = maps
+        .next()
+        .expect("terminal families are non-empty when parser construction starts")
+        .clone();
+    for next in maps {
+        common = crate::compiler::stages::mapped_artifact::common_internal_id_map(&[
+            &common,
+            next,
+        ]);
+    }
+    common
+}
+
+fn same_internal_id_map_numbering(left: &InternalIdMap, right: &InternalIdMap) -> bool {
+    left.tokenizer_states.original_to_internal == right.tokenizer_states.original_to_internal
+        && left.vocab_tokens.original_to_internal == right.vocab_tokens.original_to_internal
+}
+
+fn compacted_possible_matches_id_map(
+    result: &cpm::ConstraintPossibleMatchesComputation,
+) -> InternalIdMap {
+    let mut mapped = result.mapped_possible_matches.clone();
+    if compact_possible_matches_before_reconcile_enabled() {
+        let _ = mapped.compact_dimensions_fast();
+    }
+    mapped.id_map().clone()
+}
+
 fn reconcile_terminal_dwa_families(
     families: TerminalDwaFamilies,
 ) -> (MappedArtifact<Vec<TerminalAutomaton>>, TerminalFamilyLayout) {
@@ -2520,11 +2561,12 @@ fn launch_parser_dag_if_ready<'scope>(
             Some((
                 state.terminal.take().expect("terminal DAG result ready"),
                 state.templates.take().expect("templates DAG result ready"),
+                state.possible_matches_id_map.take(),
             ))
         }
     };
 
-    let Some((terminal, templates)) = ready else {
+    let Some((terminal, templates, possible_matches_id_map)) = ready else {
         return;
     };
 
@@ -2574,32 +2616,64 @@ fn launch_parser_dag_if_ready<'scope>(
                     + terminal_run_collapse_profile.rewrite_ms
         );
 
-        let (templates, prebuilt_parser_dwa) = if dwa_pm_mode.does_terminal_reconcile() {
-            (Some(templates), None)
-        } else {
-            let parser_dwa_started_at = Instant::now();
-            let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
-            let parser_dwa = build_and_merge_parser_dwa_families(
-                &terminal_dwas,
-                &table,
-                &analysis.analyzed_grammar,
-                ignore_terminal,
-                templates,
-                &tokenizer.tokenizer,
-                vocab,
-            );
-            let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
-            let parser_dwa_finished_ms = elapsed_ms(compile_started_at);
-            (
-                None,
-                Some((
-                    parser_dwa,
-                    parser_dwa_ms,
-                    parser_dwa_started_ms,
-                    parser_dwa_finished_ms,
-                )),
-            )
-        };
+        let (templates, prebuilt_parser_dwa, prebuilt_token_mask_caches) =
+            if dwa_pm_mode.does_terminal_reconcile() {
+                (Some(templates), None, None)
+            } else {
+                let parser_dwa_started_at = Instant::now();
+                let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
+                let early_cache_enabled = env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD");
+                let (parser_dwa, prebuilt_token_mask_caches) = rayon::join(
+                    || {
+                        build_and_merge_parser_dwa_families(
+                            &terminal_dwas,
+                            &table,
+                            &analysis.analyzed_grammar,
+                            ignore_terminal,
+                            templates,
+                            &tokenizer.tokenizer,
+                            vocab,
+                        )
+                    },
+                    || {
+                        if !early_cache_enabled {
+                            return None;
+                        }
+                        let possible_matches_id_map = possible_matches_id_map.as_ref()?;
+                        let parser_id_map = common_terminal_family_id_map(&terminal_dwas);
+                        let final_id_map =
+                            crate::compiler::stages::mapped_artifact::common_internal_id_map(&[
+                                &parser_id_map,
+                                possible_matches_id_map,
+                            ]);
+                        let internal_to_tokens =
+                            final_id_map.vocab_tokens.internal_to_originals_vecs();
+                        let mask_words = final_id_map
+                            .vocab_tokens
+                            .original_to_internal
+                            .len()
+                            .div_ceil(32);
+                        let caches = crate::runtime::TokenMaskCachePrebuild::build(
+                            &final_id_map.vocab_tokens.original_to_internal,
+                            &internal_to_tokens,
+                            mask_words,
+                        );
+                        Some((final_id_map, caches))
+                    },
+                );
+                let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+                let parser_dwa_finished_ms = elapsed_ms(compile_started_at);
+                (
+                    None,
+                    Some((
+                        parser_dwa,
+                        parser_dwa_ms,
+                        parser_dwa_started_ms,
+                        parser_dwa_finished_ms,
+                    )),
+                    prebuilt_token_mask_caches,
+                )
+            };
 
         *result.lock().expect("compile DAG result poisoned") = Some(CompileDagResult {
             tokenizer: tokenizer.tokenizer,
@@ -2638,6 +2712,7 @@ fn launch_parser_dag_if_ready<'scope>(
             templates_finished_ms,
             terminal_run_collapse_ms,
             prebuilt_parser_dwa,
+            prebuilt_token_mask_caches,
         });
     });
 }
@@ -3153,6 +3228,13 @@ fn compile_prepared_with_profile_and_table_construction(
                             cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK,
                         );
                         let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                        if env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD") {
+                            parser_state_ref
+                                .lock()
+                                .expect("parser DAG join state poisoned")
+                                .possible_matches_id_map =
+                                Some(compacted_possible_matches_id_map(&result));
+                        }
                         *cpm_result_ref
                             .lock()
                             .expect("possible-matches result slot poisoned") = Some((
@@ -3201,6 +3283,13 @@ fn compile_prepared_with_profile_and_table_construction(
                                     &raw_byte_to_class,
                                 );
                             let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                            if env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD") {
+                                parser_state_ref
+                                    .lock()
+                                    .expect("parser DAG join state poisoned")
+                                    .possible_matches_id_map =
+                                    Some(compacted_possible_matches_id_map(&result));
+                            }
                             *cpm_result_ref
                                 .lock()
                                 .expect("possible-matches result slot poisoned") = Some((
@@ -3480,6 +3569,7 @@ fn compile_prepared_with_profile_and_table_construction(
             templates_finished_ms,
             terminal_run_collapse_ms,
             prebuilt_parser_dwa,
+            prebuilt_token_mask_caches,
         } = compile_dag_result
             .into_inner()
             .expect("compile DAG result slot poisoned")
@@ -3713,7 +3803,21 @@ fn compile_prepared_with_profile_and_table_construction(
         // parser/possible-match relationship explicit instead of relying on
         // coincidentally identical numbering.
         let shared_id_reconcile_started_at = Instant::now();
-        let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
+        let precomputed_parser_pm_id_map = prebuilt_token_mask_caches
+            .as_ref()
+            .map(|(id_map, _)| id_map);
+        let mut parser_pm_pair = if !dwa_pm_mode.does_parser_compact()
+            && let Some(common_id_map) = precomputed_parser_pm_id_map
+        {
+            let parser_dwa = parser_dwa.remap_into_existing_common(common_id_map);
+            let possible_matches = possible_matches.remap_into_existing_common(common_id_map);
+            MappedArtifact::new(
+                (parser_dwa.into_artifact(), possible_matches.into_artifact()),
+                common_id_map.clone(),
+            )
+        } else {
+            MappedArtifact::from((parser_dwa, possible_matches))
+        };
         shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
         if dwa_pm_mode.does_parser_compact() {
             let compact_started_at = Instant::now();
@@ -3722,6 +3826,11 @@ fn compile_prepared_with_profile_and_table_construction(
         }
         let ((parser_dwa_artifact, possible_matches_artifact), internal_ids) =
             parser_pm_pair.into_parts();
+        let prebuilt_token_mask_caches = prebuilt_token_mask_caches.and_then(
+            |(prebuilt_id_map, caches)| {
+                same_internal_id_map_numbering(&prebuilt_id_map, &internal_ids).then_some(caches)
+            },
+        );
         let runtime_state_map_lift_started_at = Instant::now();
         let mut runtime_tokenizer_state_map = match full_to_synthesized_state_map.as_ref() {
             Some(certified) => certified
@@ -4001,7 +4110,7 @@ fn compile_prepared_with_profile_and_table_construction(
             crate::runtime::FastTokenizerTransitions::default()
         };
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
-        let constraint = finalize_constraint(Constraint {
+        let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             parser_dwa,
             parser_top_accept,
@@ -4078,7 +4187,13 @@ fn compile_prepared_with_profile_and_table_construction(
             word_group_buf_op_costs: Vec::new(),
             final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
             ignore_expr,
-        });
+        };
+        if let Some(caches) = prebuilt_token_mask_caches
+            && caches.matches_constraint(&constraint)
+        {
+            caches.install(&mut constraint);
+        }
+        let constraint = finalize_constraint(constraint);
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
 
