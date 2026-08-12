@@ -2066,22 +2066,39 @@ fn determinize_with_supports(
                 })
                 .collect::<Vec<_>>();
             let intern_ms = elapsed_ms(intern_started_at);
-            let component_results: Vec<(Option<Weight>, f64, f64)> = components
-                .par_iter()
-                .map_init(ScopedWeightOpCache::default, |weight_ops, (final_w, path_weights)| {
-                    let path_started = detail_enabled.then(Instant::now);
-                    let path_union = weight_ops.union_all(path_weights.iter());
-                    let path_ms = path_started.map(elapsed_ms).unwrap_or(0.0);
-                    let intersection_started = detail_enabled.then(Instant::now);
-                    let contribution = weight_ops.intersection(&path_union, final_w);
-                    let intersection_ms = intersection_started.map(elapsed_ms).unwrap_or(0.0);
-                    (
-                        (!contribution.is_empty()).then_some(contribution),
-                        path_ms,
-                        intersection_ms,
-                    )
-                })
-                .collect();
+            let parallel_min_components = std::env::var("GLRMASK_PARSER_FINAL_PARALLEL_MIN_COMPONENTS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(512);
+            let use_parallel_final_components = rayon::current_num_threads() > 1
+                && components.len() >= parallel_min_components;
+            let compute_component = |weight_ops: &mut ScopedWeightOpCache,
+                                     (final_w, path_weights): &(Weight, SmallVec<[Weight; 4]>)| {
+                let path_started = detail_enabled.then(Instant::now);
+                let path_union = weight_ops.union_all(path_weights.iter());
+                let path_ms = path_started.map(elapsed_ms).unwrap_or(0.0);
+                let intersection_started = detail_enabled.then(Instant::now);
+                let contribution = weight_ops.intersection(&path_union, final_w);
+                let intersection_ms = intersection_started.map(elapsed_ms).unwrap_or(0.0);
+                (
+                    (!contribution.is_empty()).then_some(contribution),
+                    path_ms,
+                    intersection_ms,
+                )
+            };
+            let component_results: Vec<(Option<Weight>, f64, f64)> =
+                if use_parallel_final_components {
+                    components
+                        .par_iter()
+                        .map_init(ScopedWeightOpCache::default, compute_component)
+                        .collect()
+                } else {
+                    let mut weight_ops = ScopedWeightOpCache::default();
+                    components
+                        .iter()
+                        .map(|component| compute_component(&mut weight_ops, component))
+                        .collect()
+                };
             if let Some(detail) = detail.as_mut() {
                 detail.final_path_union_ms +=
                     component_results.iter().map(|(_, ms, _)| *ms).sum::<f64>();
@@ -2089,17 +2106,25 @@ fn determinize_with_supports(
                     component_results.iter().map(|(_, _, ms)| *ms).sum::<f64>();
             }
             let output_started_at = Instant::now();
-            let results = signature_components
-                .par_iter()
-                .map(|component_ids| {
-                    let weight = Weight::union_all(
-                        component_ids
-                            .iter()
-                            .filter_map(|&component_id| component_results[component_id].0.as_ref()),
-                    );
-                    (!weight.is_empty()).then_some(weight)
-                })
-                .collect::<Vec<_>>();
+            let compute_signature = |component_ids: &SmallVec<[usize; 8]>| {
+                let weight = Weight::union_all(
+                    component_ids
+                        .iter()
+                        .filter_map(|&component_id| component_results[component_id].0.as_ref()),
+                );
+                (!weight.is_empty()).then_some(weight)
+            };
+            let results = if use_parallel_final_components {
+                signature_components
+                    .par_iter()
+                    .map(compute_signature)
+                    .collect::<Vec<_>>()
+            } else {
+                signature_components
+                    .iter()
+                    .map(compute_signature)
+                    .collect::<Vec<_>>()
+            };
             if std::env::var_os("GLRMASK_VALIDATE_INTERNED_FINAL_GROUPS").is_some() {
                 let reference = final_signature_groups
                     .iter()

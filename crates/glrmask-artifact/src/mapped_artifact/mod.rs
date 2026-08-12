@@ -12,6 +12,7 @@ use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
 pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
+#[cfg(feature = "internal-api")]
 pub use reconcile::remap_weights_with_maps;
 
 pub fn common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
