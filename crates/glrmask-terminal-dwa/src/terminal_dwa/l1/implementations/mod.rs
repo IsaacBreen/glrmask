@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::L1IdentityVocabOrder;
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::grammar::flat::TerminalID;
 use crate::terminal_dwa::l2p::equivalence_analysis::state_equivalence::nfa::{
@@ -165,5 +165,68 @@ pub fn build_with_plan(input: BuildInput<'_>, plan: Plan) -> Option<LocalIdMapTe
 }
 
 pub fn build_from_env(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
-    build_with_plan(input, Plan::from_env(input.partition_label))
+    let mut plan = Plan::from_env(input.partition_label);
+
+    // Projected L1 is the fast common path. For p1 shapes where the established
+    // quotient is often cheaper, attempt that exact builder under the existing
+    // token-bounded work budget. If the quotient analysis exceeds its budget,
+    // it declines before its expensive fallback and we keep projected L1.
+    // Explicit implementation/checker experiments remain authoritative.
+    if std::env::var_os("GLRMASK_L1_IMPLEMENTATION").is_none() && input.partition_label == "p1" {
+        let high_min_states = std::env::var("GLRMASK_P1_QUOTIENT_MIN_TOKENIZER_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(4_000);
+        let high_min_active = std::env::var("GLRMASK_P1_QUOTIENT_MIN_ACTIVE_TERMINALS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(325);
+        let high_max_states = std::env::var("GLRMASK_P1_QUOTIENT_MAX_TOKENIZER_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(6_000);
+        let medium_min_states = std::env::var("GLRMASK_P1_QUOTIENT_MEDIUM_MIN_TOKENIZER_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(1_600);
+        let medium_max_states = std::env::var("GLRMASK_P1_QUOTIENT_MEDIUM_MAX_TOKENIZER_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(4_000);
+        let medium_min_active = std::env::var("GLRMASK_P1_QUOTIENT_MEDIUM_MIN_ACTIVE_TERMINALS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(120);
+        let medium_max_active = std::env::var("GLRMASK_P1_QUOTIENT_MEDIUM_MAX_ACTIVE_TERMINALS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(300);
+        let active_terminals = input.active_terminals.iter().filter(|&&active| active).count();
+        let states = input.tokenizer.num_states();
+        let high_candidate = high_min_states != 0
+            && input.initial_state_map.is_some()
+            && states >= high_min_states
+            && states <= high_max_states
+            && active_terminals >= high_min_active;
+        let medium_candidate = high_min_states != 0
+            && input.initial_state_map.is_some()
+            && states >= medium_min_states
+            && states < medium_max_states
+            && active_terminals >= medium_min_active
+            && active_terminals <= medium_max_active;
+        if high_candidate || medium_candidate {
+            if plan.check_against.is_none() {
+                if let Some(result) = quotient::try_build(input) {
+                    return result;
+                }
+            } else if high_candidate {
+                plan.use_implementation = Implementation::Quotient;
+                if plan.check_against == Some(Implementation::Quotient) {
+                    plan.check_against = Some(Implementation::Projected);
+                }
+            }
+        }
+    }
+
+    build_with_plan(input, plan)
 }
