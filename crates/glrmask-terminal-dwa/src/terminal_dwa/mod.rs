@@ -1168,11 +1168,7 @@ fn build_char_type_sub_vocabs(
     );
     let p2_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD",
-        Some(if automatic_bounded_synthesis_overflow {
-            32
-        } else {
-            20
-        }),
+        Some(8),
     );
     let p4_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
