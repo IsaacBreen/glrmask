@@ -17,6 +17,47 @@ pub(super) struct Finished {
     pub token_classes: usize,
 }
 
+fn direct_vocab_id_map(
+    max_token_id: u32,
+    aliases: &[Vec<u32>],
+    token_class: &[u32],
+    token_classes: u32,
+) -> ManyToOneIdMap {
+    let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
+    let mut internal_to_originals = vec![Vec::<u32>::new(); token_classes as usize];
+    let mut representative_original_ids = vec![u32::MAX; token_classes as usize];
+    for (unique, originals) in aliases.iter().enumerate() {
+        let class = token_class[unique] as usize;
+        debug_assert!(class < internal_to_originals.len());
+        let members = &mut internal_to_originals[class];
+        for &original in originals {
+            original_to_internal[original as usize] = class as u32;
+            representative_original_ids[class] =
+                representative_original_ids[class].min(original);
+            members.push(original);
+        }
+    }
+    for originals in &mut internal_to_originals {
+        originals.sort_unstable();
+    }
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    }
+}
+
+fn direct_vocab_map_enabled(input: &BuildInput<'_>) -> bool {
+    std::env::var("GLRMASK_L1_DIRECT_VOCAB_MAP")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(
+            matches!(input.partition_label, "p1" | "p2") && input.subset_parent_order.is_none(),
+        )
+}
+
 fn compact_columns(rows: &[Vec<u32>], tokens: usize, signatures: usize) -> (Vec<u32>, Vec<usize>) {
     let mut classes = vec![0u32; tokens];
     let mut next = vec![0u32; tokens];
@@ -105,16 +146,26 @@ pub(super) fn finish_compacted(
         state_reps,
     );
     let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
-    let mut original_to_internal = vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
-    for (unique, originals) in aliases.iter().enumerate() {
-        for &original in originals {
-            original_to_internal[original as usize] = token_class[unique];
+    let vocab_tokens = if direct_vocab_map_enabled(&input) {
+        direct_vocab_id_map(
+            input.vocab.max_token_id(),
+            aliases,
+            &token_class,
+            token_classes,
+        )
+    } else {
+        let mut original_to_internal =
+            vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
+        for (unique, originals) in aliases.iter().enumerate() {
+            for &original in originals {
+                original_to_internal[original as usize] = token_class[unique];
+            }
         }
-    }
-    let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        original_to_internal,
-        token_classes,
-    );
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            original_to_internal,
+            token_classes,
+        )
+    };
 
     let build_started = Instant::now();
     let num_terminals = input.grammar.num_terminals as usize;
@@ -197,6 +248,7 @@ pub(super) fn finish_sparse_terminal_rows(
     compact_ms: f64,
     total_ms: impl FnOnce() -> f64,
 ) -> Option<Finished> {
+    let state_map_started = Instant::now();
     let initial = input.tokenizer.initial_state_id() as usize;
     let initial_class = state_class[initial];
     if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
@@ -213,18 +265,31 @@ pub(super) fn finish_sparse_terminal_rows(
         sparse_rows.len() as u32,
         state_reps,
     );
+    let state_map_ms = state_map_started.elapsed().as_secs_f64() * 1000.0;
 
+    let vocab_map_started = Instant::now();
     let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
-    let mut original_to_internal = vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
-    for (unique, originals) in aliases.iter().enumerate() {
-        for &original in originals {
-            original_to_internal[original as usize] = token_class[unique];
+    let vocab_tokens = if direct_vocab_map_enabled(&input) {
+        direct_vocab_id_map(
+            input.vocab.max_token_id(),
+            aliases,
+            &token_class,
+            token_classes,
+        )
+    } else {
+        let mut original_to_internal =
+            vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
+        for (unique, originals) in aliases.iter().enumerate() {
+            for &original in originals {
+                original_to_internal[original as usize] = token_class[unique];
+            }
         }
-    }
-    let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        original_to_internal,
-        token_classes,
-    );
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            original_to_internal,
+            token_classes,
+        )
+    };
+    let vocab_map_ms = vocab_map_started.elapsed().as_secs_f64() * 1000.0;
 
     let build_started = Instant::now();
     let num_terminals = input.grammar.num_terminals as usize;
@@ -267,6 +332,12 @@ pub(super) fn finish_sparse_terminal_rows(
         return None;
     }
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+        eprintln!(
+            "[glrmask/profile][l1_sparse_finish] partition={} state_map_ms={:.3} vocab_map_ms={:.3} build_ms={:.3}",
+            input.partition_label, state_map_ms, vocab_map_ms, build_ms,
+        );
+    }
     let state_classes = sparse_rows.len();
     Some(Finished {
         artifact: LocalIdMapTerminalDwa {

@@ -165,5 +165,9 @@ pub fn build_with_plan(input: BuildInput<'_>, plan: Plan) -> Option<LocalIdMapTe
 }
 
 pub fn build_from_env(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    // Projected L1 is the sole production path.  Other implementations remain
+    // available behind the explicit diagnostic environment variable so we can
+    // measure/check regressions while removing them, but production no longer
+    // contains shape selectors that silently route p1/p2 elsewhere.
     build_with_plan(input, Plan::from_env(input.partition_label))
 }

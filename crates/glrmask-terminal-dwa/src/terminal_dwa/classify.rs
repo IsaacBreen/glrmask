@@ -4488,7 +4488,7 @@ pub fn partition_vocab_char_type_tokens(
     };
     let p0_overflow_threshold = threshold("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD", 16);
     let p1_overflow_threshold = threshold("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD", 20);
-    let p2_overflow_threshold = threshold("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD", 32);
+    let p2_overflow_threshold = threshold("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD", 8);
     let p4_overflow_threshold = threshold("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD", 32);
     let partition_count = if p0_overflow_threshold.is_some() {
         13

@@ -664,11 +664,20 @@ fn l2p_nfa_relevant_powerset_max_states() -> usize {
 }
 
 #[inline]
-fn l2p_nfa_relevant_powerset_min_bounded_pairs() -> usize {
-    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_MIN_BOUNDED_PAIRS")
+fn l2p_nfa_relevant_powerset_min_bounded_pairs(partition_label: &str) -> usize {
+    if let Some(value) = std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_MIN_BOUNDED_PAIRS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(500_000)
+    {
+        return value;
+    }
+    if partition_label == "p0" {
+        return std::env::var("GLRMASK_P0_NFA_RELEVANT_POWERSET_MIN_BOUNDED_PAIRS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+    }
+    500_000
 }
 
 #[inline]
@@ -2083,7 +2092,8 @@ fn analyze_equivalences_impl(
         );
         let analysis_view_policy = l2p_nfa_analysis_view_policy();
         let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
-        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
+        let powerset_min_bounded_pairs =
+            l2p_nfa_relevant_powerset_min_bounded_pairs(partition_label);
         let prepass_pair_estimate = prepared
             .initial_states
             .len()

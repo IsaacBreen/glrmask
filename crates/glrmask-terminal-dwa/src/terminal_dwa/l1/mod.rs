@@ -982,7 +982,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
 /// Returns `None` if the vocab is empty or no terminal matches exist.
 /// The caller should pre-check `count_l1_equivalence_classes()` and merge
 /// L1 terminals into L2+ when the count exceeds `MAX_L1_TSIDS`.
-pub(super) fn build_l1_id_map_and_terminal_dwa_production(
+fn build_l1_id_map_and_terminal_dwa_production_impl(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -1001,9 +1001,11 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
-) -> Option<LocalIdMapTerminalDwa> {
+    decline_on_budget_abort: bool,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<Option<LocalIdMapTerminalDwa>, ()> {
     if vocab.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let generic_epsilon_nfa = tokenizer.has_epsilon_transitions()
@@ -1013,7 +1015,7 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
     let id_map_started_at = Instant::now();
     let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) =
         if generic_epsilon_nfa && l1_generic_nfa_exact_profiles_enabled() {
-            build_l1_generic_nfa_exact_id_map(
+            build_l1_generic_nfa_exact_id_map_impl(
                 tokenizer,
                 vocab,
                 active_terminals,
@@ -1022,7 +1024,9 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
                 shared_generic_nfa_topology,
                 shared_generic_nfa_trie,
                 subset_parent_order,
-            )
+                decline_on_budget_abort,
+                max_raw_unique_targets,
+            )?
         } else if generic_epsilon_nfa {
             build_l1_generic_nfa_fallback_id_map(tokenizer, vocab, initial_state_map)
         } else {
@@ -1040,14 +1044,14 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
 
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
-    let (dwa, terminal_profile) = if generic_epsilon_nfa && exact_profile_reuse.is_none() {
+    let terminal_result = if generic_epsilon_nfa && exact_profile_reuse.is_none() {
         build_l1_generic_nfa_terminal_dwa(
             tokenizer,
             vocab_order.as_ref(),
             &mut id_map,
             num_terminals,
             active_terminals,
-        )?
+        )
     } else {
         build_l1_terminal_dwa(
             tokenizer,
@@ -1059,7 +1063,10 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
             exact_profile_reuse
                 .as_ref()
                 .filter(|_| l1_exact_profile_reuse_enabled()),
-        )?
+        )
+    };
+    let Some((dwa, terminal_profile)) = terminal_result else {
+        return Ok(None);
     };
     let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1165,7 +1172,7 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
         );
     }
 
-    Some(LocalIdMapTerminalDwa {
+    Ok(Some(LocalIdMapTerminalDwa {
         id_map,
         dwa,
         profile: TerminalDwaPhaseProfile {
@@ -1174,7 +1181,90 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
             compact_ms,
             ..TerminalDwaPhaseProfile::default()
         },
-    })
+    }))
+}
+
+pub(super) fn build_l1_id_map_and_terminal_dwa_production(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
+    shared_generic_nfa_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+) -> Option<LocalIdMapTerminalDwa> {
+    build_l1_id_map_and_terminal_dwa_production_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        active_terminals,
+        flat_trans,
+        transitions_by_byte,
+        initial_state_map,
+        shared_generic_nfa_topology,
+        shared_generic_nfa_trie,
+        subset_parent_order,
+        false,
+        None,
+    )
+    .expect("ordinary production L1 build cannot decline")
+}
+
+pub(super) fn try_build_l1_id_map_and_terminal_dwa_production(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
+    shared_generic_nfa_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+    max_raw_unique_targets: Option<usize>,
+) -> Option<Option<LocalIdMapTerminalDwa>> {
+    build_l1_id_map_and_terminal_dwa_production_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        active_terminals,
+        flat_trans,
+        transitions_by_byte,
+        initial_state_map,
+        shared_generic_nfa_topology,
+        shared_generic_nfa_trie,
+        subset_parent_order,
+        true,
+        max_raw_unique_targets,
+    )
+    .ok()
 }
 
 fn l1_generic_nfa_exact_profiles_enabled() -> bool {
@@ -1270,7 +1360,7 @@ pub fn l1_generic_nfa_token_bounded_view_enabled(
 }
 
 
-fn build_l1_generic_nfa_analysis_view(
+fn build_l1_generic_nfa_analysis_view_impl(
     tokenizer: &Tokenizer,
     raw_states: &[usize],
     token_entries: &[(u32, Arc<[u8]>)],
@@ -1283,7 +1373,8 @@ fn build_l1_generic_nfa_analysis_view(
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
     large_work_budget: super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget,
-) -> (Vec<usize>, TokenizerView, &'static str) {
+    decline_on_budget_abort: bool,
+) -> Result<(Vec<usize>, TokenizerView, &'static str), ()> {
     let mut relevant_bytes = [false; 256];
     for (_, bytes) in token_entries {
         for &byte in bytes.iter() {
@@ -1322,11 +1413,11 @@ fn build_l1_generic_nfa_analysis_view(
                         L1_GENERIC_NFA_SMALL_VOCAB_POWERSET_MAX_STATES,
                     );
                 }
-                return (
+                return Ok((
                     view_states,
                     powerset_view.into_tokenizer_view(),
                     "relevant_powerset_small_vocab",
-                );
+                ));
             }
             Err(work) => {
                 if compile_profile_enabled() {
@@ -1342,8 +1433,8 @@ fn build_l1_generic_nfa_analysis_view(
         }
     }
 
-    let use_unbudgeted_token_bounded_view =
-        l1_generic_nfa_token_bounded_view_enabled(raw_states.len(), token_entries.len());
+    let use_unbudgeted_token_bounded_view = !decline_on_budget_abort
+        && l1_generic_nfa_token_bounded_view_enabled(raw_states.len(), token_entries.len());
     if !use_unbudgeted_token_bounded_view
         && token_entries.len() >= L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB
     {
@@ -1372,11 +1463,11 @@ fn build_l1_generic_nfa_analysis_view(
                         L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES,
                     );
                 }
-                return (
+                return Ok((
                     view_states,
                     powerset_view.into_tokenizer_view(),
                     "relevant_powerset_probe",
-                );
+                ));
             }
             Err(work) => {
                 if compile_profile_enabled() {
@@ -1446,6 +1537,9 @@ fn build_l1_generic_nfa_analysis_view(
                         work.trie_visits,
                     );
                 }
+                if decline_on_budget_abort {
+                    return Err(());
+                }
                 None
             }
         }
@@ -1456,7 +1550,7 @@ fn build_l1_generic_nfa_analysis_view(
             .iter()
             .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
             .collect::<Vec<_>>();
-        return (view_states, bounded.tokenizer_view, analysis_view);
+        return Ok((view_states, bounded.tokenizer_view, analysis_view));
     }
 
     let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
@@ -1469,14 +1563,42 @@ fn build_l1_generic_nfa_analysis_view(
         .iter()
         .map(|&raw_state| powerset_view.raw_start_to_view[raw_state] as usize)
         .collect::<Vec<_>>();
-    (
+    Ok((
         view_states,
         powerset_view.into_tokenizer_view(),
         "relevant_powerset",
-    )
+    ))
 }
 
-fn build_l1_generic_nfa_exact_id_map<'a>(
+fn build_l1_generic_nfa_analysis_view(
+    tokenizer: &Tokenizer,
+    raw_states: &[usize],
+    token_entries: &[(u32, Arc<[u8]>)],
+    active_terminals: &[bool],
+    flat_trans: &[u32],
+    shared_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
+    shared_token_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    large_work_budget: super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget,
+) -> (Vec<usize>, TokenizerView, &'static str) {
+    build_l1_generic_nfa_analysis_view_impl(
+        tokenizer,
+        raw_states,
+        token_entries,
+        active_terminals,
+        flat_trans,
+        shared_topology,
+        shared_token_trie,
+        large_work_budget,
+        false,
+    )
+    .expect("ordinary L1 analysis view cannot decline")
+}
+
+fn build_l1_generic_nfa_exact_id_map_impl<'a>(
     tokenizer: &Tokenizer,
     vocab: &'a Vocab,
     active_terminals: &[bool],
@@ -1489,13 +1611,15 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
-) -> (
+    decline_on_budget_abort: bool,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
     Vec<u32>,
     L1IdMapProfile,
     Option<L1ExactProfileReuse>,
-) {
+), ()> {
     let num_states = tokenizer.num_states() as usize;
     let token_identity_started_at = Instant::now();
     let vocab_order = subset_parent_order
@@ -1527,7 +1651,16 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
 
     let state_equiv_started_at = Instant::now();
     let view_started_at = Instant::now();
-    let (view_states, tokenizer_view, analysis_view) = build_l1_generic_nfa_analysis_view(
+    let analysis_budget = if decline_on_budget_abort {
+        let max_trie_visits = std::env::var("GLRMASK_L1_QUOTIENT_TRY_MAX_TRIE_VISITS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(500_000);
+        l1_generic_nfa_token_bounded_large_work_budget_with_override(Some(max_trie_visits))
+    } else {
+        l1_generic_nfa_token_bounded_large_work_budget()
+    };
+    let (view_states, tokenizer_view, analysis_view) = build_l1_generic_nfa_analysis_view_impl(
         tokenizer,
         &raw_states,
         token_entries,
@@ -1535,8 +1668,9 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         flat_trans,
         shared_topology,
         shared_token_trie,
-        l1_generic_nfa_token_bounded_large_work_budget(),
-    );
+        analysis_budget,
+        decline_on_budget_abort,
+    )?;
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
@@ -1547,7 +1681,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     });
     let exact_started_at = Instant::now();
     let (exact_mapping, exact_profile_reuse) =
-        find_l1_exact_state_equivalence_by_flat_signatures(
+        find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
             vocab_order.as_ref(),
             &view_states,
             state_to_terminal_signature,
@@ -1557,7 +1691,8 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             true,
             terminal_signature_ms,
             None,
-        );
+            max_raw_unique_targets,
+        )?;
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(exact_mapping.len(), raw_states.len());
     let mut exact_profile_reuse =
@@ -1651,7 +1786,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         );
     }
 
-    (
+    Ok((
         InternalIdMap {
             tokenizer_states,
             vocab_tokens: ManyToOneIdMap::empty(),
@@ -1676,7 +1811,42 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             token_identity_map_ms,
         },
         Some(exact_profile_reuse),
+    ))
+}
+
+fn build_l1_generic_nfa_exact_id_map<'a>(
+    tokenizer: &Tokenizer,
+    vocab: &'a Vocab,
+    active_terminals: &[bool],
+    flat_trans: &[u32],
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
+    shared_token_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+) -> (
+    InternalIdMap,
+    Arc<L1IdentityVocabOrder>,
+    Vec<u32>,
+    L1IdMapProfile,
+    Option<L1ExactProfileReuse>,
+) {
+    build_l1_generic_nfa_exact_id_map_impl(
+        tokenizer,
+        vocab,
+        active_terminals,
+        flat_trans,
+        initial_state_map,
+        shared_topology,
+        shared_token_trie,
+        subset_parent_order,
+        false,
+        None,
     )
+    .expect("ordinary exact L1 build cannot decline")
 }
 
 fn build_l1_generic_nfa_fallback_id_map<'a>(
@@ -2560,7 +2730,9 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
         terminal_signature_ms,
         first_target_cache_override,
         Some(self_loop_bytes_by_state.as_ref()),
+        None,
     )
+    .expect("ordinary exact L1 equivalence cannot decline")
 }
 
 fn find_l1_exact_state_equivalence_by_flat_signatures(
@@ -2574,7 +2746,34 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     terminal_signature_ms: f64,
     self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
-    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+    find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        tokenizer_view,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        self_loop_bytes_by_state,
+        None,
+    )
+    .expect("ordinary exact L1 equivalence cannot decline")
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    cached_self_loop_bytes_by_state: Option<&[U8Set]>,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
         vocab_order,
         states,
         state_to_terminal_signature,
@@ -2584,7 +2783,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         allow_remaining_horizon_quotients,
         terminal_signature_ms,
         None,
-        self_loop_bytes_by_state,
+        cached_self_loop_bytes_by_state,
+        max_raw_unique_targets,
     )
 }
 
@@ -2600,6 +2800,35 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     first_target_cache_override: Option<bool>,
     cached_self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        tokenizer_view,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        first_target_cache_override,
+        cached_self_loop_bytes_by_state,
+        None,
+    )
+    .expect("ordinary exact L1 equivalence cannot decline")
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    first_target_cache_override: Option<bool>,
+    cached_self_loop_bytes_by_state: Option<&[U8Set]>,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
     let dfa = tokenizer_view.dfa();
     let active_language = dfa
         .states
@@ -2622,6 +2851,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         terminal_signature_ms,
         first_target_cache_override,
         cached_self_loop_bytes_by_state,
+        max_raw_unique_targets,
     )
 }
 
@@ -2639,9 +2869,10 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     terminal_signature_ms: f64,
     first_target_cache_override: Option<bool>,
     cached_self_loop_bytes_by_state: Option<&[U8Set]>,
-) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
     if states.len() <= 1 {
-        return (states.to_vec(), None);
+        return Ok((states.to_vec(), None));
     }
     let profile_enabled = compile_profile_enabled();
     let total_started_at = profile_enabled.then(Instant::now);
@@ -2721,6 +2952,17 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     let raw_target_probe_ms = raw_target_probe_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
+    if max_raw_unique_targets.is_some_and(|max_targets| raw_unique_targets_len > max_targets) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][l1_exact_equiv_decline] raw_unique_targets={} max_raw_unique_targets={} raw_target_probe_ms={:.3}",
+                raw_unique_targets_len,
+                max_raw_unique_targets.expect("checked above"),
+                raw_target_probe_ms,
+            );
+        }
+        return Err(());
+    }
     let use_remaining_horizon_quotients = allow_remaining_horizon_quotients
         && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len())
         && l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets_len);
@@ -3425,7 +3667,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             );
         }
 
-        return (
+        return Ok((
             mapping,
             Some(L1ExactProfileReuse {
                 target_to_profile_id,
@@ -3445,7 +3687,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                     .collect::<Vec<_>>()
                     .into(),
             }),
-        );
+        ));
     }
 
     // Materialize each state's exact equivalence key as a contiguous row, then
@@ -3637,7 +3879,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         );
     }
 
-    (
+    Ok((
         mapping,
         Some(L1ExactProfileReuse {
             target_to_profile_id,
@@ -3660,7 +3902,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                 .collect::<Vec<_>>()
                 .into(),
         }),
-    )
+    ))
 }
 
 fn l1_target_self_loop_covers_suffix_subtree(

@@ -1094,16 +1094,39 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-#[derive(Debug)]
-struct CharTypeSubVocabs {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CharTypeSubVocabKey {
     p0_overflow_threshold: Option<usize>,
     p1_overflow_threshold: Option<usize>,
     p2_overflow_threshold: Option<usize>,
     p4_overflow_threshold: Option<usize>,
+}
+
+#[derive(Debug)]
+struct CharTypeSubVocabVariant {
+    key: CharTypeSubVocabKey,
     sub_vocabs: Arc<[Vocab]>,
 }
 
+#[derive(Debug, Default)]
+struct CharTypeSubVocabs {
+    variants: Mutex<Vec<CharTypeSubVocabVariant>>,
+}
+
 impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
+
+fn char_type_sub_vocab_cache(vocab: &Vocab) -> Arc<CharTypeSubVocabs> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
+        return cached;
+    }
+    let candidate = Arc::new(CharTypeSubVocabs::default());
+    vocab.vocab_derived_cache_set(Arc::clone(&candidate));
+    // `Vocab` cache insertion is first-writer-wins.  If another thread won the
+    // race, use that shared cache rather than the unregistered candidate.
+    vocab
+        .vocab_derived_cache_get::<CharTypeSubVocabs>()
+        .unwrap_or(candidate)
+}
 
 fn long_token_overflow_threshold(
     name: &str,
@@ -1175,24 +1198,23 @@ fn build_char_type_sub_vocabs(
     );
     let p2_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD",
-        Some(if automatic_bounded_synthesis_overflow {
-            32
-        } else {
-            20
-        }),
+        Some(8),
     );
     let p4_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
         automatic_bounded_synthesis_overflow.then_some(32),
     );
-    if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
-        if cached.p0_overflow_threshold == p0_overflow_threshold
-            && cached.p1_overflow_threshold == p1_overflow_threshold
-            && cached.p2_overflow_threshold == p2_overflow_threshold
-            && cached.p4_overflow_threshold == p4_overflow_threshold
-        {
-            return Arc::clone(&cached.sub_vocabs);
-        }
+    let key = CharTypeSubVocabKey {
+        p0_overflow_threshold,
+        p1_overflow_threshold,
+        p2_overflow_threshold,
+        p4_overflow_threshold,
+    };
+    let cache = char_type_sub_vocab_cache(vocab);
+    if let Ok(variants) = cache.variants.lock()
+        && let Some(cached) = variants.iter().find(|variant| variant.key == key)
+    {
+        return Arc::clone(&cached.sub_vocabs);
     }
 
     let partition_count = if p0_overflow_threshold.is_some() {
@@ -1241,13 +1263,17 @@ fn build_char_type_sub_vocabs(
         })
         .collect::<Vec<_>>()
         .into();
-    vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
-        p0_overflow_threshold,
-        p1_overflow_threshold,
-        p2_overflow_threshold,
-        p4_overflow_threshold,
-        sub_vocabs: Arc::clone(&sub_vocabs),
-    }));
+    if let Ok(mut variants) = cache.variants.lock() {
+        // Another compile can race the expensive construction.  Keep exactly
+        // one canonical variant and share it with all future compiles.
+        if let Some(cached) = variants.iter().find(|variant| variant.key == key) {
+            return Arc::clone(&cached.sub_vocabs);
+        }
+        variants.push(CharTypeSubVocabVariant {
+            key,
+            sub_vocabs: Arc::clone(&sub_vocabs),
+        });
+    }
     sub_vocabs
 }
 
@@ -1257,11 +1283,23 @@ pub fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
     l1::prepare_l1_token_bounded_analysis_trie(vocab);
 
     if std::env::var("GLRMASK_PARTITION_SCHEME").as_deref().unwrap_or("char_type") == "char_type" {
-        for sub_vocab in build_char_type_sub_vocabs(vocab, false).iter() {
-            classify::prepare_vocab_for_terminal_classification(sub_vocab);
-            l1::prepare_l1_identity_vocab_order(sub_vocab);
-            l1::prepare_l1_token_bounded_analysis_trie(sub_vocab);
-            l1::prepare_l1_finite_vocab_projection(sub_vocab);
+        // A grammar may or may not activate partition-local bounded-string
+        // synthesis, and that changes the long-token overflow partitions.  Both
+        // layouts are pure vocabulary artifacts, so prepare both once and keep
+        // both variants cached; compilation then selects the matching one with
+        // no sorting/trie construction on its critical path.
+        for automatic_bounded_synthesis_overflow in [false, true] {
+            for sub_vocab in build_char_type_sub_vocabs(
+                vocab,
+                automatic_bounded_synthesis_overflow,
+            )
+            .iter()
+            {
+                classify::prepare_vocab_for_terminal_classification(sub_vocab);
+                l1::prepare_l1_identity_vocab_order(sub_vocab);
+                l1::prepare_l1_token_bounded_analysis_trie(sub_vocab);
+                l1::prepare_l1_finite_vocab_projection(sub_vocab);
+            }
         }
     }
 }
