@@ -349,6 +349,42 @@ fn build_common_many_to_one_id_map_pair(
         })
         .unwrap_or(true);
     if allow_unmapped && use_sparse_unmapped_pair {
+        let direct_sparse = std::env::var("GLRMASK_DIRECT_SPARSE_COMMON_PAIR_MAP")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+        if direct_sparse {
+            let direct = build_common_many_to_one_id_map_pair_direct_sparse(
+                left,
+                right,
+                num_originals,
+            );
+            if std::env::var_os("GLRMASK_VALIDATE_DIRECT_SPARSE_COMMON_PAIR_MAP").is_some() {
+                let reference = build_common_many_to_one_id_map_pair_sparse_unmapped(
+                    left,
+                    right,
+                    num_originals,
+                );
+                assert_eq!(
+                    direct.original_to_internal,
+                    reference.original_to_internal,
+                    "direct sparse common pair original map differs from reference",
+                );
+                assert_eq!(
+                    direct.internal_to_originals,
+                    reference.internal_to_originals,
+                    "direct sparse common pair classes differ from reference",
+                );
+                assert_eq!(
+                    direct.representative_original_ids,
+                    reference.representative_original_ids,
+                    "direct sparse common pair representatives differ from reference",
+                );
+            }
+            return direct;
+        }
         return build_common_many_to_one_id_map_pair_sparse_unmapped(
             left,
             right,
@@ -356,6 +392,84 @@ fn build_common_many_to_one_id_map_pair(
         );
     }
     build_common_many_to_one_id_map_pair_hashed(left, right, num_originals, allow_unmapped)
+}
+
+fn build_common_many_to_one_id_map_pair_direct_sparse(
+    left: &ManyToOneIdMap,
+    right: &ManyToOneIdMap,
+    num_originals: usize,
+) -> ManyToOneIdMap {
+    let right_classes = right.internal_to_originals.len();
+    let mut original_to_internal = vec![u32::MAX; num_originals];
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::<u32>::new();
+
+    // Composite pair order is lexicographic `(left, right)`, with the unmapped
+    // sentinel sorting after every real class. Emit exactly that order directly.
+    let mut by_right = (0..right_classes).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+    let mut touched_right = Vec::<usize>::new();
+    let mut left_only = Vec::<u32>::new();
+
+    let mut emit = |originals: Vec<u32>| {
+        if originals.is_empty() {
+            return;
+        }
+        debug_assert!(originals.windows(2).all(|pair| pair[0] < pair[1]));
+        let class = internal_to_originals.len() as u32;
+        for &original in &originals {
+            original_to_internal[original as usize] = class;
+        }
+        representatives.push(originals[0]);
+        internal_to_originals.push(originals);
+    };
+
+    for left_originals in &left.internal_to_originals {
+        touched_right.clear();
+        left_only.clear();
+        for &original in left_originals {
+            let right_internal = right
+                .original_to_internal
+                .get(original as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if right_internal == u32::MAX {
+                left_only.push(original);
+            } else {
+                let slot = &mut by_right[right_internal as usize];
+                if slot.is_empty() {
+                    touched_right.push(right_internal as usize);
+                }
+                slot.push(original);
+            }
+        }
+        touched_right.sort_unstable();
+        for right_class in touched_right.drain(..) {
+            emit(std::mem::take(&mut by_right[right_class]));
+        }
+        emit(std::mem::take(&mut left_only));
+    }
+
+    // `(MAX, right)` classes follow every `(left, *)` class.
+    for right_originals in &right.internal_to_originals {
+        let mut right_only = Vec::new();
+        for &original in right_originals {
+            let left_internal = left
+                .original_to_internal
+                .get(original as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if left_internal == u32::MAX {
+                right_only.push(original);
+            }
+        }
+        emit(right_only);
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    }
 }
 
 fn build_common_many_to_one_id_map_pair_sparse_unmapped(
