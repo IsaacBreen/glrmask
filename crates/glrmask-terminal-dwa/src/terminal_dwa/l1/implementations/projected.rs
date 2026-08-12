@@ -2440,21 +2440,47 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             return build_finite_projected(input);
         }
     }
-    let (aliases, tokens) = unique_vocab(input);
+    // Large full-partition vocabularies already have their exact deduplicated
+    // tokens/aliases prepared for the finite projected kernel. Reuse that
+    // immutable artifact rather than rebuilding two 82k-entry vectors on every
+    // residual compile. Split-L1 keeps its subset-specific filtered order.
+    let reuse_prepared_vocab = std::env::var("GLRMASK_L1_RESIDUAL_REUSE_PREPARED_VOCAB")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let prepared_vocab = (reuse_prepared_vocab
+        && input.subset_parent_order.is_none()
+        && input.vocab.len() >= 50_000)
+        .then(|| build_finite_vocab_projection(input.vocab));
+    let owned_vocab;
+    let (aliases, tokens): (&[Vec<u32>], &[Arc<[u8]>]) = if let Some(prepared) = prepared_vocab.as_ref() {
+        (prepared.aliases.as_slice(), prepared.tokens.as_slice())
+    } else {
+        owned_vocab = unique_vocab(input);
+        (owned_vocab.0.as_slice(), owned_vocab.1.as_slice())
+    };
     if tokens.iter().all(|token| token.len() == 1) {
-        return build_one_byte(input, &aliases, &tokens, total);
+        return build_one_byte(input, aliases, tokens, total);
     }
-    let mut relevant = [false; 256];
-    for token in &tokens {
-        for &byte in token.iter() {
-            relevant[byte as usize] = true;
+    let vocab_bytes = if prepared_vocab.is_some() {
+        let mut bytes = input.vocab.relevant_bytes().iter().copied().collect::<Vec<_>>();
+        bytes.sort_unstable();
+        bytes
+    } else {
+        let mut relevant = [false; 256];
+        for token in tokens {
+            for &byte in token.iter() {
+                relevant[byte as usize] = true;
+            }
         }
-    }
-    let vocab_bytes = relevant
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, &used)| used.then_some(byte as u8))
-        .collect::<Vec<_>>();
+        relevant
+            .iter()
+            .enumerate()
+            .filter_map(|(byte, &used)| used.then_some(byte as u8))
+            .collect::<Vec<_>>()
+    };
     let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
 
     let projected_started = Instant::now();
@@ -2688,7 +2714,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
     let finished = common::finish_sparse_terminal_rows(
         input,
-        &aliases,
+        aliases,
         state_class,
         sparse_rows,
         token_class,
