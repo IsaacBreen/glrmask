@@ -1643,6 +1643,16 @@ fn profile_vector_projection_shape(input: BuildInput<'_>) {
 }
 
 fn projected_kernel_auto(input: BuildInput<'_>) -> ProjectedKernel {
+    // p1 is best treated as one adaptive projected algorithm rather than two
+    // externally selected kernels. Start from residual projection; its cheap
+    // root-membership precheck switches to finite projection before residual
+    // state growth, and finite has a bounded-work escape back to residual when
+    // the vocabulary trie is the pathological side. Keeping the decision here
+    // unconditional avoids a second, weaker shape heuristic fighting that
+    // measured-work handoff.
+    if input.partition_label == "p1" && input.subset_parent_order.is_none() {
+        return ProjectedKernel::Residual;
+    }
     let active_terminals = input.active_terminals.iter().filter(|&&active| active).count();
     let vocab_tokens = input.vocab.len();
     let vocab_bytes = input.vocab.relevant_bytes().len();
@@ -1743,7 +1753,14 @@ fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
 }
 
 pub(crate) fn prepare_finite_vocab_projection(vocab: &Vocab) {
-    if vocab.len() >= 50_000 {
+    // The finite projected kernel is not just a large-p2 fallback: it is the
+    // fast projected representation for several medium/large p1 shapes too.
+    // This trie is a pure vocabulary artifact, so build it during vocabulary
+    // preparation instead of charging the first grammar that selects finite L1.
+    // For small partitions the same construction is sub-millisecond and often
+    // never selected, so retaining another trie is counterproductive. p1/p2
+    // full partitions are comfortably above this threshold.
+    if vocab.len() >= 10_000 {
         let _ = build_finite_vocab_projection(vocab);
     }
 }
@@ -2182,13 +2199,35 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
     let mut uniform_subtrees = 0usize;
     let mut uniform_tokens = 0usize;
     let self_loops = input.tokenizer.all_self_loop_bytes();
-    let adaptive_budget = input.partition_label == "p2" && input.subset_parent_order.is_none();
-    let profile_run_budget = if adaptive_budget {
-        std::env::var("GLRMASK_P2_FINITE_MAX_PROFILE_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_048)
-    } else { usize::MAX };
-    let pair_visit_budget = if adaptive_budget {
-        std::env::var("GLRMASK_P2_FINITE_MAX_PAIR_VISITS").ok().and_then(|v| v.parse().ok()).unwrap_or(150_000)
-    } else { usize::MAX };
+    let adaptive_budget = input.subset_parent_order.is_none()
+        && matches!(input.partition_label, "p1" | "p2");
+    let (profile_run_budget, pair_visit_budget) = if adaptive_budget {
+        let (runs_env, pairs_env, default_pairs) = if input.partition_label == "p1" {
+            (
+                "GLRMASK_P1_FINITE_MAX_PROFILE_RUNS",
+                "GLRMASK_P1_FINITE_MAX_PAIR_VISITS",
+                50_000,
+            )
+        } else {
+            (
+                "GLRMASK_P2_FINITE_MAX_PROFILE_RUNS",
+                "GLRMASK_P2_FINITE_MAX_PAIR_VISITS",
+                150_000,
+            )
+        };
+        (
+            std::env::var(runs_env)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2_048),
+            std::env::var(pairs_env)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default_pairs),
+        )
+    } else {
+        (usize::MAX, usize::MAX)
+    };
     let mut profile_run_count = 0usize;
 
     for (start, raw_states) in starts {
@@ -2363,43 +2402,57 @@ fn projected_limit_exceeded(input: BuildInput<'_>, states: usize, limit: usize) 
     true
 }
 
-fn projected_root_membership_estimate(input: BuildInput<'_>) -> usize {
+fn projected_root_membership_precheck(input: BuildInput<'_>, threshold: usize) -> (usize, bool) {
+    let mut memberships = 0usize;
+    let mut visit = |state: u32| {
+        memberships += super::super::collect_active_terminal_signature(
+            input.tokenizer,
+            state,
+            input.active_terminals,
+        )
+        .len();
+        memberships > threshold
+    };
     if let Some(state_map) = input.initial_state_map {
-        state_map
+        for &state in state_map
             .representative_original_ids
             .iter()
             .filter(|&&state| state != u32::MAX)
-            .map(|&state| {
-                super::super::collect_active_terminal_signature(
-                    input.tokenizer,
-                    state,
-                    input.active_terminals,
-                )
-                .len()
-            })
-            .sum()
+        {
+            if visit(state) {
+                return (memberships, true);
+            }
+        }
     } else {
-        (0..input.tokenizer.num_states())
-            .map(|state| {
-                super::super::collect_active_terminal_signature(
-                    input.tokenizer,
-                    state,
-                    input.active_terminals,
-                )
-                .len()
-            })
-            .sum()
+        for state in 0..input.tokenizer.num_states() {
+            if visit(state) {
+                return (memberships, true);
+            }
+        }
     }
+    (memberships, false)
 }
 
 fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
-    if input.subset_parent_order.is_some() || input.vocab.len() < 50_000 {
+    if input.subset_parent_order.is_some() {
         return usize::MAX;
     }
-    std::env::var("GLRMASK_L1_RESIDUAL_FINITE_SWITCH_STATES")
+    let (env_name, default) = if input.partition_label == "p1" {
+        // The precheck compares this with the number of live
+        // (state,terminal-group) roots. Above a few thousand roots the residual
+        // DFA can grow much faster than the finite-vocabulary projection. The
+        // finite kernel has its own work budget and falls back to residual if
+        // its trie traversal is the pathological side instead.
+        ("GLRMASK_P1_RESIDUAL_FINITE_SWITCH_STATES", 3_500)
+    } else if input.vocab.len() >= 50_000 {
+        ("GLRMASK_L1_RESIDUAL_FINITE_SWITCH_STATES", 9_000)
+    } else {
+        return usize::MAX;
+    };
+    std::env::var(env_name)
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(9_000)
+        .unwrap_or(default)
 }
 
 fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
@@ -2416,6 +2469,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     }
     let total = Instant::now();
     let finite_switch_states = if allow_finite_switch { residual_finite_switch_states(input) } else { usize::MAX };
+    let setup_started = Instant::now();
     let use_finite_precheck = allow_finite_switch && std::env::var("GLRMASK_L1_RESIDUAL_FINITE_PRECHECK")
         .map(|value| {
             let value = value.trim();
@@ -2424,7 +2478,8 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         .unwrap_or(true);
     if use_finite_precheck && finite_switch_states != usize::MAX {
         let precheck_started = Instant::now();
-        let memberships = projected_root_membership_estimate(input);
+        let (memberships, exceeds_threshold) =
+            projected_root_membership_precheck(input, finite_switch_states);
         let precheck_ms = precheck_started.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
@@ -2432,11 +2487,11 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
                 input.partition_label,
                 memberships,
                 finite_switch_states,
-                memberships > finite_switch_states,
+                exceeds_threshold,
                 precheck_ms,
             );
         }
-        if memberships > finite_switch_states {
+        if exceeds_threshold {
             return build_finite_projected(input);
         }
     }
@@ -2450,10 +2505,12 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
+    let vocab_projection_started = Instant::now();
     let prepared_vocab = (reuse_prepared_vocab
         && input.subset_parent_order.is_none()
         && input.vocab.len() >= 50_000)
         .then(|| build_finite_vocab_projection(input.vocab));
+    let vocab_projection_ms = vocab_projection_started.elapsed().as_secs_f64() * 1000.0;
     let owned_vocab;
     let (aliases, tokens): (&[Vec<u32>], &[Arc<[u8]>]) = if let Some(prepared) = prepared_vocab.as_ref() {
         (prepared.aliases.as_slice(), prepared.tokens.as_slice())
@@ -2464,6 +2521,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     if tokens.iter().all(|token| token.len() == 1) {
         return build_one_byte(input, aliases, tokens, total);
     }
+    let byte_setup_started = Instant::now();
     let vocab_bytes = if prepared_vocab.is_some() {
         let mut bytes = input.vocab.relevant_bytes().iter().copied().collect::<Vec<_>>();
         bytes.sort_unstable();
@@ -2482,6 +2540,8 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             .collect::<Vec<_>>()
     };
     let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
+    let byte_setup_ms = byte_setup_started.elapsed().as_secs_f64() * 1000.0;
+    let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
 
     let projected_started = Instant::now();
     let mut projected = Projected::new(input);
@@ -2641,9 +2701,8 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let mut final_subset_to_class = FxHashMap::<u32, u32>::default();
     let mut class_subsets = Vec::<u32>::new();
     let mut token_class = vec![0u32; aliases.len()];
-    let mut token_bytes = 0usize;
+    let token_bytes = tokens.iter().map(|token| token.len()).sum::<usize>();
     for (token_index, token) in tokens.iter().enumerate() {
-        token_bytes += token.len();
         let subset = reverse.token(token);
         let next = class_subsets.len() as u32;
         token_class[token_index] = *final_subset_to_class.entry(subset).or_insert_with(|| {
@@ -2712,6 +2771,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let signature_count = 0usize;
     let signature_ms = signature_started.elapsed().as_secs_f64() * 1000.0;
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
+    let finish_started = Instant::now();
     let finished = common::finish_sparse_terminal_rows(
         input,
         aliases,
@@ -2722,6 +2782,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         0.0,
         || total.elapsed().as_secs_f64() * 1000.0,
     )?;
+    let finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         let live_edges = projected.transitions.iter().map(Vec::len).sum::<usize>();
         let max_live_edges = projected.transitions.iter().map(Vec::len).max().unwrap_or(0);
@@ -2742,7 +2803,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             .max()
             .unwrap_or(0);
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} grouped_local_states={} grouped_local_rounds={} grouped_local_ms={:.3} grouped_global_ms={:.3} dag_groups={} dag_states={} hopcroft_groups={} hopcroft_states={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} sparse_rows={} sparse_pairs={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} grouped_local_states={} grouped_local_rounds={} grouped_local_ms={:.3} grouped_global_ms={:.3} dag_groups={} dag_states={} hopcroft_groups={} hopcroft_states={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} sparse_rows={} sparse_pairs={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} signatures={} state_classes={} token_classes={} vocab_projection_ms={:.3} byte_setup_ms={:.3} setup_ms={:.3} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} finish_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -2783,6 +2844,9 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             signature_count,
             finished.state_classes,
             finished.token_classes,
+            vocab_projection_ms,
+            byte_setup_ms,
+            setup_ms,
             projected_ms,
             minimize_ms,
             root_vectors_ms,
@@ -2790,6 +2854,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             incidence_ms,
             signature_ms,
             traverse_ms,
+            finish_ms,
             finished.compact_ms,
             finished.build_ms,
             total.elapsed().as_secs_f64() * 1000.0,
