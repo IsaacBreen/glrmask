@@ -96,26 +96,69 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
 
-    let left_started_at = profiling.then(Instant::now);
-    remap_weights_with_maps(
-        left_weights,
-        &left_tsid_map,
-        &left_token_map,
-        common_id_map.num_tsids() as usize,
-    );
-    let left_ms = left_started_at
-        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-    let right_started_at = profiling.then(Instant::now);
-    remap_weights_with_maps(
-        right_weights,
-        &right_tsid_map,
-        &right_token_map,
-        common_id_map.num_tsids() as usize,
-    );
-    let right_ms = right_started_at
-        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
+    let common_tsid_count = common_id_map.num_tsids() as usize;
+    let parallel_remap = std::env::var("GLRMASK_PARALLEL_FORCED_COMMON_REMAP")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let ((left_ms, ()), (right_ms, ())) = if parallel_remap {
+        rayon::join(
+            || {
+                let started = profiling.then(Instant::now);
+                remap_weights_with_maps(
+                    left_weights,
+                    &left_tsid_map,
+                    &left_token_map,
+                    common_tsid_count,
+                );
+                (
+                    started
+                        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
+                    (),
+                )
+            },
+            || {
+                let started = profiling.then(Instant::now);
+                remap_weights_with_maps(
+                    right_weights,
+                    &right_tsid_map,
+                    &right_token_map,
+                    common_tsid_count,
+                );
+                (
+                    started
+                        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
+                    (),
+                )
+            },
+        )
+    } else {
+        let left_started = profiling.then(Instant::now);
+        remap_weights_with_maps(
+            left_weights,
+            &left_tsid_map,
+            &left_token_map,
+            common_tsid_count,
+        );
+        let left_ms = left_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let right_started = profiling.then(Instant::now);
+        remap_weights_with_maps(
+            right_weights,
+            &right_tsid_map,
+            &right_token_map,
+            common_tsid_count,
+        );
+        let right_ms = right_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        ((left_ms, ()), (right_ms, ()))
+    };
 
     if let Some(total_started_at) = total_started_at {
         let fanout = |map: &[Vec<u32>]| {
@@ -256,18 +299,47 @@ pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> Interna
         .max()
         .unwrap_or(0);
 
-    let tokenizer_states = build_common_many_to_one_id_map(
-        inputs,
-        num_tokenizer_states,
-        |input| &input.tokenizer_states,
-        false,
-    );
-    let vocab_tokens = build_common_many_to_one_id_map(
-        inputs,
-        num_original_tokens,
-        |input| &input.vocab_tokens,
-        true,
-    );
+    let parallel_dimensions = std::env::var("GLRMASK_PARALLEL_COMMON_ID_DIMENSIONS")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let (tokenizer_states, vocab_tokens) = if parallel_dimensions {
+        rayon::join(
+            || {
+                build_common_many_to_one_id_map(
+                    inputs,
+                    num_tokenizer_states,
+                    |input| &input.tokenizer_states,
+                    false,
+                )
+            },
+            || {
+                build_common_many_to_one_id_map(
+                    inputs,
+                    num_original_tokens,
+                    |input| &input.vocab_tokens,
+                    true,
+                )
+            },
+        )
+    } else {
+        (
+            build_common_many_to_one_id_map(
+                inputs,
+                num_tokenizer_states,
+                |input| &input.tokenizer_states,
+                false,
+            ),
+            build_common_many_to_one_id_map(
+                inputs,
+                num_original_tokens,
+                |input| &input.vocab_tokens,
+                true,
+            ),
+        )
+    };
 
     InternalIdMap {
         tokenizer_states,
