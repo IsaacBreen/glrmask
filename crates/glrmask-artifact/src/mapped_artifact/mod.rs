@@ -427,6 +427,10 @@ impl<T: WeightRefs> MappedArtifact<T> {
     where
         U: WeightRefs,
     {
+        if same_internal_id_maps(self.id_map(), other.id_map()) {
+            let (left_artifact, id_map) = self.into_parts();
+            return MappedArtifact::new((left_artifact, other.into_artifact()), id_map);
+        }
         let common_id_map = {
             let (left_artifact, left_id_map) = self.parts_mut();
             let (right_artifact, right_id_map) = other.parts_mut();

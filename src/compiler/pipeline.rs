@@ -2194,6 +2194,7 @@ fn build_and_merge_parser_dwa_families(
     templates: Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
+    final_id_map: Option<&std::sync::OnceLock<InternalIdMap>>,
 ) -> MappedParserDwa {
     let total_started_at = Instant::now();
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
@@ -2342,6 +2343,30 @@ fn build_and_merge_parser_dwa_families(
         .max_original_token_id()
         .unwrap_or_else(|| vocab.max_token_id())
         .max(vocab.max_token_id());
+
+    let parser_dwas = if direct_parts.is_none() {
+        if let Some(final_id_map) = final_id_map.and_then(std::sync::OnceLock::get) {
+            if parser_dwas.len() == 2 {
+                let mut parser_dwas = parser_dwas.into_iter();
+                let left = parser_dwas.next().expect("two parser families have a left member");
+                let right = parser_dwas.next().expect("two parser families have a right member");
+                let (left, right) = rayon::join(
+                    || left.remap_into_existing_common(final_id_map),
+                    || right.remap_into_existing_common(final_id_map),
+                );
+                vec![left, right]
+            } else {
+                parser_dwas
+                    .into_iter()
+                    .map(|parser| parser.remap_into_existing_common(final_id_map))
+                    .collect()
+            }
+        } else {
+            parser_dwas
+        }
+    } else {
+        parser_dwas
+    };
 
     if let Some(mapped_parts) = direct_parts {
         let (dwa, top_accept, id_map, parts_first) = if parser_dwas.is_empty() {
@@ -2623,6 +2648,20 @@ fn launch_parser_dag_if_ready<'scope>(
                 let parser_dwa_started_at = Instant::now();
                 let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
                 let early_cache_enabled = env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD");
+                let parser_final_id_map = std::sync::OnceLock::new();
+                let parser_final_coordinate_merge_max_states = std::env::var(
+                    "GLRMASK_PARSER_FINAL_COORDINATE_MERGE_MAX_TOKENIZER_STATES",
+                )
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or(512);
+                let parser_final_coordinate_merge = env_flag_enabled_by_default("GLRMASK_PARSER_FINAL_COORDINATE_MERGE")
+                    && early_cache_enabled
+                    && possible_matches_id_map.is_some()
+                    && !dwa_pm_mode.does_parser_compact()
+                    && tokenizer.tokenizer.num_states() <= parser_final_coordinate_merge_max_states;
+                let parser_final_id_map_target =
+                    parser_final_coordinate_merge.then_some(&parser_final_id_map);
                 let (parser_dwa, prebuilt_token_mask_caches) = rayon::join(
                     || {
                         build_and_merge_parser_dwa_families(
@@ -2633,6 +2672,7 @@ fn launch_parser_dag_if_ready<'scope>(
                             templates,
                             &tokenizer.tokenizer,
                             vocab,
+                            parser_final_id_map_target,
                         )
                     },
                     || {
@@ -2646,6 +2686,11 @@ fn launch_parser_dag_if_ready<'scope>(
                                 &parser_id_map,
                                 possible_matches_id_map,
                             ]);
+                        if parser_final_coordinate_merge {
+                            parser_final_id_map
+                                .set(final_id_map.clone())
+                                .expect("parser final ID map is published once");
+                        }
                         let internal_to_tokens =
                             final_id_map.vocab_tokens.internal_to_originals_vecs();
                         let mask_words = final_id_map
@@ -3709,6 +3754,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         retained_templates,
                         &tokenizer,
                         vocab,
+                        None,
                     )
                 } else {
                     let precompact_families = restore_terminal_dwa_families(
@@ -3726,6 +3772,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         retained_templates,
                         &tokenizer,
                         vocab,
+                        None,
                     );
                     let compact_apply_started_at = Instant::now();
                     terminal_pm_pair.apply_compaction_plan(&terminal_compaction_plan);
@@ -3758,6 +3805,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     retained_templates,
                     &tokenizer,
                     vocab,
+                    None,
                 )
             };
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
