@@ -3249,9 +3249,14 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     // canonical-DFA fast path. `determinize_and_minimize` is a pure method, so
     // precomputing across cores keeps the serial emit loop below (which assigns
     // nonterminal/terminal IDs in rule order) byte-for-byte identical.
-    let precomputed_expr_dfas: FxHashMap<usize, DFA> = grammar
+    //
+    // Most small JSON schemas have only one or two such rules. Spawning a Rayon
+    // traversal over every named rule for that shape costs more than the useful
+    // work, so first identify the actual candidates and keep tiny candidate sets
+    // serial. Large grammars retain parallel determinize/minimize work.
+    let expr_dfa_candidates = grammar
         .rules
-        .par_iter()
+        .iter()
         .enumerate()
         .filter_map(|(idx, rule)| {
             if rule.is_terminal {
@@ -3266,12 +3271,43 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                         .canonical_dfa
                         .as_ref()
                         .is_some_and(|dfa| dfa.compute_is_acyclic()));
-            if hits_fast_path {
-                return None;
-            }
-            Some((idx, expr_nfa.determinize_and_minimize()))
+            (!hits_fast_path).then_some((idx, expr_nfa))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let parallel_min_candidates = std::env::var("GLRMASK_AST_LOWER_EXPR_DFA_PARALLEL_MIN_CANDIDATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(4);
+    let parallel_min_work = std::env::var("GLRMASK_AST_LOWER_EXPR_DFA_PARALLEL_MIN_WORK")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(512);
+    let expr_dfa_work = expr_dfa_candidates
+        .iter()
+        .map(|(_, expr_nfa)| {
+            expr_nfa.nfa.states.len()
+                + expr_nfa
+                    .nfa
+                    .states
+                    .iter()
+                    .map(|state| state.transitions.len())
+                    .sum::<usize>()
+        })
+        .sum::<usize>();
+    let use_parallel_expr_dfa = rayon::current_num_threads() > 1
+        && (expr_dfa_candidates.len() >= parallel_min_candidates
+            || expr_dfa_work >= parallel_min_work);
+    let precomputed_expr_dfas: FxHashMap<usize, DFA> = if use_parallel_expr_dfa {
+        expr_dfa_candidates
+            .par_iter()
+            .map(|(idx, expr_nfa)| (*idx, expr_nfa.determinize_and_minimize()))
+            .collect()
+    } else {
+        expr_dfa_candidates
+            .iter()
+            .map(|(idx, expr_nfa)| (*idx, expr_nfa.determinize_and_minimize()))
+            .collect()
+    };
     for (rule_index, rule) in grammar.rules.iter().enumerate() {
         let rule_started_at = detail_profile.then(std::time::Instant::now);
         // Terminal rules: convert the entire body to a single Terminal::Expr.
