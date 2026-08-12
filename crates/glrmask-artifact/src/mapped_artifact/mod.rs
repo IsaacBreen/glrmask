@@ -14,6 +14,10 @@ use crate::ds::weight::Weight;
 pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
 pub use reconcile::remap_weights_with_maps;
 
+pub fn common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
+    reconcile::build_common_internal_id_map(inputs)
+}
+
 pub trait WeightRefs {
     fn weight_refs(&self) -> Vec<&Weight>;
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;
@@ -389,6 +393,26 @@ impl<T: WeightRefs> MappedArtifact<T> {
             right_id_map,
         );
         left_id_map.clone()
+    }
+
+    /// Remap this artifact into an already-computed exact common refinement.
+    ///
+    /// The supplied map must refine this artifact's current coordinates. This
+    /// avoids rediscovering the same common partition when another concurrent
+    /// stage has already certified it.
+    pub fn remap_into_existing_common(mut self, common_id_map: &InternalIdMap) -> Self {
+        if same_internal_id_maps(self.id_map(), common_id_map) {
+            return self;
+        }
+        debug_assert!(
+            reconcile::internal_id_map_refines(common_id_map, self.id_map()),
+            "precomputed common ID map must refine the artifact's local map",
+        );
+        let (artifact, id_map) = self.parts_mut();
+        let mut weights = artifact.weight_refs_mut();
+        reconcile::remap_weights_into_existing_common(&mut weights, id_map, common_id_map);
+        *id_map = common_id_map.clone();
+        self
     }
 
     /// Reconcile into the exact common refinement even when one map already
