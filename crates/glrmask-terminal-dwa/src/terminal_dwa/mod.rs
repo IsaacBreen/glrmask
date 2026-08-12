@@ -51,6 +51,29 @@ use types::{
     LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaFamilies, TerminalDwaPhaseProfile,
 };
 
+fn dedicated_p0_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::env::var("GLRMASK_P0_DEDICATED_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|idx| format!("glrmask-p0-{idx}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+fn dedicated_p0_max_tokenizer_states() -> u32 {
+    std::env::var("GLRMASK_P0_DEDICATED_MAX_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(512)
+}
+
 #[derive(Clone)]
 pub struct PartitionLocalSynthesisPlan {
     pub expressions: Arc<[Expr]>,
@@ -1859,6 +1882,25 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 .enumerate()
                 .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
                 .collect()
+        } else if partition_scheme == "char_type"
+            && !sub_vocabs.is_empty()
+            && tokenizer.num_states() <= dedicated_p0_max_tokenizer_states()
+            && let Some(p0_pool) = dedicated_p0_pool()
+        {
+            let (p0_result, mut other_results) = rayon::join(
+                || p0_pool.install(|| build_partition(0, &sub_vocabs[0])),
+                || {
+                    sub_vocabs[1..]
+                        .par_iter()
+                        .enumerate()
+                        .map(|(offset, sub_vocab)| build_partition(offset + 1, sub_vocab))
+                        .collect::<Vec<_>>()
+                },
+            );
+            let mut results = Vec::with_capacity(sub_vocabs.len());
+            results.push(p0_result);
+            results.append(&mut other_results);
+            results
         } else {
             sub_vocabs
                 .par_iter()
