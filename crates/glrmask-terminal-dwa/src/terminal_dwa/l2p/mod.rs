@@ -220,6 +220,20 @@ pub fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &
     l2p_terminal_interchangeability_enabled()
 }
 
+fn p0_terminal_interchangeability_small_tokenizer_skip(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+) -> bool {
+    if partition_label != "p0" {
+        return false;
+    }
+    let max_states = std::env::var("GLRMASK_P0_TI_SKIP_MAX_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(250);
+    max_states != 0 && tokenizer.num_states() <= max_states
+}
+
 /// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
 /// This is deliberately slow and is intended for tests and explicit validation,
 /// not ordinary TI compilation.
@@ -506,7 +520,9 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         ti_restricted_observation_seed,
         ti_restricted_observation_seed_ms,
     ) =
-        if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
+        if l2p_terminal_interchangeability_enabled_for_partition(partition_label)
+            && !p0_terminal_interchangeability_small_tokenizer_skip(partition_label, tokenizer)
+        {
             let mut active = active_terminals.to_vec();
             for &terminal in grammar.residual_isolation_classes.keys() {
                 if let Some(slot) = active.get_mut(terminal as usize) {
