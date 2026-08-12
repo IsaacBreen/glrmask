@@ -228,5 +228,38 @@ pub fn build_from_env(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         }
     }
 
+    // p2 is the common median bottleneck. The exact quotient is substantially
+    // cheaper on compact state/frontier shapes, but even constructing its
+    // projected analysis view is wasted work on the larger tail coordinates.
+    // Pre-gate on the already-proved initial state quotient, then let the exact
+    // quotient perform its raw-frontier probe and decline before expensive
+    // suffix-profile construction if that frontier is still too wide. Forced
+    // implementation/checker experiments remain unchanged.
+    if std::env::var_os("GLRMASK_L1_IMPLEMENTATION").is_none()
+        && plan.check_against.is_none()
+        && input.partition_label == "p2"
+        && input.subset_parent_order.is_none()
+    {
+        let max_initial_reps = std::env::var("GLRMASK_P2_QUOTIENT_MAX_INITIAL_REPS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(640);
+        let max_raw_unique_targets = std::env::var("GLRMASK_P2_QUOTIENT_MAX_RAW_UNIQUE_TARGETS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(750);
+        let initial_reps = input.initial_state_map.map(ManyToOneIdMap::num_internal_ids);
+        if max_initial_reps != 0
+            && max_raw_unique_targets != 0
+            && initial_reps.is_some_and(|reps| reps <= max_initial_reps)
+            && let Some(result) = quotient::try_build_with_raw_target_budget(
+                input,
+                Some(max_raw_unique_targets),
+            )
+        {
+            return result;
+        }
+    }
+
     build_with_plan(input, plan)
 }

@@ -1002,6 +1002,7 @@ fn build_l1_id_map_and_terminal_dwa_production_impl(
     >,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
     decline_on_budget_abort: bool,
+    max_raw_unique_targets: Option<usize>,
 ) -> Result<Option<LocalIdMapTerminalDwa>, ()> {
     if vocab.is_empty() {
         return Ok(None);
@@ -1024,6 +1025,7 @@ fn build_l1_id_map_and_terminal_dwa_production_impl(
                 shared_generic_nfa_trie,
                 subset_parent_order,
                 decline_on_budget_abort,
+                max_raw_unique_targets,
             )?
         } else if generic_epsilon_nfa {
             build_l1_generic_nfa_fallback_id_map(tokenizer, vocab, initial_state_map)
@@ -1218,6 +1220,7 @@ pub(super) fn build_l1_id_map_and_terminal_dwa_production(
         shared_generic_nfa_trie,
         subset_parent_order,
         false,
+        None,
     )
     .expect("ordinary production L1 build cannot decline")
 }
@@ -1241,6 +1244,7 @@ pub(super) fn try_build_l1_id_map_and_terminal_dwa_production(
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
+    max_raw_unique_targets: Option<usize>,
 ) -> Option<Option<LocalIdMapTerminalDwa>> {
     build_l1_id_map_and_terminal_dwa_production_impl(
         partition_label,
@@ -1258,6 +1262,7 @@ pub(super) fn try_build_l1_id_map_and_terminal_dwa_production(
         shared_generic_nfa_trie,
         subset_parent_order,
         true,
+        max_raw_unique_targets,
     )
     .ok()
 }
@@ -1607,6 +1612,7 @@ fn build_l1_generic_nfa_exact_id_map_impl<'a>(
     >,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
     decline_on_budget_abort: bool,
+    max_raw_unique_targets: Option<usize>,
 ) -> Result<(
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
@@ -1675,7 +1681,7 @@ fn build_l1_generic_nfa_exact_id_map_impl<'a>(
     });
     let exact_started_at = Instant::now();
     let (exact_mapping, exact_profile_reuse) =
-        find_l1_exact_state_equivalence_by_flat_signatures(
+        find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
             vocab_order.as_ref(),
             &view_states,
             state_to_terminal_signature,
@@ -1685,7 +1691,8 @@ fn build_l1_generic_nfa_exact_id_map_impl<'a>(
             true,
             terminal_signature_ms,
             None,
-        );
+            max_raw_unique_targets,
+        )?;
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(exact_mapping.len(), raw_states.len());
     let mut exact_profile_reuse =
@@ -1837,6 +1844,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         shared_token_trie,
         subset_parent_order,
         false,
+        None,
     )
     .expect("ordinary exact L1 build cannot decline")
 }
@@ -2722,7 +2730,9 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
         terminal_signature_ms,
         first_target_cache_override,
         Some(self_loop_bytes_by_state.as_ref()),
+        None,
     )
+    .expect("ordinary exact L1 equivalence cannot decline")
 }
 
 fn find_l1_exact_state_equivalence_by_flat_signatures(
@@ -2736,7 +2746,34 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     terminal_signature_ms: f64,
     self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
-    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+    find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        tokenizer_view,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        self_loop_bytes_by_state,
+        None,
+    )
+    .expect("ordinary exact L1 equivalence cannot decline")
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures_maybe_decline(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    cached_self_loop_bytes_by_state: Option<&[U8Set]>,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
         vocab_order,
         states,
         state_to_terminal_signature,
@@ -2746,7 +2783,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         allow_remaining_horizon_quotients,
         terminal_signature_ms,
         None,
-        self_loop_bytes_by_state,
+        cached_self_loop_bytes_by_state,
+        max_raw_unique_targets,
     )
 }
 
@@ -2762,6 +2800,35 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     first_target_cache_override: Option<bool>,
     cached_self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        tokenizer_view,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        first_target_cache_override,
+        cached_self_loop_bytes_by_state,
+        None,
+    )
+    .expect("ordinary exact L1 equivalence cannot decline")
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache_maybe_decline(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    first_target_cache_override: Option<bool>,
+    cached_self_loop_bytes_by_state: Option<&[U8Set]>,
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
     let dfa = tokenizer_view.dfa();
     let active_language = dfa
         .states
@@ -2784,6 +2851,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         terminal_signature_ms,
         first_target_cache_override,
         cached_self_loop_bytes_by_state,
+        max_raw_unique_targets,
     )
 }
 
@@ -2801,9 +2869,10 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     terminal_signature_ms: f64,
     first_target_cache_override: Option<bool>,
     cached_self_loop_bytes_by_state: Option<&[U8Set]>,
-) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    max_raw_unique_targets: Option<usize>,
+) -> Result<(Vec<usize>, Option<L1ExactProfileReuse>), ()> {
     if states.len() <= 1 {
-        return (states.to_vec(), None);
+        return Ok((states.to_vec(), None));
     }
     let profile_enabled = compile_profile_enabled();
     let total_started_at = profile_enabled.then(Instant::now);
@@ -2883,6 +2952,17 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     let raw_target_probe_ms = raw_target_probe_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
+    if max_raw_unique_targets.is_some_and(|max_targets| raw_unique_targets_len > max_targets) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][l1_exact_equiv_decline] raw_unique_targets={} max_raw_unique_targets={} raw_target_probe_ms={:.3}",
+                raw_unique_targets_len,
+                max_raw_unique_targets.expect("checked above"),
+                raw_target_probe_ms,
+            );
+        }
+        return Err(());
+    }
     let use_remaining_horizon_quotients = allow_remaining_horizon_quotients
         && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len())
         && l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets_len);
@@ -3587,7 +3667,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             );
         }
 
-        return (
+        return Ok((
             mapping,
             Some(L1ExactProfileReuse {
                 target_to_profile_id,
@@ -3607,7 +3687,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                     .collect::<Vec<_>>()
                     .into(),
             }),
-        );
+        ));
     }
 
     // Materialize each state's exact equivalence key as a contiguous row, then
@@ -3799,7 +3879,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         );
     }
 
-    (
+    Ok((
         mapping,
         Some(L1ExactProfileReuse {
             target_to_profile_id,
@@ -3822,7 +3902,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                 .collect::<Vec<_>>()
                 .into(),
         }),
-    )
+    ))
 }
 
 fn l1_target_self_loop_covers_suffix_subtree(
