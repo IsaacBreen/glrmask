@@ -1333,6 +1333,23 @@ pub fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
                 l1::prepare_l1_finite_vocab_projection(sub_vocab);
             }
         }
+
+        #[cfg(target_os = "windows")]
+        for automatic_bounded_synthesis_overflow in [false, true] {
+            let overflow_sub_vocabs = build_char_type_sub_vocabs(
+                vocab,
+                automatic_bounded_synthesis_overflow,
+                Some(8),
+            );
+            for partition in [2usize, 9usize] {
+                if let Some(sub_vocab) = overflow_sub_vocabs.get(partition) {
+                    classify::prepare_vocab_for_terminal_classification(sub_vocab);
+                    l1::prepare_l1_identity_vocab_order(sub_vocab);
+                    l1::prepare_l1_token_bounded_analysis_trie(sub_vocab);
+                    l1::prepare_l1_finite_vocab_projection(sub_vocab);
+                }
+            }
+        }
     }
 }
 
