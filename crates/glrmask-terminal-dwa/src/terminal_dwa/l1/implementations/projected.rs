@@ -2713,6 +2713,31 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         })
         .unwrap_or(true);
     if use_finite_precheck && finite_switch_states != usize::MAX {
+        let p2_unbounded_max_tokenizer_states = std::env::var(
+            "GLRMASK_P2_RESIDUAL_FINITE_UNBOUNDED_MAX_TOKENIZER_STATES",
+        )
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(50_000);
+        // The unbounded finite p2 handoff is a win for the compact Kubernetes
+        // p99 topology, where a few thousand tokenizer states fan out into a
+        // huge residual-root set.  Very large tokenizer machines are the
+        // opposite shape: on o21135-37 (~78k local states), the finite scan is
+        // itself enormous and can take seconds longer than residual.  Do not
+        // even pay the bounded finite probe there; retain the exact residual
+        // kernel directly.
+        if input.partition_label == "p2"
+            && input.subset_parent_order.is_none()
+            && input.tokenizer.num_states() > p2_unbounded_max_tokenizer_states
+        {
+            if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                eprintln!(
+                    "[glrmask/profile][l1_residual_finite_precheck] partition=p2 tokenizer_states={} max_unbounded_tokenizer_states={} selected=false reason=large_tokenizer_residual",
+                    input.tokenizer.num_states(),
+                    p2_unbounded_max_tokenizer_states,
+                );
+            }
+        } else {
         let unbounded_p2_memberships = (input.partition_label == "p2").then(|| {
             std::env::var("GLRMASK_P2_RESIDUAL_FINITE_UNBOUNDED_MEMBERSHIPS")
                 .ok()
@@ -2750,6 +2775,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
                 return build_finite_projected_unbounded(input);
             }
             return build_finite_projected(input);
+        }
         }
     }
     // Full-partition vocabularies at or above the finite-preparation threshold
