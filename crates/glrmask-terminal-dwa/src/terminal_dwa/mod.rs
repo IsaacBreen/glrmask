@@ -112,6 +112,7 @@ struct PartitionLocalTokenizer {
 }
 
 struct PreparedPartitionLocalTokenizer {
+    vocab_len: usize,
     rebuilt_expressions: Arc<[Expr]>,
     local_expressions: Arc<[Expr]>,
     protected_terminal_ids: Arc<[u32]>,
@@ -294,12 +295,15 @@ impl PreparedPartitionLocalTokenizers {
         global_tokenizer: &Tokenizer,
         vocab: &Vocab,
     ) -> Option<ReadyPartitionLocalTokenizer> {
-        let prepared = self
+        let mut slot = self
             .entries
             .get(partition)?
             .lock()
-            .expect("prepared partition-local tokenizer slot poisoned")
-            .take()?;
+            .expect("prepared partition-local tokenizer slot poisoned");
+        if slot.as_ref().is_some_and(|prepared| prepared.vocab_len != vocab.entries_map().len()) {
+            return None;
+        }
+        let prepared = slot.take()?;
         finish_prepared_partition_local_tokenizer(
             global_tokenizer,
             prepared,
@@ -917,6 +921,7 @@ fn prepare_partition_local_tokenizer(
     )?;
     let build_ms = pairs.build_ms;
     Some(PreparedPartitionLocalTokenizer {
+        vocab_len: vocab.entries_map().len(),
         rebuilt_expressions,
         local_expressions,
         protected_terminal_ids: Arc::clone(&plan.protected_terminal_ids),
@@ -1004,7 +1009,7 @@ pub fn prepare_partition_local_tokenizers(
         return None;
     }
     use rayon::prelude::*;
-    let sub_vocabs = build_char_type_sub_vocabs(vocab, true);
+    let sub_vocabs = build_char_type_sub_vocabs(vocab, true, None);
     let entries = sub_vocabs
         .par_iter()
         .enumerate()
@@ -1107,6 +1112,18 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
+fn automatic_p2_overflow_threshold(tokenizer_states: u32) -> Option<usize> {
+    let min_states = std::env::var("GLRMASK_P2_OVERFLOW_MIN_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(5_000);
+    let max_states = std::env::var("GLRMASK_P2_OVERFLOW_MAX_TOKENIZER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(8_192);
+    (tokenizer_states >= min_states && tokenizer_states <= max_states).then_some(8)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CharTypeSubVocabKey {
     p0_overflow_threshold: Option<usize>,
@@ -1200,6 +1217,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
 fn build_char_type_sub_vocabs(
     vocab: &Vocab,
     automatic_bounded_synthesis_overflow: bool,
+    automatic_p2_overflow_threshold: Option<usize>,
 ) -> Arc<[Vocab]> {
     let p0_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD",
@@ -1211,7 +1229,7 @@ fn build_char_type_sub_vocabs(
     );
     let p2_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD",
-        Some(8),
+        automatic_p2_overflow_threshold,
     );
     let p4_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
@@ -1305,6 +1323,7 @@ pub fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
             for sub_vocab in build_char_type_sub_vocabs(
                 vocab,
                 automatic_bounded_synthesis_overflow,
+                None,
             )
             .iter()
             {
@@ -1651,6 +1670,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         "char_type" => build_char_type_sub_vocabs(
             vocab,
             partition_local_synthesis_plan.is_some(),
+            automatic_p2_overflow_threshold(tokenizer.num_states()),
         ),
         "l2p_cost" => {
             let cost_fn = l2p_partition_cost_fn_from_env();
@@ -1691,6 +1711,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             let char_token_partitions = classify::partition_vocab_char_type_tokens(
                 vocab,
                 partition_local_synthesis_plan.is_some(),
+                automatic_p2_overflow_threshold(tokenizer.num_states()),
             );
             let char_partition_sizes = char_token_partitions
                 .iter()

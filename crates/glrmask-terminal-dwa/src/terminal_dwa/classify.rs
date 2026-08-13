@@ -4478,6 +4478,7 @@ fn compute_token_l2p_map(
 pub fn partition_vocab_char_type_tokens(
     vocab: &Vocab,
     automatic_bounded_synthesis_overflow: bool,
+    automatic_p2_overflow_threshold: Option<usize>,
 ) -> Vec<Vec<u32>> {
     let threshold = |name: &str, automatic: usize| match std::env::var(name) {
         Ok(value) => value
@@ -4488,7 +4489,10 @@ pub fn partition_vocab_char_type_tokens(
     };
     let p0_overflow_threshold = threshold("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD", 16);
     let p1_overflow_threshold = threshold("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD", 20);
-    let p2_overflow_threshold = threshold("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD", 8);
+    let p2_overflow_threshold = match std::env::var("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD") {
+        Ok(value) => value.parse::<usize>().ok().filter(|&threshold| threshold > 0),
+        Err(_) => automatic_p2_overflow_threshold,
+    };
     let p4_overflow_threshold = threshold("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD", 32);
     let partition_count = if p0_overflow_threshold.is_some() {
         13
