@@ -4292,8 +4292,14 @@ fn try_minimize_small_pairwise_direct(dwa: &DWA) -> Option<DWA> {
             states_by_height[heights[state]].push(state);
         }
     }
+    // Height 0 is handled by the all-compatible leaf fast path below and
+    // never enters pairwise coloring. Bound only the non-leaf buckets that can
+    // actually pay O(bucket^2) compatibility work. Applying this limit to the
+    // leaf bucket made 65+ leaf automata do all small-direct preparation, reject,
+    // and then repeat the same weight-pushing work in the generic minimizer.
     if states_by_height
         .iter()
+        .skip(1)
         .any(|bucket| bucket.len() > MAX_HEIGHT_BUCKET)
     {
         return None;
@@ -4619,9 +4625,8 @@ fn minimize_acyclic_owned_impl(
 mod tests {
     use super::{
         batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
-        find_difference,
-        memberwise_group_compatible, minimize_acyclic, minimize_acyclic_owned_path_conditioned,
-        push_weights,
+        find_difference, memberwise_group_compatible, minimize_acyclic,
+        minimize_acyclic_owned_path_conditioned, push_weights, try_minimize_small_pairwise_direct,
         overlay_compatible_token_behavior_ranges,
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
@@ -4647,6 +4652,35 @@ mod tests {
                 .copied()
                 .map(|(tsid, ranges)| (tsid, token_set(ranges))),
         )
+    }
+
+    #[test]
+    fn small_direct_allows_large_leaf_bucket() {
+        let leaf_count = 65usize;
+        let mut states = Vec::with_capacity(leaf_count + 1);
+        let mut start = DWAState::default();
+        for leaf in 0..leaf_count {
+            start.transitions.insert(
+                leaf as i32,
+                ((leaf + 1) as u32, Weight::all()),
+            );
+        }
+        states.push(start);
+        for _ in 0..leaf_count {
+            let mut leaf = DWAState::default();
+            leaf.final_weight = Some(Weight::all());
+            states.push(leaf);
+        }
+        let dwa = DWA::from_parts(states, 0);
+
+        let minimized = try_minimize_small_pairwise_direct(&dwa)
+            .expect("height-0 leaf count must not trip the pairwise bucket limit");
+        assert_eq!(
+            find_difference(&dwa, &minimized).expect("equivalence check must succeed"),
+            None,
+        );
+        assert_eq!(minimized.states().len(), 2);
+        assert_eq!(minimized.states()[minimized.start_state() as usize].transitions.len(), leaf_count);
     }
 
     #[test]
