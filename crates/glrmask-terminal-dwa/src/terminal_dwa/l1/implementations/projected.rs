@@ -1787,6 +1787,39 @@ struct FiniteVocabProjection {
 
 impl crate::vocab::VocabDerivedArtifact for FiniteVocabProjection {}
 
+fn small_prepared_vocab_enabled(input: BuildInput<'_>) -> bool {
+    let max_tokenizer_states = std::env::var(
+        "GLRMASK_L1_SMALL_PREPARED_VOCAB_MAX_TOKENIZER_STATES",
+    )
+    .ok()
+    .and_then(|value| value.parse::<u32>().ok())
+    .unwrap_or(4_000);
+    input.subset_parent_order.is_none()
+        && input.tokenizer.num_states() <= max_tokenizer_states
+}
+
+fn preordered_vocab_map_enabled(input: BuildInput<'_>) -> bool {
+    std::env::var("GLRMASK_L1_PREORDERED_VOCAB_MAP")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or_else(|_| small_prepared_vocab_enabled(input))
+}
+
+fn residual_prepared_vocab_min_tokens(input: BuildInput<'_>) -> usize {
+    std::env::var("GLRMASK_L1_RESIDUAL_PREPARED_VOCAB_MIN_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            if small_prepared_vocab_enabled(input) {
+                10_000
+            } else {
+                50_000
+            }
+        })
+}
+
 fn build_reverse_vocab_trie(tokens: &[Arc<[u8]>]) -> ReverseVocabTrie {
     let mut order = (0..tokens.len() as u32).collect::<Vec<_>>();
     order.sort_unstable_by(|&left, &right| {
@@ -2501,13 +2534,7 @@ fn build_finite_projected_impl(
                 aliases.len(),
             );
         let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
-        let use_preordered_vocab = std::env::var("GLRMASK_L1_PREORDERED_VOCAB_MAP")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        let preordered_vocab = use_preordered_vocab
+        let preordered_vocab = preordered_vocab_map_enabled(input)
             .then(|| finite_vocab.original_order.as_deref())
             .flatten();
         let finished = common::finish_compacted(
@@ -2730,12 +2757,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
-    let prepared_vocab_min_tokens = std::env::var(
-        "GLRMASK_L1_RESIDUAL_PREPARED_VOCAB_MIN_TOKENS",
-    )
-    .ok()
-    .and_then(|value| value.parse::<usize>().ok())
-    .unwrap_or(10_000);
+    let prepared_vocab_min_tokens = residual_prepared_vocab_min_tokens(input);
     let vocab_projection_started = Instant::now();
     let prepared_vocab = (reuse_prepared_vocab
         && input.subset_parent_order.is_none()
@@ -3083,13 +3105,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let signature_ms = signature_started.elapsed().as_secs_f64() * 1000.0;
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
     let finish_started = Instant::now();
-    let use_preordered_vocab = std::env::var("GLRMASK_L1_PREORDERED_VOCAB_MAP")
-        .map(|value| {
-            let value = value.trim();
-            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(true);
-    let preordered_vocab = use_preordered_vocab
+    let preordered_vocab = preordered_vocab_map_enabled(input)
         .then(|| {
             prepared_vocab
                 .as_ref()
