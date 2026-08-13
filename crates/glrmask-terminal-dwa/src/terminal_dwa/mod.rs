@@ -129,7 +129,7 @@ struct ReadyPartitionLocalTokenizer {
 }
 
 pub struct PreparedPartitionLocalTokenizers {
-    entries: Vec<Mutex<Option<PreparedPartitionLocalTokenizer>>>,
+    entries: Vec<Mutex<Vec<PreparedPartitionLocalTokenizer>>>,
 }
 
 fn direct_regular_language_uses_at_most_one_terminal(
@@ -300,10 +300,11 @@ impl PreparedPartitionLocalTokenizers {
             .get(partition)?
             .lock()
             .expect("prepared partition-local tokenizer slot poisoned");
-        if slot.as_ref().is_some_and(|prepared| prepared.vocab_len != vocab.entries_map().len()) {
-            return None;
-        }
-        let prepared = slot.take()?;
+        let wanted_vocab_len = vocab.entries_map().len();
+        let prepared_idx = slot
+            .iter()
+            .position(|prepared| prepared.vocab_len == wanted_vocab_len)?;
+        let prepared = slot.swap_remove(prepared_idx);
         finish_prepared_partition_local_tokenizer(
             global_tokenizer,
             prepared,
@@ -1010,6 +1011,7 @@ pub fn prepare_partition_local_tokenizers(
     }
     use rayon::prelude::*;
     let sub_vocabs = build_char_type_sub_vocabs(vocab, true, None);
+    let overflow_sub_vocabs = build_char_type_sub_vocabs(vocab, true, Some(8));
     let entries = sub_vocabs
         .par_iter()
         .enumerate()
@@ -1024,11 +1026,23 @@ pub fn prepare_partition_local_tokenizers(
                         .any(|item| item == label)
                 })
                 .unwrap_or_else(|_| matches!(partition, 0 | 1 | 2 | 4));
-            Mutex::new(
-                selected
-                    .then(|| prepare_partition_local_tokenizer(sub_vocab, plan))
-                    .flatten(),
-            )
+            let mut prepared = Vec::with_capacity(if partition == 2 { 2 } else { 1 });
+            if selected {
+                if partition == 2 {
+                    let overflow_vocab = &overflow_sub_vocabs[partition];
+                    let (ordinary, overflow) = rayon::join(
+                        || prepare_partition_local_tokenizer(sub_vocab, plan),
+                        || prepare_partition_local_tokenizer(overflow_vocab, plan),
+                    );
+                    if let Some(ordinary) = ordinary { prepared.push(ordinary); }
+                    if let Some(overflow) = overflow
+                        && prepared.iter().all(|candidate| candidate.vocab_len != overflow.vocab_len)
+                    { prepared.push(overflow); }
+                } else if let Some(ordinary) = prepare_partition_local_tokenizer(sub_vocab, plan) {
+                    prepared.push(ordinary);
+                }
+            }
+            Mutex::new(prepared)
         })
         .collect();
     Some(Arc::new(PreparedPartitionLocalTokenizers { entries }))
