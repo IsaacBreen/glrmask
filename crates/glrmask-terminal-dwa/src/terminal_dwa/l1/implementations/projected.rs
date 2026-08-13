@@ -1611,7 +1611,13 @@ fn projected_kernel(input: BuildInput<'_>) -> ProjectedKernel {
     let p2_finite_state_limit = std::env::var("GLRMASK_P2_FINITE_MAX_TOKENIZER_STATES")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(160);
+        // Residual p2 became substantially cheaper after the dense-reverse,
+        // reverse-trie, and prepared-vocabulary work.  Revalidation on the
+        // current canonical corpus shows finite still wins for the tiniest
+        // lexers, but the old <=160 crossover is stale; above ~40 states the
+        // residual kernel is now overwhelmingly faster.  Keep the env override
+        // for exact diagnostics and older-machine experiments.
+        .unwrap_or(40);
     let p2_finite = input.partition_label == "p2"
         && input.subset_parent_order.is_none()
         && input.tokenizer.num_states() <= p2_finite_state_limit
