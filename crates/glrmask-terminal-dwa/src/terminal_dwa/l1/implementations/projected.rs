@@ -2326,6 +2326,17 @@ fn finite_compact_runs(
 /// per-bucket profile IDs form an exact short fingerprint for the raw state;
 /// only fingerprints that survive as state classes are materialized into rows.
 fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    build_finite_projected_impl(input, false)
+}
+
+fn build_finite_projected_unbounded(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    build_finite_projected_impl(input, true)
+}
+
+fn build_finite_projected_impl(
+    input: BuildInput<'_>,
+    bypass_adaptive_budget: bool,
+) -> Option<LocalIdMapTerminalDwa> {
     if input.vocab.is_empty() {
         return None;
     }
@@ -2356,7 +2367,8 @@ fn build_finite_projected(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa
     let mut uniform_subtrees = 0usize;
     let mut uniform_tokens = 0usize;
     let self_loops = input.tokenizer.all_self_loop_bytes();
-    let adaptive_budget = input.subset_parent_order.is_none()
+    let adaptive_budget = !bypass_adaptive_budget
+        && input.subset_parent_order.is_none()
         && matches!(input.partition_label, "p1" | "p2");
     let (profile_run_budget, pair_visit_budget) = if adaptive_budget {
         let (runs_env, pairs_env, default_pairs) = if input.partition_label == "p1" {
@@ -2601,6 +2613,13 @@ fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
         // finite kernel has its own work budget and falls back to residual if
         // its trie traversal is the pathological side instead.
         ("GLRMASK_P1_RESIDUAL_FINITE_SWITCH_STATES", 3_500)
+    } else if input.partition_label == "p5" && input.vocab.len() >= 4_000 {
+        // Large p5 residuals can occasionally explode to O(100k) projected
+        // roots even though ordinary/max-tail shapes remain around O(10k).
+        // The existing membership precheck catches that topology before
+        // constructing the residual automata and hands it to the exact finite
+        // projected kernel instead.
+        ("GLRMASK_P5_RESIDUAL_FINITE_SWITCH_STATES", 50_000)
     } else if input.vocab.len() >= 50_000 {
         ("GLRMASK_L1_RESIDUAL_FINITE_SWITCH_STATES", 9_000)
     } else {
@@ -2634,21 +2653,42 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         })
         .unwrap_or(true);
     if use_finite_precheck && finite_switch_states != usize::MAX {
+        let unbounded_p2_memberships = (input.partition_label == "p2").then(|| {
+            std::env::var("GLRMASK_P2_RESIDUAL_FINITE_UNBOUNDED_MEMBERSHIPS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(50_000)
+        });
+        // For p2, probe far enough to distinguish a merely-large residual
+        // (which should keep the existing bounded finite attempt) from the
+        // pathological 100k+ root regime where falling back to residual is
+        // much more expensive than letting finite projection complete.
+        let probe_threshold = unbounded_p2_memberships
+            .map(|threshold| threshold.max(finite_switch_states))
+            .unwrap_or(finite_switch_states);
         let precheck_started = Instant::now();
-        let (memberships, exceeds_threshold) =
-            projected_root_membership_precheck(input, finite_switch_states);
+        let (memberships, exceeds_probe_threshold) =
+            projected_root_membership_precheck(input, probe_threshold);
+        let exceeds_threshold = exceeds_probe_threshold || memberships > finite_switch_states;
+        let exceeds_unbounded_p2 = unbounded_p2_memberships
+            .is_some_and(|threshold| exceeds_probe_threshold || memberships > threshold);
         let precheck_ms = precheck_started.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
-                "[glrmask/profile][l1_residual_finite_precheck] partition={} memberships={} threshold={} selected={} precheck_ms={:.3}",
+                "[glrmask/profile][l1_residual_finite_precheck] partition={} memberships={} threshold={} probe_threshold={} selected={} unbounded={} precheck_ms={:.3}",
                 input.partition_label,
                 memberships,
                 finite_switch_states,
+                probe_threshold,
                 exceeds_threshold,
+                exceeds_unbounded_p2,
                 precheck_ms,
             );
         }
         if exceeds_threshold {
+            if exceeds_unbounded_p2 {
+                return build_finite_projected_unbounded(input);
+            }
             return build_finite_projected(input);
         }
     }
