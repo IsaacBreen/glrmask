@@ -56,8 +56,20 @@ fn dedicated_p0_pool() -> Option<&'static rayon::ThreadPool> {
     POOL.get_or_init(|| {
         let threads = match std::env::var("GLRMASK_P0_DEDICATED_THREADS") {
             Ok(value) => value.trim().parse::<usize>().ok().filter(|&value| value > 0)?,
-            Err(_) if rayon::current_num_threads() >= 8 => 2,
-            Err(_) => return None,
+            Err(_) => {
+                #[cfg(target_os = "macos")]
+                {
+                    if rayon::current_num_threads() >= 8 {
+                        2
+                    } else {
+                        return None;
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return None;
+                }
+            }
         };
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
