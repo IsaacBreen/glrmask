@@ -1776,6 +1776,10 @@ struct ReverseVocabTrie {
 
 struct FiniteVocabProjection {
     aliases: Vec<Vec<u32>>,
+    /// `(original_token_id, unique_token_index)` sorted by original token ID.
+    /// Full partition vocabularies cache this once so projected L1 can build
+    /// sorted reverse ID maps without per-grammar class sorting.
+    original_order: Option<Box<[(u32, u32)]>>,
     tokens: Vec<Arc<[u8]>>,
     trie: FiniteTrie,
     reverse_trie: Option<ReverseVocabTrie>,
@@ -1895,10 +1899,22 @@ fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
         }
     }
     debug_assert_eq!(aliases.iter().map(Vec::len).sum::<usize>(), vocab.len());
+    let mut original_order = aliases
+        .iter()
+        .enumerate()
+        .flat_map(|(unique, originals)| {
+            originals
+                .iter()
+                .copied()
+                .map(move |original| (original, unique as u32))
+        })
+        .collect::<Vec<_>>();
+    original_order.sort_unstable_by_key(|&(original, _)| original);
     let trie = FiniteTrie::build(&tokens);
     let reverse_trie = (tokens.len() >= 50_000).then(|| build_reverse_vocab_trie(&tokens));
     let projection = Arc::new(FiniteVocabProjection {
         aliases,
+        original_order: Some(original_order.into_boxed_slice()),
         tokens,
         trie,
         reverse_trie,
@@ -1942,6 +1958,7 @@ fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>
     (
         Arc::new(FiniteVocabProjection {
             aliases,
+            original_order: None,
             tokens,
             trie,
             reverse_trie,
@@ -2484,6 +2501,15 @@ fn build_finite_projected_impl(
                 aliases.len(),
             );
         let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
+        let use_preordered_vocab = std::env::var("GLRMASK_L1_PREORDERED_VOCAB_MAP")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+        let preordered_vocab = use_preordered_vocab
+            .then(|| finite_vocab.original_order.as_deref())
+            .flatten();
         let finished = common::finish_compacted(
             input,
             aliases,
@@ -2491,6 +2517,7 @@ fn build_finite_projected_impl(
             state_class,
             compact_rows,
             token_class,
+            preordered_vocab,
             prep_ms + scan_ms,
             compact_ms,
             || total.elapsed().as_secs_f64() * 1000.0,
@@ -2692,20 +2719,27 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             return build_finite_projected(input);
         }
     }
-    // Large full-partition vocabularies already have their exact deduplicated
-    // tokens/aliases prepared for the finite projected kernel. Reuse that
-    // immutable artifact rather than rebuilding two 82k-entry vectors on every
-    // residual compile. Split-L1 keeps its subset-specific filtered order.
+    // Full-partition vocabularies at or above the finite-preparation threshold
+    // already have exact deduplicated tokens/aliases cached before grammar
+    // compilation. Reuse that immutable artifact rather than rebuilding the
+    // same vectors on every residual compile. Split-L1 keeps its subset-specific
+    // filtered order.
     let reuse_prepared_vocab = std::env::var("GLRMASK_L1_RESIDUAL_REUSE_PREPARED_VOCAB")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
+    let prepared_vocab_min_tokens = std::env::var(
+        "GLRMASK_L1_RESIDUAL_PREPARED_VOCAB_MIN_TOKENS",
+    )
+    .ok()
+    .and_then(|value| value.parse::<usize>().ok())
+    .unwrap_or(10_000);
     let vocab_projection_started = Instant::now();
     let prepared_vocab = (reuse_prepared_vocab
         && input.subset_parent_order.is_none()
-        && input.vocab.len() >= 50_000)
+        && input.vocab.len() >= prepared_vocab_min_tokens)
         .then(|| build_finite_vocab_projection(input.vocab));
     let vocab_projection_ms = vocab_projection_started.elapsed().as_secs_f64() * 1000.0;
     let owned_vocab;
@@ -3049,12 +3083,26 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let signature_ms = signature_started.elapsed().as_secs_f64() * 1000.0;
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
     let finish_started = Instant::now();
+    let use_preordered_vocab = std::env::var("GLRMASK_L1_PREORDERED_VOCAB_MAP")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let preordered_vocab = use_preordered_vocab
+        .then(|| {
+            prepared_vocab
+                .as_ref()
+                .and_then(|prepared| prepared.original_order.as_deref())
+        })
+        .flatten();
     let finished = common::finish_sparse_terminal_rows(
         input,
         aliases,
         state_class,
         sparse_rows,
         token_class,
+        preordered_vocab,
         projected_ms + minimize_ms + traverse_ms,
         0.0,
         || total.elapsed().as_secs_f64() * 1000.0,

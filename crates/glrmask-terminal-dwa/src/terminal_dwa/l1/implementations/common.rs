@@ -22,24 +22,42 @@ fn direct_vocab_id_map(
     aliases: &[Vec<u32>],
     token_class: &[u32],
     token_classes: u32,
+    preordered_originals: Option<&[(u32, u32)]>,
 ) -> ManyToOneIdMap {
     let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
     let mut internal_to_originals = vec![Vec::<u32>::new(); token_classes as usize];
     let mut representative_original_ids = vec![u32::MAX; token_classes as usize];
-    for (unique, originals) in aliases.iter().enumerate() {
-        let class = token_class[unique] as usize;
-        debug_assert!(class < internal_to_originals.len());
-        let members = &mut internal_to_originals[class];
-        for &original in originals {
+
+    if let Some(preordered) = preordered_originals {
+        debug_assert_eq!(preordered.len(), aliases.iter().map(Vec::len).sum::<usize>());
+        for &(original, unique) in preordered {
+            let class = token_class[unique as usize] as usize;
+            debug_assert!(class < internal_to_originals.len());
             original_to_internal[original as usize] = class as u32;
-            representative_original_ids[class] =
-                representative_original_ids[class].min(original);
-            members.push(original);
+            if representative_original_ids[class] == u32::MAX {
+                representative_original_ids[class] = original;
+            }
+            // `preordered` is globally sorted by original token ID, so each
+            // class is built in the same sorted order the old path produced.
+            internal_to_originals[class].push(original);
+        }
+    } else {
+        for (unique, originals) in aliases.iter().enumerate() {
+            let class = token_class[unique] as usize;
+            debug_assert!(class < internal_to_originals.len());
+            let members = &mut internal_to_originals[class];
+            for &original in originals {
+                original_to_internal[original as usize] = class as u32;
+                representative_original_ids[class] =
+                    representative_original_ids[class].min(original);
+                members.push(original);
+            }
+        }
+        for originals in &mut internal_to_originals {
+            originals.sort_unstable();
         }
     }
-    for originals in &mut internal_to_originals {
-        originals.sort_unstable();
-    }
+
     ManyToOneIdMap {
         original_to_internal,
         internal_to_originals,
@@ -112,6 +130,7 @@ pub(super) fn finish(
         state_class,
         compact_rows,
         token_class,
+        None,
         scan_ms,
         compact_ms,
         total_ms,
@@ -126,6 +145,7 @@ pub(super) fn finish_compacted(
     mut state_class: Vec<u32>,
     mut rows: Vec<Vec<u32>>,
     token_class: Vec<u32>,
+    preordered_originals: Option<&[(u32, u32)]>,
     scan_ms: f64,
     compact_ms: f64,
     total_ms: impl FnOnce() -> f64,
@@ -152,6 +172,7 @@ pub(super) fn finish_compacted(
             aliases,
             &token_class,
             token_classes,
+            preordered_originals,
         )
     } else {
         let mut original_to_internal =
@@ -244,6 +265,7 @@ pub(super) fn finish_sparse_terminal_rows(
     mut state_class: Vec<u32>,
     mut sparse_rows: Vec<Vec<(u32, u32)>>,
     token_class: Vec<u32>,
+    preordered_originals: Option<&[(u32, u32)]>,
     scan_ms: f64,
     compact_ms: f64,
     total_ms: impl FnOnce() -> f64,
@@ -275,6 +297,7 @@ pub(super) fn finish_sparse_terminal_rows(
             aliases,
             &token_class,
             token_classes,
+            preordered_originals,
         )
     } else {
         let mut original_to_internal =
@@ -360,4 +383,36 @@ pub(super) fn finish_sparse_terminal_rows(
         state_classes,
         token_classes: token_classes as usize,
     })
+}
+
+#[cfg(test)]
+mod direct_vocab_map_tests {
+    use super::direct_vocab_id_map;
+
+    #[test]
+    fn preordered_originals_match_sorted_alias_path() {
+        let aliases = vec![vec![7, 2], vec![9], vec![8, 1, 5], vec![6, 3, 4]];
+        let token_class = vec![1, 0, 1, 2];
+        let mut preordered = aliases
+            .iter()
+            .enumerate()
+            .flat_map(|(unique, originals)| {
+                originals
+                    .iter()
+                    .copied()
+                    .map(move |original| (original, unique as u32))
+            })
+            .collect::<Vec<_>>();
+        preordered.sort_unstable_by_key(|&(original, _)| original);
+
+        let reference = direct_vocab_id_map(9, &aliases, &token_class, 3, None);
+        let preordered_map =
+            direct_vocab_id_map(9, &aliases, &token_class, 3, Some(&preordered));
+        assert_eq!(reference.original_to_internal, preordered_map.original_to_internal);
+        assert_eq!(reference.internal_to_originals, preordered_map.internal_to_originals);
+        assert_eq!(
+            reference.representative_original_ids,
+            preordered_map.representative_original_ids
+        );
+    }
 }
