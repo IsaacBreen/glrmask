@@ -2300,7 +2300,13 @@ fn try_build_and_color_pointwise(
 ) -> Option<HybridColoring> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
-    let mut regions = PointwiseRegionInterner::default();
+    let mut regions = if std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS").is_ok() {
+        PointwiseRegionInterner::default()
+    } else if candidates.len() >= 256 {
+        PointwiseRegionInterner::with_direct_overlay_slots(128)
+    } else {
+        PointwiseRegionInterner::default()
+    };
     let mut region_build_cache = PointwiseRegionBuildCache::default();
     let profile_started_at = Instant::now();
     let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
@@ -2469,7 +2475,13 @@ fn try_build_and_color_pointwise_ranges(
 ) -> Option<Vec<usize>> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
-    let mut regions = PointwiseRegionInterner::default();
+    let mut regions = if std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS").is_ok() {
+        PointwiseRegionInterner::default()
+    } else if candidates.len() >= 256 {
+        PointwiseRegionInterner::with_direct_overlay_slots(128)
+    } else {
+        PointwiseRegionInterner::default()
+    };
     let mut region_build_cache = PointwiseRegionBuildCache::default();
     let profile_started_at = Instant::now();
     let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());

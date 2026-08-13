@@ -54,10 +54,11 @@ use types::{
 fn dedicated_p0_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = std::env::var("GLRMASK_P0_DEDICATED_THREADS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&value| value > 0)?;
+        let threads = match std::env::var("GLRMASK_P0_DEDICATED_THREADS") {
+            Ok(value) => value.trim().parse::<usize>().ok().filter(|&value| value > 0)?,
+            Err(_) if rayon::current_num_threads() >= 8 => 2,
+            Err(_) => return None,
+        };
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|idx| format!("glrmask-p0-{idx}"))
@@ -71,7 +72,7 @@ fn dedicated_p0_max_tokenizer_states() -> u32 {
     std::env::var("GLRMASK_P0_DEDICATED_MAX_TOKENIZER_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
-        .unwrap_or(512)
+        .unwrap_or(384)
 }
 
 fn proven_disjoint_immediate_merge_max_tokenizer_states() -> u32 {
