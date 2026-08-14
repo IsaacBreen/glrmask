@@ -211,6 +211,52 @@ fn elapsed_ms(started_at: Instant) -> f64 {
 
 const DEFAULT_COMPILE_THREAD_CAP: usize = 10;
 
+#[cfg(target_os = "windows")]
+fn configure_compile_worker_thread() {
+    // Windows may dynamically put long-lived worker threads into execution-speed
+    // throttling (EcoQoS) after sustained CPU work. A compile pool is latency
+    // sensitive, so explicitly opt its owned worker threads out. StateMask=0
+    // requests normal execution speed; ControlMask marks that choice explicit.
+    #[repr(C)]
+    struct ThreadPowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+
+    const THREAD_POWER_THROTTLING: i32 = 3;
+    const THREAD_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+    const THREAD_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut std::ffi::c_void;
+        fn SetThreadInformation(
+            thread: *mut std::ffi::c_void,
+            thread_information_class: i32,
+            thread_information: *const std::ffi::c_void,
+            thread_information_size: u32,
+        ) -> i32;
+    }
+
+    let state = ThreadPowerThrottlingState {
+        version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        control_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        state_mask: 0,
+    };
+    unsafe {
+        let _ = SetThreadInformation(
+            GetCurrentThread(),
+            THREAD_POWER_THROTTLING,
+            (&state as *const ThreadPowerThrottlingState).cast(),
+            std::mem::size_of::<ThreadPowerThrottlingState>() as u32,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_compile_worker_thread() {}
+
 fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
@@ -249,6 +295,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     let thread_count = compile_thread_count()?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
+        .start_handler(|_| configure_compile_worker_thread())
         .build()
         .ok()
 });
