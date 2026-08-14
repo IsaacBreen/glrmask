@@ -714,6 +714,9 @@ impl<'a> Lowerer<'a> {
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
         }
+        if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
+            return self.lower_schema(&merged);
+        }
         if let Some(merged) = merge_all_of_string_like_schema(&branches) {
             return self.lower_schema(&merged);
         }
@@ -1553,6 +1556,99 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
             ..SchemaAssertions::default()
         },
     ))
+}
+
+/// Collapse a finite string literal language intersected with simple string
+/// constraints by evaluating those constraints at import time.
+///
+/// This is particularly important for discriminator-like schemas such as
+///
+///   enum["atomic", "compound", ...] ∩ pattern("atomic")
+///
+/// which otherwise lower as an `allOf` parser intersection and keep multiple
+/// equivalent parser histories alive long after the discriminator value has
+/// been consumed.  The finite side gives us an exact, cheap decision procedure:
+/// test each literal and retain only the survivors.
+fn merge_all_of_finite_string_literals(branches: &[Schema]) -> ImportResult<Option<Schema>> {
+    let mut finite_index = None;
+    let mut finite_values = Vec::<Value>::new();
+
+    for (index, branch) in branches.iter().enumerate() {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            return Ok(None);
+        };
+        if assertions.const_value.is_none() && assertions.enum_values.is_none() {
+            continue;
+        }
+        // Keep this first version deliberately narrow: exactly one finite
+        // branch, containing string literals only, and not both const+enum.
+        if finite_index.is_some()
+            || (assertions.const_value.is_some() && assertions.enum_values.is_some())
+        {
+            return Ok(None);
+        }
+        let Some(values) = string_literal_values(assertions) else {
+            return Ok(None);
+        };
+        finite_index = Some(index);
+        finite_values.extend(values.into_iter().cloned());
+    }
+
+    let Some(finite_index) = finite_index else {
+        return Ok(None);
+    };
+
+    for (index, branch) in branches.iter().enumerate() {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            return Ok(None);
+        };
+
+        let string_schema = if index == finite_index {
+            // `string_literal_values` already rejected other assertion
+            // families, but the finite branch itself may also carry a string
+            // constraint.
+            assertions.string.as_ref()
+        } else {
+            let Some(string_schema) = broad_string_assertions(assertions) else {
+                return Ok(None);
+            };
+            Some(string_schema)
+        };
+
+        let Some(string_schema) = string_schema else {
+            continue;
+        };
+        // `string_value_satisfies_schema` currently treats pattern as an
+        // early-return check, so only use it when pattern is the sole string
+        // restriction.  Pattern-free length/format schemas are also exact.
+        if string_schema.pattern.is_some()
+            && (string_schema.min_length != 0
+                || string_schema.max_length.is_some()
+                || string_schema.format.is_some())
+        {
+            return Ok(None);
+        }
+
+        let mut survivors = Vec::with_capacity(finite_values.len());
+        for value in finite_values {
+            if string_value_satisfies_schema(&value, string_schema)? {
+                survivors.push(value);
+            }
+        }
+        finite_values = survivors;
+        if finite_values.is_empty() {
+            return Ok(Some(Schema::never("<merged-allOf-finite-string-literals:empty>")));
+        }
+    }
+
+    Ok(Some(Schema::assertions(
+        "<merged-allOf-finite-string-literals>",
+        SchemaAssertions {
+            types: Some(vec![SchemaType::String]),
+            enum_values: Some(finite_values),
+            ..SchemaAssertions::default()
+        },
+    )))
 }
 
 fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<SchemaType>> {

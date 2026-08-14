@@ -6305,6 +6305,32 @@ fn patterned_string_enum_does_not_use_raw_regex_fast_path() {
 }
 
 #[test]
+fn allof_finite_string_enum_and_pattern_is_filtered_at_import_time() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": "string",
+                "enum": ["atomic", "compound", "parallel", "final", "history"]
+            },
+            {
+                "type": "string",
+                "pattern": "atomic"
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(schema_accepts_bytes(&schema, br#""atomic""#));
+    assert!(!schema_accepts_bytes(&schema, br#""compound""#));
+    assert!(!schema_accepts_bytes(&schema, br#""parallel""#));
+    assert!(glrm.contains("atomic"), "{glrm}");
+    assert!(!glrm.contains("compound"), "{glrm}");
+    assert!(!glrm.contains("parallel"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn mixed_type_enum_does_not_use_raw_regex_fast_path() {
     let schema = json!({"enum": ["red", 7, "blue"]});
 
