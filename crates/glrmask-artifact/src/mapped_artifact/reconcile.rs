@@ -1307,6 +1307,20 @@ pub fn remap_weights_with_maps(
     let token_run_map =
         DisjointRunLocalMap::from_local_to_common(local_to_common_tokens, common_token_count);
     let identity_tsids = local_to_common_is_identity(local_to_common_tsids, common_tsid_count);
+    let identity_tokens = local_to_common_is_identity(local_to_common_tokens, common_token_count);
+    // Reconciliation is literally the identity when both coordinates are already
+    // published in the common numbering. Avoid walking/interning every weight and
+    // token set only to reconstruct the same artifact.
+    if identity_tsids && identity_tokens {
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][token_run_reconcile] weights={} identity_tsids=true identity_tokens=true action=skip total_ms={:.3}",
+                weights.len(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return;
+    }
     let mut unique_by_ptr = FxHashMap::<usize, usize>::default();
     let mut unique_weights = Vec::<Weight>::new();
     let mut weight_to_unique = Vec::with_capacity(weights.len());

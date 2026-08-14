@@ -526,8 +526,14 @@ impl SharedClassifyBytesets {
                 }
             }
         }
-        let reverse_transitions_by_byte =
-            build_reverse_transitions_by_byte(&sparse_transitions_by_byte, num_states);
+        let reverse_transitions_by_byte = if tokenizer.has_epsilon_transitions() {
+            // Only the deterministic exact-boundary path consumes this index.
+            // Epsilon tokenizers use their bounded/powerset analysis view, so a
+            // reverse copy of every raw transition is unreachable work.
+            Vec::new()
+        } else {
+            build_reverse_transitions_by_byte(&sparse_transitions_by_byte, num_states)
+        };
         let scan_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
         let mut reachable_bytes = vec![U8Set::empty(); nt];

@@ -2170,14 +2170,24 @@ fn analyze_equivalences_impl(
         }
 
         let mut pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
-        let skip_pipeline_prepass = std::env::var("GLRMASK_SKIP_L2P_STATE_EQUIV_PIPELINE_PARTITIONS")
-            .ok()
-            .is_some_and(|scope| {
-                scope
-                    .split(',')
-                    .map(str::trim)
-                    .any(|candidate| candidate == partition_label)
-            });
+        // On large p1 domains the exact finite-vocabulary refinement already
+        // collapses the state space aggressively. The preliminary stable
+        // restricted-observation pass walks tens of thousands of states but saves
+        // less work downstream than it costs. The exact vocabulary/state passes
+        // remain authoritative, so omitting this optional prequotient is semantic-
+        // preserving.
+        let auto_skip_pipeline_prepass = partition_label == "p1"
+            && prepared.initial_states.len() >= 20_000
+            && dedup.representative_token_bytes.len() >= 10_000;
+        let skip_pipeline_prepass = auto_skip_pipeline_prepass
+            || std::env::var("GLRMASK_SKIP_L2P_STATE_EQUIV_PIPELINE_PARTITIONS")
+                .ok()
+                .is_some_and(|scope| {
+                    scope
+                        .split(',')
+                        .map(str::trim)
+                        .any(|candidate| candidate == partition_label)
+                });
         if skip_pipeline_prepass {
             pipeline_config.passes.clear();
         }
