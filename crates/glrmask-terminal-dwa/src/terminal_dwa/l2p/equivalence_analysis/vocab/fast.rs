@@ -3293,12 +3293,15 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         }
     };
 
-    // The factor pass normally runs inside the partition-level Rayon DAG.
-    // Small and moderate pools benefit from nested bucket parallelism because
-    // one sequential factor task otherwise monopolizes an outer worker. On
-    // larger pools, very large source-state domains instead benefit from one
-    // sequential factor task, leaving the remaining workers to the outer DAG.
-    // Keep an explicit override for diagnostics and future scheduler studies.
+    // The factor pass normally runs inside the partition-level Rayon DAG. Its
+    // buckets are independent, and Rayon schedules nested parallel work on the
+    // existing pool rather than creating another pool. Keeping a large bucketed
+    // factor sequential can therefore create a severe tail once the sibling
+    // partition tasks drain: one worker remains in this factor while the rest of
+    // the pool has nothing left to steal. Always expose the bucket parallelism
+    // when the pool has more than one worker; the work-stealing scheduler can
+    // still interleave it with sibling partition work while that work exists.
+    // Keep the explicit override for diagnostics.
     let parallel_buckets = buckets.len() > 1
         && first_transition_factor_parallel_buckets_override().unwrap_or_else(|| {
             first_transition_factor_parallel_buckets_default(
@@ -3376,15 +3379,11 @@ const SINGLETON_PROBE_STATES: usize = 16;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
 const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
-const FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES: usize = 10_000;
-
 fn first_transition_factor_parallel_buckets_default(
     num_threads: usize,
-    num_initial_states: usize,
+    _num_initial_states: usize,
 ) -> bool {
     num_threads > 1
-        && (num_threads <= 8
-            || num_initial_states < FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES)
 }
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
@@ -4679,7 +4678,8 @@ mod shared_base_tests {
         assert!(first_transition_factor_parallel_buckets_default(4, 50_000));
         assert!(first_transition_factor_parallel_buckets_default(8, 50_000));
         assert!(first_transition_factor_parallel_buckets_default(12, 4_989));
-        assert!(!first_transition_factor_parallel_buckets_default(12, 12_000));
+        assert!(first_transition_factor_parallel_buckets_default(12, 12_000));
+        assert!(first_transition_factor_parallel_buckets_default(48, 1_000_000));
     }
 
     #[test]

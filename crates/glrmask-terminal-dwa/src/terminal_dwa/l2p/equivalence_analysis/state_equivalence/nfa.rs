@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
 use std::collections::VecDeque;
@@ -2493,6 +2494,31 @@ fn intern_config(
     id
 }
 
+fn step_epsilon_closed_config_sorted(
+    tokenizer: &Tokenizer,
+    source: &[u32],
+    byte: u8,
+    singleton_closures: &SingletonEpsilonClosures,
+    raw_active_language: Option<&[bool]>,
+) -> Vec<u32> {
+    let mut target = Vec::<u32>::new();
+    for &source_state in source {
+        let raw_target = tokenizer.get_transition(source_state, byte);
+        if raw_target == u32::MAX {
+            continue;
+        }
+        for &reachable in singleton_closures[raw_target as usize].iter() {
+            if raw_active_language.is_some_and(|active| !active[reachable as usize]) {
+                continue;
+            }
+            target.push(reachable);
+        }
+    }
+    target.sort_unstable();
+    target.dedup();
+    target
+}
+
 fn candidate_partition(
     num_states: usize,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -3198,6 +3224,7 @@ pub fn compute_state_map(
     initial_state_map: Option<&ManyToOneIdMap>,
     depth: RefinementDepth,
 ) -> ManyToOneIdMap {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let num_states = tokenizer.num_states() as usize;
     if num_states == 0 {
         return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(Vec::new(), 0);
@@ -3215,6 +3242,7 @@ pub fn compute_state_map(
 
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
+    let start_configs_started_at = profile_timing.then(std::time::Instant::now);
     let start_configs = candidate_representatives
         .iter()
         .map(|&state| {
@@ -3225,11 +3253,26 @@ pub fn compute_state_map(
             intern_config(config, &mut config_ids, &mut configs)
         })
         .collect::<Vec<_>>();
+    let start_configs_ms = start_configs_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    let observations = start_configs
-        .iter()
-        .map(|&config| observation_words(tokenizer, &configs[config as usize], active_groups))
-        .collect::<Vec<_>>();
+    let observations_started_at = profile_timing.then(std::time::Instant::now);
+    let parallel_candidate_work = rayon::current_num_threads() > 1
+        && num_candidates >= 16_384
+        && std::env::var_os("GLRMASK_DISABLE_NFA_RESTRICTED_TARGET_PARALLEL").is_none();
+    let observations = if parallel_candidate_work {
+        start_configs
+            .par_iter()
+            .map(|&config| observation_words(tokenizer, &configs[config as usize], active_groups))
+            .collect::<Vec<_>>()
+    } else {
+        start_configs
+            .iter()
+            .map(|&config| observation_words(tokenizer, &configs[config as usize], active_groups))
+            .collect::<Vec<_>>()
+    };
+    let observations_ms = observations_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let mut initial_keys = FxHashMap::<Vec<u64>, u32>::default();
     let mut classes = vec![0u32; num_candidates];
     for candidate in 0..num_candidates {
@@ -3238,49 +3281,111 @@ pub fn compute_state_map(
         classes[candidate] = *initial_keys.entry(key).or_insert(next);
     }
 
-    let mut target_configs = vec![u32::MAX; num_candidates * active_bytes.len()];
-    let mut target_marks = vec![0u32; num_states];
-    let mut target_generation = 0u32;
-    let mut target_config = Vec::<u32>::new();
-    for candidate in 0..num_candidates {
-        let source = configs[start_configs[candidate] as usize].to_vec();
-        for (slot, &byte) in active_bytes.iter().enumerate() {
-            target_generation = target_generation.wrapping_add(1);
-            if target_generation == 0 {
-                target_marks.fill(0);
-                target_generation = 1;
-            }
-            target_config.clear();
-            // Every source config is already epsilon-closed.  Consume the byte
-            // from each member and union cached singleton closures of the raw
-            // targets.  This is exactly `step_all` without re-closing the
-            // source, allocating a per-call seen vector, or sorting an
-            // intermediate direct-target list.
-            for &source_state in &source {
-                let raw_target = tokenizer.get_transition(source_state, byte);
-                if raw_target == u32::MAX {
-                    continue;
-                }
-                for &reachable in singleton_closures[raw_target as usize].iter() {
-                    if raw_active_language
-                        .as_deref()
-                        .is_some_and(|active| !active[reachable as usize])
-                    {
-                        continue;
+    let target_row_width = active_bytes.len();
+    let mut target_configs = vec![u32::MAX; num_candidates * target_row_width];
+    let target_configs_started_at = profile_timing.then(std::time::Instant::now);
+    let parallel_target_rows = parallel_candidate_work
+        && num_candidates.saturating_mul(target_row_width) >= 131_072;
+    if parallel_target_rows {
+        // Successor construction is independent for every candidate.  The
+        // only dependency in the old loop was `intern_config`, whose assigned
+        // IDs depended on encounter order.  Compute canonical successor sets
+        // in parallel, then intern them serially in the exact original
+        // candidate/byte order.  This therefore preserves both the semantic
+        // quotient and its deterministic internal numbering byte-for-byte.
+        //
+        // Keep the batch bounded: retaining successor sets for the entire raw
+        // tokenizer at once can be much larger than the final interned graph.
+        const CANDIDATE_BATCH: usize = 4_096;
+        for batch_start in (0..num_candidates).step_by(CANDIDATE_BATCH) {
+            let batch_end = (batch_start + CANDIDATE_BATCH).min(num_candidates);
+            let rows = (batch_start..batch_end)
+                .into_par_iter()
+                .map(|candidate| {
+                    let source = &configs[start_configs[candidate] as usize];
+                    active_bytes
+                        .iter()
+                        .map(|&byte| {
+                            step_epsilon_closed_config_sorted(
+                                tokenizer,
+                                source,
+                                byte,
+                                singleton_closures.as_ref(),
+                                raw_active_language.as_deref(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            for (batch_offset, row) in rows.into_iter().enumerate() {
+                let candidate = batch_start + batch_offset;
+                for (slot, target) in row.into_iter().enumerate() {
+                    if !target.is_empty() {
+                        target_configs[candidate * target_row_width + slot] =
+                            intern_config(target, &mut config_ids, &mut configs);
                     }
-                    let mark = &mut target_marks[reachable as usize];
-                    if *mark != target_generation {
-                        *mark = target_generation;
-                        target_config.push(reachable);
-                    }
                 }
-            }
-            if !target_config.is_empty() {
-                target_config.sort_unstable();
-                target_configs[candidate * active_bytes.len() + slot] =
-                    intern_config(target_config.clone(), &mut config_ids, &mut configs);
             }
         }
+    } else {
+        let mut target_marks = vec![0u32; num_states];
+        let mut target_generation = 0u32;
+        let mut target_config = Vec::<u32>::new();
+        for candidate in 0..num_candidates {
+            let source = configs[start_configs[candidate] as usize].to_vec();
+            for (slot, &byte) in active_bytes.iter().enumerate() {
+                target_generation = target_generation.wrapping_add(1);
+                if target_generation == 0 {
+                    target_marks.fill(0);
+                    target_generation = 1;
+                }
+                target_config.clear();
+                // Every source config is already epsilon-closed. Consume the
+                // byte from each member and union cached singleton closures of
+                // the raw targets. This is exactly `step_all` without
+                // re-closing the source.
+                for &source_state in &source {
+                    let raw_target = tokenizer.get_transition(source_state, byte);
+                    if raw_target == u32::MAX {
+                        continue;
+                    }
+                    for &reachable in singleton_closures[raw_target as usize].iter() {
+                        if raw_active_language
+                            .as_deref()
+                            .is_some_and(|active| !active[reachable as usize])
+                        {
+                            continue;
+                        }
+                        let mark = &mut target_marks[reachable as usize];
+                        if *mark != target_generation {
+                            *mark = target_generation;
+                            target_config.push(reachable);
+                        }
+                    }
+                }
+                if !target_config.is_empty() {
+                    target_config.sort_unstable();
+                    target_configs[candidate * target_row_width + slot] =
+                        intern_config(target_config.clone(), &mut config_ids, &mut configs);
+                }
+            }
+        }
+    }
+    let target_configs_ms = target_configs_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][nfa_restricted_direct_prepare] states={} candidates={} active_bytes={} parallel={} start_configs_ms={:.3} observations_ms={:.3} target_configs_ms={:.3}",
+            num_states,
+            num_candidates,
+            active_bytes.len(),
+            parallel_target_rows,
+            start_configs_ms,
+            observations_ms,
+            target_configs_ms,
+        );
     }
 
     if matches!(depth, RefinementDepth::Stable) {
@@ -3326,7 +3431,6 @@ pub fn compute_state_map(
             edge_offsets.push(edges.len() as u32);
         }
 
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let started_at = std::time::Instant::now();
         let refined = refine_prebuilt_sparse_powerset_worklist(
             &classes,
@@ -3574,6 +3678,17 @@ mod tests {
                         &mut target_generation,
                     );
                     assert_eq!(cached, scalar, "raw_state={raw_state} byte={byte}");
+                    let sorted = step_epsilon_closed_config_sorted(
+                        &tokenizer,
+                        &config,
+                        byte,
+                        singleton_closures.as_ref(),
+                        active_language.as_deref(),
+                    );
+                    assert_eq!(
+                        sorted, scalar,
+                        "parallel-row successor differs: raw_state={raw_state} byte={byte}",
+                    );
                     let cached_from_raw = step_epsilon_closed_config_cached(
                         &tokenizer,
                         Some(&raw_transitions),
