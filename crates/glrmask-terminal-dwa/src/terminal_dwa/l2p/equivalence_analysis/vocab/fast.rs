@@ -47,6 +47,27 @@ const VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES: usize = 768 * 1024;
 const VOCAB_SEQUENTIAL_TRIE_WORK_MAX_DEFAULT: usize = 10_000_000;
 const SELF_LOOP_ACTIVE_LEN_LIMIT: usize = 512;
 
+#[inline]
+fn state_signature_block_factor(block_len: usize) -> u64 {
+    let mut factor = 1u64;
+    for _ in 0..block_len {
+        factor = factor.wrapping_mul(HASH_SEED1);
+    }
+    factor
+}
+
+#[inline]
+fn append_state_signature_block(prefix: u64, block: u64, factor: u64) -> u64 {
+    // A block signature is
+    //   HASH_SEED3 * a^n + observations(block)
+    // for a = HASH_SEED1. Appending it to an existing prefix therefore gives
+    //   prefix * a^n + observations(block)
+    // = block + (prefix - HASH_SEED3) * a^n.
+    // This is bit-for-bit the same wrapping-u64 polynomial as one monolithic
+    // state batch, not merely an equivalent vector of per-batch hashes.
+    block.wrapping_add(prefix.wrapping_sub(HASH_SEED3).wrapping_mul(factor))
+}
+
 /// Flat DFA with byte-class-compressed transposed transition tables.
 ///
 /// Byte equivalence classes group bytes that produce identical transitions across
@@ -721,6 +742,40 @@ fn vocab_batch_size_override() -> Option<usize> {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
+}
+
+fn vocab_parallel_state_batch_size(num_states: usize, num_tokens: usize) -> Option<usize> {
+    if let Ok(value) = std::env::var("GLRMASK_VOCAB_EQUIV_PARALLEL_STATE_BATCH_SIZE") {
+        return value
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|&batch_size| batch_size > 0);
+    }
+
+    // The state-slab route deliberately targets machines with genuinely spare
+    // compile workers. On small pools, duplicating the token-trie traversal
+    // competes with sibling partition work and loses. The representative p0
+    // cohort starts paying back at 4-8 isolated workers; keep a much more
+    // conservative production threshold so ordinary desktop/server builds are
+    // unchanged while 48/96-core compilation can expose 3-4 independent slabs.
+    const AUTO_MIN_THREADS: usize = 32;
+    const AUTO_MIN_STATES: usize = 64;
+    const AUTO_MIN_TOKENS: usize = 768;
+    const TARGET_STATES_PER_SLAB: usize = 32;
+    const MAX_SLABS: usize = 4;
+
+    if rayon::current_num_threads() < AUTO_MIN_THREADS
+        || num_states < AUTO_MIN_STATES
+        || num_tokens < AUTO_MIN_TOKENS
+    {
+        return None;
+    }
+
+    let slabs = num_states
+        .div_ceil(TARGET_STATES_PER_SLAB)
+        .clamp(2, MAX_SLABS);
+    Some(num_states.div_ceil(slabs))
 }
 
 fn vocab_sequential_trie_work_max() -> usize {
@@ -4263,6 +4318,129 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         .as_ref()
         .map_or_else(TrieWalkChunkStats::default, |plan| plan.stats.trie_walk);
 
+    // Exact state-axis decomposition of the vocabulary observation matrix.
+    //
+    // The ordinary loop below refines token classes by one state batch at a
+    // time. State batches do not depend on one another, so on the many-core
+    // path we evaluate every batch concurrently and preserve their original
+    // order. `append_state_signature_block` then recombines the slab hashes
+    // algebraically into the exact same polynomial signature as one monolithic
+    // state batch.
+    // Each worker deliberately performs one sequential full-trie walk: the
+    // outer state slabs are the parallelism, avoiding nested Rayon work on the
+    // token axis.
+    let parallel_state_batch_size = vocab_parallel_state_batch_size(
+        num_authority_states,
+        num_tokens,
+    )
+    .filter(|&size| {
+        factor_plan.is_none()
+            && num_tokens >= TRIE_WALK_MIN_TOKENS
+            && !*TRIE_WALK_DISABLED
+            && rayon::current_num_threads() > 1
+            && num_authority_states > size
+    });
+    if let Some(parallel_batch_size) = parallel_state_batch_size {
+        let use_parallel_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
+            && num_authority_states > SINGLETON_PROBE_STATES
+            && parallel_batch_size > SINGLETON_PROBE_STATES;
+        let mut state_ranges = Vec::<std::ops::Range<usize>>::new();
+        let mut start = 0usize;
+        let mut batch_index = 0usize;
+        while start < num_authority_states {
+            let size = if batch_index == 0 && use_parallel_singleton_probe {
+                SINGLETON_PROBE_STATES
+            } else {
+                parallel_batch_size
+            };
+            let end = (start + size).min(num_authority_states);
+            state_ranges.push(start..end);
+            start = end;
+            batch_index += 1;
+        }
+
+        let sorted_indices = lexical_order
+            .as_deref()
+            .expect("parallel state batches require lexical token order");
+
+        let signature_started_at = Instant::now();
+        let batch_results = state_ranges
+            .par_iter()
+            .map(|range| {
+                let batch = &ordered_states[range.clone()];
+                let state_group_size = vocab_state_group_size(batch.len(), num_groups);
+                let mut scratch = Scratch::new(batch.len(), num_groups);
+                let mut trie_state = TrieWalkState::new();
+                trie_walk_chunk_signatures(
+                    dfa_ref,
+                    strings,
+                    &sorted_indices,
+                    batch,
+                    state_group_size,
+                    &mut scratch,
+                    &mut trie_state,
+                    profiling,
+                )
+            })
+            .collect::<Vec<_>>();
+        let parallel_signature_wall_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
+        signature_ms += parallel_signature_wall_ms;
+        batches += batch_results.len();
+        sequential_trie_batches += batch_results.len();
+        used_trie_walk = true;
+
+        let refinement_started_at = Instant::now();
+        let mut signatures_by_token = vec![HASH_SEED3; num_tokens];
+        for (batch_index, (batch_signatures, batch_stats)) in
+            batch_results.into_iter().enumerate()
+        {
+            if profiling {
+                trie_walk_stats.add_assign(batch_stats);
+            }
+            debug_assert_eq!(batch_signatures.len(), num_tokens);
+            let block_len = state_ranges[batch_index].len();
+            let block_factor = state_signature_block_factor(block_len);
+            for (token_idx, signature) in batch_signatures {
+                signatures_by_token[token_idx] = append_state_signature_block(
+                    signatures_by_token[token_idx],
+                    signature,
+                    block_factor,
+                );
+            }
+        }
+
+        let mut class_by_signature = HashMap::<u64, usize>::with_capacity(num_tokens);
+        next_class_id = 0;
+        for (token_idx, signature) in signatures_by_token.into_iter().enumerate() {
+            let class_id = match class_by_signature.entry(signature) {
+                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    let class_id = next_class_id;
+                    next_class_id += 1;
+                    *entry.insert(class_id)
+                }
+            };
+            partition[token_idx] = class_id;
+        }
+        active_indices.clear();
+        active_tokens.fill(false);
+        let parallel_refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
+        refinement_ms += parallel_refinement_ms;
+        if profiling {
+            eprintln!(
+                "[glrmask/profile][vocab_parallel_state_batches] states={} tokens={} batch_size={} batches={} singleton_probe={} signature_wall_ms={:.3} refinement_ms={:.3} classes={}",
+                num_authority_states,
+                num_tokens,
+                parallel_batch_size,
+                batches,
+                use_parallel_singleton_probe,
+                parallel_signature_wall_ms,
+                parallel_refinement_ms,
+                next_class_id,
+            );
+        }
+    }
+
     // A single Rayon worker previously rebuilt the full scratch arena for every
     // state batch. The arena is deliberately reset by the signature routines,
     // so one owner can safely reuse it across all batches without altering the
@@ -5845,6 +6023,26 @@ mod shared_base_tests {
             transitions: Arc::from(dfa.transitions.to_vec()),
         };
         assert!(base.is_compatible_with_dfa(&independently_allocated));
+    }
+
+    #[test]
+    fn state_signature_blocks_recombine_to_monolithic_polynomial() {
+        let observations = [3u64, 11, u64::MAX - 7, 19, 23, 29, 31];
+        let fold = |values: &[u64]| {
+            values.iter().fold(HASH_SEED3, |signature, &value| {
+                signature.wrapping_mul(HASH_SEED1).wrapping_add(value)
+            })
+        };
+
+        let mut combined = HASH_SEED3;
+        for block in [&observations[..2], &observations[2..5], &observations[5..]] {
+            combined = append_state_signature_block(
+                combined,
+                fold(block),
+                state_signature_block_factor(block.len()),
+            );
+        }
+        assert_eq!(combined, fold(&observations));
     }
 }
 
