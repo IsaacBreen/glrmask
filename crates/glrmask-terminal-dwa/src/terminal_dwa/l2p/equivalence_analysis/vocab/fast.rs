@@ -2723,14 +2723,30 @@ fn finish_token_signature_no_cleanup(
 fn finish_token_signature_sparse_dirty(
     dfa: &Dfa,
     num_initial_states: usize,
+    live_indices: &[usize],
     scratch: &Scratch,
+    all_none_signature: u64,
 ) -> u64 {
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
     let dag = &scratch.dag_nodes;
     let single_target_hash_pos = scratch.single_target_hash_pos;
     let single_target_hash = scratch.single_target_hash;
-    let mut sig = finish_token_signature_clean(dfa, num_initial_states, scratch);
+    // The clean component of a dirty token is the same polynomial fold as for
+    // a clean token.  Every state omitted from `live_indices` is exactly
+    // STATE_NONE, so start from the all-dead fold and correct only live states.
+    // The dirty-state loop below then replaces each clean completion with the
+    // full terminal-edge signature at that same polynomial position.
+    let mut sig = if live_indices.len().saturating_mul(2) <= num_initial_states {
+        finish_token_signature_sparse_live_clean(
+            dfa,
+            live_indices,
+            scratch,
+            all_none_signature,
+        )
+    } else {
+        finish_token_signature_clean(dfa, num_initial_states, scratch)
+    };
     let state_words = num_initial_states.div_ceil(64);
     for (word_idx, &dirty_word) in scratch.dirty_state_bits[..state_words].iter().enumerate() {
         let mut bits = dirty_word;
@@ -3043,7 +3059,13 @@ fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
             let signature = if *VOCAB_SPARSE_DIRTY_FINISH_DISABLED {
                 finish_token_signature_no_cleanup(dfa, batch_len, scratch)
             } else {
-                finish_token_signature_sparse_dirty(dfa, batch_len, scratch)
+                finish_token_signature_sparse_dirty(
+                    dfa,
+                    batch_len,
+                    live_indices,
+                    scratch,
+                    all_none_signature,
+                )
             };
             stats.finish_signature_ms += elapsed_ms(finish_started_at);
             signature
@@ -5673,6 +5695,60 @@ mod shared_base_tests {
                 ),
                 finish_token_signature_clean(&dfa, state_count, &scratch),
                 "live_mask={live_mask:#b}",
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_dirty_signature_matches_dense_fold_with_live_and_dead_dirty_states() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        let state_count = 6usize;
+        let mut scratch = Scratch::new(state_count, dfa.num_groups);
+        ensure_completion_weights(&mut scratch, state_count);
+        let all_none_signature = all_none_completion_signature(&dfa, state_count);
+
+        for (states, live_indices) in [
+            // Sparse side of the crossover.
+            (
+                [0, STATE_NONE, 2 % dfa.num_states, STATE_NONE, STATE_NONE, 0],
+                vec![0usize, 2, 5],
+            ),
+            // Dense side of the crossover.
+            (
+                [0, STATE_NONE, 2 % dfa.num_states, STATE_NONE, 1 % dfa.num_states, 0],
+                vec![0usize, 2, 4, 5],
+            ),
+        ] {
+            scratch.current_states[..state_count].copy_from_slice(&states);
+            scratch.dirty_group_masks.fill(0);
+            scratch.dirty_state_flags.fill(0);
+            scratch.dirty_state_bits.fill(0);
+            scratch.match_positions.fill(NONE);
+
+            // Exercise both a live dirty state and a dirty state whose DFA path
+            // has already died. Missing DAG nodes intentionally hash as zero in
+            // both implementations, isolating only the polynomial baseline.
+            for &(state_index, gid, position) in
+                &[(1usize, 0usize, 1u32), (2usize, 0usize, 2u32)]
+            {
+                scratch.dirty_state_flags[state_index] = 1;
+                set_dirty_state_bit(&mut scratch.dirty_state_bits, state_index);
+                let flat_dirty = state_index * scratch.dirty_words + gid / 64;
+                scratch.dirty_group_masks[flat_dirty] |= 1u64 << (gid % 64);
+                scratch.match_positions[state_index * dfa.num_groups + gid] = position;
+            }
+
+            assert_eq!(
+                finish_token_signature_sparse_dirty(
+                    &dfa,
+                    state_count,
+                    &live_indices,
+                    &scratch,
+                    all_none_signature,
+                ),
+                finish_token_signature_no_cleanup(&dfa, state_count, &scratch),
             );
         }
     }
