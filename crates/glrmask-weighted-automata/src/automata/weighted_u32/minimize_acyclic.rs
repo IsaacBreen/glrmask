@@ -4175,7 +4175,15 @@ fn canonical_dead_dwa() -> DWA {
 /// pushed maps are not needed for partition refinement. Keep the productive
 /// transitions in one compact side vector and reconstruct directly from it.
 fn try_minimize_small_pairwise_direct(dwa: &DWA) -> Option<DWA> {
-    const MAX_INPUT_STATES: usize = 128;
+    // The quadratic work is governed by the largest non-leaf height bucket,
+    // not by the total number of states.  Structural L2P DWAs commonly have a
+    // large collection of height-0 leaves plus several modest upper buckets;
+    // rejecting those at 128 total states needlessly falls back to the generic
+    // push/materialize/rescan pipeline even though every pairwise-coloring
+    // bucket remains small.  Keep a conservative total-size guard for now, but
+    // admit the common 129-192-state regime while retaining the independent
+    // MAX_HEIGHT_BUCKET bound below.
+    const MAX_INPUT_STATES: usize = 192;
     const MAX_HEIGHT_BUCKET: usize = 64;
 
     let n = dwa.states().len();
@@ -4681,6 +4689,45 @@ mod tests {
         );
         assert_eq!(minimized.states().len(), 2);
         assert_eq!(minimized.states()[minimized.start_state() as usize].transitions.len(), leaf_count);
+    }
+
+    #[test]
+    fn small_direct_accepts_over_128_states_when_nonleaf_buckets_stay_bounded() {
+        // Mirror the shape that motivated widening the total-state guard:
+        // many height-0 leaves, a modest height-1 bucket, and one root.  The
+        // pairwise work is controlled by the 48-state non-leaf bucket even
+        // though the complete automaton has well over 128 states.
+        let middle_count = 48usize;
+        let leaf_count = 103usize;
+        let root = 0usize;
+        let first_middle = 1usize;
+        let first_leaf = first_middle + middle_count;
+        let total_states = first_leaf + leaf_count;
+        assert!(total_states > 128 && total_states <= 192);
+
+        let mut states = vec![DWAState::default(); total_states];
+        for middle in 0..middle_count {
+            states[root].transitions.insert(
+                middle as i32,
+                ((first_middle + middle) as u32, Weight::all()),
+            );
+            states[first_middle + middle].transitions.insert(
+                10_000,
+                ((first_leaf + middle % leaf_count) as u32, Weight::all()),
+            );
+        }
+        for leaf in 0..leaf_count {
+            states[first_leaf + leaf].final_weight = Some(Weight::all());
+        }
+
+        let dwa = DWA::from_parts(states, root as u32);
+        let minimized = try_minimize_small_pairwise_direct(&dwa)
+            .expect("bounded non-leaf buckets should admit the >128-state direct path");
+        assert_eq!(
+            find_difference(&dwa, &minimized).expect("equivalence check must succeed"),
+            None,
+        );
+        assert!(minimized.num_states() < dwa.num_states());
     }
 
     #[test]
