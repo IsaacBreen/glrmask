@@ -7491,17 +7491,41 @@ impl InterchangeabilityDfa {
         self.canonical_paired_hopcroft_interchange_map(left, right)
     }
 
-    fn canonical_identity_map(&mut self) -> InterchangeMap {
-        if let Some(map) = &self.canonical_identity_map {
-            return map.clone();
-        }
+    fn canonical_identity_map_via_moore_history(&mut self) -> InterchangeMap {
         self.ensure_canonical_identity_stable_round();
         self.ensure_canonical_quotient();
         let quotient = self
             .canonical_quotient
             .as_ref()
             .expect("canonical quotient initialized");
-        let map = self.quotient_identity_map(quotient);
+        self.quotient_identity_map(quotient)
+    }
+
+    fn canonical_identity_map(&mut self) -> InterchangeMap {
+        if let Some(map) = &self.canonical_identity_map {
+            return map.clone();
+        }
+        let use_support_identity = std::env::var("GLRMASK_TI_IDENTITY_FROM_SUPPORT_QUOTIENT")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+        let map = if use_support_identity && self.support_partition_seed.is_none() {
+            self.ensure_support_quotient();
+            let support_map = self.identity_map_from_unseeded_support_quotient();
+            if std::env::var_os("GLRMASK_TI_VALIDATE_SUPPORT_IDENTITY_MAP").is_some() {
+                let reference = self.canonical_identity_map_via_moore_history();
+                assert_eq!(
+                    support_map.scanner_state_map.materialized(),
+                    reference.scanner_state_map.materialized(),
+                    "support-quotient identity transport diverged from canonical Moore identity transport",
+                );
+            }
+            support_map
+        } else {
+            self.canonical_identity_map_via_moore_history()
+        };
         self.canonical_identity_map = Some(map.clone());
         map
     }
@@ -7660,6 +7684,38 @@ impl InterchangeabilityDfa {
     // so they perform no `&mut self` mutation and can run concurrently over an
     // immutable `&InterchangeabilityDfa`.
 
+    /// Build the identity scanner transport directly from an *unseeded* exact
+    /// stable support quotient.  In that case `support_identity_stable_partition`
+    /// and the canonical Moore ladder solve the same deterministic-output
+    /// bisimulation fixed point from the same round-one output partition. Both
+    /// canonicalize classes by first state, so they choose the same scanner
+    /// representatives as well as the same equivalence relation.
+    ///
+    /// A support quotient projected from a finer previous TI round is allowed to
+    /// remain a strict refinement, which is sufficient for the support proof but
+    /// is not the canonical current-round identity quotient. Never use this
+    /// shortcut when `support_partition_seed` is present.
+    fn identity_map_from_unseeded_support_quotient(&self) -> InterchangeMap {
+        assert!(
+            self.support_partition_seed.is_none(),
+            "seeded support quotient is not necessarily the canonical current-round identity partition",
+        );
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient pre-built before identity transport");
+        InterchangeMap {
+            scanner_state_map: self
+                .topology
+                .scanner_map_from_internal_quotient(
+                    Arc::clone(&quotient.class_for_state),
+                    Arc::clone(&quotient.representative_by_class),
+                    Box::default(),
+                )
+                .expect("exact support identity quotient must retain a raw representative"),
+        }
+    }
+
     /// Force every lazily built structure the certification path reads, so the
     /// `&self` variants never trigger a build. `candidates` is the flattened set
     /// of terminals that enter the certification loop.
@@ -7681,7 +7737,7 @@ impl InterchangeabilityDfa {
             (0..terminal_count).map(|_| OnceLock::new()).collect()
         });
         let _ = candidates;
-        // Force the canonical identity map used by the frozen-preserve branch.
+        // Force the identity transport used by the frozen-preserve branch.
         let _ = self.canonical_identity_map();
     }
 
@@ -12795,6 +12851,147 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn support_quotient_identity_transport_matches_moore_history_exactly() {
+        let fixtures = vec![
+            vec![
+                Expr::U8Seq(b"same".to_vec()),
+                Expr::U8Seq(b"same".to_vec()),
+                Expr::U8Seq(b"sample".to_vec()),
+                Expr::U8Seq(b"simple".to_vec()),
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::U8Seq(b"ba".to_vec()),
+            ],
+            vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(255),
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(251),
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 0,
+                    max: Some(255),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ],
+        ];
+
+        for expressions in fixtures {
+            let tokenizer = tokenizer(expressions);
+            let active = vec![true; tokenizer.num_terminals() as usize];
+            let mut support =
+                InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+            support.ensure_support_quotient();
+            let support_map = support.identity_map_from_unseeded_support_quotient();
+
+            let mut moore = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+            let moore_map = moore.canonical_identity_map_via_moore_history();
+            assert_eq!(
+                support_map.materialized_scanner_states(),
+                moore_map.materialized_scanner_states(),
+                "stable support quotient and canonical Moore history must induce the same identity transport",
+            );
+        }
+
+        // Exercise the epsilon/NFA discovery topology as well.  The support
+        // quotient is over internal powerset states there, and the common
+        // scanner-map projection must still reproduce the exact raw-state
+        // identity transport chosen by the Moore history.
+        let expressions = vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"other".to_vec()),
+        ];
+        let terminal_count = expressions.len() as u32;
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1, 2], false)
+            .into_tokenizer(
+                terminal_count,
+                Some(Arc::from(expressions.into_boxed_slice())),
+            );
+        assert!(tokenizer.has_epsilon_transitions());
+        let active = vec![true; terminal_count as usize];
+        let mut support = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+        support.ensure_support_quotient();
+        let support_map = support.identity_map_from_unseeded_support_quotient();
+        let mut moore = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+        let moore_map = moore.canonical_identity_map_via_moore_history();
+        assert_eq!(
+            support_map.materialized_scanner_states(),
+            moore_map.materialized_scanner_states(),
+            "epsilon/NFA support quotient must induce the same raw scanner identity transport",
+        );
+    }
+
+    #[test]
+    fn seeded_support_quotient_identity_transport_falls_back_to_exact_moore() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"sample".to_vec()),
+            Expr::U8Seq(b"simple".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+        ]);
+        let topology = Arc::new(RestrictedTopology::new(&tokenizer, &[true; 256]));
+        let raw = Arc::new(TiRawDiscoveryData::new(&tokenizer, &topology, None));
+
+        let all_active = vec![true; 8];
+        let mut seed_dfa = InterchangeabilityDfa::from_raw_discovery_data(
+            &all_active,
+            Arc::clone(&topology),
+            Arc::clone(&raw),
+            None,
+            None,
+        );
+        seed_dfa.ensure_support_quotient();
+        let seed = SupportPartitionSeed {
+            active_terminals: all_active.into(),
+            quotient: Arc::clone(
+                seed_dfa
+                    .support_quotient
+                    .as_ref()
+                    .expect("support quotient initialized"),
+            ),
+        };
+
+        let current_active = [true, true, false, false, true, false, true, false];
+        let mut seeded = InterchangeabilityDfa::from_raw_discovery_data(
+            &current_active,
+            Arc::clone(&topology),
+            Arc::clone(&raw),
+            Some(seed),
+            None,
+        );
+        // Even with the support shortcut enabled by default, a seeded round must
+        // retain the canonical Moore route because the projected support quotient
+        // can be a strict refinement of the fresh current-round fixed point.
+        let seeded_map = seeded.canonical_identity_map();
+
+        let mut unseeded = InterchangeabilityDfa::from_raw_discovery_data(
+            &current_active,
+            topology,
+            raw,
+            None,
+            None,
+        );
+        let moore_map = unseeded.canonical_identity_map_via_moore_history();
+        assert_eq!(
+            seeded_map.materialized_scanner_states(),
+            moore_map.materialized_scanner_states(),
+            "seeded TI identity transport must fall back to the exact current-round Moore fixed point",
+        );
     }
 
     #[test]
