@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Extremely fast grammar-constrained decoding for LLMs.
 //!
 //! GLRMask compiles a grammar together with a model vocabulary into a reusable
