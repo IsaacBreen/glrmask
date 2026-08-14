@@ -450,6 +450,31 @@ impl SharedClassifyBytesets {
         let mut representative_future_terminal_by_state = vec![u32::MAX; num_states];
         let mut transition_count = 0usize;
 
+        // Every transition used to recompute the empty-input epsilon closure of
+        // its target and re-OR the same terminal observations. Large synthesized
+        // tokenizers have millions of transitions but only O(100k) target
+        // states. Precompute the exact closure observation once per state.
+        let singleton_closures = tokenizer.all_singleton_epsilon_closures();
+        let closure_output_started_at = std::time::Instant::now();
+        let mut closure_reachable_words = vec![0u64; num_states * words_per_terminal_set];
+        let mut closure_last_words = vec![0u64; num_states * words_per_terminal_set];
+        for state in 0..num_states {
+            let base = state * words_per_terminal_set;
+            for &closure_state in &singleton_closures[state] {
+                let matched_words = tokenizer.matched_terminal_bitset(closure_state).words();
+                let future_words = tokenizer.possible_future_terminals(closure_state).words();
+                debug_assert!(matched_words.len() >= words_per_terminal_set);
+                debug_assert!(future_words.len() >= words_per_terminal_set);
+                for word_index in 0..words_per_terminal_set {
+                    let matched_word = matched_words[word_index];
+                    closure_last_words[base + word_index] |= matched_word;
+                    closure_reachable_words[base + word_index] |=
+                        matched_word | future_words[word_index];
+                }
+            }
+        }
+        let closure_output_ms = closure_output_started_at.elapsed().as_secs_f64() * 1000.0;
+
         for state in 0..tokenizer.num_states() {
             let matched = tokenizer
                 .matched_terminals(state)
@@ -492,20 +517,12 @@ impl SharedClassifyBytesets {
                 transitions_by_byte[byte as usize * num_states + state as usize] = target;
                 sparse_transitions_by_byte[byte as usize].push((state, target));
                 let bucket_offset = byte as usize * words_per_terminal_set;
-                let target_closure = tokenizer.execute_from_state_end_only(&[], target);
-                for &closure_state in &target_closure {
-                    let matched_words = tokenizer.matched_terminal_bitset(closure_state).words();
-                    let future_words = tokenizer.possible_future_terminals(closure_state).words();
-
-                    debug_assert!(matched_words.len() >= words_per_terminal_set);
-                    debug_assert!(future_words.len() >= words_per_terminal_set);
-                    for word_index in 0..words_per_terminal_set {
-                        let matched_word = matched_words[word_index];
-                        let future_word = future_words[word_index];
-                        reachable_by_byte[bucket_offset + word_index] |=
-                            matched_word | future_word;
-                        last_by_byte[bucket_offset + word_index] |= matched_word;
-                    }
+                let target_offset = target as usize * words_per_terminal_set;
+                for word_index in 0..words_per_terminal_set {
+                    reachable_by_byte[bucket_offset + word_index] |=
+                        closure_reachable_words[target_offset + word_index];
+                    last_by_byte[bucket_offset + word_index] |=
+                        closure_last_words[target_offset + word_index];
                 }
             }
         }
@@ -562,11 +579,12 @@ impl SharedClassifyBytesets {
 
         if profile_enabled {
             eprintln!(
-                "[glrmask/profile][classify_bytesets] terminals={} states={} transitions={} words_per_terminal_set={} scan_ms={:.3} transpose_and_first_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][classify_bytesets] terminals={} states={} transitions={} words_per_terminal_set={} closure_output_ms={:.3} scan_ms={:.3} transpose_and_first_ms={:.3} total_ms={:.3}",
                 nt,
                 tokenizer.num_states(),
                 transition_count,
                 words_per_terminal_set,
+                closure_output_ms,
                 scan_ms,
                 started_at.elapsed().as_secs_f64() * 1000.0 - scan_ms,
                 started_at.elapsed().as_secs_f64() * 1000.0,

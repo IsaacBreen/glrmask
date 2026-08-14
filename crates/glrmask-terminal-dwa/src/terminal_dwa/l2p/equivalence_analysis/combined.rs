@@ -2169,7 +2169,26 @@ fn analyze_equivalences_impl(
             );
         }
 
-        let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+        let mut pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+        let skip_pipeline_prepass = std::env::var("GLRMASK_SKIP_L2P_STATE_EQUIV_PIPELINE_PARTITIONS")
+            .ok()
+            .is_some_and(|scope| {
+                scope
+                    .split(',')
+                    .map(str::trim)
+                    .any(|candidate| candidate == partition_label)
+            });
+        if skip_pipeline_prepass {
+            pipeline_config.passes.clear();
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_state_pipeline_plan] partition={} skip={} passes={:?}",
+                partition_label,
+                skip_pipeline_prepass,
+                pipeline_config.passes,
+            );
+        }
         let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
             tokenizer,
             vocab,

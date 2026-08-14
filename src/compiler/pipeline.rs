@@ -4181,7 +4181,17 @@ fn compile_prepared_with_profile_and_table_construction(
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
             terminal_live_states: Vec::new(),
-            state_internal_tsid_offsets: Vec::new(),
+            // Unless optional runtime full-adaptive product states were selected,
+            // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw
+            // runtime tokenizer state has exactly one internal TSID. Runtime
+            // lookup already falls back to `state_to_internal_tsid`; sentinel
+            // `[u32::MAX]` prevents generic finalization from allocating 1.4M
+            // temporary SmallVec rows and rebuilding an equivalent CSR relation.
+            state_internal_tsid_offsets: if runtime_source_state_offset.is_none() {
+                vec![u32::MAX]
+            } else {
+                Vec::new()
+            },
             state_internal_tsids: Vec::new(),
             runtime_source_state_offset,
             runtime_product_source_offsets,

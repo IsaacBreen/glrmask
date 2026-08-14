@@ -907,6 +907,16 @@ pub fn find_state_equivalence_classes_with_state_resets<
         return Vec::new();
     }
 
+    // Structural vocabulary certification repeatedly traverses the same sorted
+    // vocabulary. The historical 250-state batches replayed that machinery far
+    // too often; 1k retains modest scratch size while removing most batch setup.
+    let certifier_batch_size = Some(
+        std::env::var("GLRMASK_SYNTH_VOCAB_CERT_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(1_000),
+    );
     find_state_equivalence_classes_token_based(
         tokenizer,
         tokens,
@@ -914,7 +924,7 @@ pub fn find_state_equivalence_classes_with_state_resets<
         &[],
         FollowRows::Dense(Some(disallowed_follows)),
         None,
-        None,
+        certifier_batch_size,
         None,
         false,
         None,

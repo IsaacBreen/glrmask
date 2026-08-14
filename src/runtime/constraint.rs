@@ -2025,16 +2025,19 @@ impl Constraint {
         let closures = self.tokenizer.all_singleton_epsilon_closures();
         let state_count = self.tokenizer.num_states() as usize;
         let build_state = |mut rows: Vec<Vec<u32>>, state: usize| {
-            let mut terminals = SmallVec::<[u32; 8]>::new();
+            // Rows are sorted and deduplicated once after the parallel transpose.
+            // Stream observations directly instead of sorting/deduplicating a
+            // temporary terminal list for every runtime tokenizer state.
             for &closure_state in closures[state].iter() {
-                terminals.extend(self.tokenizer.matched_terminals_iter(closure_state));
-                terminals.extend(self.tokenizer.possible_future_terminals_iter(closure_state));
-            }
-            terminals.sort_unstable();
-            terminals.dedup();
-            for terminal in terminals {
-                if let Some(row) = rows.get_mut(terminal as usize) {
-                    row.push(state as u32);
+                for terminal in self.tokenizer.matched_terminals_iter(closure_state) {
+                    if let Some(row) = rows.get_mut(terminal as usize) {
+                        row.push(state as u32);
+                    }
+                }
+                for terminal in self.tokenizer.possible_future_terminals_iter(closure_state) {
+                    if let Some(row) = rows.get_mut(terminal as usize) {
+                        row.push(state as u32);
+                    }
                 }
             }
             rows

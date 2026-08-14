@@ -10,9 +10,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
+use crate::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use crate::automata::lexer::Lexer;
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
 use crate::Vocab;
@@ -44,6 +46,7 @@ struct Projected<'a> {
     singleton_ids: FxHashMap<u64, u32>,
     ids: FxHashMap<(u32, Arc<[u32]>), u32>,
     transitions: Vec<Vec<(u8, u32)>>,
+    singleton_closures: Arc<SingletonEpsilonClosures>,
     root_closure_states: usize,
     root_memberships: usize,
 }
@@ -112,6 +115,7 @@ impl<'a> Projected<'a> {
             singleton_ids: FxHashMap::default(),
             ids: FxHashMap::default(),
             transitions: Vec::new(),
+            singleton_closures: input.tokenizer.all_singleton_epsilon_closures(),
             root_closure_states: 0,
             root_memberships: 0,
         }
@@ -160,28 +164,28 @@ impl<'a> Projected<'a> {
         self.intern_filtered(group, states)
     }
 
-    /// Project one epsilon closure onto all active terminals at once.
-    fn root_row(&mut self, raw: u32) -> Vec<u32> {
-        let closure = self
-            .input
-            .tokenizer
-            .execute_from_state_end_only(&[], raw)
-            .to_vec();
-        self.root_closure_states += closure.len();
-        if closure.len() == 1 {
-            let state = closure[0];
-            let mut row = vec![DEAD; self.active_by_group.len()];
+    /// Project one epsilon closure onto all active terminal-predicate groups.
+    /// Store only live memberships; dense `raw_state × group` root matrices are
+    /// overwhelmingly DEAD on the large synthesized tokenizers.
+    fn root_sparse_row(&mut self, raw: u32) -> Vec<(u32, u32)> {
+        let closure_len = self.singleton_closures[raw as usize].len();
+        self.root_closure_states += closure_len;
+        if closure_len == 1 {
+            let state = self.singleton_closures[raw as usize][0];
             let terminals = self.active[state as usize].clone();
+            let mut row = Vec::<(u32, u32)>::with_capacity(terminals.len());
             for terminal in terminals {
                 let group = self.group_for_terminal[terminal as usize];
                 debug_assert_ne!(group, usize::MAX);
-                if row[group] == DEAD {
-                    row[group] = self.intern_singleton(group as u32, state);
-                    self.root_memberships += 1;
-                }
+                row.push((group as u32, self.intern_singleton(group as u32, state)));
             }
+            row.sort_unstable_by_key(|&(group, _)| group);
+            row.dedup_by_key(|entry| entry.0);
+            self.root_memberships += row.len();
             return row;
         }
+
+        let closure = self.singleton_closures[raw as usize].to_vec();
         let mut grouped = (0..self.active_by_group.len())
             .map(|_| Vec::<u32>::new())
             .collect::<Vec<_>>();
@@ -195,14 +199,20 @@ impl<'a> Projected<'a> {
                 }
             }
         }
-        let mut row = Vec::with_capacity(self.active_by_group.len());
+        let mut row = Vec::<(u32, u32)>::new();
         for (group, states) in grouped.iter_mut().enumerate() {
-            row.push(self.intern_filtered(group as u32, std::mem::take(states)));
+            if states.is_empty() {
+                continue;
+            }
+            let projected = self.intern_filtered(group as u32, std::mem::take(states));
+            if projected != DEAD {
+                row.push((group as u32, projected));
+            }
         }
         row
     }
 
-    fn step(&mut self, state: u32, byte: u8, roots: &[Vec<u32>]) -> u32 {
+    fn step(&mut self, state: u32, byte: u8, roots: &SparseRoots) -> u32 {
         let group = self.configs[state as usize].0;
         match &self.configs[state as usize].1 {
             ConfigStates::One(source) => {
@@ -210,7 +220,7 @@ impl<'a> Projected<'a> {
                 if target == DEAD {
                     DEAD
                 } else {
-                    roots[target as usize][group as usize]
+                    roots.get(target, group)
                 }
             }
             ConfigStates::Many(config) => {
@@ -220,6 +230,64 @@ impl<'a> Projected<'a> {
                     self.input.tokenizer.step_all(config.as_ref(), byte).to_vec(),
                 )
             }
+        }
+    }
+}
+
+/// Compact raw-root relation for projected residual L1. Rows are sorted by
+/// terminal-predicate group and contain only live projected states. Large p1/p2
+/// tokenizers have O(10^5) raw states and O(10^2) groups but fewer than one live
+/// root membership per raw state on average, so CSR avoids tens of megabytes of
+/// DEAD entries and substantially improves cache locality under parallel builds.
+struct SparseRoots {
+    offsets: Box<[u32]>,
+    entries: Vec<(u32, u32)>,
+}
+
+impl SparseRoots {
+    fn from_rows(rows: Vec<Vec<(u32, u32)>>) -> Self {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        let total = rows.iter().map(Vec::len).sum::<usize>();
+        let mut entries = Vec::with_capacity(total);
+        offsets.push(0);
+        for row in rows {
+            debug_assert!(row.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            entries.extend(row);
+            offsets.push(entries.len() as u32);
+        }
+        Self { offsets: offsets.into_boxed_slice(), entries }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    #[inline]
+    fn row(&self, raw: usize) -> &[(u32, u32)] {
+        let start = self.offsets[raw] as usize;
+        let end = self.offsets[raw + 1] as usize;
+        &self.entries[start..end]
+    }
+
+    #[inline]
+    fn get(&self, raw: u32, group: u32) -> u32 {
+        let row = self.row(raw as usize);
+        match row {
+            [] => DEAD,
+            [(only_group, state)] => {
+                if *only_group == group { *state } else { DEAD }
+            }
+            _ => row
+                .binary_search_by_key(&group, |&(candidate, _)| candidate)
+                .ok()
+                .map_or(DEAD, |index| row[index].1),
+        }
+    }
+
+    fn remap_states(&mut self, classes: &[u32]) {
+        for (_, state) in &mut self.entries {
+            *state = classes[*state as usize];
         }
     }
 }
@@ -1345,6 +1413,7 @@ struct ReverseColumn {
 
 struct ReverseSubsets<'a> {
     columns: Vec<ReverseColumn>,
+    forward_columns: &'a [Box<[u32]>],
     byte_class: &'a [u8; 256],
     state_count: usize,
     sets: Vec<Box<[u64]>>,
@@ -1354,10 +1423,16 @@ struct ReverseSubsets<'a> {
     computed_transitions: usize,
     target_visits: usize,
     predecessor_visits: usize,
+    force_source_scan: bool,
 }
 
 impl<'a> ReverseSubsets<'a> {
-    fn new(columns: &'a [Box<[u32]>], byte_class: &'a [u8; 256], state_count: usize) -> Self {
+    fn new(
+        columns: &'a [Box<[u32]>],
+        byte_class: &'a [u8; 256],
+        state_count: usize,
+        force_source_scan: bool,
+    ) -> Self {
         let words = state_count.div_ceil(64);
         let mut all = vec![u64::MAX; words];
         if let Some(last) = all.last_mut() {
@@ -1400,6 +1475,7 @@ impl<'a> ReverseSubsets<'a> {
         let symbol_count = reverse_columns.len();
         let mut result = Self {
             columns: reverse_columns,
+            forward_columns: columns,
             byte_class,
             state_count,
             sets: Vec::new(),
@@ -1409,6 +1485,7 @@ impl<'a> ReverseSubsets<'a> {
             computed_transitions: 0,
             target_visits: 0,
             predecessor_visits: 0,
+            force_source_scan,
         };
         let start = result.intern(all);
         debug_assert_eq!(start, 0);
@@ -1459,6 +1536,30 @@ impl<'a> ReverseSubsets<'a> {
         }
         let suffix_set = &self.sets[suffix as usize];
         let column = &self.columns[symbol];
+        if self.force_source_scan {
+            let forward = &self.forward_columns[symbol];
+            let mut predecessor = vec![0u64; suffix_set.len()];
+            let mut source_visits = 0usize;
+            for (word_index, &live_word) in column.live_sources.iter().enumerate() {
+                let mut word = live_word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    let source = word_index * 64 + bit;
+                    let target = forward[source];
+                    debug_assert_ne!(target, DEAD);
+                    source_visits += 1;
+                    if Self::contains(suffix_set, target) {
+                        predecessor[source / 64] |= 1u64 << (source % 64);
+                    }
+                    word &= word - 1;
+                }
+            }
+            self.computed_transitions += 1;
+            self.predecessor_visits += source_visits;
+            let target = self.intern(predecessor);
+            self.cache[cache_index] = target;
+            return target;
+        }
         let included_targets = suffix_set.iter().map(|word| word.count_ones() as usize).sum::<usize>();
         // Choosing by target cardinality avoids a separate degree-summing pass.
         // In these deterministic columns total predecessor work is linear in
@@ -1608,6 +1709,28 @@ enum ProjectedKernel {
 }
 
 fn projected_kernel(input: BuildInput<'_>) -> ProjectedKernel {
+    if std::env::var("GLRMASK_L1_PROJECTED_RESIDUAL_PARTITIONS")
+        .ok()
+        .is_some_and(|scope| {
+            scope
+                .split(',')
+                .map(str::trim)
+                .any(|partition| partition == input.partition_label)
+        })
+    {
+        return ProjectedKernel::Residual;
+    }
+    if std::env::var("GLRMASK_L1_PROJECTED_FINITE_PARTITIONS")
+        .ok()
+        .is_some_and(|scope| {
+            scope
+                .split(',')
+                .map(str::trim)
+                .any(|partition| partition == input.partition_label)
+        })
+    {
+        return ProjectedKernel::Finite;
+    }
     let p2_finite_state_limit = std::env::var("GLRMASK_P2_FINITE_MAX_TOKENIZER_STATES")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -2106,6 +2229,139 @@ impl FiniteTrie {
     }
 }
 
+
+
+struct FrozenFiniteScanner {
+    width: usize,
+    transitions: Box<[u32]>,
+    byte_slot: [u16; 256],
+    signatures: Box<[u32]>,
+    self_loops: Box<[crate::ds::u8set::U8Set]>,
+}
+
+impl FrozenFiniteScanner {
+    fn build(scanner: &mut Scanner<'_>, input: BuildInput<'_>) -> Self {
+        let mut vocab_bytes = input.vocab.relevant_bytes().iter().copied().collect::<Vec<_>>();
+        vocab_bytes.sort_unstable();
+        let (representatives, byte_representative) = quotient_input_bytes(input, &vocab_bytes);
+        let width = representatives.len();
+        let mut representative_slot = [u16::MAX; 256];
+        for (slot, &byte) in representatives.iter().enumerate() {
+            representative_slot[byte as usize] = slot as u16;
+        }
+        let mut byte_slot = [u16::MAX; 256];
+        for &byte in &vocab_bytes {
+            byte_slot[byte as usize] = representative_slot[byte_representative[byte as usize] as usize];
+        }
+
+        let mut transitions = Vec::<u32>::new();
+        let mut state = 0usize;
+        while state < scanner.configs.len() {
+            transitions.reserve(width);
+            for &byte in &representatives {
+                transitions.push(scanner.step(state as u32, byte));
+            }
+            state += 1;
+        }
+        let num_states = scanner.configs.len();
+        debug_assert_eq!(transitions.len(), num_states * width);
+        let signatures = (0..num_states)
+            .map(|state| scanner.signature(state as u32))
+            .collect::<Vec<_>>();
+        let mut self_loops = vec![crate::ds::u8set::U8Set::empty(); num_states];
+        for state in 0..num_states {
+            let row = &transitions[state * width..(state + 1) * width];
+            for &byte in &vocab_bytes {
+                let slot = byte_slot[byte as usize] as usize;
+                if row[slot] == state as u32 {
+                    self_loops[state].insert(byte);
+                }
+            }
+        }
+        Self {
+            width,
+            transitions: transitions.into_boxed_slice(),
+            byte_slot,
+            signatures: signatures.into_boxed_slice(),
+            self_loops: self_loops.into_boxed_slice(),
+        }
+    }
+
+    #[inline]
+    fn step(&self, state: u32, byte: u8) -> u32 {
+        if state == DEAD {
+            return DEAD;
+        }
+        let slot = self.byte_slot[byte as usize];
+        debug_assert_ne!(slot, u16::MAX);
+        self.transitions[state as usize * self.width + slot as usize]
+    }
+
+    #[inline]
+    fn step_bytes(&self, mut state: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            state = self.step(state, byte);
+            if state == DEAD {
+                break;
+            }
+        }
+        state
+    }
+
+    #[inline]
+    fn signature(&self, state: u32) -> u32 {
+        if state == DEAD { 0 } else { self.signatures[state as usize] }
+    }
+}
+
+fn collect_finite_profile_frozen(
+    scanner: &FrozenFiniteScanner,
+    trie: &FiniteTrie,
+    tokens: &[Arc<[u8]>],
+    node: u32,
+    config: u32,
+    out: &mut Vec<ProfileRun>,
+    pair_visits: &mut usize,
+    uniform_subtrees: &mut usize,
+    uniform_tokens: &mut usize,
+) {
+    *pair_visits += 1;
+    let current = &trie.nodes[node as usize];
+    let loops = scanner.self_loops[config as usize];
+    let covered = crate::ds::u8set::U8Set::from_words(current.subtree_bytes).is_subset(&loops);
+    if covered {
+        let signature = scanner.signature(config);
+        push_profile_run(out, current.subtree_start, current.subtree_end, signature);
+        *uniform_subtrees += 1;
+        *uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
+        return;
+    }
+    if let Some(token) = current.token {
+        push_profile_run(
+            out,
+            token as u32,
+            token as u32 + 1,
+            scanner.signature(config),
+        );
+    }
+    for &child in &current.children {
+        let target = scanner.step_bytes(config, trie.edge(child, tokens));
+        if target != DEAD {
+            collect_finite_profile_frozen(
+                scanner,
+                trie,
+                tokens,
+                child,
+                target,
+                out,
+                pair_visits,
+                uniform_subtrees,
+                uniform_tokens,
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ProfileRun {
     start: u32,
@@ -2311,8 +2567,185 @@ fn finite_compact_runs(
         rows.push(row);
     }
 
-    // At an adjacent run boundary the old run must end before the new one
-    // starts. Sorting zero-signature events first makes the final value exact.
+    // For a small state-class × token matrix, direct materialization is much
+    // cheaper than maintaining the persistent segment-tree signature vector.
+    // p6/p10 hard-schema shapes are only O(10^6) cells, while the run sweep was
+    // written for 80k-token p2 and pays hashing/tree-update overhead per event.
+    let dense_cells = rows.len().saturating_mul(token_count);
+    let dense_limit = std::env::var("GLRMASK_L1_FINITE_DENSE_COMPACT_MAX_CELLS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(2_000_000);
+    if dense_cells <= dense_limit
+        && std::env::var_os("GLRMASK_DISABLE_L1_FINITE_DENSE_COMPACT").is_none()
+    {
+        let mut columns = (0..token_count)
+            .map(|_| vec![0u32; rows.len()])
+            .collect::<Vec<_>>();
+        for (row_index, row) in rows.iter().enumerate() {
+            for run in row {
+                for token in run.start as usize..run.end as usize {
+                    columns[token][row_index] = run.signature;
+                }
+            }
+        }
+        let mut class_ids = FxHashMap::<Vec<u32>, u32>::default();
+        let mut token_class = vec![0u32; token_count];
+        let mut token_reps = Vec::<usize>::new();
+        for (token, column) in columns.iter().enumerate() {
+            let next = token_reps.len() as u32;
+            let class = *class_ids.entry(column.clone()).or_insert_with(|| {
+                token_reps.push(token);
+                next
+            });
+            token_class[token] = class;
+        }
+        let mut compact_rows = (0..rows.len())
+            .map(|_| vec![0u32; token_reps.len()])
+            .collect::<Vec<_>>();
+        for (class, &token) in token_reps.iter().enumerate() {
+            for row in 0..rows.len() {
+                compact_rows[row][class] = columns[token][row];
+            }
+        }
+        return (token_class, token_reps, compact_rows, 0, referenced_runs);
+    }
+
+    let use_exact_fingerprint_sweep = std::env::var("GLRMASK_L1_FINITE_EXACT_FINGERPRINT_SWEEP")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if use_exact_fingerprint_sweep {
+        // Event positions are vocabulary indices in a compact bounded domain.
+        // Counting-sort them in O(events + tokens) instead of comparison-sorting
+        // millions of `(position,row,kind)` tuples. End events occupy the first
+        // part of each position bucket, preserving the required end-before-start
+        // semantics for adjacent runs.
+        let mut end_counts = vec![0usize; token_count + 1];
+        let mut start_counts = vec![0usize; token_count + 1];
+        for event in &events {
+            if event.signature == 0 {
+                end_counts[event.position as usize] += 1;
+            } else {
+                start_counts[event.position as usize] += 1;
+            }
+        }
+        let mut offsets = vec![0usize; token_count + 2];
+        for position in 0..=token_count {
+            offsets[position + 1] = offsets[position]
+                + end_counts[position]
+                + start_counts[position];
+        }
+        let mut end_cursor = offsets[..=token_count].to_vec();
+        let mut start_cursor = (0..=token_count)
+            .map(|position| offsets[position] + end_counts[position])
+            .collect::<Vec<_>>();
+        let mut ordered = vec![FiniteRowEvent {
+            position: 0,
+            row: 0,
+            signature: 0,
+        }; events.len()];
+        for event in events.drain(..) {
+            let position = event.position as usize;
+            let cursor = if event.signature == 0 {
+                &mut end_cursor[position]
+            } else {
+                &mut start_cursor[position]
+            };
+            ordered[*cursor] = event;
+            *cursor += 1;
+        }
+        events = ordered;
+        #[inline(always)]
+        fn mix64(mut value: u64) -> u64 {
+            value ^= value >> 30;
+            value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value ^= value >> 27;
+            value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        }
+        #[inline(always)]
+        fn cell_hash(row: u32, signature: u32, seed: u64) -> u64 {
+            if signature == 0 {
+                0
+            } else {
+                mix64(seed ^ ((row as u64) << 32) ^ signature as u64)
+            }
+        }
+
+        // Maintain a cheap 128-bit fingerprint of the current exact token
+        // column. Fingerprints are only an index: every reuse is verified by
+        // comparing the complete row vector, so hash collisions cannot affect
+        // correctness. This removes the O(log rows) hash-consed segment-tree
+        // update paid for every run boundary on large finite p2 matrices.
+        let mut current = vec![0u32; class_fingerprints.len()];
+        let mut fingerprint_a = 0u64;
+        let mut fingerprint_b = 0u64;
+        let mut buckets = FxHashMap::<(u64, u64), Vec<u32>>::default();
+        let mut class_vectors = Vec::<Box<[u32]>>::new();
+        let mut token_class = vec![0u32; token_count];
+        let mut token_reps = Vec::<usize>::new();
+        let mut position = 0usize;
+        let mut event_index = 0usize;
+        while position < token_count {
+            while event_index < events.len() && events[event_index].position as usize == position {
+                let event = events[event_index];
+                let row = event.row as usize;
+                let old = current[row];
+                if old != event.signature {
+                    fingerprint_a ^= cell_hash(event.row, old, 0x243f_6a88_85a3_08d3)
+                        ^ cell_hash(event.row, event.signature, 0x243f_6a88_85a3_08d3);
+                    fingerprint_b ^= cell_hash(event.row, old, 0x1319_8a2e_0370_7344)
+                        ^ cell_hash(event.row, event.signature, 0x1319_8a2e_0370_7344);
+                    current[row] = event.signature;
+                }
+                event_index += 1;
+            }
+            let next_position = events
+                .get(event_index)
+                .map_or(token_count, |event| event.position as usize)
+                .min(token_count);
+            debug_assert!(next_position > position || event_index < events.len());
+            if next_position > position {
+                let key = (fingerprint_a, fingerprint_b);
+                let candidates = buckets.entry(key).or_default();
+                let class = if let Some(class) = candidates
+                    .iter()
+                    .copied()
+                    .find(|&class| class_vectors[class as usize].as_ref() == current.as_slice())
+                {
+                    class
+                } else {
+                    let class = class_vectors.len() as u32;
+                    class_vectors.push(current.clone().into_boxed_slice());
+                    candidates.push(class);
+                    token_reps.push(position);
+                    class
+                };
+                token_class[position..next_position].fill(class);
+                position = next_position;
+            }
+        }
+        let mut compact_rows = (0..class_fingerprints.len())
+            .map(|_| vec![0u32; class_vectors.len()])
+            .collect::<Vec<_>>();
+        for (class, column) in class_vectors.iter().enumerate() {
+            for (row, &signature) in column.iter().enumerate() {
+                compact_rows[row][class] = signature;
+            }
+        }
+        return (
+            token_class,
+            token_reps,
+            compact_rows,
+            events.len(),
+            referenced_runs,
+        );
+    }
+
+    // Legacy diagnostic path retains its comparison sort.
     events.sort_unstable_by_key(|event| {
         (event.position, event.row, u8::from(event.signature != 0))
     });
@@ -2405,8 +2838,41 @@ fn build_finite_projected_impl(
     let scan_started = Instant::now();
     let mut scanner = Scanner::new(input);
     let mut starts = BTreeMap::<u32, Vec<u32>>::new();
-    for raw in 0..input.tokenizer.num_states() {
-        starts.entry(scanner.start(raw)).or_default().push(raw);
+    if let Some(state_map) = input.initial_state_map {
+        debug_assert_eq!(
+            state_map.original_to_internal.len(),
+            input.tokenizer.num_states() as usize,
+        );
+        // `initial_state_map` is an exact certified quotient for this L1 branch.
+        // Finite projection historically ignored it and constructed a projected
+        // Scanner root for every raw tokenizer state, only to rediscover the
+        // same equivalence after vocabulary replay.  Evaluate one representative
+        // per certified class, then fan the resulting finite state class back to
+        // every raw member of that class.
+        for (class, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            if representative == u32::MAX {
+                continue;
+            }
+            let start = scanner.start(representative);
+            starts
+                .entry(start)
+                .or_default()
+                .extend_from_slice(&state_map.internal_to_originals[class]);
+        }
+        // Defensive support for deliberately partial maps.  Production L1 maps
+        // are total, but an unmapped raw state must retain exact scalar behavior.
+        for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
+            if class == u32::MAX {
+                starts
+                    .entry(scanner.start(raw as u32))
+                    .or_default()
+                    .push(raw as u32);
+            }
+        }
+    } else {
+        for raw in 0..input.tokenizer.num_states() {
+            starts.entry(scanner.start(raw)).or_default().push(raw);
+        }
     }
 
     let root_token = trie.nodes[0].token;
@@ -2455,75 +2921,235 @@ fn build_finite_projected_impl(
     };
     let mut profile_run_count = 0usize;
 
-    for (start, raw_states) in starts {
-        let mut fingerprint = Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
-        if root_token.is_some() {
-            fingerprint.push(scanner.signature(start));
-        }
-        for &child in &root_children {
-            let target = scanner.step_bytes(start, trie.edge(child, tokens));
-            if target == DEAD {
-                fingerprint.push(0);
-                continue;
+    let parallel_profile_override = std::env::var("GLRMASK_L1_FINITE_PARALLEL_PROFILES").ok();
+    let force_parallel_profiles = parallel_profile_override
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("force"));
+    let parallel_profiles_enabled = parallel_profile_override
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty()
+                || value.eq_ignore_ascii_case("force")
+                || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let parallel_profiles = (bypass_adaptive_budget || force_parallel_profiles)
+        && input.subset_parent_order.is_none()
+        && input.vocab.len() >= 10_000
+        && input.tokenizer.num_states() >= 10_000
+        && rayon::current_num_threads() > 1
+        && parallel_profiles_enabled;
+
+    if parallel_profiles {
+        let freeze_started = Instant::now();
+        let frozen = FrozenFiniteScanner::build(&mut scanner, input);
+        let freeze_ms = freeze_started.elapsed().as_secs_f64() * 1000.0;
+
+        // Enumerate the small set of unique top-level radix jobs before doing
+        // any suffix work. The historical finite scanner used one mutable
+        // interner throughout the walk, which serialized all 60M+ pair visits
+        // even though equal `(child,target)` jobs are independent once the
+        // projected config graph has been frozen.
+        let mut key_ids = FxHashMap::<(u32, u32), usize>::default();
+        let mut keys = Vec::<(u32, u32)>::new();
+        let mut work = Vec::<(u32, Vec<u32>, Vec<usize>)>::with_capacity(starts.len());
+        for (start, raw_states) in starts {
+            let mut ids = Vec::with_capacity(root_children.len());
+            for &child in &root_children {
+                let target = frozen.step_bytes(start, trie.edge(child, tokens));
+                if target == DEAD {
+                    ids.push(usize::MAX);
+                    continue;
+                }
+                let key = (child, target);
+                let id = if let Some(&id) = key_ids.get(&key) {
+                    cache_hits += 1;
+                    id
+                } else {
+                    let id = keys.len();
+                    key_ids.insert(key, id);
+                    keys.push(key);
+                    id
+                };
+                ids.push(id);
             }
-            let key = (child, target);
-            let profile = if let Some(&profile) = bucket_cache.get(&key) {
-                cache_hits += 1;
-                profile
-            } else {
-                let mut values = Vec::new();
-                let remaining_runs = profile_run_budget.saturating_sub(profile_run_count);
-                if !collect_finite_profile(
-                    &mut scanner,
+            work.push((start, raw_states, ids));
+        }
+
+        let results = keys
+            .par_iter()
+            .map(|&(child, target)| {
+                let mut values = Vec::<ProfileRun>::new();
+                let mut visits = 0usize;
+                let mut uniform = 0usize;
+                let mut uniform_token_count = 0usize;
+                collect_finite_profile_frozen(
+                    &frozen,
                     trie,
                     tokens,
-                    self_loops.as_ref(),
                     child,
                     target,
                     &mut values,
-                    &mut pair_visits,
-                    &mut uniform_subtrees,
-                    &mut uniform_tokens,
-                    remaining_runs,
-                    pair_visit_budget,
-                ) {
-                    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
-                        eprintln!(
-                            "[glrmask/profile][l1_finite_budget_abort] partition={} profile_runs={} pair_visits={} max_profile_runs={} max_pair_visits={} action=residual",
-                            input.partition_label, profile_run_count + values.len(), pair_visits,
-                            profile_run_budget, pair_visit_budget,
-                        );
-                    }
-                    return build_binary_without_finite_switch(input);
-                }
-                let values: Arc<[ProfileRun]> = Arc::from(values);
-                let profile = if values.is_empty() {
-                    0
-                } else if let Some(&profile) = profile_ids.get(&values) {
-                    profile
-                } else {
-                    let profile = profiles.len() as u32;
-                    profile_run_count += values.len();
-                    profile_ids.insert(Arc::clone(&values), profile);
-                    profiles.push(values);
-                    profile
-                };
-                if profile_run_count > profile_run_budget {
-                    return build_binary_without_finite_switch(input);
-                }
-                bucket_cache.insert(key, profile);
+                    &mut visits,
+                    &mut uniform,
+                    &mut uniform_token_count,
+                );
+                (
+                    Arc::<[ProfileRun]>::from(values),
+                    visits,
+                    uniform,
+                    uniform_token_count,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            let mut visit_counts = results.iter().map(|(_, visits, _, _)| *visits).collect::<Vec<_>>();
+            visit_counts.sort_unstable();
+            let quantile = |num: usize, den: usize| -> usize {
+                if visit_counts.is_empty() { return 0; }
+                visit_counts[(visit_counts.len() - 1) * num / den]
+            };
+            let max = visit_counts.last().copied().unwrap_or(0);
+            let total = visit_counts.iter().sum::<usize>();
+            let top_1pct = visit_counts.iter().rev().take((visit_counts.len() / 100).max(1)).sum::<usize>();
+            eprintln!(
+                "[glrmask/profile][l1_finite_parallel_job_weights] partition={} jobs={} total_visits={} p50={} p90={} p99={} max={} top1pct_visits={} top1pct_pct={:.2}",
+                input.partition_label,
+                visit_counts.len(),
+                total,
+                quantile(50, 100),
+                quantile(90, 100),
+                quantile(99, 100),
+                max,
+                top_1pct,
+                100.0 * top_1pct as f64 / total.max(1) as f64,
+            );
+        }
+        let mut key_profile = vec![0u32; keys.len()];
+        for (key, (values, visits, uniform, uniform_token_count)) in
+            results.into_iter().enumerate()
+        {
+            pair_visits += visits;
+            uniform_subtrees += uniform;
+            uniform_tokens += uniform_token_count;
+            let profile = if values.is_empty() {
+                0
+            } else if let Some(&profile) = profile_ids.get(&values) {
+                profile
+            } else {
+                let profile = profiles.len() as u32;
+                profile_run_count += values.len();
+                profile_ids.insert(Arc::clone(&values), profile);
+                profiles.push(values);
                 profile
             };
-            fingerprint.push(profile);
+            key_profile[key] = profile;
+            bucket_cache.insert(keys[key], profile);
         }
 
-        let next = class_fingerprints.len() as u32;
-        let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
-            class_fingerprints.push(fingerprint);
-            next
-        });
-        for raw in raw_states {
-            state_class[raw as usize] = class;
+        for (start, raw_states, ids) in work {
+            let mut fingerprint =
+                Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
+            if root_token.is_some() {
+                fingerprint.push(frozen.signature(start));
+            }
+            for id in ids {
+                fingerprint.push(if id == usize::MAX { 0 } else { key_profile[id] });
+            }
+            let next = class_fingerprints.len() as u32;
+            let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
+                class_fingerprints.push(fingerprint);
+                next
+            });
+            for raw in raw_states {
+                state_class[raw as usize] = class;
+            }
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l1_finite_parallel_profiles] partition={} configs={} byte_classes={} jobs={} cache_hits={} freeze_ms={:.3}",
+                input.partition_label,
+                frozen.signatures.len(),
+                frozen.width,
+                keys.len(),
+                cache_hits,
+                freeze_ms,
+            );
+        }
+    } else {
+        for (start, raw_states) in starts {
+            let mut fingerprint =
+                Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
+            if root_token.is_some() {
+                fingerprint.push(scanner.signature(start));
+            }
+            for &child in &root_children {
+                let target = scanner.step_bytes(start, trie.edge(child, tokens));
+                if target == DEAD {
+                    fingerprint.push(0);
+                    continue;
+                }
+                let key = (child, target);
+                let profile = if let Some(&profile) = bucket_cache.get(&key) {
+                    cache_hits += 1;
+                    profile
+                } else {
+                    let mut values = Vec::new();
+                    let remaining_runs = profile_run_budget.saturating_sub(profile_run_count);
+                    if !collect_finite_profile(
+                        &mut scanner,
+                        trie,
+                        tokens,
+                        self_loops.as_ref(),
+                        child,
+                        target,
+                        &mut values,
+                        &mut pair_visits,
+                        &mut uniform_subtrees,
+                        &mut uniform_tokens,
+                        remaining_runs,
+                        pair_visit_budget,
+                    ) {
+                        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                            eprintln!(
+                                "[glrmask/profile][l1_finite_budget_abort] partition={} profile_runs={} pair_visits={} max_profile_runs={} max_pair_visits={} action=residual",
+                                input.partition_label, profile_run_count + values.len(), pair_visits,
+                                profile_run_budget, pair_visit_budget,
+                            );
+                        }
+                        return build_binary_without_finite_switch(input);
+                    }
+                    let values: Arc<[ProfileRun]> = Arc::from(values);
+                    let profile = if values.is_empty() {
+                        0
+                    } else if let Some(&profile) = profile_ids.get(&values) {
+                        profile
+                    } else {
+                        let profile = profiles.len() as u32;
+                        profile_run_count += values.len();
+                        profile_ids.insert(Arc::clone(&values), profile);
+                        profiles.push(values);
+                        profile
+                    };
+                    if profile_run_count > profile_run_budget {
+                        return build_binary_without_finite_switch(input);
+                    }
+                    bucket_cache.insert(key, profile);
+                    profile
+                };
+                fingerprint.push(profile);
+            }
+
+            let next = class_fingerprints.len() as u32;
+            let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
+                class_fingerprints.push(fingerprint);
+                next
+            });
+            for raw in raw_states {
+                state_class[raw as usize] = class;
+            }
         }
     }
     let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
@@ -2829,14 +3455,15 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
 
     let projected_started = Instant::now();
+    let projected_new_started = Instant::now();
     let mut projected = Projected::new(input);
+    let projected_new_ms = projected_new_started.elapsed().as_secs_f64() * 1000.0;
+    let projected_roots_started = Instant::now();
     // `initial_state_map` is already an exact certified quotient for this L1
-    // branch.  Preserve a raw-state-indexed root table for O(1) transition
-    // lookup, but construct residual roots only for quotient representatives.
-    // Every transition that lands on a raw state therefore enters the same
-    // projected residual as its certified representative instead of rebuilding
-    // duplicate `(terminal, raw-state)` subautomata.
-    let mut roots = if let Some(state_map) = input.initial_state_map {
+    // branch. Construct projected rows only for quotient representatives, then
+    // fan their *sparse* memberships back to the raw coordinate. Unlike the old
+    // dense `raw × group` matrix, cost is proportional to actual live roots.
+    let root_rows = if let Some(state_map) = input.initial_state_map {
         debug_assert_eq!(
             state_map.original_to_internal.len(),
             input.tokenizer.num_states() as usize
@@ -2846,7 +3473,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             .iter()
             .map(|&raw| {
                 assert_ne!(raw, u32::MAX, "L1 state quotient has an unmapped representative");
-                projected.root_row(raw)
+                projected.root_sparse_row(raw)
             })
             .collect::<Vec<_>>();
         state_map
@@ -2855,7 +3482,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             .enumerate()
             .map(|(raw, &class)| {
                 if class == u32::MAX {
-                    projected.root_row(raw as u32)
+                    projected.root_sparse_row(raw as u32)
                 } else {
                     representative_rows[class as usize].clone()
                 }
@@ -2863,9 +3490,12 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             .collect::<Vec<_>>()
     } else {
         (0..input.tokenizer.num_states())
-            .map(|raw| projected.root_row(raw))
+            .map(|raw| projected.root_sparse_row(raw))
             .collect::<Vec<_>>()
     };
+    let mut roots = SparseRoots::from_rows(root_rows);
+    let projected_roots_ms = projected_roots_started.elapsed().as_secs_f64() * 1000.0;
+    let projected_expand_started = Instant::now();
     if projected.configs.len() > finite_switch_states {
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
@@ -2916,7 +3546,18 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         projected.transitions[state as usize] = row;
         expanded += 1;
     }
+    let projected_expand_ms = projected_expand_started.elapsed().as_secs_f64() * 1000.0;
     let projected_ms = projected_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+        eprintln!(
+            "[glrmask/profile][l1_projected_residual_breakdown] partition={} new_ms={:.3} roots_ms={:.3} expand_ms={:.3} total_project_ms={:.3}",
+            input.partition_label,
+            projected_new_ms,
+            projected_roots_ms,
+            projected_expand_ms,
+            projected_ms,
+        );
+    }
 
     let minimize_started = Instant::now();
     let groups = projected
@@ -2941,34 +3582,30 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             minimized.byte_class[input_byte_representative[byte as usize] as usize];
     }
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
-    for row in &mut roots {
-        for state in row {
-            if *state != DEAD {
-                *state = minimized.classes[*state as usize];
-            }
-        }
-    }
+    roots.remap_states(&minimized.classes);
 
     let traverse_started = Instant::now();
     let root_vectors_started = Instant::now();
-    // Full residual-root vectors exactly preclassify raw lexer states.
-    let mut root_vector_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut root_vectors = Vec::<Vec<u32>>::new();
+    // Full residual-root vectors exactly preclassify raw lexer states.  Roots
+    // are immutable from here on, so intern borrowed slices and retain only one
+    // raw representative per distinct vector.  The previous path cloned every
+    // 200+ entry vector into both the hash table and a second owned store.
+    let mut root_vector_ids = FxHashMap::<&[(u32, u32)], u32>::default();
+    let mut root_vector_reps = Vec::<u32>::new();
     let mut raw_root_class = vec![0u32; roots.len()];
-    for (raw, root_row) in roots.iter().enumerate() {
-        let next = root_vectors.len() as u32;
-        raw_root_class[raw] = *root_vector_ids.entry(root_row.clone()).or_insert_with(|| {
-            root_vectors.push(root_row.clone());
-            next
-        });
+    for raw in 0..roots.len() {
+        let root_row = roots.row(raw);
+        raw_root_class[raw] = if let Some(&class) = root_vector_ids.get(root_row) {
+            class
+        } else {
+            let class = root_vector_reps.len() as u32;
+            root_vector_ids.insert(root_row, class);
+            root_vector_reps.push(raw as u32);
+            class
+        };
     }
 
-    let mut used_classes = roots
-        .iter()
-        .flatten()
-        .copied()
-        .filter(|&state| state != DEAD)
-        .collect::<Vec<_>>();
+    let mut used_classes = roots.entries.iter().map(|&(_, state)| state).collect::<Vec<_>>();
     used_classes.sort_unstable();
     used_classes.dedup();
     let mut used_index = vec![usize::MAX; minimized.state_count];
@@ -2978,10 +3615,19 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let root_vectors_ms = root_vectors_started.elapsed().as_secs_f64() * 1000.0;
 
     let reverse_started = Instant::now();
+    let force_reverse_source_scan = std::env::var("GLRMASK_L1_RESIDUAL_REVERSE_SOURCE_SCAN")
+        .ok()
+        .is_some_and(|scope| {
+            let scope = scope.trim();
+            scope.is_empty()
+                || scope == "1"
+                || scope.split(',').map(str::trim).any(|label| label == input.partition_label)
+        });
     let mut reverse = ReverseSubsets::new(
         &minimized.columns,
         &minimized.byte_class,
         minimized.state_count,
+        force_reverse_source_scan,
     );
     let mut final_subset_to_class = Vec::<u32>::new();
     let mut class_subsets = Vec::<u32>::new();
@@ -3089,40 +3735,79 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     let incidence_ms = incidence_started.elapsed().as_secs_f64() * 1000.0;
 
     let signature_started = Instant::now();
-    // A root row is exactly the sparse relation
-    //     (terminal identity, residual-token class)
-    // induced by its residual states.  Canonicalize that relation *before*
-    // constructing dense token rows or interned terminal-set signatures.  This
-    // is an exact representation: two roots have equal L1 rows iff these pair
-    // lists are equal.  In the p90 p2 shapes the dense row can be 1k+ token
-    // classes while the sparse relation is typically only tens of pairs.
-    let mut sparse_row_ids = FxHashMap::<Vec<(u32, u32)>, u32>::default();
-    let mut sparse_rows = Vec::<Vec<(u32, u32)>>::new();
-    let mut root_to_state_class = vec![0u32; root_vectors.len()];
+    // Each minimized residual state is observable only through the sorted set
+    // of residual token classes that can reach it.  Intern those exact token
+    // profiles once.  A root relation is then determined exactly by one profile
+    // ID per terminal-predicate group, because those groups partition the fixed
+    // terminal identities.  Classify all root vectors using this compact key and
+    // materialize the full (terminal, token-class) relation only for one
+    // representative of each final L1 state class.
+    let mut token_profile_ids = FxHashMap::<&[u32], u32>::default();
+    let mut profile_for_used_state = vec![0u32; live_token_classes.len()];
+    let mut next_profile = 1u32; // zero denotes the empty/dead profile
+    for (used, token_classes) in live_token_classes.iter().enumerate() {
+        if token_classes.is_empty() {
+            continue;
+        }
+        let profile = if let Some(&profile) = token_profile_ids.get(token_classes.as_slice()) {
+            profile
+        } else {
+            let profile = next_profile;
+            next_profile += 1;
+            token_profile_ids.insert(token_classes.as_slice(), profile);
+            profile
+        };
+        profile_for_used_state[used] = profile;
+    }
+
+    let group_count = projected.active_by_group.len();
+    let mut state_class_ids = FxHashMap::<Box<[(u32, u32)]>, u32>::default();
+    let mut state_class_representative_root = Vec::<u32>::new();
+    let mut root_to_state_class = vec![0u32; root_vector_reps.len()];
+    let mut key = Vec::<(u32, u32)>::new();
+    for (root_class, &raw_rep) in root_vector_reps.iter().enumerate() {
+        key.clear();
+        for &(group, state) in roots.row(raw_rep as usize) {
+            let profile = profile_for_used_state[used_index[state as usize]];
+            if profile != 0 {
+                key.push((group, profile));
+            }
+        }
+        let class = if let Some(&class) = state_class_ids.get(key.as_slice()) {
+            class
+        } else {
+            let class = state_class_representative_root.len() as u32;
+            state_class_ids.insert(key.clone().into_boxed_slice(), class);
+            state_class_representative_root.push(root_class as u32);
+            class
+        };
+        root_to_state_class[root_class] = class;
+    }
+
+    let mut sparse_rows = Vec::<Vec<(u32, u32)>>::with_capacity(state_class_representative_root.len());
     let mut sparse_pair_visits = 0usize;
-    for (root_class, root_row) in root_vectors.iter().enumerate() {
+    let mut group_state = vec![DEAD; group_count];
+    for &root_class in &state_class_representative_root {
+        let raw_rep = root_vector_reps[root_class as usize];
+        let root_row = roots.row(raw_rep as usize);
+        for &(group, state) in root_row {
+            group_state[group as usize] = state;
+        }
         let mut sparse = Vec::<(u32, u32)>::new();
         for (terminal_index, &group) in projected.terminal_groups.iter().enumerate() {
-            let state = root_row[group];
+            let state = group_state[group];
             if state == DEAD {
                 continue;
             }
             for &token in &live_token_classes[used_index[state as usize]] {
-                // terminal_index-major, then token-major, is canonical because
-                // both source lists are stable and strictly ordered.
                 sparse.push((projected.terminals[terminal_index], token));
             }
         }
+        for &(group, _) in root_row {
+            group_state[group as usize] = DEAD;
+        }
         sparse_pair_visits += sparse.len();
-        let next = sparse_rows.len() as u32;
-        root_to_state_class[root_class] = match sparse_row_ids.entry(sparse) {
-            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                sparse_rows.push(entry.key().clone());
-                entry.insert(next);
-                next
-            }
-        };
+        sparse_rows.push(sparse);
     }
 
     // The sparse relation is already the final semantic row. No dense
@@ -3204,7 +3889,7 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
             projected.root_closure_states,
             projected.root_memberships,
             used_classes.len(),
-            root_vectors.len(),
+            root_vector_reps.len(),
             class_subsets.len(),
             sparse_row_count,
             sparse_pair_visits,
@@ -3281,7 +3966,10 @@ mod finite_run_sweep_tests {
 
         let (classes, reps, compact_rows, events, referenced_runs) =
             finite_compact_runs(None, &fingerprints, &profiles, TOKENS);
-        assert!(events > 0);
+        // Small matrices intentionally take the exact dense compactor and
+        // therefore do not materialize sweep events. Both compaction paths must
+        // preserve the same token-vector equivalence below.
+        assert!(events > 0 || ROWS * TOKENS <= 2_000_000);
         assert!(referenced_runs > 0);
         assert_eq!(compact_rows.len(), ROWS);
         assert_eq!(compact_rows[0].len(), reps.len());

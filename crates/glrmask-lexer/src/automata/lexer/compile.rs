@@ -4784,11 +4784,15 @@ fn try_product_union_components(
         .iter()
         .map(|component| explicit_dead_sink_state(&component.dfa))
         .collect::<Vec<_>>();
+    let class_started_at = Instant::now();
     let (class_map, class_members) = compute_lexer_component_equivalence_classes(components);
+    let class_ms = class_started_at.elapsed().as_secs_f64() * 1000.0;
+    let class_transitions_started_at = Instant::now();
     let component_class_transitions = components
         .iter()
         .map(|component| build_product_class_transitions_for_dfa(&component.dfa, &class_map))
         .collect::<Vec<_>>();
+    let class_transitions_ms = class_transitions_started_at.elapsed().as_secs_f64() * 1000.0;
     let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_classes = class_members.len();
 
@@ -5008,11 +5012,13 @@ fn try_product_union_components(
 
     if profile {
         eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_product states={} classes={} max_depth={:?} setup_ms={:.3} state_expand_ms={:.3} byte_expand_ms={:.3}",
+            "[glrmask/profile][tokenizer] adaptive_product states={} classes={} max_depth={:?} setup_ms={:.3} class_ms={:.3} class_transitions_ms={:.3} state_expand_ms={:.3} byte_expand_ms={:.3}",
             combined.num_states(),
             num_classes,
             max_depth,
             setup_ms,
+            class_ms,
+            class_transitions_ms,
             state_expand_ms,
             byte_expand_ms,
         );
@@ -8876,12 +8882,19 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                     )
                 })
             };
+            let structural_component_vocab_map_enabled = std::env::var("GLRMASK_DISABLE_STRUCTURAL_COMPONENT_VOCABULARY_MAP")
+                .ok()
+                .is_none_or(|value| {
+                    let value = value.trim();
+                    value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false")
+                });
             let vocabulary_mapping = if used_identical_mapping
                 || used_homomorphism_mapping
                 || layered_mapping.is_some()
                 || dominance_mapping.is_some()
                 || override_layered_mapping.is_some()
                 || override_dominance_mapping.is_some()
+                || !structural_component_vocab_map_enabled
             {
                 None
             } else {
@@ -10344,16 +10357,33 @@ fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<
 }
 
 fn build_product_class_transitions_for_dfa(dfa: &DFA, class_map: &[u8]) -> Vec<Vec<(u8, u32)>> {
-    dfa.states()
+    let class_count = class_map
         .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    dfa.states()
+        .par_iter()
         .map(|state| {
-            let mut target_by_class = FxHashMap::<u8, u32>::default();
+            let mut target_by_class = [u32::MAX; 256];
             for (byte, &target) in state.transitions.iter() {
-                target_by_class.insert(class_map[byte as usize], target);
+                let class = class_map[byte as usize] as usize;
+                let slot = &mut target_by_class[class];
+                if *slot == u32::MAX {
+                    *slot = target;
+                } else {
+                    debug_assert_eq!(
+                        *slot, target,
+                        "lexer byte-equivalence class must have one target per DFA state",
+                    );
+                }
             }
-            let mut entries: Vec<(u8, u32)> = target_by_class.into_iter().collect();
-            entries.sort_unstable_by_key(|entry| entry.0);
-            entries
+            (0..class_count)
+                .filter_map(|class| {
+                    let target = target_by_class[class];
+                    (target != u32::MAX).then_some((class as u8, target))
+                })
+                .collect()
         })
         .collect()
 }
