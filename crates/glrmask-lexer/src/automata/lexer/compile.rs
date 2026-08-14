@@ -4303,7 +4303,13 @@ fn env_flag(name: &str, default: bool) -> bool {
 }
 
 fn adaptive_lexer_enabled() -> bool {
-    env_flag("GLRMASK_LEXER_ADAPTIVE", true)
+    match std::env::var("GLRMASK_LEXER_ADAPTIVE") {
+        Ok(_) => env_flag("GLRMASK_LEXER_ADAPTIVE", false),
+        // Keep the long-standing depth override useful as a one-variable
+        // diagnostic opt-in even though adaptive determinization is no longer
+        // enabled by default.
+        Err(_) => std::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some(),
+    }
 }
 
 fn adaptive_lexer_state_limit() -> usize {
@@ -4327,6 +4333,21 @@ fn adaptive_lexer_max_depth() -> Option<usize> {
             "invalid GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH={value:?}; expected a byte depth or full"
         )
     }))
+}
+
+/// Extra product-prefix states permitted for a bounded adaptive lexer.
+///
+/// A bounded product retains exact copies of the independently compiled
+/// component DFAs after its cutoff, so percentage growth relative to those
+/// components is the wrong resource model.  At depth one the prefix can add at
+/// most one state per byte (plus the shared root already present in the
+/// untouched epsilon union), making 256 a tight representation-independent
+/// default overhead cap. Deeper explicit experiments can raise this budget.
+fn adaptive_lexer_bounded_overhead_states() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_BOUNDED_OVERHEAD_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(256)
 }
 
 fn adaptive_lexer_growth_percent() -> usize {
@@ -4767,6 +4788,35 @@ fn try_product_union_components(
         .iter()
         .all(|component| !component.dfa.has_epsilon_transitions()));
 
+    // A bounded product is not just its determinized prefix: after the cutoff
+    // it appends exact copies of the component DFAs and reconnects frontier
+    // tuples to them.  Account for those copies *before* constructing the
+    // prefix so `state_limit` / `transition_limit` bound the final DFA rather
+    // than only the speculative prefix.  The previous implementation applied
+    // the state cap only to `combined` and then appended every component,
+    // allowing a nominal 100% growth limit to produce a larger lexer.
+    let copied_states = if max_depth.is_some() {
+        components
+            .iter()
+            .map(|component| component.dfa.num_states())
+            .sum::<usize>()
+    } else {
+        0
+    };
+    let copied_transitions = if max_depth.is_some() {
+        components
+            .iter()
+            .map(|component| dfa_transition_count(&component.dfa))
+            .sum::<usize>()
+    } else {
+        0
+    };
+    let product_state_limit = state_limit.checked_sub(copied_states)?;
+    if product_state_limit == 0 {
+        return None;
+    }
+    let product_transition_limit = transition_limit.checked_sub(copied_transitions)?;
+
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let setup_started_at = Instant::now();
@@ -4865,7 +4915,7 @@ fn try_product_union_components(
         for &class_index in &used_classes {
             projected_byte_transitions = projected_byte_transitions
                 .saturating_add(class_members[class_index].len());
-            if projected_byte_transitions > transition_limit {
+            if projected_byte_transitions > product_transition_limit {
                 return None;
             }
             let next_tuple = &class_buffers[class_index];
@@ -4874,7 +4924,7 @@ fn try_product_union_components(
             let target = if let Some(&existing) = state_map.get(&next_key) {
                 existing
             } else {
-                if combined.num_states() >= state_limit {
+                if combined.num_states() >= product_state_limit {
                     return None;
                 }
                 let new_state = combined.add_state();
@@ -5007,6 +5057,9 @@ fn try_product_union_components(
                 );
             }
         }
+
+        debug_assert!(combined.num_states() <= state_limit);
+        debug_assert!(dfa_transition_count(&combined) <= transition_limit);
     }
     let byte_expand_ms = byte_expand_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -5090,15 +5143,28 @@ fn adaptively_determinize_components_with_limits(
         .map(|batch| batch.terminal_ids.len())
         .sum::<usize>();
 
-    let growth_limit = input_states
+    // Compare against the representation we would actually return if adaptive
+    // determinization is rejected: the disjoint component DFAs plus their one
+    // epsilon-union root.  Using only `input_states` made a 100% growth cap one
+    // state stricter for full products while, paradoxically, bounded products
+    // could exceed it after appending their component copies.
+    let baseline_states = input_states.saturating_add(usize::from(input_batches > 1));
+    let percentage_growth_limit = baseline_states
         .saturating_mul(growth_percent)
         .saturating_add(99)
         / 100;
-    let effective_state_limit = state_limit.min(growth_limit).max(1);
-    let attempt_started_at = Instant::now();
+    let effective_state_limit = match max_depth {
+        None => state_limit.min(percentage_growth_limit).max(1),
+        Some(_) => state_limit
+            .min(
+                baseline_states.saturating_add(adaptive_lexer_bounded_overhead_states()),
+            )
+            .max(1),
+    };
     let transition_limit = input_transitions
         .saturating_mul(transition_growth_percent)
         / 100;
+    let attempt_started_at = Instant::now();
     let candidate = try_product_union_components(
         &inputs,
         effective_state_limit,
@@ -5107,12 +5173,13 @@ fn adaptively_determinize_components_with_limits(
     );
     let attempt_ms = attempt_started_at.elapsed().as_secs_f64() * 1000.0;
     let candidate_transitions = candidate.as_ref().map(dfa_transition_count);
-    let accepted = candidate_transitions.is_some_and(|output_transitions| {
-        adaptive_transition_growth_is_acceptable(
-            input_transitions,
-            output_transitions,
-            transition_growth_percent,
-        )
+    let accepted = candidate.as_ref().is_some_and(|dfa| {
+        dfa.num_states() <= effective_state_limit
+            && adaptive_transition_growth_is_acceptable(
+                input_transitions,
+                dfa_transition_count(dfa),
+                transition_growth_percent,
+            )
     });
     let terminal_ids = inputs
         .iter()
@@ -5123,11 +5190,12 @@ fn adaptively_determinize_components_with_limits(
 
     if profile {
         eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted=1 accepted={} max_states={} effective_state_limit={} max_depth={:?} max_growth_percent={} max_transition_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} baseline_states={} output_states={} input_transitions={} output_transitions={} accepted={} max_states={} effective_state_limit={} max_depth={:?} bounded_overhead_states={} max_growth_percent={} max_transition_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
             input_batches,
             terminals,
             if accepted { 1 } else { input_batches },
             input_states,
+            baseline_states,
             output_states,
             input_transitions,
             output_transitions,
@@ -5135,6 +5203,7 @@ fn adaptively_determinize_components_with_limits(
             state_limit,
             effective_state_limit,
             max_depth,
+            adaptive_lexer_bounded_overhead_states(),
             growth_percent,
             transition_growth_percent,
             attempt_ms,
@@ -14028,6 +14097,99 @@ mod tests {
                 .map(|component| component.terminal_ids.clone())
                 .collect::<Vec<_>>(),
             original_terminal_ids,
+        );
+    }
+
+    #[test]
+    fn bounded_adaptive_product_accounts_for_copied_component_states() {
+        let expressions = vec![
+            Expr::U8Seq(b"abcd".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: Some(8),
+            },
+        ];
+        let components =
+            super::compile_partition_components(&expressions, None, &[0, 1], None);
+        let untouched_states = 1usize
+            + components
+                .iter()
+                .map(|component| component.dfa.num_states())
+                .sum::<usize>();
+
+        assert!(
+            try_product_union_components(
+                &components,
+                untouched_states,
+                usize::MAX,
+                Some(1),
+            )
+            .is_none(),
+            "a depth-one prefix plus copied suffix DFAs must not fit inside the untouched-union state count",
+        );
+
+        let expanded = try_product_union_components(
+            &components,
+            untouched_states.saturating_mul(2),
+            usize::MAX,
+            Some(1),
+        )
+        .expect("the bounded product should fit once explicit growth is allowed");
+        assert!(
+            expanded.num_states() > untouched_states,
+            "this fixture should expose the bounded prefix + copied-component overhead",
+        );
+    }
+
+    #[test]
+    fn adaptive_bounded_depth_uses_additive_prefix_budget() {
+        let expressions = vec![
+            Expr::U8Seq(b"abc".to_vec()),
+            Expr::U8Seq(b"abd".to_vec()),
+        ];
+        let components =
+            super::compile_partition_components(&expressions, None, &[0, 1], None);
+        let untouched_states = 1usize
+            + components
+                .iter()
+                .map(|component| component.dfa.num_states())
+                .sum::<usize>();
+
+        let bounded = super::adaptively_determinize_components_with_limits(
+            super::compile_partition_components(&expressions, None, &[0, 1], None),
+            32_768,
+            100,
+            600,
+            Some(1),
+        );
+        assert_eq!(
+            bounded.len(),
+            1,
+            "bounded depth should use its explicit additive prefix-state budget rather than the full-product percentage budget",
+        );
+        assert!(
+            bounded[0].dfa.num_states()
+                <= untouched_states + super::adaptive_lexer_bounded_overhead_states(),
+        );
+
+        let full = super::adaptively_determinize_components_with_limits(
+            components,
+            32_768,
+            100,
+            600,
+            None,
+        );
+        let [combined] = full.as_slice() else {
+            panic!("full mode should accept the compressing exact product");
+        };
+        assert!(
+            combined.dfa.num_states() < untouched_states,
+            "the exact product should be smaller than the untouched epsilon union for this shared-prefix fixture",
+        );
+        assert!(
+            !combined.dfa.has_epsilon_transitions(),
+            "the accepted exact product should remain deterministic",
         );
     }
 

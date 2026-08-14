@@ -97,6 +97,19 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn lexer_adaptive_enabled() -> bool {
+    if std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some() {
+        env_flag_enabled("GLRMASK_LEXER_ADAPTIVE")
+    } else {
+        // A depth override is itself an explicit request for adaptive lexer
+        // construction. With neither variable present, keep the exact
+        // partition union: current corpus measurements show it is both faster
+        // to build and lower-tail at runtime than the historical depth-one
+        // hybrid.
+        std::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some()
+    }
+}
+
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
     env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
 }
@@ -499,7 +512,8 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
 
     let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
-        || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some();
+        || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some()
+        || std::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some();
     if !explicit_policy {
         let labels = grammar
             .terminals
@@ -1559,7 +1573,7 @@ fn prepare_structural_tokenizer_pair(
                 .map(|(index, _)| grammar.terminal_display_name(index as u32))
                 .collect::<Vec<_>>();
             let adaptive = adaptive_override
-                .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE"));
+                .unwrap_or_else(lexer_adaptive_enabled);
             let pair = if vocabulary_token_quotient {
                 prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
                     &full_expressions,
@@ -2990,7 +3004,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         .into_boxed_slice(),
                 ),
                 adaptive: lexer_adaptive_override
-                    .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")),
+                    .unwrap_or_else(lexer_adaptive_enabled),
                 global_max_token_len: vocab
                     .entries_map()
                     .values()
