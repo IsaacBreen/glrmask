@@ -3,6 +3,7 @@
 use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::Lexer;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -3115,7 +3116,85 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
     let mut any_viable_suffix = false;
-    if words_per_mask == 1 && adjacent_pair_index.is_some() {
+    let parallel_dense_suffix = words_per_mask == 1
+        && adjacent_pair_index.is_some()
+        && !uses_original_tokenizer
+        && rayon::current_num_threads() > 1
+        && total_splits >= 32_768
+        && std::env::var("GLRMASK_PARALLEL_CLASSIFY_SUFFIX")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+    if parallel_dense_suffix {
+        let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
+        // Each token owns one disjoint interval of `suffix_viable_masks`, so the
+        // suffix proof is embarrassingly parallel.  Compute several token
+        // intervals per Rayon worker into private buffers, then copy them back
+        // in lexical-vocabulary order.  This is exactly the serial computation:
+        // the only cross-token aggregate is OR (`any_viable_suffix`) and the
+        // count of inspected feasible splits.
+        let workers = rayon::current_num_threads().max(1);
+        let token_chunk_size = vocab_entries
+            .len()
+            .div_ceil(workers.saturating_mul(4))
+            .max(64);
+        let chunk_results = vocab_entries
+            .par_chunks(token_chunk_size)
+            .enumerate()
+            .map(|(chunk_index, entries)| {
+                let first_token = chunk_index * token_chunk_size;
+                let split_base = split_offsets[first_token];
+                let split_end = split_offsets[first_token + entries.len()];
+                let mut local_masks = vec![0u64; split_end - split_base];
+                let mut local_candidate_splits = 0usize;
+                let mut local_any_viable_suffix = false;
+                for (entry_offset, (_token_id, bytes)) in entries.iter().enumerate() {
+                    let token_index = first_token + entry_offset;
+                    let token_split_start = split_offsets[token_index];
+                    for split_after in 0..bytes.len().saturating_sub(1) {
+                        if !split_may_host_boundary(bytes, split_after) {
+                            continue;
+                        }
+                        local_candidate_splits += 1;
+                        let mut state = continuation_reset_state;
+                        let mut matched = 0u64;
+                        let mut consumed_suffix = true;
+                        for &byte in &bytes[split_after + 1..] {
+                            if dense_future_masks[state as usize] == 0 {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            state = dense_flat_trans[state as usize * 256 + byte as usize];
+                            if state == u32::MAX {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            matched |= dense_finalizer_masks[state as usize];
+                        }
+                        if consumed_suffix {
+                            matched |= dense_future_masks[state as usize];
+                        }
+                        local_any_viable_suffix |= matched != 0;
+                        local_masks[token_split_start - split_base + split_after] = matched;
+                    }
+                }
+                (
+                    split_base,
+                    local_masks,
+                    local_candidate_splits,
+                    local_any_viable_suffix,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (split_base, local_masks, local_candidate_splits, local_any) in chunk_results {
+            suffix_viable_masks[split_base..split_base + local_masks.len()]
+                .copy_from_slice(&local_masks);
+            candidate_splits += local_candidate_splits;
+            any_viable_suffix |= local_any;
+        }
+    } else if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
         let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
         for left in 0u8..=u8::MAX {
