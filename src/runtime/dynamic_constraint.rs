@@ -442,6 +442,7 @@ impl DynamicConstraint {
             internal_token_buf_op_costs: Vec::new(),
             word_group_buf_op_costs: Vec::new(),
             final_mask_mapping: Default::default(),
+            parser_state_domain_labels: Vec::new(),
             ignore_expr: payload.ignore_expr,
         };
         inner

@@ -7,7 +7,8 @@ const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
 const PREVIOUS_EXPRLESS_CONSTRAINT_VERSION: u16 = 10;
-const CONSTRAINT_VERSION: u16 = 11;
+const PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION: u16 = 11;
+const CONSTRAINT_VERSION: u16 = 12;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -37,6 +38,22 @@ struct ConstraintArtifactV11 {
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
+}
+
+#[derive(Serialize)]
+struct ConstraintArtifactV12Ref<'a> {
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+    terminal_exprs: Option<&'a [Expr]>,
+    parser_state_domain_labels: &'a [i32],
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV12 {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    terminal_exprs: Option<Vec<Expr>>,
+    parser_state_domain_labels: Vec<i32>,
 }
 
 struct CountingWriter<W> {
@@ -101,10 +118,11 @@ impl Constraint {
                 );
                 bincode::serialize_into(
                     &mut buffered,
-                    &ConstraintArtifactV11Ref {
+                    &ConstraintArtifactV12Ref {
                         constraint: self,
                         ignore_expr: &self.ignore_expr,
                         terminal_exprs: self.tokenizer.terminal_exprs(),
+                        parser_state_domain_labels: &self.parser_state_domain_labels,
                     },
                 )
                     .expect("Constraint serialization should succeed");
@@ -139,6 +157,7 @@ impl Constraint {
             LEGACY_CONSTRAINT_VERSION
                 | PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
                 | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
+                | PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -166,6 +185,7 @@ impl Constraint {
             version,
             PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
                 | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
+                | PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
@@ -218,6 +238,17 @@ impl Constraint {
             payload
         };
         let mut constraint = if version == CONSTRAINT_VERSION {
+            let artifact: ConstraintArtifactV12 = bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            let mut constraint = artifact.constraint;
+            constraint.ignore_expr = artifact.ignore_expr;
+            constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
+            constraint
+                .tokenizer
+                .restore_terminal_exprs(artifact.terminal_exprs)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            constraint
+        } else if version == PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION {
             let artifact: ConstraintArtifactV11 = bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             let mut constraint = artifact.constraint;
@@ -237,6 +268,29 @@ impl Constraint {
             bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
         };
+        if !constraint.parser_state_domain_labels.is_empty() {
+            if constraint.parser_state_domain_labels.len() != constraint.table.num_states as usize {
+                return Err(crate::GlrMaskError::Serialization(format!(
+                    "parser-state domain map has {} entries for {} parser states",
+                    constraint.parser_state_domain_labels.len(),
+                    constraint.table.num_states,
+                )));
+            }
+            let first_synthetic = constraint.table.num_states as i64;
+            let default_label = crate::compiler::glr::labels::DEFAULT_LABEL as i64;
+            for &label in &constraint.parser_state_domain_labels {
+                if label == i32::MAX {
+                    continue;
+                }
+                let label64 = label as i64;
+                if label64 < first_synthetic || label64 >= default_label {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "invalid parser-state domain label {label} for {} parser states",
+                        constraint.table.num_states,
+                    )));
+                }
+            }
+        }
         if constraint.uses_dynamic_runtime() {
             constraint.rebuild_dynamic_runtime_caches();
         } else {
@@ -369,6 +423,55 @@ mod tests {
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
         assert!(loaded.tokenizer.terminal_exprs().is_none());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn constraint_envelope_loads_previous_v11_terminal_expr_payload() {
+        let constraint = ignored_constraint();
+        let raw = bincode::serialize(&ConstraintArtifactV11Ref {
+            constraint: &constraint,
+            ignore_expr: &constraint.ignore_expr,
+            terminal_exprs: constraint.tokenizer.terminal_exprs(),
+        })
+        .unwrap();
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
+        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
+        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let loaded = Constraint::load(&envelope(
+            PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION,
+            &payload,
+        ))
+        .expect("v11 terminal-expression artifact should remain loadable");
+
+        assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
+        assert_eq!(loaded.tokenizer.terminal_exprs(), constraint.tokenizer.terminal_exprs());
+        assert!(loaded.parser_state_domain_labels.is_empty());
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn current_constraint_artifact_rejects_invalid_parser_state_domain_map() {
+        let mut constraint = ignored_constraint();
+        constraint.parser_state_domain_labels = vec![0];
+        let error = Constraint::load(&constraint.save()).unwrap_err().to_string();
+        assert!(error.contains("parser-state domain map") || error.contains("domain label"));
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_parser_state_domain_labels() {
+        let mut constraint = ignored_constraint();
+        constraint.parser_state_domain_labels =
+            vec![i32::MAX; constraint.table.num_states as usize];
+        if let Some(first) = constraint.parser_state_domain_labels.first_mut() {
+            *first = constraint.table.num_states as i32;
+        }
+        let loaded = Constraint::load(&constraint.save()).unwrap();
+        assert_eq!(
+            loaded.parser_state_domain_labels,
+            constraint.parser_state_domain_labels,
+        );
     }
 
     #[test]

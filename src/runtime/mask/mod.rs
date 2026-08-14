@@ -1550,10 +1550,8 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
 
     fn transition(&self, dwa_state: u32, parser_state: u32) -> Option<(u32, Weight)> {
         let transitions = &self.constraint.dwa_fast_transitions[dwa_state as usize];
-        let positive_label = encode_positive_label(parser_state);
-        transitions
-            .get(&positive_label)
-            .or_else(|| transitions.get(&DEFAULT_LABEL))
+        self.constraint
+            .fast_parser_dwa_transition(transitions, parser_state)
             .cloned()
     }
 
@@ -1651,16 +1649,13 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         parser_state: u32,
         tsid: u32,
     ) -> Option<(u32, &'a IndexedDagDenseMask)> {
-        let positive_label = encode_positive_label(parser_state);
-        let transition = self
+        let row = self
             .constraint
             .indexed_dag_dense_transitions
-            .get(dwa_state as usize)?
-            .get(&positive_label)
-            .or_else(|| {
-                self.constraint.indexed_dag_dense_transitions[dwa_state as usize]
-                    .get(&DEFAULT_LABEL)
-            })?;
+            .get(dwa_state as usize)?;
+        let transition = self
+            .constraint
+            .indexed_parser_dwa_transition(row, parser_state)?;
         Some((
             transition.target,
             transition.masks.get(tsid),
@@ -2183,6 +2178,7 @@ fn enqueue_weighted_transition(
 }
 
 fn enqueue_parser_state_transition(
+    constraint: &Constraint,
     queue: &mut MaskQueue,
     fast_transitions: &FastDwaTransitionRow,
     parser_state: u32,
@@ -2192,16 +2188,13 @@ fn enqueue_parser_state_transition(
     transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
     profile: &mut Option<MaskInnerProfileStats>,
 ) {
-    let positive_label = encode_positive_label(parser_state);
-
     let lookup_start = if profile.is_some() {
         Some(Instant::now())
     } else {
         None
     };
-    let Some((target, weight)) = fast_transitions
-        .get(&positive_label)
-        .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
+    let Some((target, weight)) = constraint
+        .fast_parser_dwa_transition(fast_transitions, parser_state)
     else {
         if let (Some(profile), Some(start)) = (profile.as_mut(), lookup_start) {
             profile.transition_lookup_ns += elapsed_ns(start);
@@ -2611,9 +2604,9 @@ impl<'a> ConstraintState<'a> {
 
                     let fast_transitions =
                         &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
-                    let Some((target, weight)) = fast_transitions
-                        .get(&positive_label)
-                        .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
+                    let Some((target, weight)) = self
+                        .constraint
+                        .fast_parser_dwa_transition(fast_transitions, parser_state)
                     else {
                         break;
                     };
@@ -2860,9 +2853,9 @@ impl<'a> ConstraintState<'a> {
 
                     let fast_transitions =
                         &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
-                    let Some((target, weight)) = fast_transitions
-                        .get(&positive_label)
-                        .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
+                    let Some((target, weight)) = self
+                        .constraint
+                        .fast_parser_dwa_transition(fast_transitions, parser_state)
                     else {
                         break;
                     };
@@ -3455,6 +3448,7 @@ impl<'a> ConstraintState<'a> {
                 }
                 queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
+                    self.constraint,
                     queue,
                     start_fast_transitions,
                     *parser_state,
@@ -3620,9 +3614,9 @@ impl<'a> ConstraintState<'a> {
                         });
                     },
                 );
-                let Some((target, transition_weight)) = start_transitions
-                    .get(&positive_label)
-                    .or_else(|| start_transitions.get(&DEFAULT_LABEL))
+                let Some((target, transition_weight)) = self
+                    .constraint
+                    .fast_parser_dwa_transition(start_transitions, parser_state)
                 else {
                     return;
                 };
@@ -3923,6 +3917,7 @@ impl<'a> ConstraintState<'a> {
                 };
                 queue.record_loop_decompose_callback();
                 enqueue_parser_state_transition(
+                    self.constraint,
                     &mut queue,
                     fast_transitions,
                     parser_state,

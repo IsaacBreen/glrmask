@@ -543,6 +543,38 @@ struct TokenMaskCacheBuildProfile {
 
 impl Constraint {
     #[inline]
+    pub(crate) fn parser_state_domain_label(&self, parser_state: u32) -> Option<i32> {
+        self.parser_state_domain_labels
+            .get(parser_state as usize)
+            .copied()
+            .filter(|&label| label != i32::MAX)
+    }
+
+    #[inline]
+    pub(crate) fn fast_parser_dwa_transition<'a>(
+        &self,
+        row: &'a FastDwaTransitionRow,
+        parser_state: u32,
+    ) -> Option<&'a (u32, Weight)> {
+        let positive = encode_positive_label(parser_state);
+        row.get(&positive)
+            .or_else(|| self.parser_state_domain_label(parser_state).and_then(|label| row.get(&label)))
+            .or_else(|| row.get(&DEFAULT_LABEL))
+    }
+
+    #[inline]
+    pub(crate) fn indexed_parser_dwa_transition<'a>(
+        &self,
+        row: &'a IndexedDagDenseTransitionRow,
+        parser_state: u32,
+    ) -> Option<&'a IndexedDagDenseTransition> {
+        let positive = encode_positive_label(parser_state);
+        row.get(&positive)
+            .or_else(|| self.parser_state_domain_label(parser_state).and_then(|label| row.get(&label)))
+            .or_else(|| row.get(&DEFAULT_LABEL))
+    }
+
+    #[inline]
     pub(crate) fn uses_dynamic_runtime(&self) -> bool {
         matches!(
             self.runtime_backend,

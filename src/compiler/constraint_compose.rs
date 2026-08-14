@@ -81,6 +81,186 @@ pub(crate) struct ParserDwaComponent<'a> {
     pub(crate) tokenizer_state_offset: u32,
 }
 
+const NO_PARSER_DOMAIN_LABEL: i32 = i32::MAX;
+
+#[derive(Debug, Clone)]
+struct ParserDefaultDomain {
+    label: i32,
+    states: BitSet,
+    predicted_saved_edges: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ParserDefaultDomainPlan {
+    /// Composed parser state -> synthetic fallback label. The sentinel means
+    /// that state has no component-local wildcard domain.
+    parser_state_labels: Vec<i32>,
+    /// One optional exact wildcard domain per component. Component zero is the
+    /// parent and is deliberately never assigned a domain.
+    component_domains: Vec<Option<ParserDefaultDomain>>,
+    predicted_saved_edges: usize,
+}
+
+fn symbolic_child_defaults_env_override() -> Option<bool> {
+    std::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULTS")
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        })
+}
+
+fn symbolic_child_default_min_saved_edges() -> usize {
+    std::env::var("GLRMASK_COMPOSE_SYMBOLIC_CHILD_DEFAULT_MIN_SAVED_EDGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4_096)
+}
+
+/// Build an exact quotient of the positive parser-state input alphabet for
+/// component-local DEFAULT transitions.
+///
+/// A composed LR state is eligible for child `i` iff it has exactly one
+/// preimage `(i, local_state)` across *all* component state relations. This
+/// excludes caller/return aliases, same-child many-to-one quotients, and
+/// cross-child structural sharing. Eligible domains are therefore pairwise
+/// disjoint, and every state in a domain has one unambiguous local-state
+/// interpretation. A child DEFAULT can then be represented once by a synthetic
+/// label: runtime lookup tries the concrete LR-state label first and the domain
+/// label only on a miss. States outside the domain retain ordinary explicit
+/// DEFAULT materialization, making this representation exactly equivalent to
+/// full materialization on every parser stack, not merely reachable stacks.
+fn build_parser_default_domain_plan(
+    components: &[ParserDwaComponent<'_>],
+    num_parser_states: u32,
+) -> ParserDefaultDomainPlan {
+    let n = num_parser_states as usize;
+    let mut preimage_count = vec![0u32; n];
+    let mut owner_component = vec![u32::MAX; n];
+    let mut owner_local = vec![u32::MAX; n];
+
+    for (component_index, component) in components.iter().enumerate() {
+        for (local_state, targets) in component.parser_state_relation.iter().enumerate() {
+            for &target in targets {
+                let Some(count) = preimage_count.get_mut(target as usize) else {
+                    continue;
+                };
+                *count = count.saturating_add(1);
+                if *count == 1 {
+                    owner_component[target as usize] = component_index as u32;
+                    owner_local[target as usize] = local_state as u32;
+                } else {
+                    owner_component[target as usize] = u32::MAX;
+                    owner_local[target as usize] = u32::MAX;
+                }
+            }
+        }
+    }
+
+    let mut local_multiplicities = components
+        .iter()
+        .map(|component| vec![0usize; component.parser_state_relation.len()])
+        .collect::<Vec<_>>();
+    for state in 0..n {
+        if preimage_count[state] != 1 {
+            continue;
+        }
+        let component = owner_component[state] as usize;
+        let local = owner_local[state] as usize;
+        // Parent defaults remain ordinary global/scoped materialization. Child
+        // domains begin at component 1.
+        if component == 0 || component >= components.len() {
+            continue;
+        }
+        if let Some(slot) = local_multiplicities
+            .get_mut(component)
+            .and_then(|rows| rows.get_mut(local))
+        {
+            *slot += 1;
+        }
+    }
+
+    let force = symbolic_child_defaults_env_override();
+    let min_saved = symbolic_child_default_min_saved_edges();
+    let mut component_predicted = vec![0usize; components.len()];
+    for component_index in 1..components.len() {
+        let component = components[component_index];
+        let domain_total = local_multiplicities[component_index].iter().sum::<usize>();
+        if domain_total == 0 {
+            continue;
+        }
+        for state in component.constraint.parser_dwa.states() {
+            if !state.transitions.contains_key(&DEFAULT_LABEL) {
+                continue;
+            }
+            let explicit_domain = state
+                .transitions
+                .keys()
+                .filter_map(|&label| {
+                    (label >= 0 && label != DEFAULT_LABEL).then_some(label as usize)
+                })
+                .filter_map(|local| local_multiplicities[component_index].get(local))
+                .copied()
+                .sum::<usize>();
+            component_predicted[component_index] = component_predicted[component_index]
+                .saturating_add(domain_total.saturating_sub(explicit_domain));
+        }
+    }
+
+    let max_domains = components.len().saturating_sub(1);
+    let labels_fit = (num_parser_states as i64)
+        .saturating_add(max_domains as i64)
+        < DEFAULT_LABEL as i64;
+    let mut next_label = num_parser_states as i32;
+    let mut component_domains = vec![None; components.len()];
+    let mut parser_state_labels = vec![NO_PARSER_DOMAIN_LABEL; n];
+    let mut predicted_saved_edges = 0usize;
+
+    if labels_fit && force != Some(false) {
+        for component_index in 1..components.len() {
+            let predicted = component_predicted[component_index];
+            let selected = force == Some(true) || predicted >= min_saved;
+            if !selected || predicted == 0 {
+                continue;
+            }
+            let label = next_label;
+            next_label += 1;
+            let mut states = BitSet::new(n);
+            for state in 0..n {
+                if preimage_count[state] == 1
+                    && owner_component[state] == component_index as u32
+                {
+                    states.set(state);
+                    parser_state_labels[state] = label;
+                }
+            }
+            if states.is_empty() {
+                continue;
+            }
+            predicted_saved_edges = predicted_saved_edges.saturating_add(predicted);
+            component_domains[component_index] = Some(ParserDefaultDomain {
+                label,
+                states,
+                predicted_saved_edges: predicted,
+            });
+        }
+    }
+
+    if predicted_saved_edges == 0 {
+        // Keep ordinary/small compositions on the zero-overhead runtime path:
+        // an empty map makes the exact-label -> DEFAULT lookup identical to
+        // pre-v12 constraints.
+        parser_state_labels.clear();
+    }
+    ParserDefaultDomainPlan {
+        parser_state_labels,
+        component_domains,
+        predicted_saved_edges,
+    }
+}
+
 pub(crate) struct CompiledSubgrammarInput<'a> {
     pub(crate) placeholder_terminal: u32,
     pub(crate) constraint: &'a Constraint,
@@ -436,7 +616,74 @@ fn materialized_top_acceptance(constraint: &Constraint) -> BTreeMap<i32, Weight>
     result
 }
 
-fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, String> {
+fn add_component_parser_state_transitions(
+    nwa: &mut NWA,
+    source_state: u32,
+    source: &DWAState,
+    parser_state_relation: &[Vec<u32>],
+    num_local_parser_states: u32,
+    default_domain: Option<&ParserDefaultDomain>,
+) -> Result<(), String> {
+    let explicit_positive = source
+        .transitions
+        .keys()
+        .filter_map(|&label| {
+            (label >= 0 && label != DEFAULT_LABEL).then_some(label as u32)
+        })
+        .collect::<BTreeSet<_>>();
+
+    for (&label, (target, weight)) in &source.transitions {
+        if label == DEFAULT_LABEL {
+            continue;
+        }
+        add_transition_for_mapped_label(
+            nwa,
+            source_state,
+            label,
+            *target,
+            weight,
+            parser_state_relation,
+        )?;
+    }
+
+    let Some((target, weight)) = source.transitions.get(&DEFAULT_LABEL) else {
+        return Ok(());
+    };
+    if let Some(domain) = default_domain {
+        // One synthetic positive symbol denotes precisely the unambiguous
+        // composed states owned by this child. Concrete transitions are looked
+        // up before this fallback at runtime, preserving explicit-over-default
+        // precedence exactly.
+        nwa.add_transition(source_state, domain.label, *target, weight.clone());
+    }
+    for local_state in 0..num_local_parser_states {
+        if explicit_positive.contains(&local_state) {
+            continue;
+        }
+        let targets = parser_state_relation
+            .get(local_state as usize)
+            .ok_or_else(|| format!("parser-state relation omits local state {local_state}"))?;
+        for &mapped_state in targets {
+            if default_domain
+                .is_some_and(|domain| domain.states.contains(mapped_state as usize))
+            {
+                continue;
+            }
+            nwa.add_transition(
+                source_state,
+                encode_positive_label(mapped_state),
+                *target,
+                weight.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn component_parser_nwa(
+    component: &ParserDwaComponent<'_>,
+    default_domain: Option<&ParserDefaultDomain>,
+) -> Result<NWA, String> {
     let constraint = component.constraint;
     if component.parser_state_relation.len() != constraint.table.num_states as usize {
         return Err(format!(
@@ -457,41 +704,14 @@ fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, Strin
         if let Some(final_weight) = &state.final_weight {
             nwa.set_final_weight(state_id as u32, final_weight.clone());
         }
-        let explicit_positive = state
-            .transitions
-            .keys()
-            .filter_map(|&label| {
-                (label >= 0 && label != DEFAULT_LABEL).then_some(label as u32)
-            })
-            .collect::<BTreeSet<_>>();
-        for (&label, (target, weight)) in &state.transitions {
-            if label == DEFAULT_LABEL {
-                continue;
-            }
-            add_transition_for_mapped_label(
-                &mut nwa,
-                state_id as u32,
-                label,
-                *target,
-                weight,
-                component.parser_state_relation,
-            )?;
-        }
-        if let Some((target, weight)) = state.transitions.get(&DEFAULT_LABEL) {
-            for local_state in 0..constraint.table.num_states {
-                if explicit_positive.contains(&local_state) {
-                    continue;
-                }
-                add_transition_for_mapped_label(
-                    &mut nwa,
-                    state_id as u32,
-                    encode_positive_label(local_state),
-                    *target,
-                    weight,
-                    component.parser_state_relation,
-                )?;
-            }
-        }
+        add_component_parser_state_transitions(
+            &mut nwa,
+            state_id as u32,
+            state,
+            component.parser_state_relation,
+            constraint.table.num_states,
+            default_domain,
+        )?;
     }
 
     let top_accept = materialized_top_acceptance(constraint);
@@ -2915,18 +3135,20 @@ struct UnmappedComponentParserArtifact {
 fn prepare_unmapped_component_parser_artifacts(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
+    default_domains: &[Option<ParserDefaultDomain>],
     strip_scoped_ignore_identity: bool,
 ) -> Result<Vec<UnmappedComponentParserArtifact>, String> {
-    if components.len() != terminal_offsets.len() {
-        return Err("component/parser terminal-offset count mismatch".into());
+    if components.len() != terminal_offsets.len() || components.len() != default_domains.len() {
+        return Err("component/parser terminal-offset/default-domain count mismatch".into());
     }
     components
         .par_iter()
         .copied()
         .zip(terminal_offsets.par_iter().copied())
-        .map(|(component, terminal_offset)| {
+        .zip(default_domains.par_iter())
+        .map(|((component, terminal_offset), default_domain)| {
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
-            let mut automaton = component_parser_nwa(&component)?;
+            let mut automaton = component_parser_nwa(&component, default_domain.as_ref())?;
             if strip_scoped_ignore_identity {
                 let ignore_weight = component
                     .constraint
@@ -3161,9 +3383,10 @@ fn component_possible_matches(
         .collect())
 }
 
-pub(crate) fn compose_component_parser_dwas_and_possible_matches(
+fn compose_component_parser_dwas_and_possible_matches(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
+    default_domains: &[Option<ParserDefaultDomain>],
     merged_tokenizer_state_count: usize,
     original_token_ids: &[u32],
     strip_scoped_ignore_identity: bool,
@@ -3171,10 +3394,11 @@ pub(crate) fn compose_component_parser_dwas_and_possible_matches(
     if components.is_empty() {
         return Err("cannot compose zero parser DWAs".into());
     }
-    if terminal_offsets.len() != components.len() {
+    if terminal_offsets.len() != components.len() || default_domains.len() != components.len() {
         return Err(format!(
-            "terminal-offset count {} does not match component count {}",
+            "terminal-offset/default-domain count ({}/{}) does not match component count {}",
             terminal_offsets.len(),
+            default_domains.len(),
             components.len(),
         ));
     }
@@ -3202,11 +3426,12 @@ pub(crate) fn compose_component_parser_dwas_and_possible_matches(
         .par_iter()
         .copied()
         .zip(terminal_offsets.par_iter().copied())
+        .zip(default_domains.par_iter())
         .zip(component_maps.into_par_iter())
         .enumerate()
-        .map(|(component_index, ((component, terminal_offset), coordinate_maps))| {
+        .map(|(component_index, (((component, terminal_offset), default_domain), coordinate_maps))| {
             let started_at = Instant::now();
-            let mut parser_nwa = component_parser_nwa(&component)?;
+            let mut parser_nwa = component_parser_nwa(&component, default_domain.as_ref())?;
             let parser_nwa_ms = started_at.elapsed().as_secs_f64() * 1000.0;
             let started_at = Instant::now();
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
@@ -3382,7 +3607,11 @@ pub(crate) fn compose_component_parser_dwas_and_possible_matches(
     Ok(MappedArtifact::new((dwa, possible_matches), id_map))
 }
 
-fn explicit_parser_nwa(dwa: &DWA, num_parser_states: u32) -> NWA {
+fn explicit_parser_nwa(
+    dwa: &DWA,
+    num_parser_states: u32,
+    extra_positive_labels: &[i32],
+) -> NWA {
     let mut nwa = NWA::new(0, 0);
     for _ in dwa.states() {
         nwa.add_state();
@@ -3413,6 +3642,11 @@ fn explicit_parser_nwa(dwa: &DWA, num_parser_states: u32) -> NWA {
                         *target,
                         weight.clone(),
                     );
+                }
+            }
+            for &label in extra_positive_labels {
+                if label >= 0 && !state.transitions.contains_key(&label) {
+                    nwa.add_transition(source as u32, label, *target, weight.clone());
                 }
             }
         }
@@ -3655,8 +3889,8 @@ fn union_boundary_parser_dwa(
 
     let build_generic = || -> Result<(DWA, f64, f64), String> {
         let append_started_at = Instant::now();
-        let generic_component_nwa = explicit_parser_nwa(&component_dwa, num_parser_states);
-        let generic_boundary_nwa = explicit_parser_nwa(&boundary_dwa, num_parser_states);
+        let generic_component_nwa = explicit_parser_nwa(&component_dwa, num_parser_states, &[]);
+        let generic_boundary_nwa = explicit_parser_nwa(&boundary_dwa, num_parser_states, &[]);
         let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
         let component_body = union.append_with_body(&generic_component_nwa);
         let boundary_body = union.append_with_body(&generic_boundary_nwa);
@@ -4524,6 +4758,7 @@ fn build_composed_constraint_unfinalized(
     tokenizer: Tokenizer,
     tokenizer_state_offsets: Vec<u32>,
     parser_dwa: DWA,
+    parser_state_domain_labels: Vec<i32>,
     possible_matches: PossibleMatches,
     internal_ids: InternalIdMap,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
@@ -4655,6 +4890,7 @@ fn build_composed_constraint_unfinalized(
         internal_token_buf_op_costs: Vec::new(),
         word_group_buf_op_costs: Vec::new(),
         final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
+        parser_state_domain_labels,
         ignore_expr,
     };
     ConstraintComposition {
@@ -4670,6 +4906,7 @@ fn finalize_composed_constraint(
     tokenizer: Tokenizer,
     tokenizer_state_offsets: Vec<u32>,
     parser_artifacts: MappedArtifact<(DWA, PossibleMatches)>,
+    parser_state_domain_labels: Vec<i32>,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     special_token_terminals: Vec<SpecialTokenTerminal>,
     embedded_end_token_ids: Vec<u32>,
@@ -4688,6 +4925,7 @@ fn finalize_composed_constraint(
         tokenizer,
         tokenizer_state_offsets,
         parser_dwa,
+        parser_state_domain_labels,
         possible_matches,
         internal_ids,
         template_dfas_by_terminal,
@@ -4894,6 +5132,41 @@ pub(crate) fn compose_constraints(
             tokenizer_state_offset: expected_tokenizer_state_offsets[index],
         })
         .collect::<Vec<_>>();
+    let parser_default_domains = build_parser_default_domain_plan(
+        &parser_components,
+        composed_table.table.num_states,
+    );
+    if compose_profile_enabled() {
+        let selected = parser_default_domains
+            .component_domains
+            .iter()
+            .flatten()
+            .count();
+        let domain_states = parser_default_domains
+            .component_domains
+            .iter()
+            .flatten()
+            .map(|domain| domain.states.count_ones())
+            .sum::<usize>();
+        let per_component = parser_default_domains
+            .component_domains
+            .iter()
+            .enumerate()
+            .filter_map(|(index, domain)| {
+                domain.as_ref().map(|domain| {
+                    format!("{index}:{}:{}", domain.states.count_ones(), domain.predicted_saved_edges)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[glrmask/profile][constraint_parser_default_domains] selected={} domain_states={} predicted_saved_edges={} per_component=[{}]",
+            selected,
+            domain_states,
+            parser_default_domains.predicted_saved_edges,
+            per_component,
+        );
+    }
     let special_token_terminals = merged_special_token_terminals(
         parent,
         children,
@@ -4993,6 +5266,7 @@ pub(crate) fn compose_constraints(
                 let result = compose_component_parser_dwas_and_possible_matches(
                     &parser_components,
                     &composed_table.terminal_offsets,
+                    &parser_default_domains.component_domains,
                     merged_tokenizer_state_count,
                     &original_token_ids,
                     !global_ignores,
@@ -5043,6 +5317,7 @@ pub(crate) fn compose_constraints(
                             let result = compose_component_parser_dwas_and_possible_matches(
                                 &parser_components,
                                 &composed_table.terminal_offsets,
+                                &parser_default_domains.component_domains,
                                 merged_tokenizer_state_count,
                                 &original_token_ids,
                                 !global_ignores,
@@ -5142,6 +5417,7 @@ pub(crate) fn compose_constraints(
         tokenizer,
         tokenizer_state_offsets,
         parser_artifacts,
+        parser_default_domains.parser_state_labels.clone(),
         template_dfas_by_terminal,
         special_token_terminals,
         embedded_end_token_ids,
@@ -5330,6 +5606,41 @@ pub(crate) fn compose_constraints_owned_parent(
             tokenizer_state_offset: expected_tokenizer_state_offsets[index],
         })
         .collect::<Vec<_>>();
+    let parser_default_domains = build_parser_default_domain_plan(
+        &parser_components,
+        composed_table.table.num_states,
+    );
+    if compose_profile_enabled() {
+        let selected = parser_default_domains
+            .component_domains
+            .iter()
+            .flatten()
+            .count();
+        let domain_states = parser_default_domains
+            .component_domains
+            .iter()
+            .flatten()
+            .map(|domain| domain.states.count_ones())
+            .sum::<usize>();
+        let per_component = parser_default_domains
+            .component_domains
+            .iter()
+            .enumerate()
+            .filter_map(|(index, domain)| {
+                domain.as_ref().map(|domain| {
+                    format!("{index}:{}:{}", domain.states.count_ones(), domain.predicted_saved_edges)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[glrmask/profile][constraint_parser_default_domains] selected={} domain_states={} predicted_saved_edges={} per_component=[{}]",
+            selected,
+            domain_states,
+            parser_default_domains.predicted_saved_edges,
+            per_component,
+        );
+    }
     let component_views_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
     let specials_started_at = Instant::now();
     let special_token_terminals = merged_special_token_terminals(
@@ -5421,6 +5732,7 @@ pub(crate) fn compose_constraints_owned_parent(
                             let result = prepare_unmapped_component_parser_artifacts(
                                 &parser_components,
                                 &composed_table.terminal_offsets,
+                                &parser_default_domains.component_domains,
                                 !global_ignores,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -5630,6 +5942,7 @@ pub(crate) fn compose_constraints_owned_parent(
         tokenizer,
         tokenizer_state_offsets,
         DWA::new(id_num_tsids, id_max_internal_token),
+        parser_default_domains.parser_state_labels.clone(),
         possible_matches,
         id_map,
         template_dfas_by_terminal,
@@ -5644,6 +5957,12 @@ pub(crate) fn compose_constraints_owned_parent(
         vocab,
     );
 
+    let parser_default_domain_labels = parser_default_domains
+        .component_domains
+        .iter()
+        .flatten()
+        .map(|domain| domain.label)
+        .collect::<Vec<_>>();
     let union_started_at = Instant::now();
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
         || -> Result<DWA, String> {
@@ -5698,7 +6017,11 @@ pub(crate) fn compose_constraints_owned_parent(
                         let last = automata.len().saturating_sub(1);
                         for (index, automaton) in automata.iter().enumerate() {
                             let explicit = if index == last {
-                                explicit_parser_nwa(&boundary_dwa, num_parser_states)
+                                explicit_parser_nwa(
+                                    &boundary_dwa,
+                                    num_parser_states,
+                                    &parser_default_domain_labels,
+                                )
                             } else {
                                 automaton.clone()
                             };
@@ -5719,7 +6042,11 @@ pub(crate) fn compose_constraints_owned_parent(
                         let mut starts = Vec::new();
                         for (index, automaton) in automata.iter().enumerate() {
                             let explicit = if index + 1 == automata.len() {
-                                explicit_parser_nwa(&boundary_dwa, num_parser_states)
+                                explicit_parser_nwa(
+                                    &boundary_dwa,
+                                    num_parser_states,
+                                    &parser_default_domain_labels,
+                                )
                             } else {
                                 automaton.clone()
                             };
@@ -5737,11 +6064,12 @@ pub(crate) fn compose_constraints_owned_parent(
                     }
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
                             parser_dwa.num_states(),
+                            parser_dwa.num_transitions(),
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
@@ -5774,11 +6102,12 @@ pub(crate) fn compose_constraints_owned_parent(
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
                             parser_dwa.num_states(),
+                            parser_dwa.num_transitions(),
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
@@ -6143,6 +6472,86 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_child_default_domain_expands_exactly_to_materialized_transport() {
+        let relation = vec![vec![10], vec![11], vec![12, 13], vec![20]];
+        let mut source = DWAState::default();
+        source.transitions.insert(
+            encode_positive_label(0),
+            (1, Weight::all()),
+        );
+        // This explicit one-to-many local label must override the synthetic
+        // DEFAULT on both of its mapped concrete parser states.
+        source.transitions.insert(
+            encode_positive_label(2),
+            (1, Weight::all()),
+        );
+        source
+            .transitions
+            .insert(DEFAULT_LABEL, (2, Weight::all()));
+
+        let mut baseline = NWA::new(1, 0);
+        for _ in 0..3 {
+            baseline.add_state();
+        }
+        add_component_parser_state_transitions(
+            &mut baseline,
+            0,
+            &source,
+            &relation,
+            relation.len() as u32,
+            None,
+        )
+        .unwrap();
+
+        let mut domain_states = BitSet::new(32);
+        for state in [11usize, 12, 13] {
+            domain_states.set(state);
+        }
+        let domain = ParserDefaultDomain {
+            label: 30,
+            states: domain_states,
+            predicted_saved_edges: 3,
+        };
+        let mut compressed = NWA::new(1, 0);
+        for _ in 0..3 {
+            compressed.add_state();
+        }
+        add_component_parser_state_transitions(
+            &mut compressed,
+            0,
+            &source,
+            &relation,
+            relation.len() as u32,
+            Some(&domain),
+        )
+        .unwrap();
+
+        // Expand the runtime lookup semantics `concrete -> domain` back onto
+        // concrete labels. The resulting transition relation must equal the old
+        // fully-materialized transport exactly.
+        let domain_targets = compressed.states()[0]
+            .transitions
+            .get(&domain.label)
+            .cloned()
+            .expect("compressed row must carry one domain fallback");
+        let mut expanded = compressed.states()[0].transitions.clone();
+        expanded.remove(&domain.label);
+        for parser_state in domain.states.iter_ones() {
+            expanded
+                .entry(encode_positive_label(parser_state as u32))
+                .or_insert_with(|| domain_targets.clone());
+        }
+        assert_eq!(expanded, baseline.states()[0].transitions);
+        assert_eq!(
+            expanded[&encode_positive_label(12)][0].0,
+            1,
+            "explicit local transitions must retain precedence over domain DEFAULT",
+        );
+        assert_eq!(expanded[&encode_positive_label(11)][0].0, 2);
+        assert_eq!(expanded[&encode_positive_label(20)][0].0, 2);
+    }
+
+    #[test]
     fn overlap_local_union_preserves_symbolic_default_semantics() {
         let mut wildcard = NWA::new(1, 0);
         let wildcard_start = wildcard.add_state();
@@ -6172,6 +6581,15 @@ mod tests {
             explicit_final,
             Weight::all(),
         );
+        // Synthetic child-domain labels are ordinary nonnegative symbols above
+        // the concrete parser-state range. A global DEFAULT from another
+        // automaton must still contribute on them.
+        explicit.add_transition(
+            explicit_start,
+            100,
+            explicit_final,
+            Weight::all(),
+        );
         explicit.set_final_weight(explicit_final, Weight::all());
 
         let (union, _) = determinize_epsilon_free_component_union(
@@ -6197,6 +6615,7 @@ mod tests {
         assert!(!evaluate_runtime_label(encode_positive_label(3)).is_empty());
         assert!(!evaluate_runtime_label(encode_positive_label(4)).is_empty());
         assert!(!evaluate_runtime_label(encode_negative_label(5)).is_empty());
+        assert!(!evaluate_runtime_label(100).is_empty());
         assert!(evaluate_runtime_label(encode_negative_label(6)).is_empty());
         assert!(union.states()[union.start_state() as usize]
             .transitions
@@ -6255,20 +6674,26 @@ mod tests {
                 (&parent.tokenizer, composed_table.terminal_offsets[0]),
                 (&child.tokenizer, composed_table.terminal_offsets[1]),
             ]);
+        let parser_components = [
+            ParserDwaComponent {
+                constraint: &parent,
+                parser_state_relation: &composed_table.state_relations[0],
+                tokenizer_state_offset: tokenizer_offsets[0],
+            },
+            ParserDwaComponent {
+                constraint: &child,
+                parser_state_relation: &composed_table.state_relations[1],
+                tokenizer_state_offset: tokenizer_offsets[1],
+            },
+        ];
+        let default_domains = build_parser_default_domain_plan(
+            &parser_components,
+            composed_table.table.num_states,
+        );
         let merged = compose_component_parser_dwas_and_possible_matches(
-            &[
-                ParserDwaComponent {
-                    constraint: &parent,
-                    parser_state_relation: &composed_table.state_relations[0],
-                    tokenizer_state_offset: tokenizer_offsets[0],
-                },
-                ParserDwaComponent {
-                    constraint: &child,
-                    parser_state_relation: &composed_table.state_relations[1],
-                    tokenizer_state_offset: tokenizer_offsets[1],
-                },
-            ],
+            &parser_components,
             &composed_table.terminal_offsets,
+            &default_domains.component_domains,
             merged_tokenizer.num_states() as usize,
             &vocab.entries_map().keys().copied().collect::<Vec<_>>(),
             false,

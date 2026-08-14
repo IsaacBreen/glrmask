@@ -2089,6 +2089,13 @@ pub struct Constraint {
     /// Self-contained final internal-token -> original-token bitset materializer.
     #[serde(skip)]
     pub(crate) final_mask_mapping: FinalMaskMapping,
+    /// Optional exact quotient of positive parser-state labels used by composed
+    /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
+    /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
+    /// transitions always take precedence, followed by this label, then the
+    /// ordinary global DEFAULT. Empty for ordinary non-composed constraints.
+    #[serde(skip, default)]
+    pub(crate) parser_state_domain_labels: Vec<i32>,
     /// Exact source expression for the globally erasable ignore terminal.
     ///
     /// Tokenizer source expressions are compile-time data and are normally
