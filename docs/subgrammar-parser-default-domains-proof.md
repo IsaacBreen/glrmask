@@ -97,8 +97,10 @@ If `d_q` exists, the compressed transport additionally emits one edge
 and retains ordinary explicit default materialization for every mapped state
 outside `D_i`.  Default edges for states in `D_i` are omitted.
 
-A profitability threshold can decline to create `D_i`; that merely falls back
-to the old materialization and has no semantic effect.
+A profitability threshold gates creation of the domain map as a whole. If no
+child amortizes that table-sized map, composition uses the old materialization.
+Once the map is worthwhile, every child domain with positive predicted savings
+is represented symbolically; this changes only representation, never semantics.
 
 ## 5. Pointwise equivalence of a transported component row
 
@@ -206,7 +208,8 @@ The optimization declines compression rather than weakening its proof when:
 - a composed state has zero or multiple component/local preimages;
 - the state belongs to the parent rather than a child;
 - synthetic labels would collide with the reserved `DEFAULT_LABEL` range;
-- the predicted edge saving is below the configured profitability threshold; or
+- no child reaches the configured profitability threshold needed to amortize
+  the table-sized domain map; or
 - the optimization is explicitly disabled.
 
 Every declined case uses the historical exact materialization path.

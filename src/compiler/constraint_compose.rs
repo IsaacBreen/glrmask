@@ -218,11 +218,19 @@ fn build_parser_default_domain_plan(
     let mut parser_state_labels = vec![NO_PARSER_DOMAIN_LABEL; n];
     let mut predicted_saved_edges = 0usize;
 
-    if labels_fit && force != Some(false) {
+    let feature_selected = labels_fit
+        && match force {
+            Some(false) => false,
+            Some(true) => true,
+            None => component_predicted.iter().any(|&predicted| predicted >= min_saved),
+        };
+    if feature_selected {
+        // Once one child amortizes the table-sized runtime map, every further
+        // exact child domain is a marginal win: one synthetic label replaces a
+        // positive number of concrete edges without increasing lookup depth.
         for component_index in 1..components.len() {
             let predicted = component_predicted[component_index];
-            let selected = force == Some(true) || predicted >= min_saved;
-            if !selected || predicted == 0 {
+            if predicted == 0 {
                 continue;
             }
             let label = next_label;
