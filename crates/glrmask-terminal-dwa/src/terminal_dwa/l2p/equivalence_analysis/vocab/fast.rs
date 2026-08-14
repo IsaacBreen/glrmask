@@ -745,37 +745,18 @@ fn vocab_batch_size_override() -> Option<usize> {
 }
 
 fn vocab_parallel_state_batch_size(num_states: usize, num_tokens: usize) -> Option<usize> {
-    if let Ok(value) = std::env::var("GLRMASK_VOCAB_EQUIV_PARALLEL_STATE_BATCH_SIZE") {
-        return value
-            .trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|&batch_size| batch_size > 0);
-    }
-
-    // The state-slab route deliberately targets machines with genuinely spare
-    // compile workers. On small pools, duplicating the token-trie traversal
-    // competes with sibling partition work and loses. The representative p0
-    // cohort starts paying back at 4-8 isolated workers; keep a much more
-    // conservative production threshold so ordinary desktop/server builds are
-    // unchanged while 48/96-core compilation can expose 3-4 independent slabs.
-    const AUTO_MIN_THREADS: usize = 32;
-    const AUTO_MIN_STATES: usize = 64;
-    const AUTO_MIN_TOKENS: usize = 768;
-    const TARGET_STATES_PER_SLAB: usize = 32;
-    const MAX_SLABS: usize = 4;
-
-    if rayon::current_num_threads() < AUTO_MIN_THREADS
-        || num_states < AUTO_MIN_STATES
-        || num_tokens < AUTO_MIN_TOKENS
-    {
-        return None;
-    }
-
-    let slabs = num_states
-        .div_ceil(TARGET_STATES_PER_SLAB)
-        .clamp(2, MAX_SLABS);
-    Some(num_states.div_ceil(slabs))
+    let _ = (num_states, num_tokens);
+    // Keep state-axis decomposition opt-in. In isolation the slabs can expose
+    // useful parallelism, but schema compilation already runs vocabulary
+    // partitions concurrently. Automatically spawning several full-trie walks
+    // inside each partition caused severe nested-parallel contention on a
+    // 48-core build (notably the large p2 vocabulary). The explicit override is
+    // retained for experiments and callers that know they have an isolated
+    // vocabulary-proof workload.
+    std::env::var("GLRMASK_VOCAB_EQUIV_PARALLEL_STATE_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&batch_size| batch_size > 0)
 }
 
 fn vocab_sequential_trie_work_max() -> usize {
