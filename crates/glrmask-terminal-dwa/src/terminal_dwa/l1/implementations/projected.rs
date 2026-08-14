@@ -3040,7 +3040,6 @@ fn build_finite_projected_impl(
                 profile
             } else {
                 let profile = profiles.len() as u32;
-                profile_run_count += values.len();
                 profile_ids.insert(Arc::clone(&values), profile);
                 profiles.push(values);
                 profile
