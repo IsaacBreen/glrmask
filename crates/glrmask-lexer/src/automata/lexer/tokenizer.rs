@@ -1860,6 +1860,449 @@ impl Tokenizer {
         self.exprs.as_deref()?.get(terminal as usize)
     }
 
+    /// Compile-time terminal expressions, when retained by the artifact.
+    pub fn terminal_exprs(&self) -> Option<&[Expr]> {
+        self.exprs.as_deref()
+    }
+
+    /// Restore terminal expressions carried by a versioned outer artifact.
+    /// Invalid-length metadata is rejected rather than silently associating
+    /// expressions with the wrong terminal IDs.
+    pub fn restore_terminal_exprs(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
+        let Some(exprs) = exprs else {
+            self.exprs = None;
+            return Ok(());
+        };
+        if exprs.len() != self.num_terminals as usize {
+            return Err(format!(
+                "serialized tokenizer has {} terminal expressions for {} terminals",
+                exprs.len(), self.num_terminals,
+            ));
+        }
+        self.exprs = Some(Arc::from(exprs.into_boxed_slice()));
+        Ok(())
+    }
+
+    /// Exact syntactic byte support retained for one terminal.
+    ///
+    /// This is a cheap necessary condition for terminal-language equality. It
+    /// is not itself used as an equivalence proof.
+    pub fn terminal_byte_support(&self, terminal: TerminalID) -> Option<U8Set> {
+        (terminal < self.num_terminals)
+            .then(|| *self.dfa.group_id_to_u8set(terminal))
+    }
+
+    #[inline]
+    fn state_live_for_terminal(&self, state: u32, terminal: TerminalID) -> bool {
+        self.dfa.finalizers(state).contains(terminal as usize)
+            || self
+                .dfa
+                .possible_future_group_ids(state)
+                .contains(terminal as usize)
+    }
+
+    fn terminal_projected_epsilon_closure(
+        &self,
+        states: &[u32],
+        terminal: TerminalID,
+    ) -> Box<[u32]> {
+        let mut closure = self.dfa.epsilon_closure(states);
+        closure.retain(|state| self.state_live_for_terminal(*state, terminal));
+        closure.sort_unstable();
+        closure.dedup();
+        closure.into_vec().into_boxed_slice()
+    }
+
+    fn terminal_projected_subset_accepting(
+        &self,
+        states: &[u32],
+        terminal: TerminalID,
+    ) -> bool {
+        states
+            .iter()
+            .any(|&state| self.dfa.finalizers(state).contains(terminal as usize))
+    }
+
+    /// Return the unique scalar deterministic reset branch containing this
+    /// terminal, when the tokenizer's structural certificate proves such a
+    /// branch exists. This avoids powerset construction for the common
+    /// partitioned-lexer representation.
+    fn terminal_scalar_dispatch_root(&self, terminal: TerminalID) -> Option<u32> {
+        let start = self.start_state();
+        if self.dfa.finalizers(start).contains(terminal as usize) {
+            // A nullable terminal can accept before entering a dispatch root;
+            // keep it on the general epsilon-NFA proof path.
+            return None;
+        }
+        if !self.has_epsilon_transitions() {
+            return Some(start);
+        }
+        if !self.has_scalar_deterministic_dispatch() {
+            return None;
+        }
+        let mut live_roots = self
+            .deterministic_dispatch_roots()?
+            .iter()
+            .copied()
+            .filter(|&root| self.state_live_for_terminal(root, terminal));
+        let root = live_roots.next()?;
+        live_roots.next().is_none().then_some(root)
+    }
+
+    #[inline]
+    fn terminal_projected_scalar_step(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+        byte: u8,
+    ) -> Option<u32> {
+        self.step(state, byte)
+            .filter(|&target| self.state_live_for_terminal(target, terminal))
+    }
+
+    fn terminal_scalar_prefix_fingerprint_from_state(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+        depth: u8,
+        memo: &mut FxHashMap<(u32, u8), u64>,
+    ) -> u64 {
+        if let Some(&fingerprint) = memo.get(&(state, depth)) {
+            return fingerprint;
+        }
+        // Fixed deterministic mixer. Hash collisions merely admit an extra
+        // exact equivalence check; this fingerprint is never a proof.
+        #[inline]
+        fn mix(mut hash: u64, value: u64) -> u64 {
+            hash ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            hash ^ (hash >> 29)
+        }
+
+        let accepting = self.dfa.finalizers(state).contains(terminal as usize);
+        let mut hash = if accepting {
+            0x6a09_e667_f3bc_c909
+        } else {
+            0xbb67_ae85_84ca_a73b
+        };
+        if depth > 0 {
+            let mut transitions = self
+                .transitions_from(state)
+                .filter_map(|(byte, target)| {
+                    self.state_live_for_terminal(target, terminal)
+                        .then_some((byte, target))
+                })
+                .collect::<Vec<_>>();
+            transitions.sort_unstable_by_key(|&(byte, _)| byte);
+            for (byte, target) in transitions {
+                let child = self.terminal_scalar_prefix_fingerprint_from_state(
+                    target,
+                    terminal,
+                    depth - 1,
+                    memo,
+                );
+                hash = mix(hash, byte as u64 + 1);
+                hash = mix(hash, child);
+            }
+            hash = mix(hash, 0x100 + depth as u64);
+        }
+        memo.insert((state, depth), hash);
+        hash
+    }
+
+    /// A bounded language-observation fingerprint for candidate indexing.
+    ///
+    /// For scalar deterministic terminal branches this recursively records the
+    /// accepting bit and every live byte derivative to `depth`. Equal terminal
+    /// languages necessarily produce the same value. Hash collisions or a
+    /// shallow horizon only create extra exact checks; equality of the value is
+    /// never used as an equivalence certificate.
+    pub fn terminal_scalar_prefix_fingerprint(
+        &self,
+        terminal: TerminalID,
+        depth: u8,
+    ) -> Option<u64> {
+        let root = self.terminal_scalar_dispatch_root(terminal)?;
+        let mut memo = FxHashMap::default();
+        Some(self.terminal_scalar_prefix_fingerprint_from_state(
+            root,
+            terminal,
+            depth,
+            &mut memo,
+        ))
+    }
+
+    /// Canonical rooted-graph certificate for one scalar terminal DFA.
+    ///
+    /// States are renumbered by deterministic BFS from the terminal's unique
+    /// dispatch root, following live transitions in byte order. The returned
+    /// sparse serialization records each state's accepting bit and every
+    /// byte-labelled edge to the canonical target ID. Equality of two returned
+    /// vectors is therefore an exact rooted labelled-DFA isomorphism proof and
+    /// implies terminal-language equality. Non-isomorphic but language-
+    /// equivalent DFAs may produce different certificates; this is an
+    /// intentionally sufficient, not complete, proof.
+    pub fn terminal_scalar_structural_certificate(
+        &self,
+        terminal: TerminalID,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<Vec<u64>> {
+        if state_limit == 0 || transition_limit == 0 {
+            return None;
+        }
+        let root = self.terminal_scalar_dispatch_root(terminal)?;
+        let mut canonical = FxHashMap::<u32, u32>::default();
+        canonical.insert(root, 0);
+        let mut queue = VecDeque::from([root]);
+        let mut encoded = Vec::<u64>::new();
+        let mut transition_count = 0usize;
+
+        while let Some(state) = queue.pop_front() {
+            if canonical.len() > state_limit {
+                return None;
+            }
+            let accepting = self.dfa.finalizers(state).contains(terminal as usize);
+            let mut transitions = self
+                .transitions_from(state)
+                .filter_map(|(byte, target)| {
+                    self.state_live_for_terminal(target, terminal)
+                        .then_some((byte, target))
+                })
+                .collect::<Vec<_>>();
+            transitions.sort_unstable_by_key(|&(byte, _)| byte);
+            transition_count = transition_count.saturating_add(transitions.len());
+            if transition_count > transition_limit {
+                return None;
+            }
+            encoded.push(
+                ((accepting as u64) << 63)
+                    | u64::try_from(transitions.len()).ok()?.min((1u64 << 63) - 1),
+            );
+            for (byte, target) in transitions {
+                let next_id = if let Some(&existing) = canonical.get(&target) {
+                    existing
+                } else {
+                    let next = canonical.len() as u32;
+                    canonical.insert(target, next);
+                    queue.push_back(target);
+                    next
+                };
+                encoded.push(((byte as u64) << 32) | next_id as u64);
+            }
+        }
+        Some(encoded)
+    }
+
+    fn terminal_scalar_language_equivalent_bounded(
+        &self,
+        terminal: TerminalID,
+        left_root: u32,
+        other: &Tokenizer,
+        other_terminal: TerminalID,
+        right_root: u32,
+        pair_limit: usize,
+        transition_work_limit: usize,
+    ) -> Option<bool> {
+        let mut seen = rustc_hash::FxHashSet::<(Option<u32>, Option<u32>)>::default();
+        let mut queue = VecDeque::from([(Some(left_root), Some(right_root))]);
+        let mut work = 0usize;
+
+        while let Some(pair @ (left, right)) = queue.pop_front() {
+            if !seen.insert(pair) {
+                continue;
+            }
+            if seen.len() > pair_limit {
+                return None;
+            }
+            let left_accepting = left.is_some_and(|state| {
+                self.dfa.finalizers(state).contains(terminal as usize)
+            });
+            let right_accepting = right.is_some_and(|state| {
+                other
+                    .dfa
+                    .finalizers(state)
+                    .contains(other_terminal as usize)
+            });
+            if left_accepting != right_accepting {
+                return Some(false);
+            }
+
+            let mut bytes = U8Set::empty();
+            if let Some(state) = left {
+                for (byte, _) in self.transitions_from(state) {
+                    bytes.insert(byte);
+                }
+            }
+            if let Some(state) = right {
+                for (byte, _) in other.transitions_from(state) {
+                    bytes.insert(byte);
+                }
+            }
+            for byte in bytes.iter() {
+                work = work.saturating_add(1);
+                if work > transition_work_limit {
+                    return None;
+                }
+                let next = (
+                    left.and_then(|state| {
+                        self.terminal_projected_scalar_step(state, terminal, byte)
+                    }),
+                    right.and_then(|state| {
+                        other.terminal_projected_scalar_step(state, other_terminal, byte)
+                    }),
+                );
+                if next != (None, None) && !seen.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        Some(true)
+    }
+
+    fn terminal_projected_step(
+        &self,
+        states: &[u32],
+        terminal: TerminalID,
+        byte: u8,
+        work: &mut usize,
+        work_limit: usize,
+    ) -> Option<Box<[u32]>> {
+        let mut targets = SmallVec::<[u32; 8]>::new();
+        for &state in states {
+            *work = work.saturating_add(1);
+            if *work > work_limit {
+                return None;
+            }
+            if let Some(target) = self.step(state, byte) {
+                targets.push(target);
+            }
+        }
+        if targets.is_empty() {
+            return Some(Box::new([]));
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        Some(self.terminal_projected_epsilon_closure(&targets, terminal))
+    }
+
+    /// Prove whether two compiled terminals denote the same byte language.
+    ///
+    /// This works directly from the serialized tokenizer automata and does not
+    /// require the compile-time `Expr` sidecar. The proof is exact: each
+    /// epsilon-NFA is projected to the chosen terminal, then the symmetric
+    /// difference of their on-the-fly subset constructions is searched by BFS.
+    /// `Some(true)` means equivalence was proved; `Some(false)` means a concrete
+    /// distinguishing byte word exists. `None` means the supplied resource
+    /// bounds were exhausted, in which case callers must conservatively decline
+    /// any optimization that requires equivalence.
+    ///
+    /// `possible_future_group_ids` is used only to remove states from which the
+    /// selected terminal can neither finalize now nor in the future. By its
+    /// tokenizer invariant such states cannot contribute to the selected
+    /// terminal's language.
+    pub fn terminal_language_equivalent_bounded(
+        &self,
+        terminal: TerminalID,
+        other: &Tokenizer,
+        other_terminal: TerminalID,
+        pair_limit: usize,
+        transition_work_limit: usize,
+    ) -> Option<bool> {
+        if terminal >= self.num_terminals
+            || other_terminal >= other.num_terminals
+            || pair_limit == 0
+            || transition_work_limit == 0
+        {
+            return None;
+        }
+
+        // Equal languages necessarily consume the same set of byte values.
+        // This metadata is a cheap rejection filter only; equality here is not
+        // treated as a proof.
+        if self.terminal_byte_support(terminal)? != other.terminal_byte_support(other_terminal)? {
+            return Some(false);
+        }
+
+        if let (Some(left_root), Some(right_root)) = (
+            self.terminal_scalar_dispatch_root(terminal),
+            other.terminal_scalar_dispatch_root(other_terminal),
+        ) {
+            return self.terminal_scalar_language_equivalent_bounded(
+                terminal,
+                left_root,
+                other,
+                other_terminal,
+                right_root,
+                pair_limit,
+                transition_work_limit,
+            );
+        }
+
+        let left_start =
+            self.terminal_projected_epsilon_closure(&[self.start_state()], terminal);
+        let right_start = other
+            .terminal_projected_epsilon_closure(&[other.start_state()], other_terminal);
+
+        type SubsetPair = (Box<[u32]>, Box<[u32]>);
+        let mut seen = rustc_hash::FxHashSet::<SubsetPair>::default();
+        let mut queue = VecDeque::<SubsetPair>::from([(left_start, right_start)]);
+        let mut work = 0usize;
+
+        while let Some((left, right)) = queue.pop_front() {
+            if !seen.insert((left.clone(), right.clone())) {
+                continue;
+            }
+            if seen.len() > pair_limit {
+                return None;
+            }
+            if self.terminal_projected_subset_accepting(&left, terminal)
+                != other.terminal_projected_subset_accepting(&right, other_terminal)
+            {
+                return Some(false);
+            }
+
+            // Explore exactly the bytes that have an outgoing transition from
+            // either current subset. This is equivalent to scanning all 256
+            // bytes while avoiding dead/dead product edges.
+            let mut bytes = U8Set::empty();
+            for &state in left.iter() {
+                for (byte, _) in self.transitions_from(state) {
+                    bytes.insert(byte);
+                }
+            }
+            for &state in right.iter() {
+                for (byte, _) in other.transitions_from(state) {
+                    bytes.insert(byte);
+                }
+            }
+
+            for byte in bytes.iter() {
+                let next_left = self.terminal_projected_step(
+                    &left,
+                    terminal,
+                    byte,
+                    &mut work,
+                    transition_work_limit,
+                )?;
+                let next_right = other.terminal_projected_step(
+                    &right,
+                    other_terminal,
+                    byte,
+                    &mut work,
+                    transition_work_limit,
+                )?;
+                if next_left.is_empty() && next_right.is_empty() {
+                    continue;
+                }
+                if !seen.contains(&(next_left.clone(), next_right.clone())) {
+                    queue.push_back((next_left, next_right));
+                }
+            }
+        }
+        Some(true)
+    }
+
     pub fn initial_epsilon_branch_count(&self) -> usize {
         self.dfa
             .states()
@@ -2671,6 +3114,47 @@ mod tests {
             num_terminals,
             Some(Arc::from(exprs.into_boxed_slice())),
         )
+    }
+
+    fn serialized_roundtrip(tokenizer: &Tokenizer) -> Tokenizer {
+        let bytes = bincode::serialize(tokenizer).unwrap();
+        let loaded: Tokenizer = bincode::deserialize(&bytes).unwrap();
+        assert!(loaded.exprs.is_none(), "Expr sidecars are intentionally not serialized");
+        loaded
+    }
+
+    #[test]
+    fn serialized_terminal_language_equivalence_is_exact_without_exprs() {
+        let left = serialized_roundtrip(&tokenizer_from_exprs(vec![bytes(b"ab")]));
+        let equal = serialized_roundtrip(&tokenizer_from_exprs(vec![bytes(b"ab")]));
+        let different_same_support =
+            serialized_roundtrip(&tokenizer_from_exprs(vec![bytes(b"ba")]));
+
+        assert_eq!(
+            left.terminal_language_equivalent_bounded(0, &equal, 0, 64, 10_000),
+            Some(true),
+        );
+        assert_eq!(
+            left.terminal_language_equivalent_bounded(
+                0,
+                &different_same_support,
+                0,
+                64,
+                10_000,
+            ),
+            Some(false),
+        );
+    }
+
+    #[test]
+    fn serialized_terminal_language_equivalence_budget_fails_closed() {
+        let left = serialized_roundtrip(&tokenizer_from_exprs(vec![bytes(b"ab")]));
+        let right = serialized_roundtrip(&tokenizer_from_exprs(vec![bytes(b"ab")]));
+        assert_eq!(
+            left.terminal_language_equivalent_bounded(0, &right, 0, 1, 10_000),
+            None,
+            "budget exhaustion must never be interpreted as equivalence",
+        );
     }
 
     fn normalized_exec(

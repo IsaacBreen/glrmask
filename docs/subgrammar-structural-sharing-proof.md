@@ -43,7 +43,51 @@ certificates holds:
 2. both terminals are the same local terminal of the exact same compiled
    `Constraint` artifact reused at two composition sites.
 
+Current constraint artifact version 11 persists the terminal `Expr` sidecar in
+the versioned outer artifact, so independently compiled and independently
+loaded current artifacts normally use certificate 1 directly. Older v10/v9/v7
+artifacts remain loadable but do not carry this proof metadata. Distinct legacy
+artifacts therefore remain separate by default.
+
+An explicitly enabled legacy-artifact fallback can additionally prove equality
+from the compiled tokenizer automata. It first tries exact rooted scalar-DFA
+isomorphism and may then run bounded exact NFA-language equivalence. These are
+proof mechanisms, never heuristics: budget exhaustion returns `Unknown`, which
+means "leave distinct". Necessary-condition byte/vocabulary fingerprints are
+used only to reject impossible candidates cheaply; equality of a fingerprint
+never causes a merge. The fallback is intentionally not enabled by default,
+because rediscovering proof structure from large old artifacts can be much more
+expensive than carrying the compact v11 sidecar.
+
 All other terminals are singleton classes.
+
+### Lemma 1a — optional exact projected-NFA equivalence certificate
+
+For a serialized tokenizer `L`, terminal `t`, and raw state `r`, retain `r` iff
+`t` is a finalizer at `r` or `t` occurs in the exact possible-future metadata at
+`r`. Let `P_t(L)` be the epsilon-NFA obtained by this live-state projection,
+with the tokenizer reset as start and `t`-finalizing states as accepting.
+Then `P_t(L)` recognizes exactly the byte language of terminal `t`.
+
+**Proof.** A removed state neither accepts `t` now nor has a path to a state
+that accepts `t`; by the definition of possible-future metadata it cannot
+participate in any accepting `t` path. Conversely every state on an accepting
+`t` path is either the final state itself or has `t` in its possible future, so
+it is retained. Epsilon closure is computed before each projection, preserving
+all zero-byte reachability among live states. Therefore projection removes
+exactly states irrelevant to `t` and leaves its language unchanged. ∎
+
+The checker explores the product of the on-the-fly subset constructions of
+`P_t1(L1)` and `P_t2(L2)`. At every reachable subset pair it compares whether
+the left and right subsets contain an accepting state. For every byte with an
+outgoing transition on either side it advances all member states, takes exact
+epsilon closure, projects to terminal-live states, and interns the resulting
+pair. If acceptance ever differs, the BFS path is a concrete distinguishing
+word. If the finite reachable product is exhausted without such a pair, the
+symmetric difference is empty and the languages are equal. This is the
+standard finite-NFA language-equivalence decision procedure performed lazily;
+the implementation may abort with `Unknown` before exhaustion but never
+returns `true` without exhausting the reachable product.
 
 ### Lemma 1 — terminal-language equality
 
@@ -59,14 +103,17 @@ immediate induction over the expression constructors (`U8Seq`, `U8Class`,
 does not discard those semantics. In case 2 there is no semantic comparison at
 all: both global aliases refer to the same local terminal in the same immutable
 compiled tokenizer artifact, hence to the identical transition/finalizer
-machine and accepted widths. The exclusion of terminals with side semantics
+machine and accepted widths. If the explicitly enabled legacy fallback is used,
+equality of canonical rooted scalar-DFA certificates is an exact labelled-graph
+isomorphism proof; otherwise Lemma 1a plus exhaustion of the subset-product
+search proves equality of the two compiled byte languages. The exclusion of
+terminals with side semantics
 removes every known terminal behavior not represented by that byte matcher.
 Therefore the byte match relation and every match width are equal. ∎
 
-This is intentionally only a sufficient test. Two differently written regexes
-may denote the same language and still remain unmerged. The artifact-identity
-case is useful after serialization because compile-time `Expr` values are not
-required to be retained in a loaded constraint.
+This is intentionally incomplete. Legacy artifacts without retained proof
+metadata stay unmerged by default, and optional exact search may also decline on
+its resource bound. Both failure modes lose optimization only, never semantics.
 
 ## 3. Structural nonterminal relation
 

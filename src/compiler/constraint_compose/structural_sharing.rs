@@ -43,12 +43,99 @@ use crate::grammar::flat::{NonterminalID, Symbol};
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct StructuralSharingReport {
     pub(super) terminal_aliases: usize,
+    pub(super) terminal_structural_matches: usize,
+    pub(super) terminal_exact_checks: usize,
+    pub(super) terminal_exact_unknown: usize,
     pub(super) nonterminals_before: usize,
     pub(super) nonterminal_classes: usize,
     pub(super) contextual_candidate_groups: usize,
     pub(super) contextual_states_saved: usize,
     pub(super) states_before: usize,
     pub(super) states_after: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct TerminalClassAnalysis {
+    pub(super) classes: Vec<u32>,
+    pub(super) structural_matches: usize,
+    pub(super) exact_checks: usize,
+    pub(super) exact_unknown: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalRepresentative {
+    component_index: usize,
+    local_terminal: u32,
+    global_terminal: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TerminalEquivalencePrefilter {
+    byte_support: U8Set,
+    scalar_prefix_fingerprint: Option<u64>,
+    /// Algebraic fingerprint of original-vocabulary token IDs admitted by
+    /// possible-matches from tokenizer reset. Equal sets necessarily have the
+    /// same fingerprint. Unequal sets can collide, which only causes an extra
+    /// exact automata check; the fingerprint is never an equivalence proof.
+    reset_tokens: OriginalTokenSetFingerprint,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct OriginalTokenSetFingerprint {
+    count: u64,
+    sum: u128,
+    sum_squares: u128,
+    xor: u32,
+}
+
+impl OriginalTokenSetFingerprint {
+    fn from_originals(originals: &[u32]) -> Self {
+        let mut out = Self::default();
+        for &token in originals {
+            let token128 = token as u128;
+            out.count += 1;
+            out.sum += token128;
+            out.sum_squares += token128 * token128;
+            out.xor ^= token;
+        }
+        out
+    }
+
+    fn add_group(&mut self, group: Self) {
+        self.count += group.count;
+        self.sum += group.sum;
+        self.sum_squares += group.sum_squares;
+        self.xor ^= group.xor;
+    }
+}
+
+fn terminal_equivalence_prefilter(
+    component: &Constraint,
+    terminal: u32,
+    token_group_fingerprints: &[OriginalTokenSetFingerprint],
+    prefix_depth: u8,
+) -> Option<TerminalEquivalencePrefilter> {
+    let byte_support = component.tokenizer.terminal_byte_support(terminal)?;
+    let scalar_prefix_fingerprint = component
+        .tokenizer
+        .terminal_scalar_prefix_fingerprint(terminal, prefix_depth);
+    let mut internal_tokens = RangeSetBlaze::<u32>::new();
+    if let Some(weight) = component.possible_matches.get(&terminal) {
+        for &tsid in component
+            .internal_tsids_for_state(component.tokenizer.initial_state())
+        {
+            internal_tokens |= weight.tokens_for_tsid(tsid);
+        }
+    }
+    let mut reset_tokens = OriginalTokenSetFingerprint::default();
+    for internal_token in internal_tokens.iter() {
+        reset_tokens.add_group(*token_group_fingerprints.get(internal_token as usize)?);
+    }
+    Some(TerminalEquivalencePrefilter {
+        byte_support,
+        scalar_prefix_fingerprint,
+        reset_tokens,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -152,6 +239,103 @@ fn component_action_signature(action: &Action) -> ComponentActionSignature {
     }
 }
 
+fn component_action_signature_remapped(
+    action: &Action,
+    state_classes: &[u32],
+    nonterminal_classes: &[u32],
+) -> ComponentActionSignature {
+    let map_state = |state: u32| {
+        state_classes
+            .get(state as usize)
+            .copied()
+            .unwrap_or(state)
+    };
+    let map_nonterminal = |nonterminal: u32| {
+        nonterminal_classes
+            .get(nonterminal as usize)
+            .copied()
+            .unwrap_or(nonterminal)
+    };
+    match action {
+        Action::Shift(target, replace) => {
+            ComponentActionSignature::Shift(map_state(*target), *replace)
+        }
+        Action::StackShifts(shifts) => {
+            let mut shifts = shifts
+                .iter()
+                .map(|shift| {
+                    (
+                        shift.pop,
+                        shift.pushes.iter().map(|&state| map_state(state)).collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            shifts.sort();
+            shifts.dedup();
+            ComponentActionSignature::StackShifts(shifts)
+        }
+        Action::GuardedStackShifts(shifts) => {
+            let mut shifts = shifts
+                .iter()
+                .map(|shift| {
+                    let mut guards = shift
+                        .guards
+                        .iter()
+                        .map(|guard| {
+                            let mut states = guard
+                                .states
+                                .iter()
+                                .map(|&state| map_state(state))
+                                .collect::<Vec<_>>();
+                            states.sort_unstable();
+                            states.dedup();
+                            (guard.pop, states)
+                        })
+                        .collect::<Vec<_>>();
+                    guards.sort();
+                    guards.dedup();
+                    (
+                        guards,
+                        shift.pop,
+                        shift.pushes.iter().map(|&state| map_state(state)).collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            shifts.sort();
+            shifts.dedup();
+            ComponentActionSignature::GuardedStackShifts(shifts)
+        }
+        Action::Reduce(nonterminal, len) => {
+            ComponentActionSignature::Reduce(map_nonterminal(*nonterminal), *len)
+        }
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => {
+            let mut reduces = reduces
+                .iter()
+                .map(|&(nonterminal, len)| (map_nonterminal(nonterminal), len))
+                .collect::<Vec<_>>();
+            reduces.sort_unstable();
+            reduces.dedup();
+            ComponentActionSignature::Split {
+                shift: shift.map(|(target, replace)| (map_state(target), replace)),
+                reduces,
+                accept: *accept,
+            }
+        }
+        Action::Accept => ComponentActionSignature::Accept,
+        Action::ReplaceShifts(targets) => {
+            let mut targets = targets.iter().map(|&state| map_state(state)).collect::<Vec<_>>();
+            targets.sort_unstable();
+            targets.dedup();
+            ComponentActionSignature::ReplaceShifts(targets)
+        }
+        Action::Skip => ComponentActionSignature::Skip,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ComponentStateSignature {
     previous_class: u32,
@@ -164,11 +348,11 @@ pub(super) fn structural_sharing_enabled() -> bool {
     std::env::var_os("GLRMASK_COMPOSE_DISABLE_STRUCTURAL_SHARING").is_none()
 }
 
-fn composition_terminal_classes(
+pub(super) fn composition_terminal_classes(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     composed: &ComposedTable,
-) -> Vec<u32> {
+) -> TerminalClassAnalysis {
     let num_terminals = composed.table.num_terminals as usize;
     let mut classes = (0..num_terminals as u32).collect::<Vec<_>>();
     let mut ineligible = BitSet::new(num_terminals);
@@ -187,6 +371,30 @@ fn composition_terminal_classes(
     let components = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .collect::<Vec<_>>();
+    let automata_fallback_enabled = std::env::var("GLRMASK_COMPOSE_TERMINAL_AUTOMATA_EQUIV")
+        .ok()
+        .is_some_and(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        });
+    let needs_automata_fallback = automata_fallback_enabled
+        && components
+            .iter()
+            .any(|component| component.tokenizer.terminal_exprs().is_none());
+    let token_group_fingerprints = needs_automata_fallback.then(|| {
+        components
+            .iter()
+            .map(|component| {
+                component
+                    .internal_token_to_tokens
+                    .iter()
+                    .map(|originals| OriginalTokenSetFingerprint::from_originals(originals))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
     for (component_index, component) in components.iter().enumerate() {
         let offset = composed.terminal_offsets[component_index];
         if let Some(ignore) = component.ignore_terminal {
@@ -197,12 +405,56 @@ fn composition_terminal_classes(
         }
     }
 
-    // Expr equality is a deliberately sufficient condition.  It proves equal
-    // byte languages without invoking a potentially expensive regex-language
-    // equivalence check, and it remains exact for Exclude/Intersect because
-    // those operators are retained inside Expr.
+    // Fast exact proofs are tried first. Current v11 artifacts retain terminal
+    // Exprs, so the production path does not need to rediscover language
+    // equivalence after load. For legacy/mixed artifacts, expensive compiled-
+    // automaton rediscovery is explicitly opt-in; without proof metadata the
+    // default is simply to leave terminals distinct.
     let mut representative_by_expr = FxHashMap::<Expr, u32>::default();
     let mut representative_by_artifact_terminal = FxHashMap::<(usize, u32), u32>::default();
+    let mut representatives_by_prefilter =
+        FxHashMap::<TerminalEquivalencePrefilter, Vec<TerminalRepresentative>>::default();
+    let pair_limit = std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PAIR_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(1_024);
+    let transition_work_limit =
+        std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_TRANSITION_WORK_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(200_000);
+    let prefix_depth = std::env::var("GLRMASK_COMPOSE_TERMINAL_EQUIV_PREFIX_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(10);
+    let certificate_state_limit =
+        std::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_STATE_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(20_000);
+    let certificate_transition_limit =
+        std::env::var("GLRMASK_COMPOSE_TERMINAL_CERTIFICATE_TRANSITION_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(1_000_000);
+    let semantic_fallback = std::env::var("GLRMASK_COMPOSE_TERMINAL_SEMANTIC_EQUIV")
+        .ok()
+        .is_some_and(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        });
+    let mut structural_certificate_cache =
+        FxHashMap::<(usize, u32), Option<Arc<[u64]>>>::default();
+    let mut structural_matches = 0usize;
+    let mut exact_checks = 0usize;
+    let mut exact_unknown = 0usize;
+
     for (component_index, component) in components.iter().enumerate() {
         let offset = composed.terminal_offsets[component_index];
         for local_terminal in 0..component.tokenizer.num_terminals() {
@@ -213,8 +465,8 @@ fn composition_terminal_classes(
                 continue;
             }
             // Reusing one compiled child artifact at multiple call sites is an
-            // exact identity proof even after save/load, where compile-time
-            // lexer Exprs are intentionally not serialized.
+            // exact identity proof, including legacy loaded artifacts that do
+            // not carry the v11 terminal-Expr sidecar.
             let artifact_key = (*component as *const Constraint as usize, local_terminal);
             let artifact_representative = representative_by_artifact_terminal
                 .get(&artifact_key)
@@ -222,9 +474,88 @@ fn composition_terminal_classes(
             let expr = component.tokenizer.terminal_expr(local_terminal);
             let expr_representative = expr
                 .and_then(|expr| representative_by_expr.get(expr).copied());
-            let representative = artifact_representative
-                .or(expr_representative)
-                .unwrap_or(global_terminal);
+            let mut representative = artifact_representative.or(expr_representative);
+            let prefilter = if needs_automata_fallback && representative.is_none() {
+                terminal_equivalence_prefilter(
+                    component,
+                    local_terminal,
+                    &token_group_fingerprints
+                        .as_ref()
+                        .expect("fallback fingerprints were prepared")[component_index],
+                    prefix_depth,
+                )
+            } else {
+                None
+            };
+
+            if representative.is_none()
+                && let Some(prefilter) = prefilter.as_ref()
+                && let Some(candidates) = representatives_by_prefilter.get(prefilter)
+            {
+                let current_key = (component_index, local_terminal);
+                let current_certificate = if let Some(cached) =
+                    structural_certificate_cache.get(&current_key)
+                {
+                    cached.clone()
+                } else {
+                    let built = component
+                        .tokenizer
+                        .terminal_scalar_structural_certificate(
+                            local_terminal,
+                            certificate_state_limit,
+                            certificate_transition_limit,
+                        )
+                        .map(Arc::<[u64]>::from);
+                    structural_certificate_cache.insert(current_key, built.clone());
+                    built
+                };
+                for candidate in candidates {
+                    let candidate_component = components[candidate.component_index];
+                    let candidate_key = (candidate.component_index, candidate.local_terminal);
+                    let candidate_certificate = if let Some(cached) =
+                        structural_certificate_cache.get(&candidate_key)
+                    {
+                        cached.clone()
+                    } else {
+                        let built = candidate_component
+                            .tokenizer
+                            .terminal_scalar_structural_certificate(
+                                candidate.local_terminal,
+                                certificate_state_limit,
+                                certificate_transition_limit,
+                            )
+                            .map(Arc::<[u64]>::from);
+                        structural_certificate_cache.insert(candidate_key, built.clone());
+                        built
+                    };
+                    if current_certificate.is_some()
+                        && current_certificate == candidate_certificate
+                    {
+                        structural_matches += 1;
+                        representative = Some(candidate.global_terminal);
+                        break;
+                    }
+                    if semantic_fallback {
+                        exact_checks += 1;
+                        match component.tokenizer.terminal_language_equivalent_bounded(
+                            local_terminal,
+                            &candidate_component.tokenizer,
+                            candidate.local_terminal,
+                            pair_limit,
+                            transition_work_limit,
+                        ) {
+                            Some(true) => {
+                                representative = Some(candidate.global_terminal);
+                                break;
+                            }
+                            Some(false) => {}
+                            None => exact_unknown += 1,
+                        }
+                    }
+                }
+            }
+
+            let representative = representative.unwrap_or(global_terminal);
             classes[global_terminal as usize] = representative;
             representative_by_artifact_terminal
                 .entry(artifact_key)
@@ -234,9 +565,26 @@ fn composition_terminal_classes(
                     .entry(expr.clone())
                     .or_insert(representative);
             }
+            if representative == global_terminal
+                && let Some(prefilter) = prefilter
+            {
+                representatives_by_prefilter
+                    .entry(prefilter)
+                    .or_default()
+                    .push(TerminalRepresentative {
+                        component_index,
+                        local_terminal,
+                        global_terminal,
+                    });
+            }
         }
     }
-    classes
+    TerminalClassAnalysis {
+        classes,
+        structural_matches,
+        exact_checks,
+        exact_unknown,
+    }
 }
 
 fn dense_initial_nonterminal_classes(
@@ -259,11 +607,12 @@ fn dense_initial_nonterminal_classes(
     classes
 }
 
-fn structural_nonterminal_classes(
+pub(super) fn structural_nonterminal_classes(
     table: &crate::compiler::glr::table::GLRTable,
     terminal_classes: &[u32],
     boundary_nonterminals: &BTreeSet<NonterminalID>,
 ) -> Vec<u32> {
+    let started_at = compose_profile_enabled().then(Instant::now);
     let num_nonterminals = table.nonterminal_display_names.len();
     if num_nonterminals == 0 {
         return Vec::new();
@@ -277,42 +626,55 @@ fn structural_nonterminal_classes(
 
     let mut classes = dense_initial_nonterminal_classes(table, boundary_nonterminals);
     loop {
+        let signatures = (0..num_nonterminals)
+            .into_par_iter()
+            .map(|nonterminal| {
+                let mut normalized_productions = productions[nonterminal]
+                    .iter()
+                    .map(|rhs| {
+                        rhs.iter()
+                            .map(|symbol| match *symbol {
+                                Symbol::Terminal(terminal) => StructuralSymbolSignature::Terminal(
+                                    terminal_classes
+                                        .get(terminal as usize)
+                                        .copied()
+                                        .unwrap_or(terminal),
+                                ),
+                                Symbol::Nonterminal(child) => {
+                                    StructuralSymbolSignature::Nonterminal(
+                                        classes.get(child as usize).copied().unwrap_or(child),
+                                    )
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                // Rule order is not part of CFG semantics. Preserve duplicate
+                // productions so this remains at least as strict as structural
+                // equality of the derivation graph.
+                normalized_productions.sort();
+                NonterminalRefinementSignature {
+                    previous_class: classes[nonterminal],
+                    productions: normalized_productions,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut class_by_signature = FxHashMap::<NonterminalRefinementSignature, u32>::default();
         let mut next_classes = Vec::with_capacity(num_nonterminals);
-        for nonterminal in 0..num_nonterminals {
-            let mut normalized_productions = productions[nonterminal]
-                .iter()
-                .map(|rhs| {
-                    rhs.iter()
-                        .map(|symbol| match *symbol {
-                            Symbol::Terminal(terminal) => StructuralSymbolSignature::Terminal(
-                                terminal_classes
-                                    .get(terminal as usize)
-                                    .copied()
-                                    .unwrap_or(terminal),
-                            ),
-                            Symbol::Nonterminal(child) => {
-                                StructuralSymbolSignature::Nonterminal(
-                                    classes.get(child as usize).copied().unwrap_or(child),
-                                )
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            // Rule order is not part of CFG semantics.  Preserve duplicate
-            // productions (rather than deduplicating) so this criterion is at
-            // least as strict as structural equality of the derivation graph.
-            normalized_productions.sort();
-            let signature = NonterminalRefinementSignature {
-                previous_class: classes[nonterminal],
-                productions: normalized_productions,
-            };
+        for signature in signatures {
             let next = class_by_signature.len() as u32;
             let class = *class_by_signature.entry(signature).or_insert(next);
             next_classes.push(class);
         }
         if next_classes == classes {
+            if let Some(started_at) = started_at {
+                eprintln!(
+                    "[glrmask/profile][constraint_structural_nonterminal_classes] nonterminals={} classes={} ms={:.3}",
+                    num_nonterminals,
+                    next_classes.iter().copied().max().map_or(0, |class| class as usize + 1),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             return classes;
         }
         classes = next_classes;
@@ -643,6 +1005,22 @@ fn component_structural_state_groups(
         return Vec::new();
     }
 
+    let child_local_nonterminal_classes = children
+        .iter()
+        .enumerate()
+        .map(|(component_index, child)| {
+            let nonterminal_offset = child_nonterminal_offsets[component_index];
+            (0..child.constraint.table.nonterminal_display_names.len())
+                .map(|nonterminal| {
+                    nonterminal_classes
+                        .get(nonterminal_offset as usize + nonterminal)
+                        .copied()
+                        .unwrap_or(nonterminal_offset + nonterminal as u32)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
     // Distinguish each component's start role from internal rows, but allow
     // starts from different components to be compared with one another.
     let mut classes = vec![0u32; virtual_state_count];
@@ -653,95 +1031,97 @@ fn component_structural_state_groups(
     }
 
     loop {
+        let signatures_by_component = children
+            .par_iter()
+            .enumerate()
+            .map(|(component_index, child)| {
+                let table = &child.constraint.table;
+                let state_offset = virtual_state_offsets[component_index];
+                let terminal_offset = composed.terminal_offsets[component_index + 1];
+                let local_state_classes = &classes[state_offset as usize
+                    ..state_offset as usize + table.num_states as usize];
+                let local_nonterminal_classes = &child_local_nonterminal_classes[component_index];
+
+                (0..table.num_states)
+                    .map(|local_state| {
+                        let mut actions = table.action[local_state as usize]
+                            .iter()
+                            .map(|(terminal, action)| {
+                                let terminal_class = if terminal < table.num_terminals {
+                                    terminal_classes
+                                        .get((terminal_offset + terminal) as usize)
+                                        .copied()
+                                        .unwrap_or(terminal_offset + terminal)
+                                } else {
+                                    terminal
+                                };
+                                (
+                                    terminal_class,
+                                    component_action_signature_remapped(
+                                        action,
+                                        local_state_classes,
+                                        local_nonterminal_classes,
+                                    ),
+                                    table.forwarded_shifts.contains(&(local_state, terminal)),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        actions.sort();
+
+                        let mut gotos = table.goto[local_state as usize]
+                            .iter()
+                            .map(|(&nonterminal, &(target, replace))| {
+                                (
+                                    local_nonterminal_classes
+                                        .get(nonterminal as usize)
+                                        .copied()
+                                        .unwrap_or(nonterminal),
+                                    local_state_classes[target as usize],
+                                    replace,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        gotos.sort_unstable();
+
+                        let mut advance = if table.advance.len() == table.num_states as usize {
+                            table.advance[local_state as usize]
+                                .iter()
+                                .map(|terminal| {
+                                    if terminal < table.num_terminals as usize {
+                                        terminal_classes
+                                            .get(terminal_offset as usize + terminal)
+                                            .copied()
+                                            .unwrap_or(terminal_offset + terminal as u32)
+                                    } else {
+                                        terminal as u32
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        advance.sort_unstable();
+                        advance.dedup();
+
+                        ComponentStateSignature {
+                            previous_class: classes[(state_offset + local_state) as usize],
+                            actions,
+                            gotos,
+                            advance,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
         let mut class_by_signature = FxHashMap::<ComponentStateSignature, u32>::default();
         let mut next_classes = vec![0u32; virtual_state_count];
-        for (component_index, child) in children.iter().enumerate() {
-            let table = &child.constraint.table;
+        for (component_index, signatures) in signatures_by_component.into_iter().enumerate() {
             let state_offset = virtual_state_offsets[component_index];
-            let terminal_offset = composed.terminal_offsets[component_index + 1];
-            let nonterminal_offset = child_nonterminal_offsets[component_index];
-            let local_state_classes = (0..table.num_states as usize)
-                .map(|state| classes[state_offset as usize + state])
-                .collect::<Vec<_>>();
-            let local_nonterminal_classes = (0..table.nonterminal_display_names.len())
-                .map(|nonterminal| {
-                    nonterminal_classes
-                        .get(nonterminal_offset as usize + nonterminal)
-                        .copied()
-                        .unwrap_or(nonterminal_offset + nonterminal as u32)
-                })
-                .collect::<Vec<_>>();
-
-            for local_state in 0..table.num_states {
-                let mut actions = table.action[local_state as usize]
-                    .iter()
-                    .map(|(terminal, action)| {
-                        let terminal_class = if terminal < table.num_terminals {
-                            terminal_classes
-                                .get((terminal_offset + terminal) as usize)
-                                .copied()
-                                .unwrap_or(terminal_offset + terminal)
-                        } else {
-                            terminal
-                        };
-                        let normalized = remap_action_for_structural_quotient(
-                            action,
-                            &local_state_classes,
-                            &local_nonterminal_classes,
-                        );
-                        (
-                            terminal_class,
-                            component_action_signature(&normalized),
-                            table.forwarded_shifts.contains(&(local_state, terminal)),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                actions.sort();
-
-                let mut gotos = table.goto[local_state as usize]
-                    .iter()
-                    .map(|(&nonterminal, &(target, replace))| {
-                        (
-                            local_nonterminal_classes
-                                .get(nonterminal as usize)
-                                .copied()
-                                .unwrap_or(nonterminal_offset + nonterminal),
-                            local_state_classes[target as usize],
-                            replace,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                gotos.sort_unstable();
-
-                let mut advance = if table.advance.len() == table.num_states as usize {
-                    table.advance[local_state as usize]
-                        .iter()
-                        .map(|terminal| {
-                            if terminal < table.num_terminals as usize {
-                                terminal_classes
-                                    .get(terminal_offset as usize + terminal)
-                                    .copied()
-                                    .unwrap_or(terminal_offset + terminal as u32)
-                            } else {
-                                terminal as u32
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                advance.sort_unstable();
-                advance.dedup();
-
-                let virtual_state = state_offset + local_state;
-                let signature = ComponentStateSignature {
-                    previous_class: classes[virtual_state as usize],
-                    actions,
-                    gotos,
-                    advance,
-                };
+            for (local_state, signature) in signatures.into_iter().enumerate() {
+                let virtual_state = state_offset as usize + local_state;
                 let next = class_by_signature.len() as u32;
-                next_classes[virtual_state as usize] =
+                next_classes[virtual_state] =
                     *class_by_signature.entry(signature).or_insert(next);
             }
         }
@@ -806,8 +1186,9 @@ pub(super) fn contextually_share_composed_states(
     composed: &mut ComposedTable,
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
+    terminal_classes: &[u32],
+    nonterminal_classes: &[u32],
 ) -> (usize, usize) {
-    let terminal_classes = composition_terminal_classes(parent, children, composed);
     if terminal_classes
         .iter()
         .enumerate()
@@ -815,34 +1196,48 @@ pub(super) fn contextually_share_composed_states(
     {
         return (0, 0);
     }
-    let nonterminal_classes = structural_nonterminal_classes(
-        &composed.table,
-        &terminal_classes,
-        &composed.boundary_nonterminals,
-    );
+    let groups_started_at = compose_profile_enabled().then(Instant::now);
     let groups = component_structural_state_groups(
         parent,
         children,
         composed,
-        &terminal_classes,
-        &nonterminal_classes,
+        terminal_classes,
+        nonterminal_classes,
     );
+    let groups_ms = groups_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
     if groups.is_empty() {
         return (0, 0);
     }
     let before = composed.table.num_states as usize;
+    let share_started_at = compose_profile_enabled().then(Instant::now);
     let state_map = composed
         .table
         .share_context_distinguishable_states_exact(&groups);
+    let share_ms = share_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
+    let remap_started_at = compose_profile_enabled().then(Instant::now);
     remap_composed_state_relations(composed, &state_map);
+    let remap_ms = remap_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
     let after = composed.table.num_states as usize;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_contextual_structural_sharing] groups={} saved={} group_ms={groups_ms:.3} share_ms={share_ms:.3} relation_remap_ms={remap_ms:.3}",
+            groups.len(),
+            before.saturating_sub(after),
+        );
+    }
     (groups.len(), before.saturating_sub(after))
 }
 
 pub(super) fn quotient_composed_table_structurally(
     composed: &mut ComposedTable,
-    parent: &Constraint,
-    children: &[CompiledSubgrammarInput<'_>],
+    terminal_analysis: &TerminalClassAnalysis,
+    nonterminal_classes: &[u32],
 ) -> Result<StructuralSharingReport, String> {
     let states_before = composed.table.num_states as usize;
     let nonterminals_before = composed.table.nonterminal_display_names.len();
@@ -856,7 +1251,7 @@ pub(super) fn quotient_composed_table_structurally(
         });
     }
 
-    let terminal_classes = composition_terminal_classes(parent, children, composed);
+    let terminal_classes = &terminal_analysis.classes;
     let terminal_aliases = terminal_classes
         .iter()
         .enumerate()
@@ -865,6 +1260,9 @@ pub(super) fn quotient_composed_table_structurally(
     if terminal_aliases == 0 {
         return Ok(StructuralSharingReport {
             terminal_aliases,
+            terminal_structural_matches: terminal_analysis.structural_matches,
+            terminal_exact_checks: terminal_analysis.exact_checks,
+            terminal_exact_unknown: terminal_analysis.exact_unknown,
             nonterminals_before,
             nonterminal_classes: nonterminals_before,
             states_before,
@@ -873,16 +1271,41 @@ pub(super) fn quotient_composed_table_structurally(
         });
     }
 
-    let nonterminal_classes = structural_nonterminal_classes(
-        &composed.table,
-        &terminal_classes,
-        &composed.boundary_nonterminals,
-    );
     let nonterminal_class_count = nonterminal_classes
         .iter()
         .copied()
         .max()
         .map_or(0, |class| class as usize + 1);
+    // This whole-table bisimulation is only a secondary cleanup after the
+    // caller-sensitive quotient. On large linked tables it repeatedly scans
+    // every row and can cost far more build time than the few additional
+    // states it removes. Skipping it is semantics-preserving: it merely leaves
+    // some exact states unmerged. Keep it for smaller tables where it is cheap,
+    // with an environment override for measurement.
+    let ordinary_max_states = std::env::var("GLRMASK_COMPOSE_ORDINARY_STRUCTURAL_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4_096);
+    if states_before > ordinary_max_states {
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_ordinary_structural_quotient] skipped=true states={} limit={} saved=0 state_classes_ms=0.000 materialize_ms=0.000",
+                states_before,
+                ordinary_max_states,
+            );
+        }
+        return Ok(StructuralSharingReport {
+            terminal_aliases,
+            terminal_structural_matches: terminal_analysis.structural_matches,
+            terminal_exact_checks: terminal_analysis.exact_checks,
+            terminal_exact_unknown: terminal_analysis.exact_unknown,
+            nonterminals_before,
+            nonterminal_classes: nonterminal_class_count,
+            states_before,
+            states_after: states_before,
+            ..StructuralSharingReport::default()
+        });
+    }
     // Structural nonterminal equivalence is intentionally *not* used by this
     // ordinary LR quotient. Equal nonterminal languages do not imply equal
     // goto behavior in one caller state. Keep concrete nonterminal identity
@@ -890,16 +1313,28 @@ pub(super) fn quotient_composed_table_structurally(
     // only to propose candidates and then preserves source behavior with
     // stack-context guards.
     let nonterminal_identity = (0..nonterminals_before as u32).collect::<Vec<_>>();
+    let state_classes_started_at = compose_profile_enabled().then(Instant::now);
     let state_classes =
         structural_state_classes(&composed.table, &terminal_classes, &nonterminal_identity);
+    let state_classes_ms = state_classes_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
     let state_class_count = state_classes
         .iter()
         .copied()
         .max()
         .map_or(0, |class| class as usize + 1);
     if state_class_count == states_before {
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_ordinary_structural_quotient] saved=0 state_classes_ms={state_classes_ms:.3} materialize_ms=0.000",
+            );
+        }
         return Ok(StructuralSharingReport {
             terminal_aliases,
+            terminal_structural_matches: terminal_analysis.structural_matches,
+            terminal_exact_checks: terminal_analysis.exact_checks,
+            terminal_exact_unknown: terminal_analysis.exact_unknown,
             nonterminals_before,
             nonterminal_classes: nonterminal_class_count,
             states_before,
@@ -913,6 +1348,7 @@ pub(super) fn quotient_composed_table_structurally(
         members[class as usize].push(state as u32);
     }
 
+    let materialize_started_at = compose_profile_enabled().then(Instant::now);
     let old_action = std::mem::take(&mut composed.table.action);
     let old_goto = std::mem::take(&mut composed.table.goto);
     let old_advance = std::mem::take(&mut composed.table.advance);
@@ -996,9 +1432,21 @@ pub(super) fn quotient_composed_table_structurally(
     }
     composed.table.rebuild_guarded_shift_index();
     composed.table.compress_default_action_rows();
+    let materialize_ms = materialize_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_ordinary_structural_quotient] saved={} state_classes_ms={state_classes_ms:.3} materialize_ms={materialize_ms:.3}",
+            states_before.saturating_sub(state_class_count),
+        );
+    }
 
     Ok(StructuralSharingReport {
         terminal_aliases,
+        terminal_structural_matches: terminal_analysis.structural_matches,
+        terminal_exact_checks: terminal_analysis.exact_checks,
+        terminal_exact_unknown: terminal_analysis.exact_unknown,
         nonterminals_before,
         nonterminal_classes: nonterminal_class_count,
         states_before,

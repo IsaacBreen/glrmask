@@ -6,7 +6,8 @@ use std::io::{BufWriter, Read, Write};
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
-const CONSTRAINT_VERSION: u16 = 10;
+const PREVIOUS_EXPRLESS_CONSTRAINT_VERSION: u16 = 10;
+const CONSTRAINT_VERSION: u16 = 11;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -22,6 +23,20 @@ struct ConstraintArtifactV10Ref<'a> {
 struct ConstraintArtifactV10 {
     constraint: Constraint,
     ignore_expr: Option<Expr>,
+}
+
+#[derive(Serialize)]
+struct ConstraintArtifactV11Ref<'a> {
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+    terminal_exprs: Option<&'a [Expr]>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV11 {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    terminal_exprs: Option<Vec<Expr>>,
 }
 
 struct CountingWriter<W> {
@@ -86,9 +101,10 @@ impl Constraint {
                 );
                 bincode::serialize_into(
                     &mut buffered,
-                    &ConstraintArtifactV10Ref {
+                    &ConstraintArtifactV11Ref {
                         constraint: self,
                         ignore_expr: &self.ignore_expr,
+                        terminal_exprs: self.tokenizer.terminal_exprs(),
                     },
                 )
                     .expect("Constraint serialization should succeed");
@@ -122,6 +138,7 @@ impl Constraint {
             version,
             LEGACY_CONSTRAINT_VERSION
                 | PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
+                | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -147,7 +164,9 @@ impl Constraint {
         let mut raw;
         let serialized = if matches!(
             version,
-            PREVIOUS_COMPRESSED_CONSTRAINT_VERSION | CONSTRAINT_VERSION
+            PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
+                | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
+                | CONSTRAINT_VERSION
         ) {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
                 return Err(crate::GlrMaskError::Serialization(
@@ -199,6 +218,16 @@ impl Constraint {
             payload
         };
         let mut constraint = if version == CONSTRAINT_VERSION {
+            let artifact: ConstraintArtifactV11 = bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            let mut constraint = artifact.constraint;
+            constraint.ignore_expr = artifact.ignore_expr;
+            constraint
+                .tokenizer
+                .restore_terminal_exprs(artifact.terminal_exprs)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            constraint
+        } else if version == PREVIOUS_EXPRLESS_CONSTRAINT_VERSION {
             let artifact: ConstraintArtifactV10 = bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             let mut constraint = artifact.constraint;
@@ -322,11 +351,37 @@ mod tests {
     }
 
     #[test]
+    fn constraint_envelope_loads_previous_exprless_v10_payload() {
+        let constraint = ignored_constraint();
+        let raw = bincode::serialize(&ConstraintArtifactV10Ref {
+            constraint: &constraint,
+            ignore_expr: &constraint.ignore_expr,
+        })
+        .unwrap();
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
+        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
+        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let loaded = Constraint::load(&envelope(PREVIOUS_EXPRLESS_CONSTRAINT_VERSION, &payload))
+            .expect("v10 exprless artifact should remain loadable");
+
+        assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
+        assert!(loaded.tokenizer.terminal_exprs().is_none());
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
     fn current_constraint_artifact_preserves_global_ignore_descriptor() {
         let constraint = ignored_constraint();
         let loaded = Constraint::load(&constraint.save()).unwrap();
         assert!(constraint.ignore_expr.is_some());
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
+        assert_eq!(
+            loaded.tokenizer.terminal_exprs(),
+            constraint.tokenizer.terminal_exprs(),
+            "current artifacts should retain terminal proof expressions",
+        );
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

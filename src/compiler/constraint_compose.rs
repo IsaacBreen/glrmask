@@ -61,8 +61,9 @@ mod structural_sharing;
 mod runtime_lexer_product;
 use runtime_lexer_product::maybe_install_runtime_lexer_product;
 use structural_sharing::{
-    StructuralSharingReport, contextually_share_composed_states,
-    quotient_composed_table_structurally, structural_sharing_enabled,
+    StructuralSharingReport, composition_terminal_classes, contextually_share_composed_states,
+    quotient_composed_table_structurally, structural_nonterminal_classes,
+    structural_sharing_enabled,
 };
 
 #[inline]
@@ -4818,9 +4819,25 @@ pub(crate) fn compose_constraints(
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
     let structural_report = if structural_sharing_enabled() {
+        let terminal_analysis = composition_terminal_classes(parent, children, &composed_table);
+        let nonterminal_classes = structural_nonterminal_classes(
+            &composed_table.table,
+            &terminal_analysis.classes,
+            &composed_table.boundary_nonterminals,
+        );
         let (candidate_groups, contextual_states_saved) =
-            contextually_share_composed_states(&mut composed_table, parent, children);
-        let mut report = quotient_composed_table_structurally(&mut composed_table, parent, children)?;
+            contextually_share_composed_states(
+                &mut composed_table,
+                parent,
+                children,
+                &terminal_analysis.classes,
+                &nonterminal_classes,
+            );
+        let mut report = quotient_composed_table_structurally(
+            &mut composed_table,
+            &terminal_analysis,
+            &nonterminal_classes,
+        )?;
         report.contextual_candidate_groups = candidate_groups;
         report.contextual_states_saved = contextual_states_saved;
         report.states_before = structural_states_before;
@@ -4837,9 +4854,12 @@ pub(crate) fn compose_constraints(
     };
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
+            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} terminal_structural_matches={} terminal_exact_checks={} terminal_exact_unknown={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
             structural_sharing_enabled(),
             structural_report.terminal_aliases,
+            structural_report.terminal_structural_matches,
+            structural_report.terminal_exact_checks,
+            structural_report.terminal_exact_unknown,
             structural_report.nonterminals_before,
             structural_report.nonterminal_classes,
             structural_report.contextual_candidate_groups,
@@ -5242,10 +5262,25 @@ pub(crate) fn compose_constraints_owned_parent(
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
     let structural_report = if structural_sharing_enabled() {
+        let terminal_analysis = composition_terminal_classes(&parent, children, &composed_table);
+        let nonterminal_classes = structural_nonterminal_classes(
+            &composed_table.table,
+            &terminal_analysis.classes,
+            &composed_table.boundary_nonterminals,
+        );
         let (candidate_groups, contextual_states_saved) =
-            contextually_share_composed_states(&mut composed_table, &parent, children);
-        let mut report =
-            quotient_composed_table_structurally(&mut composed_table, &parent, children)?;
+            contextually_share_composed_states(
+                &mut composed_table,
+                &parent,
+                children,
+                &terminal_analysis.classes,
+                &nonterminal_classes,
+            );
+        let mut report = quotient_composed_table_structurally(
+            &mut composed_table,
+            &terminal_analysis,
+            &nonterminal_classes,
+        )?;
         report.contextual_candidate_groups = candidate_groups;
         report.contextual_states_saved = contextual_states_saved;
         report.states_before = structural_states_before;
@@ -5262,9 +5297,12 @@ pub(crate) fn compose_constraints_owned_parent(
     };
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
+            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} terminal_structural_matches={} terminal_exact_checks={} terminal_exact_unknown={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
             structural_sharing_enabled(),
             structural_report.terminal_aliases,
+            structural_report.terminal_structural_matches,
+            structural_report.terminal_exact_checks,
+            structural_report.terminal_exact_unknown,
             structural_report.nonterminals_before,
             structural_report.nonterminal_classes,
             structural_report.contextual_candidate_groups,
@@ -5850,6 +5888,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
+        let loaded_child = Constraint::load(&child.save()).unwrap();
         let children = [
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "LEFT"),
@@ -5857,7 +5896,7 @@ mod tests {
             },
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "RIGHT"),
-                constraint: &child,
+                constraint: &loaded_child,
             },
         ];
         let table_inputs = children
@@ -5871,9 +5910,38 @@ mod tests {
             .collect::<Vec<_>>();
         let mut composed = compose_subgrammar_tables(&parent.table, &table_inputs).unwrap();
         let before = composed.table.num_states;
+        let terminal_analysis = composition_terminal_classes(&parent, &children, &composed);
+        assert!(
+            loaded_child.tokenizer.terminal_exprs().is_some(),
+            "current serialized artifacts should retain terminal proof expressions",
+        );
+        assert!(
+            terminal_analysis
+                .classes
+                .iter()
+                .enumerate()
+                .any(|(terminal, &class)| terminal as u32 != class),
+            "the separately loaded child should still form terminal aliases",
+        );
+        let nonterminal_classes = structural_nonterminal_classes(
+            &composed.table,
+            &terminal_analysis.classes,
+            &composed.boundary_nonterminals,
+        );
         let (candidate_groups, contextual_saved) =
-            contextually_share_composed_states(&mut composed, &parent, &children);
-        let _ = quotient_composed_table_structurally(&mut composed, &parent, &children).unwrap();
+            contextually_share_composed_states(
+                &mut composed,
+                &parent,
+                &children,
+                &terminal_analysis.classes,
+                &nonterminal_classes,
+            );
+        let _ = quotient_composed_table_structurally(
+            &mut composed,
+            &terminal_analysis,
+            &nonterminal_classes,
+        )
+        .unwrap();
 
         assert!(candidate_groups > 0);
         assert!(
@@ -5905,7 +5973,7 @@ mod tests {
         )
         .unwrap();
         let runtime_composed = parent
-            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &loaded_child)], &vocab)
             .unwrap();
         assert_constraints_equivalent_on_reachable_prefixes(
             &runtime_composed,
@@ -5971,8 +6039,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut shared = compose_subgrammar_tables(&parent.table, &table_inputs).unwrap();
+        let terminal_analysis = composition_terminal_classes(&parent, &children, &shared);
+        let nonterminal_classes = structural_nonterminal_classes(
+            &shared.table,
+            &terminal_analysis.classes,
+            &shared.boundary_nonterminals,
+        );
         let (candidate_count, saved) =
-            contextually_share_composed_states(&mut shared, &parent, &children);
+            contextually_share_composed_states(
+                &mut shared,
+                &parent,
+                &children,
+                &terminal_analysis.classes,
+                &nonterminal_classes,
+            );
         assert!(candidate_count > 0, "the duplicate child states should be detected structurally");
         assert_eq!(
             saved, 0,

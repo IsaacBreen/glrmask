@@ -1334,6 +1334,79 @@ impl GLRTable {
                 }
             }
         }
+        // Reduction macro compilation may need every LR state having a goto
+        // for a reduced nonterminal after the reconstructed suffix is popped
+        // completely. Build that exact inverse index once; repeatedly scanning
+        // all goto rows inside each speculative reduction is O(groups × rows)
+        // and dominated large subgrammar compositions.
+        let mut goto_sources_by_nonterminal =
+            vec![Vec::<u32>::new(); self.nonterminal_display_names.len()];
+        for (state, row) in self.goto[..original_len].iter().enumerate() {
+            for (&nonterminal, _) in row.iter() {
+                if nonterminal as usize >= goto_sources_by_nonterminal.len() {
+                    goto_sources_by_nonterminal
+                        .resize_with(nonterminal as usize + 1, Vec::new);
+                }
+                goto_sources_by_nonterminal[nonterminal as usize].push(state as u32);
+            }
+        }
+
+        // Cheap first pass: any state used as immediate-predecessor provenance
+        // by a structurally viable candidate cannot itself be shared. Compute
+        // that necessary protection before compiling any suffix-effect macro
+        // rows. This may conservatively protect a predecessor for a candidate
+        // whose later macro compilation would fail, but can only lose an
+        // optimization; it cannot make an invalid merge admissible. In the
+        // common duplicated-subgrammar case this removes a large fraction of
+        // speculative interior/caller groups before the expensive exact row
+        // compilation.
+        let mut early_provenance_protected = vec![false; original_len];
+        for input_group in groups {
+            let mut group = input_group
+                .iter()
+                .copied()
+                .filter(|&state| state < original_num_states)
+                .collect::<Vec<_>>();
+            group.sort_unstable();
+            group.dedup();
+            if group.len() < 2
+                || group.iter().any(|&state| {
+                    protected[state as usize]
+                        || unsafe_predecessor[state as usize]
+                        || predecessors[state as usize].is_empty()
+                })
+            {
+                continue;
+            }
+            let Some(plan) = context_share_provenance_plan(&group, &predecessors) else {
+                continue;
+            };
+            let first_goto = &self.goto[group[0] as usize];
+            let goto_ok = group[1..].iter().all(|&state| {
+                let row = &self.goto[state as usize];
+                row.len() == first_goto.len()
+                    && first_goto
+                        .iter()
+                        .all(|(&nonterminal, &target)| row.get(&nonterminal) == Some(&target))
+            });
+            if !goto_ok {
+                continue;
+            }
+            // Accept cannot be represented by a predecessor-guarded macro, so
+            // reject such groups before allowing them to reserve provenance.
+            if group.iter().any(|&state| {
+                self.action[state as usize]
+                    .values()
+                    .any(|action| matches!(action, Action::Accept | Action::Split { accept: true, .. }))
+            }) {
+                continue;
+            }
+            for member_predecessors in &plan.predecessors_by_member {
+                for &predecessor in member_predecessors {
+                    early_provenance_protected[predecessor as usize] = true;
+                }
+            }
+        }
         // First establish which proposed classes are individually viable.
         // Only *those* classes are allowed to reserve their predecessor IDs as
         // provenance tags. Reserving predecessors for every speculative class
@@ -1402,6 +1475,18 @@ impl GLRTable {
                 continue;
             }
 
+            if group
+                .iter()
+                .any(|&state| early_provenance_protected[state as usize])
+            {
+                if debug_context_share {
+                    eprintln!(
+                        "[glrmask/debug][context_state_share] reject=early_provenance group={group:?}",
+                    );
+                }
+                continue;
+            }
+
             // Build the exact row against the unmodified table. Each initial
             // frame reconstructs the concrete member only when the immediate
             // predecessor belongs to that member's certified, disjoint
@@ -1424,13 +1509,13 @@ impl GLRTable {
                         state,
                         &plan.predecessors_by_member[member_index],
                     );
-                    if collect_suffix_effects_from_frame(
+                    if collect_context_share_effects_from_frame(
                         self,
                         terminal,
                         state,
                         action,
                         frame,
-                        &mut FxHashSet::default(),
+                        &goto_sources_by_nonterminal,
                         &mut effects,
                         &mut accepts,
                     )
@@ -1471,6 +1556,7 @@ impl GLRTable {
             }
             plan.generated_guard_states.sort_unstable();
             plan.generated_guard_states.dedup();
+            plan.action_row = action_row;
             viable.push(plan);
         }
 
@@ -1520,9 +1606,10 @@ impl GLRTable {
             return (0..original_num_states).collect();
         }
 
-        // Rebuild the rows once more now that the accepted classes are fixed;
-        // this avoids retaining temporary rows and lets every target be mapped
-        // directly to its final shared-state ID.
+        // The exact macro rows were already compiled during viability. Once
+        // the accepted classes are fixed, transport their embedded state IDs
+        // through the final sharing map rather than recomputing the same
+        // reduction/suffix closure a second time.
         let mut share_map = (0..original_num_states).collect::<Vec<_>>();
         let shared_base = original_num_states;
         for (index, plan) in accepted.iter().enumerate() {
@@ -1537,53 +1624,13 @@ impl GLRTable {
         let mut shared_rows = Vec::<(ActionRow, GotoRow, Option<BitSet>)>::new();
         for plan in &accepted {
             let group = &plan.group;
-            let mut terminals = BTreeSet::<TerminalID>::new();
-            for &state in group {
-                terminals.extend(self.action[state as usize].keys());
-            }
-            let mut action_row = ActionRow::default();
-            for terminal in terminals {
-                let mut effects = Vec::<GuardedStackShift>::new();
-                let mut accepts = 0usize;
-                for (member_index, &state) in group.iter().enumerate() {
-                    let Some(action) = self.action[state as usize].get(&terminal) else {
-                        continue;
-                    };
-                    let frame = context_share_frame_for_member(
-                        state,
-                        &plan.predecessors_by_member[member_index],
-                    );
-                    collect_suffix_effects_from_frame(
-                        self,
-                        terminal,
-                        state,
-                        action,
-                        frame,
-                        &mut FxHashSet::default(),
-                        &mut effects,
-                        &mut accepts,
-                    )
-                    .expect("accepted contextual-sharing row must rebuild exactly");
+            let mut action_row = plan.action_row.clone();
+            remap_action_row_targets_in_place(&mut action_row, &share_map);
+            action_row.for_each_value_mut(|action| {
+                if let Action::GuardedStackShifts(effects) = action {
+                    normalize_guarded_effects_for_suffix_quotient(effects);
                 }
-                debug_assert_eq!(accepts, 0);
-                normalize_guarded_effects_for_suffix_quotient(&mut effects);
-                for effect in &mut effects {
-                    for guard in &mut effect.guards {
-                        for state in &mut guard.states {
-                            *state = share_map[*state as usize];
-                        }
-                        guard.states.sort_unstable();
-                        guard.states.dedup();
-                    }
-                    for state in &mut effect.pushes {
-                        *state = share_map[*state as usize];
-                    }
-                }
-                normalize_guarded_effects_for_suffix_quotient(&mut effects);
-                if !effects.is_empty() {
-                    action_row.insert(terminal, Action::GuardedStackShifts(effects));
-                }
-            }
+            });
 
             let goto_row = self.goto[group[0] as usize]
                 .iter()
@@ -2965,6 +3012,7 @@ fn action_has_multi_stack_shifts(action: &Action) -> bool {
             state,
             action,
             frame,
+            None,
             &mut FxHashSet::default(),
             effects,
             accepts,
@@ -3096,6 +3144,7 @@ fn collect_suffix_effects_from_frame(
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
+    goto_sources_by_nonterminal: Option<&[Vec<u32>]>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
     effects: &mut Vec<GuardedStackShift>,
     accepts: &mut usize,
@@ -3150,7 +3199,13 @@ fn collect_suffix_effects_from_frame(
                 Ok(())
             }
             Action::Reduce(nt, len) => {
-                for frame in reduce_suffix_frame(table, frame, *nt, *len)? {
+                for frame in reduce_suffix_frame(
+                    table,
+                    frame,
+                    *nt,
+                    *len,
+                    goto_sources_by_nonterminal,
+                )? {
                     let Some(&next_state) = frame.pushes.last() else {
                         continue;
                     };
@@ -3163,6 +3218,7 @@ fn collect_suffix_effects_from_frame(
                         next_state,
                         next_action,
                         frame,
+                        goto_sources_by_nonterminal,
                         visiting,
                         effects,
                         accepts,
@@ -3182,6 +3238,7 @@ fn collect_suffix_effects_from_frame(
                         state,
                         &shift_action,
                         frame.clone(),
+                        goto_sources_by_nonterminal,
                         visiting,
                         effects,
                         accepts,
@@ -3195,6 +3252,7 @@ fn collect_suffix_effects_from_frame(
                         state,
                         &reduce_action,
                         frame.clone(),
+                        goto_sources_by_nonterminal,
                         visiting,
                         effects,
                         accepts,
@@ -3213,16 +3271,108 @@ fn collect_suffix_effects_from_frame(
     result
 }
 
+/// Contextual-sharing specialization of `collect_suffix_effects_from_frame`.
+///
+/// Nonrecursive consuming actions are exact one-step stack algebra and cannot
+/// revisit an action/frame pair, so allocating a fresh cycle-detection hash set
+/// for them is pure overhead. Reduction-bearing actions retain the generic
+/// recursive compiler unchanged.
+fn collect_context_share_effects_from_frame(
+    table: &GLRTable,
+    terminal: TerminalID,
+    state: u32,
+    action: &Action,
+    frame: StackEffectFrame,
+    goto_sources_by_nonterminal: &[Vec<u32>],
+    effects: &mut Vec<GuardedStackShift>,
+    accepts: &mut usize,
+) -> Result<(), ()> {
+    match action {
+        Action::Skip => {
+            effects.push(frame_to_guarded_shift(frame));
+            Ok(())
+        }
+        Action::Shift(target, replace) => {
+            let mut frame = frame;
+            let effective_replace =
+                *replace && !table.forwarded_shifts.contains(&(state, terminal));
+            push_transition_to_frame(&mut frame, *target, effective_replace);
+            effects.push(frame_to_guarded_shift(frame));
+            Ok(())
+        }
+        Action::ReplaceShifts(targets) => {
+            for &target in targets.iter() {
+                let mut next = frame.clone();
+                pop_frame(&mut next, 1);
+                next.pushes.push(target);
+                effects.push(frame_to_guarded_shift(next));
+            }
+            Ok(())
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                let mut next = frame.clone();
+                pop_frame(&mut next, shift.pop);
+                next.pushes.extend_from_slice(&shift.pushes);
+                effects.push(frame_to_guarded_shift(next));
+            }
+            Ok(())
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                if let Some(next) =
+                    compose_guarded_shift_with_frame(frame.clone(), shift).ok_or(())?
+                {
+                    effects.push(frame_to_guarded_shift(next));
+                }
+            }
+            Ok(())
+        }
+        Action::Split {
+            shift: Some((target, replace)),
+            reduces,
+            accept: false,
+        } if reduces.is_empty() => {
+            let mut frame = frame;
+            let effective_replace =
+                *replace && !table.forwarded_shifts.contains(&(state, terminal));
+            push_transition_to_frame(&mut frame, *target, effective_replace);
+            effects.push(frame_to_guarded_shift(frame));
+            Ok(())
+        }
+        _ => collect_suffix_effects_from_frame(
+            table,
+            terminal,
+            state,
+            action,
+            frame,
+            Some(goto_sources_by_nonterminal),
+            &mut FxHashSet::default(),
+            effects,
+            accepts,
+        ),
+    }
+}
+
 fn reduce_suffix_frame(
     table: &GLRTable,
     mut frame: StackEffectFrame,
     nt: NonterminalID,
     len: u32,
+    goto_sources_by_nonterminal: Option<&[Vec<u32>]>,
 ) -> Result<Vec<StackEffectFrame>, ()> {
     pop_frame(&mut frame, len);
 
     let goto_froms: Vec<(u32, Option<Vec<u32>>)> = if let Some(&state) = frame.pushes.last() {
         vec![(state, None)]
+    } else if let Some(goto_sources_by_nonterminal) = goto_sources_by_nonterminal {
+        goto_sources_by_nonterminal
+            .get(nt as usize)
+            .into_iter()
+            .flatten()
+            .copied()
+            .map(|state| (state, Some(vec![state])))
+            .collect()
     } else {
         table
             .goto
@@ -4224,6 +4374,10 @@ struct ContextStateSharePlan {
     group: Vec<u32>,
     predecessors_by_member: Vec<Vec<u32>>,
     generated_guard_states: Vec<u32>,
+    /// Exact macro row compiled against the original table during viability.
+    /// Once the final sharing map is known, remapping its embedded state IDs is
+    /// sufficient; recompiling the same suffix effects would be redundant.
+    action_row: ActionRow,
 }
 
 fn context_share_provenance_plan(
@@ -4249,6 +4403,7 @@ fn context_share_provenance_plan(
         group: group.to_vec(),
         predecessors_by_member,
         generated_guard_states: Vec::new(),
+        action_row: ActionRow::default(),
     })
 }
 
