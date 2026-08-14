@@ -3239,27 +3239,49 @@ pub fn compute_state_map(
     let num_candidates = candidate_representatives.len();
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let raw_active_language = raw_active_language_states(tokenizer, active_groups);
+    let parallel_candidate_work = rayon::current_num_threads() > 1
+        && num_candidates >= 16_384
+        && std::env::var_os("GLRMASK_DISABLE_NFA_RESTRICTED_TARGET_PARALLEL").is_none();
 
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let start_configs_started_at = profile_timing.then(std::time::Instant::now);
-    let start_configs = candidate_representatives
-        .iter()
-        .map(|&state| {
-            let config = project_raw_config(
-                singleton_closures[state].to_vec(),
-                raw_active_language.as_deref(),
-            );
-            intern_config(config, &mut config_ids, &mut configs)
-        })
-        .collect::<Vec<_>>();
+    let start_configs = if parallel_candidate_work {
+        const START_CONFIG_BATCH: usize = 16_384;
+        let mut start_configs = vec![u32::MAX; num_candidates];
+        for batch_start in (0..num_candidates).step_by(START_CONFIG_BATCH) {
+            let batch_end = (batch_start + START_CONFIG_BATCH).min(num_candidates);
+            let projected = candidate_representatives[batch_start..batch_end]
+                .par_iter()
+                .map(|&state| {
+                    project_raw_config(
+                        singleton_closures[state].to_vec(),
+                        raw_active_language.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (offset, config) in projected.into_iter().enumerate() {
+                start_configs[batch_start + offset] =
+                    intern_config(config, &mut config_ids, &mut configs);
+            }
+        }
+        start_configs
+    } else {
+        candidate_representatives
+            .iter()
+            .map(|&state| {
+                let config = project_raw_config(
+                    singleton_closures[state].to_vec(),
+                    raw_active_language.as_deref(),
+                );
+                intern_config(config, &mut config_ids, &mut configs)
+            })
+            .collect::<Vec<_>>()
+    };
     let start_configs_ms = start_configs_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
     let observations_started_at = profile_timing.then(std::time::Instant::now);
-    let parallel_candidate_work = rayon::current_num_threads() > 1
-        && num_candidates >= 16_384
-        && std::env::var_os("GLRMASK_DISABLE_NFA_RESTRICTED_TARGET_PARALLEL").is_none();
     let observations = if parallel_candidate_work {
         start_configs
             .par_iter()
