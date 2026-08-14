@@ -1086,7 +1086,7 @@ impl GLRTable {
 
 
     pub(super) fn prune_unreachable_states(&mut self) {
-        let _ = self.prune_unreachable_states_with_mapping();
+        let _ = self.prune_unreachable_states_impl(false);
     }
 
     /// Remove unreachable states and return the old-state -> new-state map.
@@ -1095,8 +1095,13 @@ impl GLRTable {
     /// Composition-time structural sharing needs this map to transport the
     /// already-compiled parser-DWA label relation through a table compaction.
     pub fn prune_unreachable_states_with_mapping(&mut self) -> Vec<u32> {
+        self.prune_unreachable_states_impl(true)
+            .unwrap_or_default()
+    }
+
+    fn prune_unreachable_states_impl(&mut self, return_mapping: bool) -> Option<Vec<u32>> {
         if self.num_states == 0 {
-            return Vec::new();
+            return return_mapping.then(Vec::new);
         }
 
         let mut reachable = vec![false; self.num_states as usize];
@@ -1113,7 +1118,7 @@ impl GLRTable {
         }
 
         if reachable.iter().all(|&is_reachable| is_reachable) {
-            return (0..self.num_states).collect();
+            return return_mapping.then(|| (0..self.num_states).collect());
         }
 
         let mut mapping = vec![u32::MAX; self.num_states as usize];
@@ -1181,7 +1186,7 @@ impl GLRTable {
             })
             .collect();
         self.num_states = kept.len() as u32;
-        mapping
+        return_mapping.then_some(mapping)
     }
 
     /// Replace several context-distinguishable LR states by one physical LR

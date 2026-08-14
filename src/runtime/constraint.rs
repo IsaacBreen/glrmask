@@ -615,7 +615,9 @@ impl Constraint {
             token_ids
         };
 
-        super::commit::prime_initial_commits(self, &state.state, &token_ids);
+        let initial_state = &state.state;
+        let buffers = &mut state.buffers;
+        super::commit::prime_initial_commits(self, initial_state, buffers, &token_ids);
     }
 
     /// Return the direct-dynamic vocabulary, materializing it only when a

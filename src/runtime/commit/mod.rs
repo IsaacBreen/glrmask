@@ -1166,12 +1166,12 @@ fn commit_token_impl(
 pub(crate) fn prime_initial_commits(
     constraint: &Constraint,
     initial_state: &ParserStateMap,
+    buffers: &mut CommitBuffers,
     token_ids: &[u32],
 ) {
-    let mut buffers = CommitBuffers::default();
     for &token_id in token_ids {
         let mut state = initial_state.clone();
-        let _ = commit_token_impl(constraint, &mut state, &mut buffers, token_id);
+        let _ = commit_token_impl(constraint, &mut state, buffers, token_id);
     }
 }
 
