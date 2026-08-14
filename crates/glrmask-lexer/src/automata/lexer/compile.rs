@@ -1163,6 +1163,10 @@ struct ExclusionCompilePlan {
     intersections: BTreeMap<u32, BTreeSet<u32>>,
     visible_groups: usize,
     profile_labels: Option<Vec<ProductComponentProfileLabel>>,
+    /// Keep small product-construction kernels on the calling worker instead of
+    /// entering nested Rayon regions. Used by request-local auxiliary lexers
+    /// that are themselves built inside a parallel compiler DAG.
+    local_small_product: bool,
 }
 
 struct ProductComponentProfileLabel {
@@ -1381,6 +1385,7 @@ fn build_exclusion_compile_plan_with_labels_and_cache(
         intersections,
         visible_groups,
         profile_labels,
+        local_small_product: false,
     }
 }
 
@@ -3931,6 +3936,7 @@ fn compile_with_plan_internal(
             &plan.intersections,
             capture_product_trace,
             true,
+            plan.local_small_product,
         )
     } else {
         (compile_single_expr_dfa(&plan.compiled_exprs[0]), false, None)
@@ -4024,6 +4030,18 @@ fn compile_with_plan_internal(
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {
     build_regex_monolithic(exprs)
+}
+
+/// Compile a small auxiliary product lexer while keeping its fine-grained
+/// construction work on the calling worker. This is intended for callers that
+/// already execute inside a parallel compiler DAG, where nested Rayon fan-out
+/// can otherwise turn a few milliseconds of local work into scheduler tail.
+pub fn build_regex_local_small_product(exprs: &[Expr]) -> Regex {
+    let mut plan = build_exclusion_compile_plan(exprs);
+    plan.local_small_product = true;
+    Regex {
+        dfa: compile_with_plan(plan),
+    }
 }
 
 /// Compile all expressions into one traditional deterministic lexer.
@@ -9808,21 +9826,33 @@ fn count_bounded_repeat_base_uses(expr: &Expr, counts: &mut FxHashMap<Expr, usiz
     }
 }
 
-fn build_repeat_base_dfa_cache(exprs: &[&Expr]) -> RepeatBaseDfaCache {
+const LOCAL_SMALL_PRODUCT_MAX_COORDINATES: usize = 32;
+
+fn local_small_product_work_enabled(component_count: usize, local_small_product: bool) -> bool {
+    local_small_product && component_count <= LOCAL_SMALL_PRODUCT_MAX_COORDINATES
+}
+
+fn build_repeat_base_dfa_cache(
+    exprs: &[&Expr],
+    local_small_product: bool,
+) -> RepeatBaseDfaCache {
     let mut counts = FxHashMap::<Expr, usize>::default();
     for expr in exprs {
         count_bounded_repeat_base_uses(expr, &mut counts);
     }
-    counts
+    let repeated = counts
         .into_iter()
         .filter_map(|(expr, uses)| (uses >= 2).then_some(expr))
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .filter_map(|expr| {
-            compile_direct_bounded_repeat_base_dfa_unconditionally(&expr)
-                .map(|dfa| (expr, Arc::new(dfa)))
-        })
-        .collect()
+        .collect::<Vec<_>>();
+    let compile = |expr: Expr| {
+        compile_direct_bounded_repeat_base_dfa_unconditionally(&expr)
+            .map(|dfa| (expr, Arc::new(dfa)))
+    };
+    if local_small_product_work_enabled(exprs.len(), local_small_product) {
+        repeated.into_iter().filter_map(compile).collect()
+    } else {
+        repeated.into_par_iter().filter_map(compile).collect()
+    }
 }
 
 #[derive(Debug)]
@@ -9839,6 +9869,7 @@ fn compile_product_components_profiled(
     profile_detail: bool,
     preserve_coordinates: bool,
     virtual_fixed_sequences: bool,
+    local_small_product: bool,
 ) -> (
     Vec<ProductComponent>,
     usize,
@@ -9864,37 +9895,40 @@ fn compile_product_components_profiled(
         component_indices.push(index);
     }
 
-    let repeat_base_cache = build_repeat_base_dfa_cache(&unique_exprs);
+    let repeat_base_cache = build_repeat_base_dfa_cache(&unique_exprs, local_small_product);
     let repeat_base_cache = (!repeat_base_cache.is_empty()).then_some(&repeat_base_cache);
 
-    let compiled: Vec<(ProductComponent, Option<f64>)> = unique_exprs
-        .par_iter()
-        .map(|expr| {
-            if profile_detail {
-                let started_at = Instant::now();
-                let component = compile_product_component_with_options(
+    let compile_component = |expr: &&Expr| {
+        if profile_detail {
+            let started_at = Instant::now();
+            let component = compile_product_component_with_options(
+                expr,
+                preserve_coordinates,
+                virtual_fixed_sequences,
+                repeat_base_cache,
+            );
+            (
+                component,
+                Some(started_at.elapsed().as_secs_f64() * 1000.0),
+            )
+        } else {
+            (
+                compile_product_component_with_options(
                     expr,
                     preserve_coordinates,
                     virtual_fixed_sequences,
                     repeat_base_cache,
-                );
-                (
-                    component,
-                    Some(started_at.elapsed().as_secs_f64() * 1000.0),
-                )
-            } else {
-                (
-                    compile_product_component_with_options(
-                        expr,
-                        preserve_coordinates,
-                        virtual_fixed_sequences,
-                        repeat_base_cache,
-                    ),
-                    None,
-                )
-            }
-        })
-        .collect();
+                ),
+                None,
+            )
+        }
+    };
+    let compiled: Vec<(ProductComponent, Option<f64>)> =
+        if local_small_product_work_enabled(unique_exprs.len(), local_small_product) {
+            unique_exprs.iter().map(compile_component).collect()
+        } else {
+            unique_exprs.par_iter().map(compile_component).collect()
+        };
     let (unique_components, compile_times): (Vec<_>, Vec<_>) = compiled.into_iter().unzip();
     let cache_hits = exprs.len() - unique_components.len();
     let profiles = profile_detail.then(|| {
@@ -9925,7 +9959,7 @@ fn compile_product_components_profiled(
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
     let (components, cache_hits, _, _) =
-        compile_product_components_profiled(exprs, false, false, true);
+        compile_product_components_profiled(exprs, false, false, true, false);
     (components, cache_hits)
 }
 
@@ -9973,6 +10007,7 @@ fn build_product_dfa(
     intersections: &BTreeMap<u32, BTreeSet<u32>>,
     capture_trace: bool,
     virtual_fixed_sequences: bool,
+    local_small_product: bool,
 ) -> (DFA, bool, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
@@ -9987,6 +10022,7 @@ fn build_product_dfa(
             profile_detail,
             capture_trace,
             virtual_fixed_sequences,
+            local_small_product,
         );
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
@@ -10301,49 +10337,58 @@ fn build_product_dfa(
     }
 
     let byte_expand_started_at = Instant::now();
-    let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> = pending_class_transitions
-        .into_par_iter()
-        .map(|class_transitions| {
-            let byte_capacity: usize = class_transitions
-                .iter()
-                .map(|(class_id, _)| class_members[*class_id as usize].len())
-                .sum();
-            const DENSE_BYTE_EXPANSION_THRESHOLD: usize = 96;
+    let expand_byte_row = |class_transitions: Vec<(u8, u32)>| {
+        let byte_capacity: usize = class_transitions
+            .iter()
+            .map(|(class_id, _)| class_members[*class_id as usize].len())
+            .sum();
+        const DENSE_BYTE_EXPANSION_THRESHOLD: usize = 96;
 
-            let transitions = if byte_capacity >= DENSE_BYTE_EXPANSION_THRESHOLD {
-                // Byte-equivalence classes are disjoint but need not be
-                // contiguous, so expanding classes in class-ID order does
-                // not generally produce byte-sorted output.  For dense rows,
-                // scatter targets into the fixed byte alphabet and scan it
-                // once. This avoids a large per-state comparison sort.
-                let mut target_by_byte = [u32::MAX; 256];
-                for (class_id, target) in class_transitions {
-                    for &byte in &class_members[class_id as usize] {
-                        target_by_byte[byte as usize] = target;
-                    }
+        let transitions = if byte_capacity >= DENSE_BYTE_EXPANSION_THRESHOLD {
+            // Byte-equivalence classes are disjoint but need not be
+            // contiguous, so expanding classes in class-ID order does
+            // not generally produce byte-sorted output.  For dense rows,
+            // scatter targets into the fixed byte alphabet and scan it
+            // once. This avoids a large per-state comparison sort.
+            let mut target_by_byte = [u32::MAX; 256];
+            for (class_id, target) in class_transitions {
+                for &byte in &class_members[class_id as usize] {
+                    target_by_byte[byte as usize] = target;
                 }
-                target_by_byte
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(byte, target)| {
-                        (target != u32::MAX).then_some((byte as u8, target))
-                    })
-                    .collect()
-            } else {
-                let mut transitions = Vec::with_capacity(byte_capacity);
-                for (class_id, target) in class_transitions {
-                    for &byte in &class_members[class_id as usize] {
-                        transitions.push((byte, target));
-                    }
+            }
+            target_by_byte
+                .into_iter()
+                .enumerate()
+                .filter_map(|(byte, target)| {
+                    (target != u32::MAX).then_some((byte as u8, target))
+                })
+                .collect()
+        } else {
+            let mut transitions = Vec::with_capacity(byte_capacity);
+            for (class_id, target) in class_transitions {
+                for &byte in &class_members[class_id as usize] {
+                    transitions.push((byte, target));
                 }
-                if transitions.len() > 1 {
-                    transitions.sort_unstable_by_key(|entry| entry.0);
-                }
-                transitions
-            };
-            crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
-        })
-        .collect();
+            }
+            if transitions.len() > 1 {
+                transitions.sort_unstable_by_key(|entry| entry.0);
+            }
+            transitions
+        };
+        crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+    };
+    let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
+        if local_small_product_work_enabled(num_coordinates, local_small_product) {
+            pending_class_transitions
+                .into_iter()
+                .map(expand_byte_row)
+                .collect()
+        } else {
+            pending_class_transitions
+                .into_par_iter()
+                .map(expand_byte_row)
+                .collect()
+        };
     let byte_expand_ms = profile_timing
         .then(|| byte_expand_started_at.elapsed().as_secs_f64() * 1000.0);
 
@@ -11624,7 +11669,7 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
         return Ok((DeferredDfa::Ready(dfa), Some(trace)));
     }
     let (components, component_cache_hits, _, _) =
-        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
+        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true, false);
     let pair_cells = components
         .first()
         .and_then(ProductComponent::materialized_dfa)
@@ -11816,6 +11861,7 @@ mod tests {
     use super::super::{Lexer, DFA};
     use super::{
         build_regex,
+        build_regex_local_small_product,
         build_regex_monolithic,
         build_regex_partitioned_with_adaptive,
         try_product_union_components,
@@ -11931,6 +11977,33 @@ mod tests {
                 max: Some(2),
             },
         ]
+    }
+
+    #[test]
+    fn local_small_product_compilation_matches_default_product() {
+        let expressions = vec![
+            Expr::U8Seq(b"alpha".to_vec()),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"cd"))),
+                    min: 1,
+                    max: Some(4),
+                },
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"cat".to_vec()),
+                Expr::U8Seq(b"car".to_vec()),
+            ]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"xy"))),
+                min: 0,
+                max: Some(3),
+            },
+        ];
+        let ordinary = build_regex(&expressions).dfa;
+        let local = build_regex_local_small_product(&expressions).dfa;
+        assert_dfa_observation_equivalent(&ordinary, &local);
     }
 
     #[test]
@@ -12992,6 +13065,7 @@ mod tests {
             &intersections,
             false,
             true,
+            false,
         )
         .0;
         let uncollapsed = super::build_product_dfa(
@@ -13002,6 +13076,7 @@ mod tests {
             &intersections,
             true,
             true,
+            false,
         )
         .0;
         assert_eq!(collapsed, uncollapsed);
@@ -13421,7 +13496,7 @@ mod tests {
             ]),
         ];
         let expression_refs = expressions.iter().collect::<Vec<_>>();
-        let cache = super::build_repeat_base_dfa_cache(&expression_refs);
+        let cache = super::build_repeat_base_dfa_cache(&expression_refs, false);
         assert_eq!(cache.len(), 1);
         assert!(cache.contains_key(&body));
 
@@ -14413,6 +14488,7 @@ mod tests {
             &intersections,
             false,
             false,
+            false,
         )
         .0;
         let virtualized = super::build_product_dfa(
@@ -14423,6 +14499,7 @@ mod tests {
             &intersections,
             false,
             true,
+            false,
         )
         .0;
 
