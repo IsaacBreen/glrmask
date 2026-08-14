@@ -1093,8 +1093,29 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     let profiling = compile_profile_enabled();
     let mut mapped_dwa = MappedArtifact::new(dwa, composed_id_map);
     let core_compact_started_at = Instant::now();
-    if profiling {
+    // p0's exact token/TSID merges are valuable, but its heuristic layout
+    // ordering is not: on the representative build cohort it adds roughly
+    // 0.1-0.3ms while changing the final serialized artifact by only a few KB
+    // and leaving mask/commit timing unchanged.  Keep the exact equivalence
+    // merges and skip only the optional ordering pass.  Other partitions keep
+    // their established layout policy; selectors remain available for
+    // diagnostics and for forcing the historical ordered p0 path.
+    let force_ordered_core_compact = l2p_partition_selector_enabled(
+        "GLRMASK_FORCE_ORDERED_L2P_CORE_COMPACT",
+        partition_label,
+    );
+    let merge_only_core_compact = !force_ordered_core_compact
+        && (partition_label == "p0"
+            || l2p_partition_selector_enabled(
+                "GLRMASK_L2P_CORE_COMPACT_MERGE_ONLY",
+                partition_label,
+            ));
+    if profiling && merge_only_core_compact {
+        mapped_dwa.compact_dimensions_merge_only_fast_with_stats();
+    } else if profiling {
         mapped_dwa.compact_dimensions_fast_with_stats();
+    } else if merge_only_core_compact {
+        mapped_dwa.compact_dimensions_merge_only_fast();
     } else {
         mapped_dwa.compact_dimensions_fast();
     }
