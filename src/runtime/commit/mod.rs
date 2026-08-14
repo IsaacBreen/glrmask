@@ -21,12 +21,13 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_control_closed,
     stack_may_advance_on_any,
     stack_may_advance_on_any_control_closed,
+    stack_admissible_terminals,
 };
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{
     CommitBuffers, ConstraintState, INLINE_PARSER_STATE_CAPACITY, LINEAR_STACK_RESERVE,
-    ParserStateMap,
+    ParserAdmissionCacheEntry, ParserStateMap,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -1270,6 +1271,204 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
         )
 }
 
+/// For a tokenizer execution that produced several end states against the same
+/// parser GSS, compute exact parser admission once over the union of their
+/// possible-future terminal sets.  Individual end-state viability is then an
+/// intersection with this admitted set.
+///
+/// This is exactly equivalent to repeated `end_state_may_advance` because
+///
+///   exists t in F_i: can_advance(G, t)
+///
+/// iff `F_i` intersects the exact admitted set over `union_i F_i`.
+///
+/// Single non-initial end states deliberately keep the old boolean path: the
+/// exact-set computation cannot beat its early-exit simulation in that case.
+fn batched_end_state_admitted_terminals(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    end_states: &[u32],
+) -> Option<crate::ds::bitset::BitSet> {
+    let initial = constraint.runtime_commit_initial_state();
+    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    let mut non_initial = 0usize;
+    for &end_state in end_states {
+        if end_state == initial {
+            continue;
+        }
+        non_initial += 1;
+        let future = constraint.tokenizer.possible_future_terminals(end_state);
+        match &mut candidates {
+            Some(acc) => acc.union_with(future),
+            None => candidates = Some(future.clone()),
+        }
+    }
+    if non_initial <= 1 {
+        return None;
+    }
+    let candidates = candidates?;
+    if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
+        let mut admitted = candidates;
+        admitted.intersect_with(&direct);
+        Some(admitted)
+    } else {
+        Some(stack_admissible_terminals(
+            &constraint.table,
+            gss,
+            &candidates,
+        ))
+    }
+}
+
+
+const PARSER_ADMISSION_CACHE_CAPACITY: usize = 8;
+const PARSER_ADMISSION_BOOLEAN_CACHE_CAPACITY: usize = 8;
+
+#[inline]
+fn exact_admitted_terminals_for_candidates(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    candidates: &crate::ds::bitset::BitSet,
+) -> crate::ds::bitset::BitSet {
+    if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
+        let mut admitted = candidates.clone();
+        admitted.intersect_with(&direct);
+        admitted
+    } else {
+        stack_admissible_terminals(&constraint.table, gss, candidates)
+    }
+}
+
+fn admission_cache_entry_index(
+    cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
+    gss: &ParserGSS,
+    terminal_count: usize,
+) -> usize {
+    if let Some(index) = cache
+        .iter()
+        .position(|entry| entry.gss.ptr_eq(gss))
+    {
+        return index;
+    }
+    if cache.len() >= PARSER_ADMISSION_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(ParserAdmissionCacheEntry {
+        gss: gss.clone(),
+        tested: crate::ds::bitset::BitSet::new(terminal_count),
+        admitted: crate::ds::bitset::BitSet::new(terminal_count),
+        boolean_queries: SmallVec::new(),
+    });
+    cache.len() - 1
+}
+
+/// Cached exact-set version of `batched_end_state_admitted_terminals`.
+/// Returns the cache entry containing exact admission facts for every terminal
+/// occurring in these end-state future sets. Single-end-state callers use the
+/// cheaper boolean cache instead.
+fn cached_batched_end_state_admission(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    end_states: &[u32],
+    cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
+) -> Option<usize> {
+    let initial = constraint.runtime_commit_initial_state();
+    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    let mut non_initial = 0usize;
+    for &end_state in end_states {
+        if end_state == initial {
+            continue;
+        }
+        non_initial += 1;
+        let future = constraint.tokenizer.possible_future_terminals(end_state);
+        match &mut candidates {
+            Some(acc) => acc.union_with(future),
+            None => candidates = Some(future.clone()),
+        }
+    }
+    if non_initial <= 1 {
+        return None;
+    }
+    let candidates = candidates?;
+    let index = admission_cache_entry_index(cache, gss, candidates.len());
+    let delta = candidates.difference(&cache[index].tested);
+    if !delta.is_empty() {
+        let newly_admitted = exact_admitted_terminals_for_candidates(constraint, gss, &delta);
+        let entry = &mut cache[index];
+        entry.tested.union_with(&delta);
+        entry.admitted.union_with(&newly_admitted);
+    }
+    Some(index)
+}
+
+/// Exact cached boolean admission for one tokenizer end state. If a prior
+/// batched query has already classified all future terminals, answer directly
+/// from the pointwise cache. Otherwise cache the old exact existential result
+/// for this complete future set.
+fn cached_single_end_state_may_advance(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    end_state: u32,
+    cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
+) -> bool {
+    if end_state == constraint.runtime_commit_initial_state() {
+        return true;
+    }
+    let future = constraint.tokenizer.possible_future_terminals(end_state);
+    let index = admission_cache_entry_index(cache, gss, future.len());
+    {
+        let entry = &cache[index];
+        if future.is_subset(&entry.tested) {
+            return !future.is_disjoint(&entry.admitted);
+        }
+        if let Some((_, result)) = entry
+            .boolean_queries
+            .iter()
+            .find(|(query, _)| query == future)
+        {
+            return *result;
+        }
+    }
+    let result = parser_may_advance_on_any(constraint, gss, future);
+    let entry = &mut cache[index];
+    if entry.boolean_queries.len() >= PARSER_ADMISSION_BOOLEAN_CACHE_CAPACITY {
+        entry.boolean_queries.remove(0);
+    }
+    entry.boolean_queries.push((future.clone(), result));
+    result
+}
+
+#[inline]
+fn end_state_may_advance_from_cache_entry(
+    constraint: &Constraint,
+    end_state: u32,
+    entry: &ParserAdmissionCacheEntry,
+) -> bool {
+    end_state == constraint.runtime_commit_initial_state()
+        || !entry.admitted.is_disjoint(
+            constraint.tokenizer.possible_future_terminals(end_state),
+        )
+}
+
+
+#[inline]
+fn end_state_may_advance_with_batch(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    end_state: u32,
+    admitted: Option<&crate::ds::bitset::BitSet>,
+) -> bool {
+    if end_state == constraint.runtime_commit_initial_state() {
+        return true;
+    }
+    match admitted {
+        Some(admitted) => !admitted.is_disjoint(
+            constraint.tokenizer.possible_future_terminals(end_state),
+        ),
+        None => end_state_may_advance(constraint, gss, end_state),
+    }
+}
+
 #[inline]
 fn wide_frontier_end_state_may_advance(
     constraint: &Constraint,
@@ -2349,8 +2548,18 @@ fn commit_bytes_full_width_fast_path(
             }
         }
 
+        let admitted_end_state_terminals = batched_end_state_admitted_terminals(
+            constraint,
+            &pruned_gss,
+            &exec_result.end_state,
+        );
         for &end_state in &exec_result.end_state {
-            if end_state_may_advance(constraint, &pruned_gss, end_state) {
+            if end_state_may_advance_with_batch(
+                constraint,
+                &pruned_gss,
+                end_state,
+                admitted_end_state_terminals.as_ref(),
+            ) {
                 merge_parser_state(&mut output, end_state, pruned_gss.clone());
             }
         }
@@ -4164,11 +4373,25 @@ fn commit_bytes_impl_profiled_inner(
                                     profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                                 }
 
+                                let may_start = Instant::now();
+                                let admitted_end_state_terminals = batched_end_state_admitted_terminals(
+                                    constraint,
+                                    &gss_at_offset,
+                                    &exec_result.end_state,
+                                );
+                                let batch_elapsed = may_start.elapsed().as_nanos() as u64;
+                                profile.may_advance_ns += batch_elapsed;
                                 for &end_state in &exec_result.end_state {
                                     let may_start = Instant::now();
-                                    let may_advance =
-                                        end_state_may_advance(constraint, &gss_at_offset, end_state);
-                                    profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                                    let may_advance = end_state_may_advance_with_batch(
+                                        constraint,
+                                        &gss_at_offset,
+                                        end_state,
+                                        admitted_end_state_terminals.as_ref(),
+                                    );
+                                    if admitted_end_state_terminals.is_none() {
+                                        profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                                    }
                                     if !may_advance {
                                         continue;
                                     }
@@ -4361,10 +4584,24 @@ fn commit_bytes_impl_profiled_inner(
                 profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
 
+            let may_start = Instant::now();
+            let admitted_end_state_terminals = batched_end_state_admitted_terminals(
+                constraint,
+                &gss_at_offset,
+                &exec_result.end_state,
+            );
+            profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
             for &end_state in &exec_result.end_state {
                 let may_start = Instant::now();
-                let may_advance = end_state_may_advance(constraint, &gss_at_offset, end_state);
-                profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                let may_advance = end_state_may_advance_with_batch(
+                    constraint,
+                    &gss_at_offset,
+                    end_state,
+                    admitted_end_state_terminals.as_ref(),
+                );
+                if admitted_end_state_terminals.is_none() {
+                    profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
+                }
                 if !may_advance {
                     continue;
                 }
@@ -5142,6 +5379,7 @@ fn try_commit_multi_state_lexer_only(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     frontier: &mut FlatFrontierScratch,
     stack_scratch: &mut Vec<u32>,
+    admission_cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> Option<Result<(), String>> {
     if state.len() <= 1
         || state.len() > INLINE_PARSER_STATE_CAPACITY
@@ -5154,8 +5392,6 @@ fn try_commit_multi_state_lexer_only(
     let mut output = SmallVec::<[(u32, usize); INLINE_PARSER_STATE_CAPACITY]>::new();
     let mut actionable_cache =
         SmallVec::<[(usize, bool); INLINE_PARSER_STATE_CAPACITY]>::new();
-    let mut future_cache =
-        SmallVec::<[(usize, u32, bool); INLINE_PARSER_STATE_CAPACITY]>::new();
     let mut input_index = 0usize;
     while input_index < state.entries.len() {
         let tokenizer_state = state.entries[input_index].0;
@@ -5204,20 +5440,27 @@ fn try_commit_multi_state_lexer_only(
                 }
             }
 
+            let admission_cache_index = cached_batched_end_state_admission(
+                constraint,
+                gss,
+                &tokenizer_scratch.states,
+                admission_cache,
+            );
             for &end_state in &tokenizer_scratch.states {
-                let may_advance = future_cache
-                    .iter()
-                    .find_map(|&(cached_gss, cached_end, cached_result)| {
-                        (cached_gss == gss_key && cached_end == end_state)
-                            .then_some(cached_result)
-                    })
-                    .unwrap_or_else(|| {
-                        let result = end_state_may_advance(constraint, gss, end_state);
-                        if future_cache.len() < future_cache.capacity() {
-                            future_cache.push((gss_key, end_state, result));
-                        }
-                        result
-                    });
+                let may_advance = if let Some(index) = admission_cache_index {
+                    end_state_may_advance_from_cache_entry(
+                        constraint,
+                        end_state,
+                        &admission_cache[index],
+                    )
+                } else {
+                    cached_single_end_state_may_advance(
+                        constraint,
+                        gss,
+                        end_state,
+                        admission_cache,
+                    )
+                };
                 if !may_advance {
                     continue;
                 }
@@ -5860,6 +6103,9 @@ fn commit_bytes_impl_inner(
     let has_linker_controls = !constraint.table.control_terminals.is_empty();
     let direct_dynamic = constraint.uses_dynamic_runtime()
         && constraint.direct_regular_automaton.is_some();
+    if state.len() <= 1 && !bufs.admission_cache.is_empty() {
+        bufs.admission_cache.clear();
+    }
 
     // A wide direct-regular frontier already carries its exact actionable
     // terminal support. Scan only that support instead of materializing every
@@ -5918,21 +6164,22 @@ fn commit_bytes_impl_inner(
         return result;
     }
 
-    if !has_linker_controls
-        && !direct_dynamic
-        && let Some(result) = try_commit_multi_state_lexer_only(
-        constraint,
-        state,
-        bytes,
-        &mut bufs.reusable_tokenizer_exec,
-        &mut bufs.flat_frontier,
-        &mut bufs.linear_stack_original,
-    )
-    {
-        if debug_path {
-            eprintln!("[glrmask/debug][commit_path] multi_state_lexer_only states={}", state.len());
+    if !has_linker_controls && !direct_dynamic {
+        let lexer_only_result = try_commit_multi_state_lexer_only(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.flat_frontier,
+            &mut bufs.linear_stack_original,
+            &mut bufs.admission_cache,
+        );
+        if let Some(result) = lexer_only_result {
+            if debug_path {
+                eprintln!("[glrmask/debug][commit_path] multi_state_lexer_only states={}", state.len());
+            }
+            return result;
         }
-        return result;
     }
     if !has_linker_controls
         && !direct_dynamic
@@ -6312,8 +6559,28 @@ fn commit_bytes_impl_inner(
                                 );
                             }
 
+                            let admission_cache_index = cached_batched_end_state_admission(
+                                constraint,
+                                &gss_at_offset,
+                                &exec_result.end_state,
+                                &mut bufs.admission_cache,
+                            );
                             for &end_state in &exec_result.end_state {
-                                if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
+                                let may_advance = if let Some(index) = admission_cache_index {
+                                    end_state_may_advance_from_cache_entry(
+                                        constraint,
+                                        end_state,
+                                        &bufs.admission_cache[index],
+                                    )
+                                } else {
+                                    cached_single_end_state_may_advance(
+                                        constraint,
+                                        &gss_at_offset,
+                                        end_state,
+                                        &mut bufs.admission_cache,
+                                    )
+                                };
+                                if !may_advance {
                                     continue;
                                 }
 
@@ -6445,8 +6712,28 @@ fn commit_bytes_impl_inner(
                 );
             }
 
+            let admission_cache_index = cached_batched_end_state_admission(
+                constraint,
+                &gss_at_offset,
+                &exec_result.end_state,
+                &mut bufs.admission_cache,
+            );
             for &end_state in &exec_result.end_state {
-                if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
+                let may_advance = if let Some(index) = admission_cache_index {
+                    end_state_may_advance_from_cache_entry(
+                        constraint,
+                        end_state,
+                        &bufs.admission_cache[index],
+                    )
+                } else {
+                    cached_single_end_state_may_advance(
+                        constraint,
+                        &gss_at_offset,
+                        end_state,
+                        &mut bufs.admission_cache,
+                    )
+                };
+                if !may_advance {
                     continue;
                 }
 
@@ -6733,6 +7020,123 @@ mod tests {
         state: &ParserStateMap,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn batched_and_cached_end_state_admission_match_pointwise_simulation() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t AB ::= "ab";
+                t B ::= "b";
+                t C ::= "c";
+                nt item ::= A | AB | B;
+                nt start ::= item C;
+            "#,
+            &Vocab::new(vec![
+                (0, b"a".to_vec()),
+                (1, b"ab".to_vec()),
+                (2, b"b".to_vec()),
+                (3, b"c".to_vec()),
+                (4, b"ac".to_vec()),
+                (5, b"abc".to_vec()),
+            ]),
+        )
+        .unwrap();
+        let state = constraint.start();
+        let gss = state.state.values().next().unwrap();
+        let initial = constraint.runtime_commit_initial_state();
+        let non_initial = (0..constraint.tokenizer.num_states())
+            .find(|&end_state| {
+                end_state != initial
+                    && !constraint
+                        .tokenizer
+                        .possible_future_terminals(end_state)
+                        .is_empty()
+            })
+            .expect("test tokenizer should have a live non-initial state");
+        // Repeating one exact continuation is enough to exercise batching and
+        // cache reuse; production callers usually provide many distinct states,
+        // but the theorem does not depend on their distinctness.
+        let end_states = vec![initial, non_initial, non_initial];
+
+        let admitted = batched_end_state_admitted_terminals(
+            &constraint,
+            gss,
+            &end_states,
+        )
+        .expect("multiple non-initial tokenizer states should batch");
+        for &end_state in &end_states {
+            assert_eq!(
+                end_state_may_advance_with_batch(
+                    &constraint,
+                    gss,
+                    end_state,
+                    Some(&admitted),
+                ),
+                end_state_may_advance(&constraint, gss, end_state),
+                "batched admission differs for tokenizer state {end_state}",
+            );
+        }
+
+        let mut cache = SmallVec::<[ParserAdmissionCacheEntry; 8]>::new();
+        let index = cached_batched_end_state_admission(
+            &constraint,
+            gss,
+            &end_states,
+            &mut cache,
+        )
+        .expect("multiple non-initial tokenizer states should populate cache");
+        for &end_state in &end_states {
+            assert_eq!(
+                end_state_may_advance_from_cache_entry(
+                    &constraint,
+                    end_state,
+                    &cache[index],
+                ),
+                end_state_may_advance(&constraint, gss, end_state),
+                "cached admission differs for tokenizer state {end_state}",
+            );
+        }
+
+        // Repeating the identical query must be a pure cache hit and retain the
+        // exact pointwise facts.
+        let tested = cache[index].tested.clone();
+        let admitted_before = cache[index].admitted.clone();
+        let repeat = cached_batched_end_state_admission(
+            &constraint,
+            gss,
+            &end_states,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(repeat, index);
+        assert_eq!(cache[index].tested, tested);
+        assert_eq!(cache[index].admitted, admitted_before);
+    }
+
+    #[test]
+    fn admission_cache_reset_drops_persistent_gss_references() {
+        let gss = ParserGSS::from_single_stack(
+            vec![0_u32, 1],
+            TerminalsDisallowed::new(),
+        );
+        let mut buffers = CommitBuffers::default();
+        buffers.admission_cache.push(ParserAdmissionCacheEntry {
+            gss,
+            tested: crate::ds::bitset::BitSet::new(2),
+            admitted: crate::ds::bitset::BitSet::new(2),
+            boolean_queries: SmallVec::new(),
+        });
+        buffers.clear_all();
+        assert_eq!(
+            buffers.admission_cache.len(),
+            1,
+            "ordinary scratch reuse should preserve admission facts",
+        );
+        buffers.reset_all();
+        assert!(buffers.admission_cache.is_empty());
     }
 
     #[test]

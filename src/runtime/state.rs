@@ -6,6 +6,7 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS, stacks_finished, stacks_finished_control_closed,
 };
+use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::GssSemanticKeyInterner;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -297,12 +298,27 @@ impl MaskScratch {
     }
 }
 
+/// Exact admission facts retained for one structurally persistent parser GSS.
+///
+/// `gss` is a strong Arc-backed clone, so pointer identity cannot be recycled
+/// while the entry exists. `tested`/`admitted` record pointwise exact terminal
+/// admission. `boolean_queries` caches existential results for the common
+/// single tokenizer-end-state case without forcing a full admitted-set closure.
+#[derive(Debug, Clone)]
+pub(crate) struct ParserAdmissionCacheEntry {
+    pub(crate) gss: ParserGSS,
+    pub(crate) tested: BitSet,
+    pub(crate) admitted: BitSet,
+    pub(crate) boolean_queries: SmallVec<[(BitSet, bool); 8]>,
+}
+
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
 /// to avoid repeated heap allocation.
 #[derive(Debug)]
 pub(crate) struct CommitBuffers {
     pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
     pub semantic_frontier_keys: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
+    pub admission_cache: SmallVec<[ParserAdmissionCacheEntry; 8]>,
     pub pending_state: FxHashMap<u32, ParserGSS>,
     pub seen_matches: FxHashSet<(usize, u32)>,
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
@@ -323,6 +339,7 @@ impl Default for CommitBuffers {
         Self {
             advance_result_cache: FxHashMap::default(),
             semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(256),
+            admission_cache: SmallVec::new(),
             pending_state: FxHashMap::default(),
             seen_matches: FxHashSet::default(),
             terminal_result_cache: FxHashMap::default(),
@@ -374,6 +391,7 @@ impl CommitBuffers {
 
     pub(crate) fn reset_all(&mut self) {
         self.clear_all();
+        self.admission_cache.clear();
         self.template_advance_runtime.reset_all();
     }
 }
