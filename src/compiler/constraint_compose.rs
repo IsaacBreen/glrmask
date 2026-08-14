@@ -57,6 +57,14 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 use crate::runtime::{Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal};
 use crate::Vocab;
 
+mod structural_sharing;
+mod runtime_lexer_product;
+use runtime_lexer_product::maybe_install_runtime_lexer_product;
+use structural_sharing::{
+    StructuralSharingReport, contextually_share_composed_states,
+    quotient_composed_table_structurally, structural_sharing_enabled,
+};
+
 #[inline]
 fn compose_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
@@ -4669,6 +4677,8 @@ fn finalize_composed_constraint(
     ignore_expr: Option<crate::automata::regex::Expr>,
     terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
+    structural_terminal_aliases: usize,
+    components_have_no_runtime_product: bool,
     vocab: &Vocab,
 ) -> ConstraintComposition {
     let ((parser_dwa, possible_matches), internal_ids) = parser_artifacts.into_parts();
@@ -4690,6 +4700,27 @@ fn finalize_composed_constraint(
         false,
         vocab,
     );
+    let lexer_product_started_at = Instant::now();
+    let lexer_product_report = maybe_install_runtime_lexer_product(
+        &mut composition.constraint,
+        structural_terminal_aliases,
+        components_have_no_runtime_product,
+    );
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_runtime_lexer_product] attempted={} selected={} parser_overlap={} terminal_aliases={} source_states={} product_states={} source_transitions={} product_transitions={} multi_tsid_product_states={} total_ms={:.3}",
+            lexer_product_report.attempted,
+            lexer_product_report.selected,
+            lexer_product_report.parser_overlap,
+            structural_terminal_aliases,
+            lexer_product_report.source_states,
+            lexer_product_report.product_states,
+            lexer_product_report.source_transitions,
+            lexer_product_report.product_transitions,
+            lexer_product_report.multi_tsid_product_states,
+            lexer_product_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     composition.constraint.rebuild_runtime_caches();
     composition
 }
@@ -4707,6 +4738,9 @@ pub(crate) fn compose_constraints(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let components_have_no_runtime_product = std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .all(|constraint| constraint.runtime_source_state_offset().is_none());
     let component_end_token_ids = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
@@ -4770,7 +4804,7 @@ pub(crate) fn compose_constraints(
             && components_have_no_explicit_controls(parent, children)
             && legacy_splice_has_only_byte_terminal_continuations(parent, children);
     let table_started_at = Instant::now();
-    let composed_table = if use_legacy_splice {
+    let mut composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
     } else {
         compose_subgrammar_tables_explicit(
@@ -4781,6 +4815,41 @@ pub(crate) fn compose_constraints(
             &table_inputs,
         )?
     };
+    let structural_started_at = Instant::now();
+    let structural_states_before = composed_table.table.num_states as usize;
+    let structural_report = if structural_sharing_enabled() {
+        let (candidate_groups, contextual_states_saved) =
+            contextually_share_composed_states(&mut composed_table, parent, children);
+        let mut report = quotient_composed_table_structurally(&mut composed_table, parent, children)?;
+        report.contextual_candidate_groups = candidate_groups;
+        report.contextual_states_saved = contextual_states_saved;
+        report.states_before = structural_states_before;
+        report.states_after = composed_table.table.num_states as usize;
+        report
+    } else {
+        StructuralSharingReport {
+            nonterminals_before: composed_table.table.nonterminal_display_names.len(),
+            nonterminal_classes: composed_table.table.nonterminal_display_names.len(),
+            states_before: composed_table.table.num_states as usize,
+            states_after: composed_table.table.num_states as usize,
+            ..StructuralSharingReport::default()
+        }
+    };
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
+            structural_sharing_enabled(),
+            structural_report.terminal_aliases,
+            structural_report.nonterminals_before,
+            structural_report.nonterminal_classes,
+            structural_report.contextual_candidate_groups,
+            structural_report.contextual_states_saved,
+            structural_report.states_before,
+            structural_report.states_after,
+            structural_report.states_before.saturating_sub(structural_report.states_after),
+            structural_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let table_ms = table_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let component_constraints = std::iter::once(parent)
@@ -5061,6 +5130,8 @@ pub(crate) fn compose_constraints(
         merged_ignores.canonical_expr.clone(),
         terminal_live_states,
         Default::default(),
+        structural_report.terminal_aliases,
+        components_have_no_runtime_product,
         vocab,
     );
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -5091,6 +5162,9 @@ pub(crate) fn compose_constraints_owned_parent(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let components_have_no_runtime_product = std::iter::once(&parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .all(|constraint| constraint.runtime_source_state_offset().is_none());
     let component_end_token_ids = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
@@ -5154,7 +5228,7 @@ pub(crate) fn compose_constraints_owned_parent(
             && components_have_no_explicit_controls(&parent, children)
             && legacy_splice_has_only_byte_terminal_continuations(&parent, children);
     let table_started_at = Instant::now();
-    let composed_table = if use_legacy_splice {
+    let mut composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
     } else {
         compose_subgrammar_tables_explicit(
@@ -5165,6 +5239,42 @@ pub(crate) fn compose_constraints_owned_parent(
             &table_inputs,
         )?
     };
+    let structural_started_at = Instant::now();
+    let structural_states_before = composed_table.table.num_states as usize;
+    let structural_report = if structural_sharing_enabled() {
+        let (candidate_groups, contextual_states_saved) =
+            contextually_share_composed_states(&mut composed_table, &parent, children);
+        let mut report =
+            quotient_composed_table_structurally(&mut composed_table, &parent, children)?;
+        report.contextual_candidate_groups = candidate_groups;
+        report.contextual_states_saved = contextual_states_saved;
+        report.states_before = structural_states_before;
+        report.states_after = composed_table.table.num_states as usize;
+        report
+    } else {
+        StructuralSharingReport {
+            nonterminals_before: composed_table.table.nonterminal_display_names.len(),
+            nonterminal_classes: composed_table.table.nonterminal_display_names.len(),
+            states_before: composed_table.table.num_states as usize,
+            states_after: composed_table.table.num_states as usize,
+            ..StructuralSharingReport::default()
+        }
+    };
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
+            structural_sharing_enabled(),
+            structural_report.terminal_aliases,
+            structural_report.nonterminals_before,
+            structural_report.nonterminal_classes,
+            structural_report.contextual_candidate_groups,
+            structural_report.contextual_states_saved,
+            structural_report.states_before,
+            structural_report.states_after,
+            structural_report.states_before.saturating_sub(structural_report.states_after),
+            structural_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let table_ms = table_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let metadata_started_at = Instant::now();
@@ -5652,6 +5762,27 @@ pub(crate) fn compose_constraints_owned_parent(
     let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
+    let lexer_product_started_at = Instant::now();
+    let lexer_product_report = maybe_install_runtime_lexer_product(
+        &mut result.constraint,
+        structural_report.terminal_aliases,
+        components_have_no_runtime_product,
+    );
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_runtime_lexer_product] attempted={} selected={} parser_overlap={} terminal_aliases={} source_states={} product_states={} source_transitions={} product_transitions={} multi_tsid_product_states={} total_ms={:.3}",
+            lexer_product_report.attempted,
+            lexer_product_report.selected,
+            lexer_product_report.parser_overlap,
+            structural_report.terminal_aliases,
+            lexer_product_report.source_states,
+            lexer_product_report.product_states,
+            lexer_product_report.source_transitions,
+            lexer_product_report.product_transitions,
+            lexer_product_report.multi_tsid_product_states,
+            lexer_product_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     result.constraint.rebuild_runtime_caches();
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
@@ -5687,6 +5818,248 @@ mod tests {
             .iter()
             .position(|candidate| candidate == name)
             .unwrap() as u32
+    }
+
+    #[test]
+    fn structural_sharing_quotients_duplicate_child_lr_regions() {
+        let vocab = Vocab::new(vec![
+            (0, b"<abc>,<abc>".to_vec()),
+            (2, b"<".to_vec()),
+            (3, b"a".to_vec()),
+            (4, b"b".to_vec()),
+            (7, b"c".to_vec()),
+            (5, b">,<".to_vec()),
+            (6, b">".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt document ::= "<" LEFT ">,<" RIGHT ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt value ::= "a" "b" "c";
+                nt child ::= value;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let children = [
+            CompiledSubgrammarInput {
+                placeholder_terminal: terminal(&parent, "LEFT"),
+                constraint: &child,
+            },
+            CompiledSubgrammarInput {
+                placeholder_terminal: terminal(&parent, "RIGHT"),
+                constraint: &child,
+            },
+        ];
+        let table_inputs = children
+            .iter()
+            .map(|child| SubgrammarTableInput {
+                placeholder_terminal: child.placeholder_terminal,
+                table: &child.constraint.table,
+                ignore_terminal: child.constraint.ignore_terminal,
+                start_nullable: child.constraint.table.embedded_start_nullable(),
+            })
+            .collect::<Vec<_>>();
+        let mut composed = compose_subgrammar_tables(&parent.table, &table_inputs).unwrap();
+        let before = composed.table.num_states;
+        let (candidate_groups, contextual_saved) =
+            contextually_share_composed_states(&mut composed, &parent, &children);
+        let _ = quotient_composed_table_structurally(&mut composed, &parent, &children).unwrap();
+
+        assert!(candidate_groups > 0);
+        assert!(
+            contextual_saved > 0 && composed.table.num_states < before,
+            "duplicate independently compiled children should share at least one LR state",
+        );
+
+        let shared_local_states = composed.state_relations[1]
+            .iter()
+            .zip(&composed.state_relations[2])
+            .filter(|(left, right)| left == right)
+            .count();
+        assert!(
+            shared_local_states > 0,
+            "at least one corresponding child-local LR state should map to the same quotient state",
+        );
+
+        // Exercise the real artifact-reuse path as well: component parser DWAs
+        // are transported through the many-to-one LR-state relation rather
+        // than rebuilt from the quotient table.
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt value ::= "a" "b" "c";
+                nt child ::= value;
+                nt document ::= "<" child ">,<" child ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let runtime_composed = parent
+            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .unwrap();
+        assert_constraints_equivalent_on_reachable_prefixes(
+            &runtime_composed,
+            &monolithic,
+            &vocab,
+            8,
+        );
+        let mut actual = runtime_composed.start();
+        actual.commit_token(0).unwrap();
+        assert!(actual.is_finished());
+
+    }
+
+    #[test]
+    fn contextual_sharing_rejects_ambiguity_with_no_stack_provenance() {
+        let vocab = byte_vocab();
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t P ::= "p";
+                t Q ::= "p";
+                t BANG ::= "!";
+                t QUESTION ::= "?";
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt left_prefix ::= P;
+                nt right_prefix ::= Q;
+                nt left_branch ::= left_prefix LEFT;
+                nt right_branch ::= right_prefix RIGHT;
+                nt document ::= left_branch BANG | right_branch QUESTION;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                t CA ::= "a";
+                t CB ::= "b";
+                t CC ::= "c";
+                nt child ::= CA CB CC;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let children = [
+            CompiledSubgrammarInput {
+                placeholder_terminal: terminal(&parent, "LEFT"),
+                constraint: &child,
+            },
+            CompiledSubgrammarInput {
+                placeholder_terminal: terminal(&parent, "RIGHT"),
+                constraint: &child,
+            },
+        ];
+        let table_inputs = children
+            .iter()
+            .map(|child| SubgrammarTableInput {
+                placeholder_terminal: child.placeholder_terminal,
+                table: &child.constraint.table,
+                ignore_terminal: child.constraint.ignore_terminal,
+                start_nullable: child.constraint.table.embedded_start_nullable(),
+            })
+            .collect::<Vec<_>>();
+        let mut shared = compose_subgrammar_tables(&parent.table, &table_inputs).unwrap();
+        let (candidate_count, saved) =
+            contextually_share_composed_states(&mut shared, &parent, &children);
+        assert!(candidate_count > 0, "the duplicate child states should be detected structurally");
+        assert_eq!(
+            saved, 0,
+            "when two linked copies have the exact same lower stack context, a table-only quotient must preserve their distinct LR states",
+        );
+    }
+
+    #[test]
+    fn runtime_lexer_product_coalesces_equivalent_ambiguous_child_lanes() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"?".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t BANG ::= "!";
+                t QUESTION ::= "?";
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt document ::= LEFT BANG | RIGHT QUESTION;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                t WORD ::= "abc";
+                nt child ::= WORD;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .unwrap();
+
+        let mut state = composed.start();
+        state.commit_token(0).unwrap();
+        let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false" | "no" | "off"
+                )
+            });
+        if explicitly_disabled {
+            assert!(composed.runtime_source_state_offset().is_none());
+            assert_eq!(
+                state.state.len(),
+                2,
+                "without the runtime product, the partial token 'a' should leave the two equivalent child lexer lanes split",
+            );
+            return;
+        }
+
+        let source_offset = composed
+            .runtime_source_state_offset()
+            .expect("duplicate ambiguous child lexer lanes should select the exact runtime product");
+        assert!(source_offset > 0);
+        assert_eq!(
+            state.state.len(),
+            1,
+            "the persistent lexer frontier should have one product key after the partial token 'a'",
+        );
+        let product_state = *state.state.keys().next().unwrap();
+        assert!(product_state < source_offset);
+        assert!(
+            composed
+                .runtime_product_source_states(product_state)
+                .is_some_and(|sources| sources.len() >= 2),
+            "the single product key must represent at least two exact source lexer lanes",
+        );
+
+        for suffix in [[1, 2, 3], [1, 2, 4]] {
+            let mut cursor = composed.start();
+            cursor.commit_token(0).unwrap();
+            for token in suffix {
+                cursor.commit_token(token).unwrap();
+            }
+            assert!(cursor.is_finished());
+        }
     }
 
     #[test]

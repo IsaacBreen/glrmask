@@ -1098,8 +1098,19 @@ impl Tokenizer {
             let mut finalizers = BitSet::new(self.num_terminals as usize);
             let mut futures = BitSet::new(self.num_terminals as usize);
             for &state in subset {
-                finalizers.union_with(self.dfa.finalizers(state));
-                futures.union_with(self.dfa.possible_future_group_ids(state));
+                // Structural tokenizer composition may append DFA components
+                // whose per-state metadata bitsets were created in a smaller
+                // local terminal domain. Their set bits are already rebased to
+                // global group IDs, but the backing BitSet width need not have
+                // been eagerly widened on every historical state. Product
+                // construction needs set union, not identical storage widths;
+                // materialize that union into the known global domain.
+                for terminal in self.dfa.finalizers(state).iter() {
+                    finalizers.set(terminal);
+                }
+                for terminal in self.dfa.possible_future_group_ids(state).iter() {
+                    futures.set(terminal);
+                }
             }
             (finalizers, futures)
         };
@@ -2802,6 +2813,40 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn full_determinization_accepts_disjoint_union_local_metadata_widths() {
+        let left = tokenizer_from_exprs(vec![bytes(b"ab"), bytes(b"ax")]);
+        let right = tokenizer_from_exprs(vec![bytes(b"ab")]);
+        let (merged, _) = Tokenizer::disjoint_union_with_terminal_offsets(&[
+            (&left, 0),
+            (&right, left.num_terminals()),
+        ]);
+        assert!(merged.has_epsilon_transitions());
+
+        let built = merged
+            .try_full_determinization(128, 4_096)
+            .expect("small disjoint union must determinize across local metadata widths");
+        assert!(!built.tokenizer.has_epsilon_transitions());
+
+        enumerate_bytes(b"abx", 3, |input| {
+            let source = merged.execute_from_state(input, merged.initial_state());
+            let product = built
+                .tokenizer
+                .execute_from_state(input, built.tokenizer.initial_state());
+            let normalize = |matches: Vec<TokenizerMatch>| {
+                let mut matches = matches
+                    .into_iter()
+                    .map(|matched| (matched.id, matched.width))
+                    .collect::<Vec<_>>();
+                matches.sort_unstable();
+                matches.dedup();
+                matches
+            };
+            assert_eq!(normalize(product.matches), normalize(source.matches));
+        });
+    }
+
     use crate::automata::lexer::dfa::DFA;
 
     #[test]

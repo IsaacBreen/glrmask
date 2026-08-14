@@ -1086,8 +1086,17 @@ impl GLRTable {
 
 
     pub(super) fn prune_unreachable_states(&mut self) {
+        let _ = self.prune_unreachable_states_with_mapping();
+    }
+
+    /// Remove unreachable states and return the old-state -> new-state map.
+    /// Unreachable states map to `u32::MAX`.
+    ///
+    /// Composition-time structural sharing needs this map to transport the
+    /// already-compiled parser-DWA label relation through a table compaction.
+    pub fn prune_unreachable_states_with_mapping(&mut self) -> Vec<u32> {
         if self.num_states == 0 {
-            return;
+            return Vec::new();
         }
 
         let mut reachable = vec![false; self.num_states as usize];
@@ -1104,10 +1113,10 @@ impl GLRTable {
         }
 
         if reachable.iter().all(|&is_reachable| is_reachable) {
-            return;
+            return (0..self.num_states).collect();
         }
 
-        let mut mapping = vec![0u32; self.num_states as usize];
+        let mut mapping = vec![u32::MAX; self.num_states as usize];
         let mut kept = Vec::new();
         for (state, &is_reachable) in reachable.iter().enumerate() {
             if is_reachable {
@@ -1148,7 +1157,478 @@ impl GLRTable {
                 reachable[state as usize].then_some((mapping[state as usize], terminal))
             })
             .collect();
+        self.direct_regular_wide_frontiers = self
+            .direct_regular_wide_frontiers
+            .iter()
+            .filter_map(|descriptor| {
+                if !reachable[descriptor.source_state as usize]
+                    || descriptor
+                        .target_states
+                        .iter()
+                        .any(|&state| !reachable[state as usize])
+                {
+                    return None;
+                }
+                Some(super::DirectRegularWideFrontierDescriptor {
+                    source_state: mapping[descriptor.source_state as usize],
+                    terminal: descriptor.terminal,
+                    target_states: descriptor
+                        .target_states
+                        .iter()
+                        .map(|&state| mapping[state as usize])
+                        .collect(),
+                })
+            })
+            .collect();
         self.num_states = kept.len() as u32;
+        mapping
+    }
+
+    /// Replace several context-distinguishable LR states by one physical LR
+    /// state while retaining the old source identity as a guard on the state
+    /// immediately below it on the parser stack.
+    ///
+    /// This is an exact quotient, not an approximation. `groups` are merely
+    /// candidates. A group is accepted only when every member has a non-empty,
+    /// pairwise-disjoint set of possible immediate predecessors, those
+    /// predecessor states remain unmerged, and predecessor provenance is known
+    /// complete (no complex stack-effect edge can enter the member). Each
+    /// member action is compiled to an equivalent macro stack effect with a
+    /// depth-one predecessor guard. Consequently, on every reachable stack,
+    /// exactly the original member's behavior remains enabled after the top
+    /// state is replaced by the shared state.
+    ///
+    /// Returns an old-state -> final-state map covering the state domain that
+    /// existed on entry. A no-op returns the identity map.
+    pub fn share_context_distinguishable_states_exact(
+        &mut self,
+        groups: &[Vec<u32>],
+    ) -> Vec<u32> {
+        let debug_context_share =
+            std::env::var_os("GLRMASK_DEBUG_CONTEXT_STATE_SHARING").is_some();
+        let original_num_states = self.num_states;
+        if original_num_states <= 1
+            || groups.is_empty()
+            || self.admission_policy != super::AdmissionPolicy::ExactSimulation
+        {
+            return (0..original_num_states).collect();
+        }
+
+        let original_len = original_num_states as usize;
+        let constituent_sets: Vec<StateSubset> = (0..original_num_states)
+            .map(|state| smallvec![state])
+            .collect();
+        let predecessors = build_runtime_state_predecessors(
+            self,
+            original_num_states,
+            &constituent_sets,
+        );
+
+        // The predecessor recurrence above is exact for ordinary Shift/Split
+        // shift and goto edges. If a state can be entered by a precompiled
+        // arbitrary stack effect, its immediate predecessor may depend on a
+        // deeper stack value that recurrence intentionally does not model.
+        // Mark such targets unsafe, then propagate unsafety through replace
+        // edges (which inherit their source predecessor). Non-replace edges
+        // establish their source state as the new immediate predecessor and
+        // therefore stop the propagation.
+        let mut unsafe_predecessor = vec![false; original_len];
+        for row in &self.action[..original_len] {
+            for action in row.values() {
+                match action {
+                    Action::StackShifts(shifts) => {
+                        for shift in shifts {
+                            for &target in &shift.pushes {
+                                if let Some(slot) = unsafe_predecessor.get_mut(target as usize) {
+                                    *slot = true;
+                                }
+                            }
+                        }
+                    }
+                    Action::GuardedStackShifts(shifts) => {
+                        for shift in shifts {
+                            for &target in &shift.pushes {
+                                if let Some(slot) = unsafe_predecessor.get_mut(target as usize) {
+                                    *slot = true;
+                                }
+                            }
+                        }
+                    }
+                    Action::ReplaceShifts(targets) => {
+                        for &target in targets.iter() {
+                            if let Some(slot) = unsafe_predecessor.get_mut(target as usize) {
+                                *slot = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for source in 0..original_len {
+                if !unsafe_predecessor[source] {
+                    continue;
+                }
+                for action in self.action[source].values() {
+                    let target = match action {
+                        Action::Shift(target, true) => Some(*target),
+                        Action::Split {
+                            shift: Some((target, true)),
+                            ..
+                        } => Some(*target),
+                        _ => None,
+                    };
+                    if let Some(target) = target
+                        && let Some(slot) = unsafe_predecessor.get_mut(target as usize)
+                        && !*slot
+                    {
+                        *slot = true;
+                        changed = true;
+                    }
+                }
+                for &(target, replace) in self.goto[source].values() {
+                    if replace
+                        && let Some(slot) = unsafe_predecessor.get_mut(target as usize)
+                        && !*slot
+                    {
+                        *slot = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        let mut protected = vec![false; original_len];
+        protected[0] = true;
+        // Existing guards observe concrete LR-state identity. Keep every state
+        // they can inspect distinct; otherwise remapping a guard set could
+        // broaden its predicate.
+        for row in &self.action[..original_len] {
+            for action in row.values() {
+                if let Action::GuardedStackShifts(shifts) = action {
+                    for shift in shifts {
+                        for guard in &shift.guards {
+                            for &state in &guard.states {
+                                if let Some(slot) = protected.get_mut(state as usize) {
+                                    *slot = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // These descriptors are runtime observations with their own state
+        // semantics. Preserve them unchanged rather than extending this first
+        // exact quotient with another proof obligation.
+        for descriptor in &self.direct_regular_wide_frontiers {
+            if let Some(slot) = protected.get_mut(descriptor.source_state as usize) {
+                *slot = true;
+            }
+            for &state in &descriptor.target_states {
+                if let Some(slot) = protected.get_mut(state as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        // First establish which proposed classes are individually viable.
+        // Only *those* classes are allowed to reserve their predecessor IDs as
+        // provenance tags. Reserving predecessors for every speculative class
+        // is overly conservative: an unmergeable return/caller class can use a
+        // perfectly mergeable interior state as its predecessor and would then
+        // freeze the useful state for no semantic reason.
+        let mut viable = Vec::<ContextStateSharePlan>::new();
+        for input_group in groups {
+            let mut group = input_group
+                .iter()
+                .copied()
+                .filter(|&state| state < original_num_states)
+                .collect::<Vec<_>>();
+            group.sort_unstable();
+            group.dedup();
+            let blocked_member = group.iter().copied().find(|&state| {
+                protected[state as usize]
+                    || unsafe_predecessor[state as usize]
+                    || predecessors[state as usize].is_empty()
+            });
+            if group.len() < 2 || blocked_member.is_some() {
+                if debug_context_share {
+                    eprintln!(
+                        "[glrmask/debug][context_state_share] reject=member group={group:?} blocked={blocked_member:?} protected={:?} unsafe={:?} predecessors={:?}",
+                        group
+                            .iter()
+                            .map(|&state| protected[state as usize])
+                            .collect::<Vec<_>>(),
+                        group
+                            .iter()
+                            .map(|&state| unsafe_predecessor[state as usize])
+                            .collect::<Vec<_>>(),
+                        group
+                            .iter()
+                            .map(|&state| predecessors[state as usize].to_vec())
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                continue;
+            }
+            let Some(mut plan) = context_share_provenance_plan(&group, &predecessors) else {
+                if debug_context_share {
+                    eprintln!(
+                        "[glrmask/debug][context_state_share] reject=overlapping_predecessors group={group:?}",
+                    );
+                }
+                continue;
+            };
+
+            // Gotos are not terminal actions and therefore cannot carry the
+            // provenance guards. Require the concrete goto rows to be exactly
+            // equal; a disjoint goto key would otherwise become spuriously
+            // available from every source represented by the shared state.
+            let first_goto = &self.goto[group[0] as usize];
+            let goto_ok = group[1..].iter().all(|&state| {
+                let row = &self.goto[state as usize];
+                row.len() == first_goto.len()
+                    && first_goto
+                        .iter()
+                        .all(|(&nonterminal, &target)| row.get(&nonterminal) == Some(&target))
+            });
+            if !goto_ok {
+                if debug_context_share {
+                    eprintln!("[glrmask/debug][context_state_share] reject=goto group={group:?}");
+                }
+                continue;
+            }
+
+            // Build the exact row against the unmodified table. Each initial
+            // frame reconstructs the concrete member only when the immediate
+            // predecessor belongs to that member's certified, disjoint
+            // predecessor set. The existing suffix-effect compiler then
+            // executes reductions to the eventual consuming effect.
+            let mut terminals = BTreeSet::<TerminalID>::new();
+            for &state in &group {
+                terminals.extend(self.action[state as usize].keys());
+            }
+            let mut action_row = ActionRow::default();
+            let mut row_ok = true;
+            for terminal in terminals {
+                let mut effects = Vec::<GuardedStackShift>::new();
+                let mut accepts = 0usize;
+                for (member_index, &state) in group.iter().enumerate() {
+                    let Some(action) = self.action[state as usize].get(&terminal) else {
+                        continue;
+                    };
+                    let frame = context_share_frame_for_member(
+                        state,
+                        &plan.predecessors_by_member[member_index],
+                    );
+                    if collect_suffix_effects_from_frame(
+                        self,
+                        terminal,
+                        state,
+                        action,
+                        frame,
+                        &mut FxHashSet::default(),
+                        &mut effects,
+                        &mut accepts,
+                    )
+                    .is_err()
+                    {
+                        row_ok = false;
+                        break;
+                    }
+                }
+                // Accept has no guard-bearing representation. Keep any group
+                // containing an accepting action separate.
+                if !row_ok || accepts != 0 {
+                    row_ok = false;
+                    break;
+                }
+                normalize_guarded_effects_for_suffix_quotient(&mut effects);
+                for effect in &effects {
+                    for guard in &effect.guards {
+                        plan.generated_guard_states.extend_from_slice(&guard.states);
+                    }
+                }
+                if !effects.is_empty() {
+                    action_row.insert(terminal, Action::GuardedStackShifts(effects));
+                }
+            }
+            if !row_ok {
+                if debug_context_share {
+                    eprintln!("[glrmask/debug][context_state_share] reject=row group={group:?}");
+                }
+                continue;
+            }
+
+            if debug_context_share {
+                eprintln!(
+                    "[glrmask/debug][context_state_share] viable group={group:?} predecessors={:?}",
+                    plan.predecessors_by_member,
+                );
+            }
+            plan.generated_guard_states.sort_unstable();
+            plan.generated_guard_states.dedup();
+            viable.push(plan);
+        }
+
+        // Every predecessor state used by a provenance guard is a runtime tag.
+        // Give that role priority over sharing the tag itself. This also makes
+        // all guard predicates stable under the later old->shared state map.
+        let mut provenance_protected = vec![false; original_len];
+        for plan in &viable {
+            for member_predecessors in &plan.predecessors_by_member {
+                for &guard_state in member_predecessors {
+                    if let Some(slot) = provenance_protected.get_mut(guard_state as usize) {
+                        *slot = true;
+                    }
+                }
+            }
+            for &guard_state in &plan.generated_guard_states {
+                if let Some(slot) = provenance_protected.get_mut(guard_state as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        let mut claimed = vec![false; original_len];
+        let mut accepted = Vec::<ContextStateSharePlan>::new();
+        for plan in viable {
+            let group = &plan.group;
+            if group.iter().any(|&state| {
+                provenance_protected[state as usize] || claimed[state as usize]
+            }) {
+                if debug_context_share {
+                    eprintln!(
+                        "[glrmask/debug][context_state_share] reject=provenance group={group:?} protected={:?}",
+                        group
+                            .iter()
+                            .map(|&state| provenance_protected[state as usize])
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                continue;
+            }
+            for &state in group {
+                claimed[state as usize] = true;
+            }
+            accepted.push(plan);
+        }
+
+        if accepted.is_empty() {
+            return (0..original_num_states).collect();
+        }
+
+        // Rebuild the rows once more now that the accepted classes are fixed;
+        // this avoids retaining temporary rows and lets every target be mapped
+        // directly to its final shared-state ID.
+        let mut share_map = (0..original_num_states).collect::<Vec<_>>();
+        let shared_base = original_num_states;
+        for (index, plan) in accepted.iter().enumerate() {
+            let shared = shared_base + index as u32;
+            for &state in &plan.group {
+                share_map[state as usize] = shared;
+            }
+        }
+        share_map.extend((shared_base..shared_base + accepted.len() as u32).collect::<Vec<_>>());
+
+        let had_advance_rows = self.advance.len() == original_len;
+        let mut shared_rows = Vec::<(ActionRow, GotoRow, Option<BitSet>)>::new();
+        for plan in &accepted {
+            let group = &plan.group;
+            let mut terminals = BTreeSet::<TerminalID>::new();
+            for &state in group {
+                terminals.extend(self.action[state as usize].keys());
+            }
+            let mut action_row = ActionRow::default();
+            for terminal in terminals {
+                let mut effects = Vec::<GuardedStackShift>::new();
+                let mut accepts = 0usize;
+                for (member_index, &state) in group.iter().enumerate() {
+                    let Some(action) = self.action[state as usize].get(&terminal) else {
+                        continue;
+                    };
+                    let frame = context_share_frame_for_member(
+                        state,
+                        &plan.predecessors_by_member[member_index],
+                    );
+                    collect_suffix_effects_from_frame(
+                        self,
+                        terminal,
+                        state,
+                        action,
+                        frame,
+                        &mut FxHashSet::default(),
+                        &mut effects,
+                        &mut accepts,
+                    )
+                    .expect("accepted contextual-sharing row must rebuild exactly");
+                }
+                debug_assert_eq!(accepts, 0);
+                normalize_guarded_effects_for_suffix_quotient(&mut effects);
+                for effect in &mut effects {
+                    for guard in &mut effect.guards {
+                        for state in &mut guard.states {
+                            *state = share_map[*state as usize];
+                        }
+                        guard.states.sort_unstable();
+                        guard.states.dedup();
+                    }
+                    for state in &mut effect.pushes {
+                        *state = share_map[*state as usize];
+                    }
+                }
+                normalize_guarded_effects_for_suffix_quotient(&mut effects);
+                if !effects.is_empty() {
+                    action_row.insert(terminal, Action::GuardedStackShifts(effects));
+                }
+            }
+
+            let goto_row = self.goto[group[0] as usize]
+                .iter()
+                .map(|(&nonterminal, &(target, replace))| {
+                    (nonterminal, (share_map[target as usize], replace))
+                })
+                .collect();
+            let advance = had_advance_rows.then(|| union_advance_rows(self, &group.iter().copied().collect()));
+            shared_rows.push((action_row, goto_row, advance));
+        }
+
+        // Redirect every incoming table edge before pruning the now-unreachable
+        // concrete member states.
+        for row in &mut self.action[..original_len] {
+            remap_action_row_targets_in_place(row, &share_map);
+        }
+        for row in &mut self.goto[..original_len] {
+            remap_goto_row_targets_in_place(row, &share_map);
+        }
+        for (action, goto, advance) in shared_rows {
+            self.action.push(action);
+            self.goto.push(goto);
+            if let Some(advance) = advance {
+                self.advance.push(advance);
+            }
+            self.num_states += 1;
+        }
+        self.forwarded_shifts = self
+            .forwarded_shifts
+            .iter()
+            .filter_map(|&(state, terminal)| {
+                (share_map[state as usize] == state).then_some((state, terminal))
+            })
+            .collect();
+
+        let prune_map = self.prune_unreachable_states_with_mapping();
+        let mut final_map = vec![u32::MAX; original_len];
+        for old in 0..original_len {
+            let shared = share_map[old] as usize;
+            final_map[old] = prune_map.get(shared).copied().unwrap_or(u32::MAX);
+        }
+        debug_assert!(final_map.iter().all(|&state| state != u32::MAX));
+        self.rebuild_guarded_shift_index();
+        self.compress_default_action_rows();
+        final_map
     }
 
     /// Collapse unit reductions by inlining their destination actions.
@@ -3739,6 +4219,50 @@ struct StackEffectFrame {
     guards: Vec<StackShiftGuard>,
 }
 
+#[derive(Debug, Clone)]
+struct ContextStateSharePlan {
+    group: Vec<u32>,
+    predecessors_by_member: Vec<Vec<u32>>,
+    generated_guard_states: Vec<u32>,
+}
+
+fn context_share_provenance_plan(
+    group: &[u32],
+    predecessors: &[StateSubset],
+) -> Option<ContextStateSharePlan> {
+    let predecessors_by_member = group
+        .iter()
+        .map(|&state| predecessors.get(state as usize).map(|set| set.to_vec()))
+        .collect::<Option<Vec<_>>>()?;
+    if predecessors_by_member.iter().any(Vec::is_empty) {
+        return None;
+    }
+    let mut seen = BTreeSet::<u32>::new();
+    for member_predecessors in &predecessors_by_member {
+        for &predecessor in member_predecessors {
+            if !seen.insert(predecessor) {
+                return None;
+            }
+        }
+    }
+    Some(ContextStateSharePlan {
+        group: group.to_vec(),
+        predecessors_by_member,
+        generated_guard_states: Vec::new(),
+    })
+}
+
+fn context_share_frame_for_member(state: u32, predecessors: &[u32]) -> StackEffectFrame {
+    StackEffectFrame {
+        pop: 1,
+        pushes: vec![state],
+        guards: vec![StackShiftGuard {
+            pop: 1,
+            states: predecessors.to_vec(),
+        }],
+    }
+}
+
 enum ReduceFrameResult {
     Dead,
     Frames {
@@ -4391,6 +4915,8 @@ fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::glr::accumulator::TerminalsDisallowed;
+    use crate::glr::parser::{ParserGSS, advance_stacks};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -4490,6 +5016,81 @@ mod tests {
             Action::StackShifts(shifts) => shifts.clone(),
             action => panic!("expected stack shifts, got {action:?}"),
         }
+    }
+
+    #[test]
+    fn contextual_state_sharing_compacts_ambiguous_top_with_distinct_stack_contexts() {
+        // Two reachable parser paths have different caller states (1 and 2)
+        // but structurally corresponding tops (3 and 4). Sharing 3~4 should
+        // turn the GSS frontier from two top LR IDs into one while retaining
+        // the caller distinction one frame below as an exact guard.
+        let mut action = vec![ActionRow::default(); 6];
+        action[0].insert(10, Action::Shift(1, false));
+        action[0].insert(11, Action::Shift(2, false));
+        action[1].insert(20, Action::Shift(3, false));
+        action[2].insert(21, Action::Shift(4, false));
+        action[3].insert(0, Action::Shift(5, true));
+        action[4].insert(0, Action::Shift(5, true));
+        action[5].insert(1, Action::Shift(5, true));
+        let mut table = GLRTable {
+            action,
+            goto: vec![GotoRow::default(); 6],
+            num_states: 6,
+            num_terminals: 22,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::ExactSimulation,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+        };
+        table.rebuild_advance_rows_from_actions();
+        let baseline = table.clone();
+        let mapping = table.share_context_distinguishable_states_exact(&[vec![3, 4]]);
+
+        assert_eq!(mapping[3], mapping[4]);
+        assert!(table.num_states < baseline.num_states);
+
+        let acc = TerminalsDisallowed::new();
+        let baseline_before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 3], acc.clone()),
+            (vec![0, 2, 4], acc.clone()),
+        ]);
+        let shared_before = ParserGSS::from_stacks(&[
+            (
+                vec![mapping[0], mapping[1], mapping[3]],
+                acc.clone(),
+            ),
+            (vec![mapping[0], mapping[2], mapping[4]], acc),
+        ]);
+        assert_eq!(baseline_before.peek_values().len(), 2);
+        assert_eq!(shared_before.peek_values().len(), 1);
+
+        let baseline_after = advance_stacks(&baseline, &baseline_before, 0);
+        let shared_after = advance_stacks(&table, &shared_before, 0);
+        let mut expected = baseline_after
+            .to_stacks(32)
+            .unwrap()
+            .into_iter()
+            .map(|(stack, acc)| {
+                (
+                    stack
+                        .into_iter()
+                        .map(|state| mapping[state as usize])
+                        .collect::<Vec<_>>(),
+                    acc,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut actual = shared_after.to_stacks(32).unwrap();
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        actual.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(actual, expected);
     }
 
     #[test]

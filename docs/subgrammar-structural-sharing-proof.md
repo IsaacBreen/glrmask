@@ -1,0 +1,494 @@
+# Exact structural sharing for compiled subgrammars
+
+This note states the correctness argument for the structural-sharing quotient
+used by compiled-constraint composition.  The optimization is intentionally
+grammar-agnostic.  It does not recognize JSON, schemas, or any other domain.
+
+## 1. Setting
+
+After ordinary component compilation and table splicing, let
+
+- `T` be the finite set of terminal IDs,
+- `N` the finite set of nonterminal IDs,
+- `S` the finite set of LR stack-state IDs,
+- `A(s,t)` the optimized table action at state `s` on terminal `t`,
+- `G(s,n)` the goto edge from state `s` on nonterminal `n`, and
+- `Adv(s)` the exact admission set captured by the table.
+
+The parser stack is a word in `S*`.  Optimized actions may be ordinary shifts,
+reductions, finite sets of stack rewrites, guarded stack rewrites, split
+actions, accept, or identity skip.
+
+The optimization constructs three equivalence relations, in this order:
+
+1. a sufficient terminal-language relation `~T`;
+2. a structural nonterminal relation `~N`;
+3. a row-bisimulation relation `~S` on LR states.
+
+Only the last relation physically removes LR states. Terminal and nonterminal
+IDs are retained. `~T` lets one shared LR row carry several byte-language
+aliases. `~N` is used only as a structural-isomorphism certificate when
+matching independently compiled child machines; it is deliberately *not* used
+to identify goto columns.
+
+## 2. Terminal relation
+
+For an ordinary byte terminal `t`, let `E(t)` be the retained lexer `Expr`.
+The implementation relates two terminals only if neither terminal carries side
+semantics not represented by the byte language (control, scoped skip, ignore,
+placeholder, or special-token semantics), and one of these sufficient identity
+certificates holds:
+
+1. `E(t1) == E(t2)` structurally; or
+2. both terminals are the same local terminal of the exact same compiled
+   `Constraint` artifact reused at two composition sites.
+
+All other terminals are singleton classes.
+
+### Lemma 1 — terminal-language equality
+
+If `t1 ~T t2`, then the set of byte strings recognized by `t1` equals the set
+recognized by `t2`, including the accepted widths relevant to longest-match
+execution.
+
+**Proof.** In case 1, `Expr` is the denotational lexer expression. Structural
+equality of `Expr` values implies equality under its language interpretation by
+immediate induction over the expression constructors (`U8Seq`, `U8Class`,
+`Dfa`, `Intersect`, `Seq`, `Choice`, `Exclude`, `Repeat`, `Shared`, and
+`Epsilon`). `Exclude` and `Intersect` remain inside the expression, so equality
+does not discard those semantics. In case 2 there is no semantic comparison at
+all: both global aliases refer to the same local terminal in the same immutable
+compiled tokenizer artifact, hence to the identical transition/finalizer
+machine and accepted widths. The exclusion of terminals with side semantics
+removes every known terminal behavior not represented by that byte matcher.
+Therefore the byte match relation and every match width are equal. ∎
+
+This is intentionally only a sufficient test. Two differently written regexes
+may denote the same language and still remain unmerged. The artifact-identity
+case is useful after serialization because compile-time `Expr` values are not
+required to be retained in a loaded constraint.
+
+## 3. Structural nonterminal relation
+
+For every `n ∈ N`, write `P(n)` for the ordered-symbol right-hand sides of all
+productions whose left-hand side is `n`.  Production order is ignored, while
+duplicate productions are retained.
+
+Starting from a coarse partition that distinguishes
+
+- the augmented start nonterminal from every other nonterminal, and
+- boundary roots from non-boundary nonterminals,
+
+the implementation repeatedly refines classes by the signature
+
+```
+{ map(rhs, T -> class_T, N -> previous_class_N) : rhs in P(n) }.
+```
+
+The finite refinement terminates at a fixed point `~N`.
+
+### Lemma 2 — equal grammar equations
+
+If `n1 ~N n2`, their production equations are identical after quotienting
+terminal symbols by `~T` and nonterminal variables by `~N`.
+
+**Proof.** This is exactly the fixed-point condition of the refinement. ∎
+
+### Lemma 3 — structural nonterminal language equality
+
+Members of one `~N` class generate the same byte language, modulo substitution
+of `~T`-equivalent terminal aliases.
+
+**Proof.** A CFG defines the least fixed point of a monotone system of language
+equations over the complete lattice of tuples of languages.  By Lemma 2,
+members of one `~N` class have the same polynomial equation after quotienting
+variables by `~N`; by Lemma 1, related terminal constants have equal byte
+languages.  The subspace in which all variables in one class are equal is
+therefore closed under the grammar functional.  Kleene iteration from the
+bottom element remains in that subspace at every finite iteration, so the least
+fixed point does as well. Thus every member of one class has the same generated
+byte language. ∎
+
+The augmented-start anchor preserves the distinguished start semantics.  The
+boundary anchor is stronger than required for grammar language equality; it
+prevents candidate matching from enlarging boundary-analysis scope.
+
+Crucially, Lemma 3 does **not** justify physically identifying the nonterminal
+IDs in an LR table. One caller state may legitimately have `goto(n1) !=
+goto(n2)` even when `L(n1) = L(n2)`. The implementation therefore retains
+concrete nonterminal identity in the ordinary LR quotient. `~N` is used later
+only to establish that two independently compiled child states have the same
+standalone grammar shape before caller-specific behavior is considered.
+
+## 4. LR-state relation
+
+The LR-state relation is the greatest fixed point reached by finite partition
+refinement from one coarse state class.  A state's refinement signature contains
+all execution observations, normalized through the current state partition:
+
+- action columns keyed by `~T` class;
+- every action target state mapped through the current state partition;
+- concrete reduction nonterminal IDs unchanged;
+- concrete goto columns with mapped target states;
+- the exact `advance` set, projected through `~T`;
+- forwarded-shift status;
+- direct-regular wide-frontier descriptors with mapped targets; and
+- exact membership in every guarded-stack-shift predicate.
+
+If two different terminal aliases in one physical row have different normalized
+actions, that row is forced to remain a singleton. Thus every non-singleton
+quotient class has one well-defined action per terminal-language class and one
+well-defined goto for every concrete nonterminal ID.
+
+The previous partition class is part of every refinement signature, so the
+algorithm only splits classes.  It terminates after at most `|S|-1` strict
+refinements.
+
+### Lemma 4 — guarded predicates descend exactly
+
+For every guarded stack predicate `H ⊆ S`, `H` is a union of final `~S`
+classes.
+
+**Proof.** Exact membership in every guard occurrence is part of the initial
+observable color and is retained by all later refinements.  Hence no final class
+contains one member of `H` and one non-member. ∎
+
+This condition is essential.  Without it, mapping guard-state sets through the
+quotient could turn a predicate that distinguished two old stack states into a
+predicate that accepted their common quotient state.
+
+## 5. Quotient construction
+
+Let `q : S -> S/~S` map an old LR state to its quotient state.
+
+For each quotient state `Q`, the implementation unions the concrete terminal
+columns of all `s ∈ Q`. State targets are mapped by `q`; reduction and goto
+nonterminal IDs remain concrete. The fixed-point signature guarantees that any
+collision has exactly the same normalized action/goto. The implementation
+checks this again while materializing the quotient and treats a disagreement as
+an internal proof violation.
+
+`advance`, forwarded shifts, guarded state sets, wide-frontier state IDs, and
+every component parser-state relation are transported by `q`. Rules,
+nonterminal IDs, and boundary nonterminal IDs remain unchanged. Guard indices
+are then rebuilt from the quotient table.
+
+### Lemma 5 — action homomorphism
+
+Let `q*` map every LR state in a stack to its `~S` class.  For any old stack
+`σ·s` and terminal `t`, every result of applying `A(s,t)` and then mapping the
+result stack by `q*` is exactly a result of applying the quotient action at
+`q(s)` on `t`; conversely every quotient result is the image of an old result
+for some member of the quotient class with a `~T`-equivalent terminal alias.
+
+**Proof by action cases.**
+
+- **Shift / replace shift.** Targets are mapped directly by `q`; the replace
+  flag and forwarded-shift observation are part of the signature.
+- **StackShifts / ReplaceShifts.** Pop counts are unchanged and each pushed
+  state is mapped by `q`.  Sorting/deduplication removes only duplicate
+  alternatives that became identical after quotienting.
+- **GuardedStackShifts.** The same stack rewrite argument applies.  By Lemma 4,
+  every guard predicate is saturated by quotient classes, so evaluating the
+  mapped guard on `q*(σ)` gives exactly the old truth value.
+- **Reduce.** The pop count and reduced nonterminal are unchanged. The concrete
+  goto column is part of the stable row signature and its target is mapped by
+  `q`; therefore the post-reduction quotient state is identical.
+- **Split.** It is the union of the preceding shift/reduce cases.  Duplicate
+  alternatives that become identical may be deduplicated because recognition
+  weights use idempotent union.
+- **Accept / Skip.** They contain no mapped identity and are unchanged.
+
+Thus the action relation commutes with `q*`. ∎
+
+### Lemma 6 — row bisimulation
+
+If `s1 ~S s2`, then for every terminal-language class the two states have the
+same admission decision and the same quotient action, and for every concrete
+nonterminal ID they have the same quotient goto.
+
+**Proof.** This is exactly equality of the stable structural state signatures;
+rows with non-uniform aliases are excluded from non-singleton classes. ∎
+
+### Theorem 1 — parser preservation
+
+Starting from the mapped initial stack, the quotient parser recognizes exactly
+the same byte language as the unquotiented composed parser.
+
+**Proof.** Induct on consuming parser steps, using Lemma 5 for the transition
+step and Lemma 6 for availability of that step.  Reductions are internal steps
+covered by the same action homomorphism.  Acceptance is unchanged.  The
+quotient may admit additional *terminal-ID spellings* obtained by substituting
+one `~T` alias for another, but by Lemma 1 those spellings have exactly the same
+byte language and match widths.  Therefore their projection to byte strings is
+unchanged. ∎
+
+## 6. Context-distinguishable sharing
+
+The row bisimulation above is intentionally conservative. Two copies of one
+child machine can acquire different return lookaheads when linked at different
+call sites. Ordinary row bisimulation then propagates that difference backwards
+through the copied child even though the parser stack still contains enough
+caller context to distinguish the copies.
+
+The second quotient recovers exactly this case without erasing that context.
+
+### 6.1 Candidate correspondence
+
+Candidates are found from the independently compiled child tables, *before*
+caller-specific return lookaheads are introduced. Child states are compared by
+finite partition refinement over their complete table behavior:
+
+- terminal columns are compared modulo `~T`;
+- reduction/goto nonterminals are compared modulo `~N`;
+- target and guard states are compared modulo the previous state partition;
+- `advance` and forwarded-shift observations are included; and
+- start states are kept in a separate initial color from internal states.
+
+Only a class containing states from at least two different child components is
+proposed to the contextual quotient. This is a structural-isomorphism
+certificate for the standalone parser submachines, not a source-domain or name
+heuristic.
+
+### 6.2 Predecessor provenance
+
+For an LR state `s`, let `Pred(s)` be a conservative set of LR states that can
+occur immediately below `s` on a reachable parser stack.
+
+For an ordinary push edge, the source state is inserted into the target's
+predecessor set. For a replace edge, predecessor sets propagate through the edge
+to a fixed point. Goto edges are treated identically. This recurrence is
+complete for states not entered by an arbitrary precompiled stack effect. Any
+target of `StackShifts`, `GuardedStackShifts`, or `ReplaceShifts`, and every
+state that inherits such provenance through a replace edge, is therefore marked
+unsafe and is not contextually merged.
+
+Hence every concrete immediate predecessor of every accepted state `s` belongs
+to `Pred(s)`.
+
+An accepted candidate class `C` additionally satisfies:
+
+1. `Pred(s)` is non-empty for every `s ∈ C`;
+2. `Pred(s1) ∩ Pred(s2) = ∅` for distinct `s1,s2 ∈ C`;
+3. every state in every `Pred(s)` is frozen and cannot itself be merged;
+4. no state observed by an existing guarded predicate is merged; and
+5. every LR state mentioned by a *new* guard produced while compiling the
+   candidate macro row is also frozen before candidate classes are accepted;
+   and
+6. the concrete goto rows of all members agree exactly, because gotos cannot
+   carry the terminal-action provenance guard used below.
+
+These conditions make the immediate predecessor a stable, injective provenance
+tag for the old top-state identity.
+
+### 6.3 Guarded macro state
+
+For an accepted class `C`, introduce one shared LR state `Q_C`. Every incoming
+edge whose old target was `s ∈ C` is redirected to `Q_C`.
+
+For each old action `A(s,t)`, construct the symbolic stack-effect frame
+
+```
+pop    = 1
+pushes = [s]
+guard  = (after popping 1, state ∈ Pred(s)).
+```
+
+Operationally, this says: replace the shared top `Q_C` by its concrete old
+representative `s`, but only in stack contexts that could have produced `s`.
+The existing exact stack-effect compiler then executes `A(s,t)`, including all
+reduction/goto closure needed before `t` is consumed, and returns the equivalent
+`GuardedStackShifts` macro effect. Pushed LR-state IDs are finally transported
+through all accepted sharing classes.
+
+The composed table uses `AdmissionPolicy::ExactSimulation`; its `advance` row
+for `Q_C` is therefore safely the union of constituent admission rows. That
+union is only a prefilter. The guard-bearing action is simulated before a
+terminal is declared admissible.
+
+### Lemma 7 — unique source recovery
+
+Let `α p Q_C` be a reachable stack whose top was obtained by redirecting an old
+state in `C`. There is exactly one `s ∈ C` whose provenance guard accepts it,
+and that `s` is the old state represented by this occurrence of `Q_C`.
+
+**Proof.** The redirected occurrence originated from some concrete member
+`s ∈ C`. Completeness of the safe predecessor analysis gives
+`p ∈ Pred(s)`. Pairwise disjointness gives `p ∉ Pred(s')` for every
+`s' != s`. The predecessor IDs are frozen, so later quotients cannot destroy
+that distinction. ∎
+
+### Lemma 8 — contextual action equivalence
+
+For every reachable `α p Q_C` and terminal `t`, applying the guarded macro row
+at `Q_C` produces exactly the image of applying the old action at the concrete
+member represented by that occurrence.
+
+**Proof.** By Lemma 7 exactly one member's initial frame is enabled. Replacing
+`Q_C` by that member reconstructs the old stack before the action. The
+stack-effect compiler is the same exact reduction/shift closure used by the
+ordinary table optimizer, so its emitted macro effect has the same result as
+the old action through the first consuming step. All other members' frames are
+eliminated by their predecessor guards. Mapping pushed target states through
+the sharing map merely applies the same representation invariant recursively.
+∎
+
+The viability pass performs this macro compilation before the accepted quotient
+is fixed and records every LR-state ID appearing in any generated guard. Those
+states are frozen along with the predecessor provenance states. Consequently a
+later shared-state mapping cannot broaden a generated predicate by identifying
+a guarded state with an unguarded one.
+
+### Theorem 2 — contextual table sharing is exact
+
+Redirecting every accepted candidate class to its shared guarded state preserves
+the parser's byte language and exact admission relation on every reachable
+stack.
+
+**Proof.** Induct over consuming parser steps. The base stack contains no shared
+state. For a non-shared top, table behavior is unchanged except that target IDs
+may be represented by their shared state. For a shared top, Lemma 8 gives exact
+step equivalence. The representation invariant is preserved by transported
+pushes. Exact admission performs the same guarded simulation, so the unioned
+`advance` row cannot introduce a false admitted terminal. Accepting actions are
+deliberately not contextually merged because `Accept` has no guard-bearing
+representation. ∎
+
+The safety restrictions are intentionally one-sided. If predecessor provenance
+is complex, overlapping, or entangled with existing guards, the candidate is
+simply left unmerged.
+
+## 7. Parser-DWA transport
+
+Compiled component parser DWAs do not contain terminal IDs.  Their labels are
+positive and negative LR-state observations.  Composition already transports a
+local LR state through a relation
+
+```
+local state -> one or more composed states.
+```
+
+After structural sharing this relation is simply post-composed with `q` and
+deduplicated.  Both positive and negative labels use the same mapping.  The
+existing NWA union/determinization then combines any transitions whose labels
+became identical.
+
+### Theorem 3 — parser-DWA reuse remains exact
+
+Transporting an already compiled component parser DWA through the updated state
+relation denotes the same weighted token relation as compiling that component's
+behavior against the quotient table.
+
+**Proof.** Parser-DWA state labels observe only LR stack-state identity.  By
+Theorem 1, `q` is a congruence for every parser transition and acceptance
+observation.  Replacing each label by its image under `q` is therefore a
+homomorphic relabeling of the recognized stack-effect language.  When multiple
+old labels acquire one quotient label, NWA union followed by determinization
+computes the idempotent union of those equal quotient behaviors, which is
+exactly the quotient relation.  TSID × vocabulary weights are unchanged by the
+LR-state quotient. ∎
+
+For context-distinguishable sharing, labels are merged only when their
+standalone child states lie in the same structural class from §6.1. That
+standalone table/terminal isomorphism induces identical component parser-DWA
+behavior modulo the same LR-state, TSID, and vocabulary renamings. The
+caller-specific differences introduced only by linking are handled by the
+guarded composed-table behavior of Theorem 2; they are not part of the reused
+child DWA.
+
+## 8. Exact runtime lexer product
+
+The parser quotients above retain logical terminal IDs. To reduce duplicated
+*lexer frontier* states, composition optionally installs the same exact runtime
+product representation already used by glrmask's generic full-runtime lexer
+determinization.
+
+Let the composed source tokenizer be the epsilon-NFA `L` with raw states `R`.
+Exact subset construction creates a deterministic product state for each
+reachable epsilon-closed subset `P ⊆ R`. For every product state the artifact
+stores
+
+- the exact source subset `P`;
+- an exact scalar source representative when `P` is one source state's epsilon
+  closure;
+- the union of the already-compiled TSID classes represented by states in `P`.
+
+The complete original source tokenizer is then appended unchanged after the
+product states. Runtime masking may keep a single product key while parser
+histories are uniform across its source subset. Before commit needs per-source
+longest-match provenance, `expand_runtime_product_states` expands that product
+key back to the exact source states in `P`; the source tokenizer then executes
+unchanged. After commit, compatible source lanes may be coalesced again.
+
+### Lemma 9 — tokenizer subset equivalence
+
+For every byte word `w`, the deterministic product state reached from subset
+`P` is exactly the epsilon closure of the union of source states reachable from
+members of `P` on `w`.
+
+**Proof.** This is the standard subset-construction invariant. The builder
+computes, for each byte, the union of all source transitions and then takes the
+exact epsilon closure before interning the target subset. Induction on `|w|`
+gives the claim. ∎
+
+### Lemma 10 — TSID observation preservation
+
+Every product state exposes exactly the union of TSID observations of the
+source states in its subset.
+
+**Proof.** Before installing the product, composition snapshots the exact
+raw-state-to-TSID relation. For every subset `P` it unions and deduplicates the
+TSIDs of all `r ∈ P`; runtime cache finalization rebuilds the general
+many-TSID-per-state relation from that mapping. No TSID is invented or removed.
+∎
+
+### Theorem 4 — runtime lexer product is exact
+
+Installing the product+source-fallback representation preserves masks, token
+acceptance, longest-match behavior, commits, and the recognized byte/token
+language.
+
+**Proof.** By Lemma 9, a product state is an exact compact representation of its
+source lexer lanes. By Lemma 10, parser-DWA/possible-match weight queries see
+exactly the union of the source TSID observations while the state remains
+compact. Whenever a consuming operation requires lane-specific provenance, the
+runtime expands the product state to exactly its stored source subset and runs
+the unchanged source tokenizer. Thus no longest-match/source history is lost;
+coalescing is only a reversible representation change. The reset product state
+has special handling because it represents one historical reset lane whose
+epsilon closure contains all component roots. Therefore every mask and commit
+step has the same source semantics as the unproductized composition. ∎
+
+### Adaptive selection is performance-only
+
+Correctness does not depend on the selection heuristic. By default composition
+attempts the runtime product only when there are structurally equal terminal
+aliases and the source tokenizer is small enough. It selects the product only
+when
+
+1. product-state count is reduced by the configured minimum (25% by default),
+2. transition growth stays bounded, and
+3. excluding the reset product state, some product subset contains at least two
+   concrete consuming source lanes whose future terminals are simultaneously
+   admitted by one parser row.
+
+Condition 3 prevents the common sequential case where duplicate lexer machines
+are statically isomorphic but the parser can enable only one copy at a time.
+An explicit environment override may force the exact product on or off for
+measurement; this changes performance only, not semantics.
+
+The representation reduces the visible/persistent lexer frontier, not total
+stored tokenizer memory: the exact source tokenizer is intentionally retained
+as the commit fallback.
+
+## 9. What this proof does *not* assume
+
+The proof does not assume anything about JSON, JSON Schema, programming
+languages, or the source that generated a grammar.  It also does not assume
+that independently optimized components chose identical raw LR state numbers.
+Only the finite structural relations above are used.
+
+The proof intentionally does **not** claim completeness: semantically equal but
+structurally different terminals/nonterminals/states may remain separate.  That
+is the preferred failure mode.  Structural sharing is an optimization, so a
+missed merge costs performance; an unjustified merge would cost correctness.
