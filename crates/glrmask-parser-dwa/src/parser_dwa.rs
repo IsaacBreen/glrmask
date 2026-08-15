@@ -2121,12 +2121,17 @@ fn determinize_with_supports(
                     component_results.iter().map(|(_, _, ms)| *ms).sum::<f64>();
             }
             let output_started_at = Instant::now();
+            let direct_final_union =
+                std::env::var_os("GLRMASK_PARSER_FINAL_DIRECT_UNION").is_some();
             let compute_signature = |component_ids: &SmallVec<[usize; 8]>| {
-                let weight = Weight::union_all(
-                    component_ids
-                        .iter()
-                        .filter_map(|&component_id| component_results[component_id].0.as_ref()),
-                );
+                let weights = component_ids
+                    .iter()
+                    .filter_map(|&component_id| component_results[component_id].0.as_ref());
+                let weight = if direct_final_union {
+                    Weight::union_all_direct(weights)
+                } else {
+                    Weight::union_all(weights)
+                };
                 (!weight.is_empty()).then_some(weight)
             };
             let results = if use_parallel_final_signatures {
