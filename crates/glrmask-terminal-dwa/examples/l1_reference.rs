@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use glrmask_glr::__private::glr::analysis::AnalyzedGrammar;
 use glrmask_grammar::__private::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
-use glrmask_lexer::__private::automata::lexer::{ast::bytes, compile::build_regex, tokenizer::Tokenizer};
+use glrmask_lexer::__private::automata::lexer::tokenizer::Tokenizer;
+#[cfg(test)]
+use glrmask_lexer::__private::automata::lexer::{ast::bytes, compile::build_regex};
 use glrmask_terminal_dwa::__private::terminal_dwa::{
     l1::{
         build_flat_transition_table,
@@ -55,7 +57,7 @@ fn run(tokenizer: &Tokenizer, vocab: &Vocab, active: &[bool], plan: Plan) {
 fn main() {
     let tokenizer = glrmask_lexer::__private::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
     let vocab = Vocab::new(vec![(0, vec![]), (1, b"a".to_vec()), (2, b"a".to_vec()), (3, b"aa".to_vec()), (4, b"b".to_vec())]);
-    run(&tokenizer, &vocab, &[true, true], Plan { use_implementation: Implementation::Scalar, check_against: Some(Implementation::Production) });
+    run(&tokenizer, &vocab, &[true, true], Plan { use_implementation: Implementation::Scalar, check_against: Some(Implementation::Quotient) });
 }
 
 #[cfg(test)]
@@ -65,18 +67,19 @@ mod tests {
     fn check_both_directions(tokenizer: Tokenizer, vocab: Vocab) {
         for active in [[true, true], [true, false], [false, true]] {
             for implementation in [
-                Implementation::Production,
+                Implementation::Projected,
+                Implementation::Quotient,
+                Implementation::Auto,
                 Implementation::Scalar,
                 Implementation::Trie,
                 Implementation::Bulk,
                 Implementation::Dense,
                 Implementation::Frontier,
-                Implementation::Single,
             ] {
-                let checker = if implementation == Implementation::Production {
-                    Implementation::Trie
+                let checker = if implementation == Implementation::Quotient {
+                    Implementation::Projected
                 } else {
-                    Implementation::Production
+                    Implementation::Quotient
                 };
                 run(&tokenizer, &vocab, &active, Plan { use_implementation: implementation, check_against: Some(checker) });
             }
