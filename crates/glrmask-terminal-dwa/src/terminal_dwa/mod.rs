@@ -2067,6 +2067,12 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let mut l1_partition_seen = vec![false; sub_vocabs.len()];
     let mut l1_token_domains_proven_disjoint = partition_scheme == "char_type"
         && tokenizer.num_states() <= proven_disjoint_immediate_merge_max_tokenizer_states();
+    // Each character partition owns a disjoint original-token domain and can
+    // contribute at most one L2P artifact. Preserve that proof for the L2P
+    // family merge instead of rescanning all original-token maps. Keep the same
+    // small-tokenizer policy as L1 so large-schema class ordering is unchanged.
+    let l2p_token_domains_proven_disjoint = partition_scheme == "char_type"
+        && tokenizer.num_states() <= proven_disjoint_immediate_merge_max_tokenizer_states();
     for (result, idx) in partition_results {
         if let Some((parts, _)) = result {
             if let Some(l1) = parts.l1 {
@@ -2149,13 +2155,20 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         },
         || {
             (!l2p_pairs.is_empty()).then(|| {
-                if let Some((nwa, id_map, profile)) =
+                let token_nwa_merge = if l2p_token_domains_proven_disjoint {
+                    merge::try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
+                        &l2p_pairs,
+                        num_tokenizer_states,
+                        max_token_id,
+                    )
+                } else {
                     merge::try_merge_id_maps_and_token_deterministic_nwa(
                         &l2p_pairs,
                         num_tokenizer_states,
                         max_token_id,
                     )
-                {
+                };
+                if let Some((nwa, id_map, profile)) = token_nwa_merge {
                     return (
                         MappedArtifact::new(TerminalAutomaton::TokenDeterministicNwa(nwa), id_map),
                         profile,

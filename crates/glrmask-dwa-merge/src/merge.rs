@@ -1228,7 +1228,49 @@ pub fn try_merge_id_maps_and_token_deterministic_nwa(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
-    if inputs.len() < 2 || !inputs_have_disjoint_token_domains(inputs, max_token_id) {
+    try_merge_id_maps_and_token_deterministic_nwa_impl(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        false,
+    )
+}
+
+/// Build the same exact token-deterministic NWA union when the caller already
+/// proved that every input owns a disjoint original-vocabulary domain.
+///
+/// Generic callers must use the checked entry point above. This entry point
+/// avoids rediscovering the partition invariant by scanning the whole vocab.
+pub fn try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    try_merge_id_maps_and_token_deterministic_nwa_impl(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        true,
+    )
+}
+
+fn try_merge_id_maps_and_token_deterministic_nwa_impl(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+    token_domains_proven_disjoint: bool,
+) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    if inputs.len() < 2 {
+        return None;
+    }
+    if token_domains_proven_disjoint {
+        if std::env::var_os("GLRMASK_ASSERT_PROVEN_DISJOINT_TOKEN_NWA_DOMAINS").is_some() {
+            assert!(
+                inputs_have_disjoint_token_domains(inputs, max_token_id),
+                "caller-proven token-NWA merge received overlapping vocabulary domains",
+            );
+        }
+    } else if !inputs_have_disjoint_token_domains(inputs, max_token_id) {
         return None;
     }
 
@@ -1238,7 +1280,7 @@ pub fn try_merge_id_maps_and_token_deterministic_nwa(
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
     let (global_id_map, direct_local_to_global_token_maps, precomputed_tsid_maps) =
-        if fast_disjoint_terminal_nwa_id_map_enabled() {
+        if token_domains_proven_disjoint || fast_disjoint_terminal_nwa_id_map_enabled() {
             let (id_map, direct_maps, tsid_maps) = build_unified_global_id_map_disjoint_fast(
                 &id_map_refs,
                 num_tokenizer_states,
