@@ -8,6 +8,7 @@ pub mod restricted_observation;
 
 pub use pipeline::{
     resolve_global_pipeline_config, resolve_l2p_pipeline_config, run_state_equivalence_pipeline,
+    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate,
     StateEquivalenceScope,
 };
 

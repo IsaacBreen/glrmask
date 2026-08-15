@@ -734,9 +734,6 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     let token_position_partition_for_analysis = matches!(partition_label, "p1" | "p7" | "p8")
         .then_some(token_position_partition.as_ref())
         .flatten();
-    let equivalence_initial_state_map = ti_restricted_observation_seed
-        .as_ref()
-        .or(initial_state_map);
 
     // ---- Step 1: Equivalence analysis (raw tokenizer state IDs) ----
     let id_map_started_at = Instant::now();
@@ -761,6 +758,16 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     // reconstruct, so observe every terminal residual conservatively.
     let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
         .then_some(analysis_active_terminals.as_slice());
+    let equivalence_initial_state_map = ti_restricted_observation_seed
+        .as_ref()
+        .map(|seed| &seed.state_map)
+        .or(initial_state_map);
+    let equivalence_initial_state_map_has_stable_restricted_observation =
+        ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
+            equivalence_active_groups
+                .is_some_and(|active| active == seed.active_terminals.as_ref())
+                && relevant_bytes == seed.relevant_bytes
+        });
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -779,6 +786,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             flat_trans,
             shared_transition_cache,
             equivalence_initial_state_map,
+            equivalence_initial_state_map_has_stable_restricted_observation,
             token_position_partition_for_analysis,
             std::env::var_os("GLRMASK_TI_DISABLE_RAW_OBSERVATION_REUSE")
                 .is_none()
