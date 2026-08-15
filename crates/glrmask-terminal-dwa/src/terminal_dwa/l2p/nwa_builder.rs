@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -1423,6 +1424,151 @@ pub fn seed_root_nodes(
     roots_by_tokenizer_state
 }
 
+
+#[derive(Default)]
+struct RootFragmentBuffers {
+    leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
+    future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
+    transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
+    epsilon_buffer: FxHashMap<(u32, u32), Weight>,
+}
+
+fn merge_terminal_dwa_build_profile(
+    dst: &mut TerminalDwaBuildProfile,
+    src: TerminalDwaBuildProfile,
+) {
+    dst.future_terminal_additions += src.future_terminal_additions;
+    dst.match_transition_additions += src.match_transition_additions;
+    dst.trie_walk_ms += src.trie_walk_ms;
+    dst.flush_ms += src.flush_ms;
+    dst.flush_leaf_ms += src.flush_leaf_ms;
+    dst.flush_future_ms += src.flush_future_ms;
+    dst.flush_weight_ms += src.flush_weight_ms;
+    dst.trie_self_loop_ms += src.trie_self_loop_ms;
+    dst.trie_execute_ms += src.trie_execute_ms;
+    dst.trie_match_filter_ms += src.trie_match_filter_ms;
+    dst.trie_end_state_ms += src.trie_end_state_ms;
+    dst.trie_match_process_ms += src.trie_match_process_ms;
+    dst.trie_continuation_weight_ms += src.trie_continuation_weight_ms;
+    dst.trie_execute_calls += src.trie_execute_calls;
+    dst.trie_execute_input_bytes += src.trie_execute_input_bytes;
+    dst.trie_matches += src.trie_matches;
+    dst.trie_end_states += src.trie_end_states;
+    dst.trie_self_loop_checks += src.trie_self_loop_checks;
+    dst.trie_self_loop_skips += src.trie_self_loop_skips;
+    dst.trie_self_loop_source_nodes += src.trie_self_loop_source_nodes;
+    dst.trie_self_loop_skipped_source_nodes += src.trie_self_loop_skipped_source_nodes;
+    dst.trie_self_loop_cache_misses += src.trie_self_loop_cache_misses;
+}
+
+fn remap_fragment_target(target: u32, base_states: usize, appended_base: u32) -> u32 {
+    if (target as usize) < base_states {
+        target
+    } else {
+        appended_base + target - base_states as u32
+    }
+}
+
+/// Merge one independently-built root-subtree fragment into `dst`, identifying
+/// the shared seeded states `[0, base_states)` and keeping every fragment-local
+/// state disjoint. NWA nondeterminism makes appended transitions from a shared
+/// root exact; later canonicalization/determinization can re-coalesce them.
+fn merge_root_fragment(dst: &mut NWA, base: &NWA, fragment: NWA) -> u32 {
+    let base_states = base.states().len();
+    let (mut fragment_states, _) = fragment.into_parts();
+    debug_assert!(fragment_states.len() >= base_states);
+    let appended_base = dst.states().len() as u32;
+
+    {
+        let dst_states = dst.states_mut();
+        for state_id in 0..base_states {
+            let base_state = &base.states()[state_id];
+            let fragment_state = &fragment_states[state_id];
+            let dst_state = &mut dst_states[state_id];
+
+            for (target, weight) in fragment_state
+                .epsilons
+                .iter()
+                .skip(base_state.epsilons.len())
+            {
+                dst_state.epsilons.push((
+                    remap_fragment_target(*target, base_states, appended_base),
+                    weight.clone(),
+                ));
+            }
+            for (&label, targets) in &fragment_state.transitions {
+                let base_count = base_state
+                    .transitions
+                    .get(&label)
+                    .map_or(0, Vec::len);
+                let dst_targets = dst_state.transitions.entry(label).or_default();
+                dst_targets.extend(targets.iter().skip(base_count).map(|(target, weight)| {
+                    (
+                        remap_fragment_target(*target, base_states, appended_base),
+                        weight.clone(),
+                    )
+                }));
+            }
+        }
+
+        for mut state in fragment_states.drain(base_states..) {
+            for (target, _) in &mut state.epsilons {
+                *target = remap_fragment_target(*target, base_states, appended_base);
+            }
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target = remap_fragment_target(*target, base_states, appended_base);
+                }
+            }
+            dst_states.push(state);
+        }
+    }
+    appended_base
+}
+
+fn remap_fragment_state_id(state: u32, base_states: usize, appended_base: u32) -> u32 {
+    remap_fragment_target(state, base_states, appended_base)
+}
+
+fn merge_root_fragment_buffers(
+    merged: &mut RootFragmentBuffers,
+    buffers: RootFragmentBuffers,
+    base_states: usize,
+    appended_base: u32,
+) {
+    let remap = |state: u32| remap_fragment_state_id(state, base_states, appended_base);
+    for (local_source, labels) in buffers.leaf_token_ids_buffer.into_iter().enumerate() {
+        if labels.is_empty() { continue; }
+        let source = remap(local_source as u32) as usize;
+        if source >= merged.leaf_token_ids_buffer.len() {
+            merged.leaf_token_ids_buffer.resize_with(source + 1, Vec::new);
+        }
+        let dst_labels = &mut merged.leaf_token_ids_buffer[source];
+        if dst_labels.len() < labels.len() {
+            dst_labels.resize_with(labels.len(), SmallVec::new);
+        }
+        for (label, token_ids) in labels.into_iter().enumerate() {
+            dst_labels[label].extend(token_ids);
+        }
+    }
+    for ((source, tokenizer_state, color), buffered) in buffers.future_leaf_buffer {
+        let dst = merged.future_leaf_buffer.entry((remap(source), tokenizer_state, color)).or_default();
+        dst.token_ids.extend(buffered.token_ids);
+        if let Some(weight) = buffered.weight {
+            if let Some(existing) = &mut dst.weight { *existing = existing.union(&weight); }
+            else { dst.weight = Some(weight); }
+        }
+    }
+    for ((source, label, target), weight) in buffers.transition_buffer {
+        merged.transition_buffer.entry((remap(source), label, remap(target)))
+            .and_modify(|existing| *existing = existing.union(&weight)).or_insert(weight);
+    }
+    for ((source, target), weight) in buffers.epsilon_buffer {
+        merged.epsilon_buffer.entry((remap(source), remap(target)))
+            .and_modify(|existing| *existing = existing.union(&weight)).or_insert(weight);
+    }
+}
+
 pub fn build_nwa_via_trie_walk<'a>(
     tokenizer: &'a Tokenizer,
     terminal_coloring: &TerminalColoring,
@@ -1444,36 +1590,164 @@ pub fn build_nwa_via_trie_walk<'a>(
             initial_source_states[source as usize] = true;
         }
     }
-    let mut builder = TerminalNwaBuilder::new(
-        tokenizer,
-        terminal_coloring.clone(),
-        possible_matches,
-        nwa,
-        num_tsids,
-        leaf_state,
-        ignore_terminal,
-        initial_source_states,
-        use_terminal_coloring,
-        None,
-        Some(active_terminals.to_vec()),
-        num_tokenizer_states,
-        shared_flat_transitions,
-    );
-    let trie_start = std::time::Instant::now();
-    builder.build_from_trie(vocab_tree_root, roots);
-    let trie_ms = trie_start.elapsed().as_secs_f64() * 1000.0;
-    builder.profile.trie_walk_ms = trie_ms;
+    let parallel_root_trie =
+        std::env::var_os("GLRMASK_L2P_PARALLEL_ROOT_TRIE").is_some()
+            && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
+            && vocab_tree_root.children().len() >= 2
+            && rayon::current_num_threads() > 1;
 
-    let flush_start = std::time::Instant::now();
-    builder.flush_transition_buffer();
-    let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
-    builder.profile.flush_ms = flush_ms;
+    if parallel_root_trie {
+        let base_nwa = nwa.clone();
+        let base_state_count = base_nwa.states().len();
+        debug_assert_eq!(base_state_count, initial_source_states.len());
+        let mut children = vocab_tree_root.iter_children().collect::<Vec<_>>();
+        children.sort_unstable_by_key(|(_, child)| {
+            std::cmp::Reverse(child.reachable_token_ids().len())
+        });
+        let task_count = std::env::var("GLRMASK_L2P_ROOT_TRIE_TASKS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or_else(rayon::current_num_threads)
+            .min(children.len())
+            .max(1);
+        let mut bins = (0..task_count).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut bin_loads = vec![0usize; task_count];
+        for child in children {
+            let index = bin_loads
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, load)| **load)
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            bin_loads[index] += child.1.reachable_token_ids().len() as usize;
+            bins[index].push(child);
+        }
 
-    let profile = builder.profile;
-    // Drop builder to release the mutable borrow on nwa before reading nwa.states.
-    drop(builder);
+        let parallel_started_at = std::time::Instant::now();
+        let fragments = bins
+            .into_par_iter()
+            .map(|children| {
+                let mut local_nwa = base_nwa.clone();
+                let mut local_possible_matches = PossibleMatchesComputer::new(tokenizer);
+                let mut local_builder = TerminalNwaBuilder::new(
+                    tokenizer,
+                    terminal_coloring.clone(),
+                    &mut local_possible_matches,
+                    &mut local_nwa,
+                    num_tsids,
+                    leaf_state,
+                    ignore_terminal,
+                    initial_source_states.clone(),
+                    use_terminal_coloring,
+                    None,
+                    Some(active_terminals.to_vec()),
+                    num_tokenizer_states,
+                    shared_flat_transitions,
+                );
+                let trie_started_at = std::time::Instant::now();
+                for (segment_bytes, child_node) in children {
+                    let next_level_nodes =
+                        local_builder.process_child_segment(segment_bytes, child_node, roots);
+                    if !next_level_nodes.is_empty() {
+                        local_builder.build_from_trie(child_node, &next_level_nodes);
+                    }
+                }
+                local_builder.profile.trie_walk_ms =
+                    trie_started_at.elapsed().as_secs_f64() * 1000.0;
+                let buffers = RootFragmentBuffers {
+                    leaf_token_ids_buffer: std::mem::take(&mut local_builder.leaf_token_ids_buffer),
+                    future_leaf_buffer: std::mem::take(&mut local_builder.future_leaf_buffer),
+                    transition_buffer: std::mem::take(&mut local_builder.transition_buffer),
+                    epsilon_buffer: std::mem::take(&mut local_builder.epsilon_buffer),
+                };
+                let profile = local_builder.profile;
+                drop(local_builder);
+                (local_nwa, profile, buffers)
+            })
+            .collect::<Vec<_>>();
+        let parallel_wall_ms = parallel_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    profile
+        let mut profile = TerminalDwaBuildProfile::default();
+        let mut merged_buffers = RootFragmentBuffers::default();
+        for (fragment, fragment_profile, buffers) in fragments {
+            merge_terminal_dwa_build_profile(&mut profile, fragment_profile);
+            let appended_base = merge_root_fragment(nwa, &base_nwa, fragment);
+            merge_root_fragment_buffers(
+                &mut merged_buffers,
+                buffers,
+                base_state_count,
+                appended_base,
+            );
+        }
+
+        let mut flush_initial_sources = vec![false; nwa.states().len()];
+        for (_, source_nodes) in roots.iter() {
+            for &source in source_nodes {
+                flush_initial_sources[source as usize] = true;
+            }
+        }
+        let mut flush_builder = TerminalNwaBuilder::new(
+            tokenizer,
+            terminal_coloring.clone(),
+            possible_matches,
+            nwa,
+            num_tsids,
+            leaf_state,
+            ignore_terminal,
+            flush_initial_sources,
+            use_terminal_coloring,
+            None,
+            Some(active_terminals.to_vec()),
+            num_tokenizer_states,
+            shared_flat_transitions,
+        );
+        flush_builder.leaf_token_ids_buffer = merged_buffers.leaf_token_ids_buffer;
+        flush_builder.future_leaf_buffer = merged_buffers.future_leaf_buffer;
+        flush_builder.transition_buffer = merged_buffers.transition_buffer;
+        flush_builder.epsilon_buffer = merged_buffers.epsilon_buffer;
+        let flush_started_at = std::time::Instant::now();
+        flush_builder.flush_transition_buffer();
+        profile.flush_ms = flush_started_at.elapsed().as_secs_f64() * 1000.0;
+        profile.flush_leaf_ms = flush_builder.profile.flush_leaf_ms;
+        profile.flush_future_ms = flush_builder.profile.flush_future_ms;
+        profile.flush_weight_ms = flush_builder.profile.flush_weight_ms;
+        drop(flush_builder);
+
+        // Per-fragment trie times are CPU-like sums; the phase field is intended
+        // to report the observed critical-path wall time.
+        profile.trie_walk_ms = parallel_wall_ms;
+        profile
+    } else {
+        let mut builder = TerminalNwaBuilder::new(
+            tokenizer,
+            terminal_coloring.clone(),
+            possible_matches,
+            nwa,
+            num_tsids,
+            leaf_state,
+            ignore_terminal,
+            initial_source_states,
+            use_terminal_coloring,
+            None,
+            Some(active_terminals.to_vec()),
+            num_tokenizer_states,
+            shared_flat_transitions,
+        );
+        let trie_start = std::time::Instant::now();
+        builder.build_from_trie(vocab_tree_root, roots);
+        let trie_ms = trie_start.elapsed().as_secs_f64() * 1000.0;
+        builder.profile.trie_walk_ms = trie_ms;
+
+        let flush_start = std::time::Instant::now();
+        builder.flush_transition_buffer();
+        let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+        builder.profile.flush_ms = flush_ms;
+
+        let profile = builder.profile;
+        drop(builder);
+        profile
+    }
 }
 
 
