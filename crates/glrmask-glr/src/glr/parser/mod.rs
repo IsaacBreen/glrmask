@@ -1326,6 +1326,384 @@ fn try_advance_bounded_concrete_paths(
     Some(out)
 }
 
+/// Exact bounded admission for a small frontier where each current top is
+/// assigned at most one terminal.  Returns `None` on unsupported branching so
+/// callers can fall back to the general exact simulator.
+pub fn stack_may_advance_disjoint_top_terminals_bounded(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    terminal_by_top: &[(u32, TerminalID)],
+) -> Option<bool> {
+    const MAX_PATHS: usize = 32;
+    const MAX_DEPTH: usize = 64;
+    const MAX_STEPS: usize = 16;
+    if terminal_by_top.is_empty()
+        || terminal_by_top.len() > 8
+        || closure.max_depth() as usize > MAX_DEPTH
+    {
+        return None;
+    }
+    let terminal_for_top = |top: u32| {
+        terminal_by_top
+            .iter()
+            .find(|(candidate, _)| *candidate == top)
+            .map(|(_, terminal)| *terminal)
+    };
+    let mut unsupported = false;
+    let mut admitted = false;
+    let complete = closure.for_each_stack_top_first_bounded(MAX_PATHS, |top_first, _acc| {
+        if admitted || unsupported || top_first.len() > MAX_DEPTH {
+            if top_first.len() > MAX_DEPTH {
+                unsupported = true;
+            }
+            return;
+        }
+        let Some(&initial_top) = top_first.first() else {
+            return;
+        };
+        let Some(token) = terminal_for_top(initial_top) else {
+            return;
+        };
+        let mut stack = SmallVec::<[u32; MAX_DEPTH]>::new();
+        stack.extend(top_first.iter().rev().copied());
+
+        for _ in 0..MAX_STEPS {
+            let Some(&state) = stack.last() else {
+                return;
+            };
+            match table.action(state, token) {
+                Some(Action::Reduce(nt, len)) => {
+                    let len = *len as usize;
+                    if len >= stack.len() {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - len);
+                    let goto_from = *stack.last().unwrap();
+                    let Some((target, replace_top)) = table.goto_target(goto_from, *nt) else {
+                        return;
+                    };
+                    if replace_top {
+                        *stack.last_mut().unwrap() = target;
+                    } else {
+                        if stack.len() == MAX_DEPTH {
+                            unsupported = true;
+                            return;
+                        }
+                        stack.push(target);
+                    }
+                }
+                Some(Action::Shift(..)) | Some(Action::ReplaceShifts(_)) | Some(Action::Skip) => {
+                    admitted = true;
+                    return;
+                }
+                Some(Action::StackShifts(shifts)) => {
+                    admitted |= shifts.iter().any(|shift| {
+                        let pop = shift.pop as usize;
+                        pop <= stack.len() && stack.len() - pop + shift.pushes.len() > 0
+                    });
+                    return;
+                }
+                Some(Action::GuardedStackShifts(shifts)) => {
+                    admitted |= shifts.iter().any(|shift| {
+                        let guards_match = shift.guards.iter().all(|guard| {
+                            let pop = guard.pop as usize;
+                            pop < stack.len()
+                                && guard
+                                    .states
+                                    .binary_search(&stack[stack.len() - 1 - pop])
+                                    .is_ok()
+                        });
+                        let pop = shift.pop as usize;
+                        guards_match
+                            && pop <= stack.len()
+                            && stack.len() - pop + shift.pushes.len() > 0
+                    });
+                    return;
+                }
+                Some(Action::Split {
+                    shift,
+                    reduces,
+                    accept,
+                }) => {
+                    if shift.is_some() || (*accept && token == EOF) {
+                        admitted = true;
+                        return;
+                    }
+                    // Multiple reduction alternatives need the general exact
+                    // closure to preserve branching.
+                    if reduces.is_empty() {
+                        return;
+                    }
+                    unsupported = true;
+                    return;
+                }
+                Some(Action::Accept) => {
+                    admitted |= token == EOF;
+                    return;
+                }
+                None => return,
+            }
+        }
+        unsupported = true;
+    });
+    if !complete || unsupported {
+        None
+    } else {
+        Some(admitted)
+    }
+}
+
+/// Advance a small GSS frontier where each live top state is assigned one
+/// terminal.  This is the exact union of advancing each disjoint top partition
+/// by its assigned terminal, but it traverses concrete paths once and rebuilds
+/// one shared-prefix GSS at the end.
+///
+/// The helper is deliberately bounded and fail-closed.  It is intended for
+/// lexically equivalent/duplicate labels produced by composition, where the
+/// current parser top makes the applicable logical label unique.  Callers must
+/// provide at most one terminal per top state.
+pub fn advance_stacks_disjoint_top_terminals_bounded(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    terminal_by_top: &[(u32, TerminalID)],
+) -> Option<ParserGSS> {
+    const MAX_PATHS: usize = 32;
+    const MAX_DEPTH: usize = 64;
+    const MAX_STEPS: usize = 16;
+
+    if terminal_by_top.len() < 2
+        || terminal_by_top.len() > 8
+        || terminal_by_top
+            .iter()
+            .enumerate()
+            .any(|(index, (top, _))| {
+                terminal_by_top[..index]
+                    .iter()
+                    .any(|(other_top, _)| other_top == top)
+            })
+        || closure.max_depth() as usize > MAX_DEPTH
+    {
+        return None;
+    }
+
+    let terminal_for_top = |top: u32| {
+        terminal_by_top
+            .iter()
+            .find(|(candidate, _)| *candidate == top)
+            .map(|(_, terminal)| *terminal)
+    };
+
+    let states = closure.peek_values();
+    if states.is_empty() || states.len() > 8 {
+        return None;
+    }
+    let mut saw_complex_action = false;
+    for &state in &states {
+        let Some(token) = terminal_for_top(state) else {
+            continue;
+        };
+        match table.action(state, token) {
+            None | Some(Action::Shift(..)) | Some(Action::Skip) => {}
+            Some(Action::Reduce(..)) | Some(Action::GuardedStackShifts(..)) => {
+                saw_complex_action = true;
+            }
+            Some(Action::ReplaceShifts(targets)) if targets.len() == 1 => {}
+            Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {}
+            _ => return None,
+        }
+    }
+    if !saw_complex_action {
+        return None;
+    }
+
+    let mut outputs =
+        SmallVec::<[(SmallVec<[u32; MAX_DEPTH]>, TerminalsDisallowed); MAX_PATHS]>::new();
+    let mut unsupported = false;
+    let complete = closure.for_each_stack_top_first_bounded(MAX_PATHS, |top_first, acc| {
+        if unsupported || top_first.len() > MAX_DEPTH {
+            unsupported = true;
+            return;
+        }
+        let Some(&initial_top) = top_first.first() else {
+            return;
+        };
+        let Some(token) = terminal_for_top(initial_top) else {
+            // This parser path has no matched logical terminal in the alias
+            // group, so it contributes no successor to the union.
+            return;
+        };
+
+        let mut stack = SmallVec::<[u32; MAX_DEPTH]>::new();
+        stack.extend(top_first.iter().rev().copied());
+        let mut finished = false;
+        let mut dead = false;
+
+        for _ in 0..MAX_STEPS {
+            let Some(&state) = stack.last() else {
+                dead = true;
+                finished = true;
+                break;
+            };
+            match table.action(state, token) {
+                Some(Action::Reduce(nt, len)) => {
+                    let len = *len as usize;
+                    if len >= stack.len() {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - len);
+                    let goto_from = *stack.last().unwrap();
+                    let Some((target, replace_top)) = table.goto_target(goto_from, *nt) else {
+                        dead = true;
+                        finished = true;
+                        break;
+                    };
+                    if replace_top {
+                        *stack.last_mut().unwrap() = target;
+                    } else {
+                        if stack.len() == MAX_DEPTH {
+                            unsupported = true;
+                            return;
+                        }
+                        stack.push(target);
+                    }
+                }
+                Some(Action::Shift(target, replace_top)) => {
+                    if *replace_top {
+                        *stack.last_mut().unwrap() = *target;
+                    } else {
+                        if stack.len() == MAX_DEPTH {
+                            unsupported = true;
+                            return;
+                        }
+                        stack.push(*target);
+                    }
+                    finished = true;
+                    break;
+                }
+                Some(Action::ReplaceShifts(targets)) if targets.len() == 1 => {
+                    *stack.last_mut().unwrap() = targets[0];
+                    finished = true;
+                    break;
+                }
+                Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
+                    let shift = &shifts[0];
+                    let pop = shift.pop as usize;
+                    if pop > stack.len()
+                        || stack.len() - pop + shift.pushes.len() > MAX_DEPTH
+                    {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - pop);
+                    stack.extend(shift.pushes.iter().copied());
+                    finished = true;
+                    break;
+                }
+                Some(Action::GuardedStackShifts(shifts)) => {
+                    let mut matched: Option<&GuardedStackShift> = None;
+                    for shift in shifts {
+                        let guards_match = shift.guards.iter().all(|guard| {
+                            let pop = guard.pop as usize;
+                            pop < stack.len()
+                                && guard
+                                    .states
+                                    .binary_search(&stack[stack.len() - 1 - pop])
+                                    .is_ok()
+                        });
+                        if !guards_match {
+                            continue;
+                        }
+                        if matched.is_some() {
+                            unsupported = true;
+                            return;
+                        }
+                        matched = Some(shift);
+                    }
+                    let Some(shift) = matched else {
+                        dead = true;
+                        finished = true;
+                        break;
+                    };
+                    let pop = shift.pop as usize;
+                    if pop > stack.len()
+                        || stack.len() - pop + shift.pushes.len() > MAX_DEPTH
+                    {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - pop);
+                    stack.extend(shift.pushes.iter().copied());
+                    finished = true;
+                    break;
+                }
+                Some(Action::Skip) => {
+                    finished = true;
+                    break;
+                }
+                None | Some(Action::Accept) => {
+                    dead = true;
+                    finished = true;
+                    break;
+                }
+                _ => {
+                    unsupported = true;
+                    return;
+                }
+            }
+        }
+
+        if !finished {
+            unsupported = true;
+            return;
+        }
+        if dead {
+            return;
+        }
+        if let Some((_, existing_acc)) = outputs
+            .iter_mut()
+            .find(|(existing_stack, _)| existing_stack == &stack)
+        {
+            *existing_acc = existing_acc.merge(acc);
+            return;
+        }
+        if outputs.len() == outputs.capacity() {
+            unsupported = true;
+            return;
+        }
+        outputs.push((stack, acc.clone()));
+    });
+
+    if !complete || unsupported {
+        return None;
+    }
+    if outputs.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    let mut groups = SmallVec::<
+        [(TerminalsDisallowed, SmallVec<[&[u32]; MAX_PATHS]>); 4],
+    >::new();
+    for (stack, acc) in &outputs {
+        if let Some((_, slices)) = groups
+            .iter_mut()
+            .find(|(existing_acc, _)| existing_acc == acc)
+        {
+            slices.push(stack.as_slice());
+        } else {
+            let mut slices = SmallVec::<[&[u32]; MAX_PATHS]>::new();
+            slices.push(stack.as_slice());
+            groups.push((acc.clone(), slices));
+        }
+    }
+    let mut out = ParserGSS::empty();
+    for (acc, slices) in groups {
+        let group = ParserGSS::from_small_stack_slices_shared_prefix(&slices, acc)?;
+        merge_into(&mut out, group);
+    }
+    Some(out)
+}
+
 /// Apply one pop-one reduction across all of its live predecessor states, then
 /// finish the same terminal with a pure shift frontier. This preserves the
 /// shared lower GSS instead of isolating one predecessor branch at a time.
@@ -4302,6 +4680,7 @@ mod tests {
     use super::{
         ParserGSS,
         advance_concrete_stacks_reference,
+        advance_stacks_disjoint_top_terminals_bounded,
         normalized_concrete_stacks,
         advance_stacks,
         apply_guarded_stack_shifts,
@@ -4311,6 +4690,7 @@ mod tests {
         stack_admissible_terminals,
         stack_may_advance_on,
         stack_may_advance_on_any,
+        stack_may_advance_disjoint_top_terminals_bounded,
         try_advance_bounded_concrete_paths,
         try_advance_mixed_top_replace_wave,
         try_advance_uniform_deterministic_frontier,
@@ -5944,6 +6324,95 @@ mod tests {
         expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
 
         assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    #[test]
+    fn disjoint_top_terminal_admission_preserves_earlier_success() {
+        let token_a = 0;
+        let token_b = 1;
+        let nt = 0;
+        let mut table = build_test_table(
+            6,
+            2,
+            &[
+                &[],
+                &[],
+                &[(token_a, Action::Reduce(nt, 1))],
+                &[(token_a, Action::Shift(5, false))],
+                &[],
+                &[],
+            ],
+            &[&[(nt, (3, false))], &[], &[], &[], &[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+        let stack = ParserGSS::from_stacks(&[
+            (vec![0, 2], TerminalsDisallowed::new()),
+            (vec![1, 4], TerminalsDisallowed::new()),
+        ]);
+
+        assert_eq!(
+            stack_may_advance_disjoint_top_terminals_bounded(
+                &table,
+                &stack,
+                &[(2, token_a), (4, token_b)],
+            ),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn disjoint_top_terminal_advance_matches_pointwise_union() {
+        let token_a = 0;
+        let token_b = 1;
+        let nt_a = 0;
+        let nt_b = 1;
+        let table = build_test_table(
+            8,
+            2,
+            &[
+                &[],
+                &[],
+                &[(token_a, Action::Reduce(nt_a, 1))],
+                &[(token_a, Action::Shift(6, false))],
+                &[(token_b, Action::Reduce(nt_b, 1))],
+                &[(token_b, Action::Shift(7, false))],
+                &[],
+                &[],
+            ],
+            &[
+                &[(nt_a, (3, false))],
+                &[(nt_b, (5, false))],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+            ],
+        );
+        let acc = TerminalsDisallowed::new();
+        let stack = ParserGSS::from_stacks(&[
+            (vec![0, 2], acc.clone()),
+            (vec![1, 4], acc),
+        ]);
+
+        let actual = advance_stacks_disjoint_top_terminals_bounded(
+            &table,
+            &stack,
+            &[(2, token_a), (4, token_b)],
+        )
+        .expect("bounded disjoint advance should apply");
+        let left = advance_stacks(&table, &stack.isolate(Some(2)), token_a);
+        let right = advance_stacks(&table, &stack.isolate(Some(4)), token_b);
+        let expected = left.merge(&right);
+        assert!(
+            actual
+                .semantically_eq(&expected, 32)
+                .expect("small exact stack languages should fit"),
+            "actual={:?} expected={:?}",
+            actual.to_stacks(32),
+            expected.to_stacks(32),
+        );
     }
 
     #[test]

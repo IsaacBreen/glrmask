@@ -15,6 +15,26 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
+#[derive(Debug, Clone)]
+pub(super) struct MatchedTerminalLists {
+    offsets: Arc<[usize]>,
+    entries: Arc<[TerminalID]>,
+}
+
+impl MatchedTerminalLists {
+    #[inline]
+    fn for_state(&self, state: u32) -> &[TerminalID] {
+        let index = state as usize;
+        let Some(&start) = self.offsets.get(index) else {
+            return &[];
+        };
+        let Some(&end) = self.offsets.get(index + 1) else {
+            return &[];
+        };
+        &self.entries[start..end]
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tokenizer {
     pub(super) dfa: DFA,
@@ -35,6 +55,13 @@ pub struct Tokenizer {
     /// raw state.
     #[serde(default, skip)]
     pub(super) singleton_epsilon_closures: OnceLock<Arc<SingletonEpsilonClosures>>,
+    /// Sparse accepting-terminal labels per raw state. Runtime commit scans
+    /// iterate these lists instead of rescanning a terminal-domain-sized bitset.
+    #[serde(default, skip)]
+    pub(super) matched_terminals_cache: OnceLock<Arc<MatchedTerminalLists>>,
+    /// Exact epsilon-closed frontier after consuming one byte from tokenizer reset.
+    #[serde(default, skip)]
+    pub(super) initial_byte_frontiers: OnceLock<Arc<[TokenizerStateSet]>>,
     /// Per-state byte sets whose transitions loop to the same raw tokenizer
     /// state. Compiler partitions reuse this table instead of rescanning every
     /// transition row independently.
@@ -204,6 +231,8 @@ pub mod artifact_serde {
             ),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
@@ -473,6 +502,8 @@ pub mod compact_artifact_serde {
             ),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
@@ -823,11 +854,7 @@ impl Tokenizer {
             .collect::<Vec<_>>();
         self.dfa
             .canonicalize_group_aliases(canonical as usize, &aliases);
-        self.singleton_epsilon_closures = OnceLock::new();
-        self.all_self_loop_bytes_cache = OnceLock::new();
-        self.transition_count_cache = OnceLock::new();
-        self.forced_minimized_state_count_cache = OnceLock::new();
-        self.scalar_deterministic_dispatch_cache = OnceLock::new();
+        self.invalidate_derived_caches();
     }
 
     /// Form an exact disjoint union of independently compiled tokenizers while
@@ -960,7 +987,7 @@ impl Tokenizer {
         parent.compressed_transition_segments =
             Arc::from(compressed_segments.into_boxed_slice());
         parent.exprs = merged_exprs;
-        parent.singleton_epsilon_closures = OnceLock::new();
+        parent.invalidate_derived_caches();
         if let Some(closures) = parent_closures.and_then(|closures| {
             closures.append_rebased_children(
                 parent.start_state(),
@@ -971,10 +998,6 @@ impl Tokenizer {
                 .singleton_epsilon_closures
                 .set(Arc::new(closures));
         }
-        parent.all_self_loop_bytes_cache = OnceLock::new();
-        parent.transition_count_cache = OnceLock::new();
-        parent.forced_minimized_state_count_cache = OnceLock::new();
-        parent.scalar_deterministic_dispatch_cache = OnceLock::new();
         (parent, state_offsets)
     }
 
@@ -1059,6 +1082,8 @@ impl Tokenizer {
     #[inline]
     fn invalidate_derived_caches(&mut self) {
         let _ = self.singleton_epsilon_closures.take();
+        let _ = self.matched_terminals_cache.take();
+        let _ = self.initial_byte_frontiers.take();
         let _ = self.all_self_loop_bytes_cache.take();
         let _ = self.transition_count_cache.take();
         let _ = self.forced_minimized_state_count_cache.take();
@@ -1196,6 +1221,8 @@ impl Tokenizer {
                 compressed_transition_segments: Arc::from([]),
                 exprs: self.exprs.clone(),
                 singleton_epsilon_closures: OnceLock::new(),
+                matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
                 all_self_loop_bytes_cache: OnceLock::new(),
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
@@ -1327,6 +1354,8 @@ impl Tokenizer {
                 compressed_transition_segments: Arc::from([]),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
+                matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
                 all_self_loop_bytes_cache: OnceLock::new(),
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
@@ -1468,6 +1497,8 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from([]),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
@@ -1706,6 +1737,8 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
@@ -1728,6 +1761,8 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from(compressed_transition_segments),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
@@ -2666,12 +2701,68 @@ impl Tokenizer {
             .collect()
     }
 
+    #[inline]
+    pub fn matched_terminals_slice(&self, state: u32) -> &[TerminalID] {
+        self.matched_terminals_cache
+            .get_or_init(|| {
+                let state_count = self.num_states() as usize;
+                let mut offsets = Vec::with_capacity(state_count + 1);
+                let mut entries = Vec::<TerminalID>::new();
+                offsets.push(0);
+                for raw_state in 0..self.num_states() {
+                    entries.extend(
+                        self.dfa
+                            .finalizers(raw_state)
+                            .iter()
+                            .map(|terminal| terminal as TerminalID),
+                    );
+                    offsets.push(entries.len());
+                }
+                Arc::new(MatchedTerminalLists {
+                    offsets: offsets.into(),
+                    entries: entries.into(),
+                })
+            })
+            .for_state(state)
+    }
+
     pub fn all_singleton_epsilon_closures(&self) -> Arc<SingletonEpsilonClosures> {
         Arc::clone(
             self.singleton_epsilon_closures
                 .get_or_init(|| Arc::new(self.dfa.all_singleton_epsilon_closures())),
         )
 
+    }
+
+
+    /// Exact epsilon-closed tokenizer frontiers after one byte from reset.
+    /// Entry `b` is epsilon_closure(move(epsilon_closure(reset), b)).
+    pub fn initial_byte_frontiers(&self) -> Arc<[TokenizerStateSet]> {
+        Arc::clone(self.initial_byte_frontiers.get_or_init(|| {
+            let closures = self.all_singleton_epsilon_closures();
+            let reset = self.initial_state();
+            let reset_closure = closures
+                .get(reset as usize)
+                .expect("tokenizer reset state must have an epsilon closure");
+            let mut rows = Vec::with_capacity(256);
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let mut targets = TokenizerStateSet::new();
+                for &state in reset_closure {
+                    let Some(target) = self.step(state, byte) else {
+                        continue;
+                    };
+                    let closure = closures
+                        .get(target as usize)
+                        .expect("tokenizer transition target must have an epsilon closure");
+                    targets.extend(closure.iter().copied());
+                }
+                targets.sort_unstable();
+                targets.dedup();
+                rows.push(targets);
+            }
+            Arc::from(rows.into_boxed_slice())
+        }))
     }
 
     pub fn cached_singleton_epsilon_closures(
@@ -3522,6 +3613,46 @@ mod tests {
             assert_eq!(source_result.matches, local_result.matches, "input={input:?}");
             assert_eq!(source_result.end_state, local_result.end_state, "input={input:?}");
         }
+    }
+
+    #[test]
+    fn matched_terminal_cache_is_invalidated_by_alias_canonicalization() {
+        let mut dfa = DFA::new(1);
+        dfa.ensure_group_capacity(2);
+        let mut alias = BitSet::new(2);
+        alias.set(1);
+        dfa.overwrite_state_metadata(0, alias, BitSet::new(2));
+        dfa.recompute_possible_futures();
+
+        let mut tokenizer = Tokenizer::from_parts(dfa, 2, None);
+        assert_eq!(tokenizer.matched_terminals_slice(0), &[1]);
+        tokenizer.canonicalize_terminal_aliases(0, &[1]);
+        assert_eq!(tokenizer.matched_terminals_slice(0), &[0]);
+    }
+
+    #[test]
+    fn owned_parent_union_invalidates_preinitialized_runtime_caches() {
+        fn one_byte(byte: u8) -> Tokenizer {
+            let mut dfa = DFA::new(2);
+            dfa.ensure_group_capacity(1);
+            dfa.add_transition(0, byte, 1);
+            let mut accepting = BitSet::new(1);
+            accepting.set(0);
+            dfa.overwrite_state_metadata(1, accepting, BitSet::new(1));
+            dfa.recompute_possible_futures();
+            Tokenizer::from_parts(dfa, 1, None)
+        }
+
+        let left = one_byte(b'a');
+        let right = one_byte(b'b');
+        assert_eq!(left.matched_terminals_slice(1), &[0]);
+        assert!(left.initial_byte_frontiers()[b'a' as usize].contains(&1));
+
+        let (merged, offsets) =
+            Tokenizer::disjoint_union_with_owned_parent(left, 0, &[(&right, 1)]);
+        let right_accept = offsets[1] + 1;
+        assert_eq!(merged.matched_terminals_slice(right_accept), &[1]);
+        assert!(merged.initial_byte_frontiers()[b'b' as usize].contains(&right_accept));
     }
 
     #[test]

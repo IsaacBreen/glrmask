@@ -37,34 +37,67 @@ pub(crate) fn execute_tokenizer_reusable(
 ) -> bool {
     let cached_closures = constraint.tokenizer.cached_singleton_epsilon_closures();
     scratch.states.clear();
-    if let Some(closures) = cached_closures {
-        let Some(start_closure) = closures.get(start_state as usize) else {
-            return false;
-        };
-        if start_closure.len() > scratch.states.capacity() {
-            return false;
-        }
-        scratch.states.extend_from_slice(start_closure);
-    } else if constraint
-        .tokenizer
-        .state_has_epsilon_transitions(start_state)
-    {
-        let start_closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
-        if start_closure.len() > scratch.states.capacity() {
-            return false;
-        }
-        scratch.states.extend_from_slice(&start_closure);
-    } else {
-        scratch.states.push(start_state);
-    }
     scratch.matches.clear();
 
-    for (index, &byte) in bytes.iter().enumerate() {
+    let owned_start_closure;
+    let start_closure: &[u32] = if let Some(closures) = cached_closures {
+        let Some(closure) = closures.get(start_state as usize) else {
+            return false;
+        };
+        closure
+    } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
+        owned_start_closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
+        &owned_start_closure
+    } else {
+        owned_start_closure = Box::new([start_state]);
+        &owned_start_closure
+    };
+
+    let mut byte_start = 0usize;
+    if start_closure.len() > scratch.states.capacity() {
+        if start_state != constraint.runtime_commit_initial_state() {
+            return false;
+        }
+        let Some(&first_byte) = bytes.first() else {
+            return false;
+        };
+        let frontiers = constraint.tokenizer.initial_byte_frontiers();
+        let first = &frontiers[first_byte as usize];
+        if first.len() > scratch.states.capacity() {
+            return false;
+        }
+        scratch.states.extend(first.iter().copied());
+        if scratch.states.is_empty() {
+            return true;
+        }
+        for &state in &scratch.states {
+            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
+                if scratch.matches.len() == scratch.matches.capacity() {
+                    return false;
+                }
+                scratch.matches.push(crate::automata::lexer::tokenizer::TokenizerMatch {
+                    id: terminal,
+                    width: 1,
+                    end_state: state,
+                });
+            }
+        }
+        byte_start = 1;
+    } else {
+        scratch.states.extend_from_slice(start_closure);
+    }
+
+    for (index, &byte) in bytes.iter().enumerate().skip(byte_start) {
         scratch.next_states.clear();
         for &state in &scratch.states {
-            let Some(target) = constraint.tokenizer.step(state, byte) else {
+            let target = constraint.tokenizer_fast_transitions.transition(
+                &constraint.tokenizer,
+                state,
+                byte,
+            );
+            if target == u32::MAX {
                 continue;
-            };
+            }
             if let Some(closures) = cached_closures {
                 let Some(target_closure) = closures.get(target as usize) else {
                     return false;
@@ -99,7 +132,7 @@ pub(crate) fn execute_tokenizer_reusable(
 
         let width = index + 1;
         for &state in &scratch.states {
-            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
+            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
                 let prior_width = scratch
                     .matches
                     .iter()
@@ -110,13 +143,121 @@ pub(crate) fn execute_tokenizer_reusable(
                     Some(prior) if prior < width => {
                         scratch.matches.retain(|matched| matched.id != terminal);
                     }
-                    Some(_) if scratch
-                        .matches
-                        .iter()
-                        .any(|matched| matched.id == terminal && matched.end_state == state) =>
-                    {
-                        continue;
+                    Some(_) => continue,
+                    _ => {}
+                }
+                if scratch.matches.len() == scratch.matches.capacity() {
+                    return false;
+                }
+                scratch.matches.push(crate::automata::lexer::tokenizer::TokenizerMatch {
+                    id: terminal,
+                    width,
+                    end_state: state,
+                });
+            }
+        }
+    }
+    true
+}
+
+
+/// Execute from the exact union of several tokenizer start states using the
+/// same bounded scratch. Callers use this only when all starts carry one
+/// identical parser language and their terminal-ID futures are pairwise
+/// disjoint, so lane-local longest-match decisions cannot interfere.
+pub(crate) fn execute_tokenizer_reusable_from_states(
+    constraint: &Constraint,
+    bytes: &[u8],
+    start_states: &[u32],
+    scratch: &mut ReusableTokenizerExecScratch,
+) -> bool {
+    if let [start_state] = start_states {
+        return execute_tokenizer_reusable(constraint, bytes, *start_state, scratch);
+    }
+    if start_states.is_empty() {
+        scratch.states.clear();
+        scratch.matches.clear();
+        return true;
+    }
+    let cached_closures = constraint.tokenizer.cached_singleton_epsilon_closures();
+    scratch.states.clear();
+    scratch.matches.clear();
+    for &start_state in start_states {
+        if let Some(closures) = cached_closures {
+            let Some(closure) = closures.get(start_state as usize) else {
+                return false;
+            };
+            if scratch.states.len() + closure.len() > scratch.states.capacity() {
+                return false;
+            }
+            scratch.states.extend_from_slice(closure);
+        } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
+            let closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
+            if scratch.states.len() + closure.len() > scratch.states.capacity() {
+                return false;
+            }
+            scratch.states.extend_from_slice(&closure);
+        } else if scratch.states.len() == scratch.states.capacity() {
+            return false;
+        } else {
+            scratch.states.push(start_state);
+        }
+    }
+    scratch.states.sort_unstable();
+    scratch.states.dedup();
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        scratch.next_states.clear();
+        for &state in &scratch.states {
+            let target = constraint.tokenizer_fast_transitions.transition(
+                &constraint.tokenizer,
+                state,
+                byte,
+            );
+            if target == u32::MAX {
+                continue;
+            }
+            if let Some(closures) = cached_closures {
+                let Some(closure) = closures.get(target as usize) else {
+                    return false;
+                };
+                if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {
+                    return false;
+                }
+                scratch.next_states.extend_from_slice(closure);
+            } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
+                let closure = constraint.tokenizer.singleton_epsilon_closure(target);
+                if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {
+                    return false;
+                }
+                scratch.next_states.extend_from_slice(&closure);
+            } else if scratch.next_states.len() == scratch.next_states.capacity() {
+                return false;
+            } else {
+                scratch.next_states.push(target);
+            }
+        }
+        if scratch.next_states.is_empty() {
+            scratch.states.clear();
+            return true;
+        }
+        scratch.next_states.sort_unstable();
+        scratch.next_states.dedup();
+        std::mem::swap(&mut scratch.states, &mut scratch.next_states);
+        let width = index + 1;
+        for &state in &scratch.states {
+            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
+                let prior_width = scratch
+                    .matches
+                    .iter()
+                    .find(|matched| matched.id == terminal)
+                    .map(|matched| matched.width);
+                match prior_width {
+                    Some(prior) if prior > width => continue,
+                    Some(prior) if prior < width => {
+                        scratch.matches.retain(|matched| matched.id != terminal);
                     }
+                    Some(_) => continue,
                     _ => {}
                 }
                 if scratch.matches.len() == scratch.matches.capacity() {
@@ -176,7 +317,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 
         tokenizer_state = next_state;
         let width = index + 1;
-        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+        for terminal in constraint.tokenizer.matched_terminals_slice(tokenizer_state).iter().copied() {
             if let Some(existing) = result
                 .matches
                 .iter_mut()

@@ -16,11 +16,13 @@ use crate::compiler::glr::parser::{
     advance_stacks,
     advance_stacks_profiled,
     advance_stacks_owned,
+    advance_stacks_disjoint_top_terminals_bounded,
     AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_control_closed,
     stack_may_advance_on_any,
     stack_may_advance_on_any_control_closed,
+    stack_may_advance_disjoint_top_terminals_bounded,
     stack_admissible_terminals,
 };
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
@@ -42,7 +44,7 @@ use self::template_advance::{
 };
 pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
-    execute_tokenizer_from_state_small, execute_tokenizer_reusable, InitialCommitScan,
+    execute_tokenizer_from_state_small, execute_tokenizer_reusable, execute_tokenizer_reusable_from_states, InitialCommitScan,
 };
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
@@ -67,10 +69,11 @@ type SmallLanguageParserStates = SmallVec<[SmallLanguageParserState; 16]>;
 
 #[derive(Debug)]
 pub(crate) struct SmallCommitQueueScratch {
-    processing: [SmallParserStates; 9],
+    processing: [SmallParserStates; 17],
     pending: SmallParserStates,
-    language_processing: [SmallLanguageParserStates; 9],
+    language_processing: [SmallLanguageParserStates; 17],
     language_pending: SmallLanguageParserStates,
+    prune_union_starts: SmallVec<[u32; 8]>,
 }
 
 impl Default for SmallCommitQueueScratch {
@@ -80,6 +83,7 @@ impl Default for SmallCommitQueueScratch {
             pending: SmallVec::new(),
             language_processing: std::array::from_fn(|_| SmallVec::new()),
             language_pending: SmallVec::new(),
+            prune_union_starts: SmallVec::new(),
         }
     }
 }
@@ -94,6 +98,7 @@ impl SmallCommitQueueScratch {
             bucket.clear();
         }
         self.language_pending.clear();
+        self.prune_union_starts.clear();
     }
 }
 
@@ -555,11 +560,114 @@ fn parser_may_advance_on(constraint: &Constraint, stack: &ParserGSS, terminal: u
 }
 
 #[inline]
+fn bitset_prefix_intersects(
+    left: &crate::ds::bitset::BitSet,
+    right: &crate::ds::bitset::BitSet,
+) -> bool {
+    left.words()
+        .iter()
+        .zip(right.words())
+        .any(|(left, right)| (*left & *right) != 0)
+}
+
+#[inline]
+fn bitset_union_intersection_prefix(
+    dst: &mut crate::ds::bitset::BitSet,
+    left: &crate::ds::bitset::BitSet,
+    right: &crate::ds::bitset::BitSet,
+) {
+    for ((dst, left), right) in dst
+        .words_mut()
+        .iter_mut()
+        .zip(left.words())
+        .zip(right.words())
+    {
+        *dst |= *left & *right;
+    }
+}
+
+fn exact_simulation_prefilter_may_advance_on_any(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminals: &crate::ds::bitset::BitSet,
+) -> Option<bool> {
+    if constraint.table.admission_policy != AdmissionPolicy::ExactSimulation
+        || !constraint.table.control_terminals.is_empty()
+        || constraint.table.unconditional_advance.len() != constraint.table.num_states as usize
+    {
+        return None;
+    }
+
+    let tops = stack.peek_values();
+    let mut any_relevant = false;
+    for &state in &tops {
+        let advance = constraint.table.advance.get(state as usize)?;
+        let unconditional = constraint.table.unconditional_advance_row(state)?;
+        if bitset_prefix_intersects(unconditional, terminals) {
+            return Some(true);
+        }
+        any_relevant |= bitset_prefix_intersects(advance, terminals);
+    }
+    if !any_relevant {
+        return Some(false);
+    }
+
+    // The unconditional portion is already known empty.  Try the bounded
+    // concrete-stack exact path when each current top has at most one remaining
+    // candidate terminal; otherwise fall through to the general exact closure.
+    let mut terminal_by_top = SmallVec::<[(u32, u32); 8]>::new();
+    for &top in &tops {
+        let actions = constraint.table.action.get(top as usize)?;
+        let unconditional = constraint.table.unconditional_advance_row(top)?;
+        let mut selected = None;
+        for (terminal, _action) in actions.iter() {
+            let bit = terminal as usize;
+            if bit >= terminals.len()
+                || !terminals.contains(bit)
+                || unconditional.contains(bit)
+            {
+                continue;
+            }
+            if selected.is_some() {
+                terminal_by_top.clear();
+                break;
+            }
+            selected = Some(terminal);
+        }
+        if terminal_by_top.is_empty() && selected.is_none() {
+            continue;
+        }
+        if let Some(terminal) = selected {
+            terminal_by_top.push((top, terminal));
+        } else if terminal_by_top.is_empty() {
+            break;
+        }
+    }
+    if !terminal_by_top.is_empty()
+        && let Some(result) = stack_may_advance_disjoint_top_terminals_bounded(
+            &constraint.table,
+            stack,
+            &terminal_by_top,
+        )
+    {
+        return Some(result);
+    }
+    Some(stack_may_advance_on_any(&constraint.table, stack, terminals))
+}
+
+#[inline]
 fn parser_may_advance_on_any(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminals: &crate::ds::bitset::BitSet,
 ) -> bool {
+    if let Some(result) = exact_simulation_prefilter_may_advance_on_any(
+        constraint,
+        stack,
+        terminals,
+    ) {
+        return result;
+    }
     constraint
         .direct_regular_admissible_terminals(stack)
         .map_or_else(
@@ -1312,8 +1420,8 @@ fn batched_end_state_admitted_terminals(
         admitted.intersect_with(&direct);
         Some(admitted)
     } else {
-        Some(stack_admissible_terminals(
-            &constraint.table,
+        Some(exact_simulation_prefiltered_admitted_terminals(
+            constraint,
             gss,
             &candidates,
         ))
@@ -1323,6 +1431,45 @@ fn batched_end_state_admitted_terminals(
 
 const PARSER_ADMISSION_CACHE_CAPACITY: usize = 8;
 const PARSER_ADMISSION_BOOLEAN_CACHE_CAPACITY: usize = 8;
+
+fn exact_simulation_prefiltered_admitted_terminals(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    candidates: &crate::ds::bitset::BitSet,
+) -> crate::ds::bitset::BitSet {
+    if constraint.table.admission_policy != AdmissionPolicy::ExactSimulation
+        || !constraint.table.control_terminals.is_empty()
+        || constraint.table.unconditional_advance.len() != constraint.table.num_states as usize
+    {
+        return stack_admissible_terminals(&constraint.table, gss, candidates);
+    }
+
+    let mut guaranteed = crate::ds::bitset::BitSet::new(candidates.len());
+    let mut unresolved = crate::ds::bitset::BitSet::new(candidates.len());
+    for state in gss.peek_values() {
+        let Some(advance) = constraint.table.advance.get(state as usize) else {
+            return stack_admissible_terminals(&constraint.table, gss, candidates);
+        };
+        let Some(unconditional) = constraint.table.unconditional_advance_row(state) else {
+            return stack_admissible_terminals(&constraint.table, gss, candidates);
+        };
+        bitset_union_intersection_prefix(&mut guaranteed, unconditional, candidates);
+        bitset_union_intersection_prefix(&mut unresolved, advance, candidates);
+    }
+    for (unresolved_word, guaranteed_word) in unresolved
+        .words_mut()
+        .iter_mut()
+        .zip(guaranteed.words())
+    {
+        *unresolved_word &= !*guaranteed_word;
+    }
+    if unresolved.is_empty() {
+        return guaranteed;
+    }
+    let simulated = stack_admissible_terminals(&constraint.table, gss, &unresolved);
+    guaranteed.union_with(&simulated);
+    guaranteed
+}
 
 #[inline]
 fn exact_admitted_terminals_for_candidates(
@@ -1335,7 +1482,7 @@ fn exact_admitted_terminals_for_candidates(
         admitted.intersect_with(&direct);
         admitted
     } else {
-        stack_admissible_terminals(&constraint.table, gss, candidates)
+        exact_simulation_prefiltered_admitted_terminals(constraint, gss, candidates)
     }
 }
 
@@ -1360,6 +1507,84 @@ fn admission_cache_entry_index(
         boolean_queries: SmallVec::new(),
     });
     cache.len() - 1
+}
+
+fn try_local_row_presence_admission_words(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    end_states: &[u32],
+) -> Option<[u64; 32]> {
+    const WORDS: usize = 32;
+    if constraint.table.admission_policy != AdmissionPolicy::ExactSimulation
+        || !constraint.table.control_terminals.is_empty()
+        || constraint.tokenizer.num_terminals() as usize > WORDS * 64
+        || constraint.table.advance.len() != constraint.table.num_states as usize
+        || constraint.table.unconditional_advance.len() != constraint.table.num_states as usize
+    {
+        return None;
+    }
+    let tops = gss.peek_values();
+    if tops.is_empty() {
+        return None;
+    }
+
+    // Only terminals reachable from the tokenizer continuation matter for this
+    // admission query. A table may contain stack-dependent actions elsewhere
+    // without invalidating row-presence admission for this exact future set.
+    let initial = constraint.runtime_commit_initial_state();
+    let mut candidates = [0u64; WORDS];
+    for &end_state in end_states {
+        if end_state == initial {
+            continue;
+        }
+        for (index, &word) in constraint
+            .tokenizer
+            .possible_future_terminals(end_state)
+            .words()
+            .iter()
+            .enumerate()
+        {
+            if index >= WORDS {
+                return None;
+            }
+            candidates[index] |= word;
+        }
+    }
+
+    let mut admitted = [0u64; WORDS];
+    for state in tops {
+        let advance = constraint.table.advance.get(state as usize)?;
+        let unconditional = constraint.table.unconditional_advance_row(state)?;
+        for index in 0..advance.words().len().min(WORDS) {
+            let candidate_word = candidates[index];
+            if candidate_word == 0 {
+                continue;
+            }
+            let advance_word = advance.words()[index];
+            let unconditional_word = unconditional.words().get(index).copied().unwrap_or(0);
+            if (advance_word & !unconditional_word & candidate_word) != 0 {
+                return None;
+            }
+            admitted[index] |= unconditional_word & candidate_word;
+        }
+    }
+    Some(admitted)
+}
+
+#[inline]
+fn end_state_may_advance_from_row_words(
+    constraint: &Constraint,
+    end_state: u32,
+    admitted_words: &[u64; 32],
+) -> bool {
+    end_state == constraint.runtime_commit_initial_state()
+        || constraint
+            .tokenizer
+            .possible_future_terminals(end_state)
+            .words()
+            .iter()
+            .zip(admitted_words.iter())
+            .any(|(&future, admitted)| (future & *admitted) != 0)
 }
 
 /// Cached exact-set version of `batched_end_state_admitted_terminals`.
@@ -1695,6 +1920,29 @@ fn advance_uniform_disallowed_interest_only(
     Some(TerminalsDisallowed::from_map(remapped))
 }
 
+fn collect_unique_actionable_reusable_matches(
+    constraint: &Constraint,
+    actionable_terminals: Option<&ActionableTerminals>,
+    ignore_terminal: Option<u32>,
+    matches: &[TokenizerMatch],
+) -> SmallVec<[NormalizedMatch; 16]> {
+    // `execute_tokenizer_reusable*` canonicalizes to one record per terminal at
+    // its longest width, so no second duplicate-removal pass is needed here.
+    let mut normalized = SmallVec::<[NormalizedMatch; 16]>::new();
+    for matched in matches {
+        let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+        if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
+            continue;
+        }
+        normalized.push(NormalizedMatch {
+            terminal_id: matched.id,
+            width: matched.width,
+            ignored,
+        });
+    }
+    normalized
+}
+
 fn collect_unique_actionable_matches(
     constraint: &Constraint,
     actionable_terminals: Option<&ActionableTerminals>,
@@ -1822,6 +2070,98 @@ fn advance_terminals_disallowed_over_bytes(
         }
     }
     Some(TerminalsDisallowed::from_map(remapped))
+}
+
+fn single_disallowed_pair(acc: &TerminalsDisallowed) -> Option<(u32, u32)> {
+    if acc.len() != 1 {
+        return None;
+    }
+    let mut states = acc.iter();
+    let (state, terminals) = states.next()?;
+    if states.next().is_some() || terminals.len() != 1 {
+        return None;
+    }
+    Some((*state, *terminals.iter().next()?))
+}
+
+fn try_prune_single_initial_state_batched_accumulators(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    bytes: &[u8],
+    scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    cached_starts: &mut SmallVec<[u32; 8]>,
+) -> Option<ParserGSS> {
+    let mut accumulators = SmallVec::<[TerminalsDisallowed; 8]>::new();
+    let mut overflow = false;
+    gss.for_each_acc(|acc| {
+        if overflow || acc.is_empty() || accumulators.contains(acc) {
+            return;
+        }
+        if accumulators.len() == accumulators.capacity() {
+            overflow = true;
+            return;
+        }
+        accumulators.push(acc.clone());
+    });
+    if overflow || accumulators.len() < 2 {
+        return None;
+    }
+
+    let mut pairs = SmallVec::<[(u32, u32); 8]>::new();
+    for acc in &accumulators {
+        pairs.push(single_disallowed_pair(acc)?);
+    }
+    // Each logical exclusion must belong to a disjoint lexer lane.  Then one
+    // union execution preserves lane-local longest-match semantics because no
+    // terminal ID can be observed from two starts.
+    for i in 0..pairs.len() {
+        let left = constraint.tokenizer.possible_future_terminals(pairs[i].0);
+        for &(right_state, _) in &pairs[..i] {
+            if !left.is_disjoint(
+                constraint.tokenizer.possible_future_terminals(right_state),
+            ) {
+                return None;
+            }
+        }
+    }
+    let starts = pairs
+        .iter()
+        .map(|&(state, _)| state)
+        .collect::<SmallVec<[u32; 8]>>();
+    if !execute_tokenizer_reusable_from_states(constraint, bytes, &starts, scratch) {
+        return None;
+    }
+    cached_starts.clear();
+    cached_starts.extend(starts.iter().copied());
+
+    let mut remapped = SmallVec::<[(TerminalsDisallowed, Option<TerminalsDisallowed>); 8]>::new();
+    for (acc, &(_, terminal)) in accumulators.iter().zip(&pairs) {
+        if scratch.matches.iter().any(|matched| matched.id == terminal) {
+            remapped.push((acc.clone(), None));
+            continue;
+        }
+        let mut next = TerminalsDisallowed::new();
+        for &end_state in &scratch.states {
+            if constraint
+                .tokenizer
+                .possible_future_terminals(end_state)
+                .contains(terminal as usize)
+            {
+                next = next.with_insert(end_state, terminal);
+            }
+        }
+        remapped.push((acc.clone(), Some(next)));
+    }
+
+    Some(gss.apply_and_prune_no_promote(|acc| {
+        if acc.is_empty() {
+            return Some(TerminalsDisallowed::new());
+        }
+        remapped
+            .iter()
+            .find(|(source, _)| source == acc)
+            .and_then(|(_, result)| result.clone())
+    }))
 }
 
 fn prune_single_initial_state_for_parts(
@@ -3221,15 +3561,197 @@ fn commit_bytes_language_small_queue_fast_path(
     Some(Ok(()))
 }
 
+fn try_advance_unique_actionable_top_fast(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    terminal: u32,
+) -> Option<ParserGSS> {
+    if !constraint.table.control_terminals.is_empty() || template_advance_enabled() {
+        return None;
+    }
+    let mut selected = None;
+    for top in gss.peek_values() {
+        let Some(action) = constraint.table.action(top, terminal) else {
+            continue;
+        };
+        if selected.is_some() {
+            return None;
+        }
+        selected = Some((top, action));
+    }
+    let (top, action) = selected?;
+    let isolated = gss.isolate(Some(top));
+    (!isolated.is_empty())
+        .then(|| apply_single_top_action_fast(constraint, &isolated, top, terminal, action))
+        .flatten()
+}
+
+fn try_batch_same_width_disjoint_alias_actions(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    matches: &[NormalizedMatch],
+    width: usize,
+    continuation_states: &[u32],
+) -> Option<ParserGSS> {
+    if !constraint.table.control_terminals.is_empty() || template_advance_enabled() {
+        return None;
+    }
+    let group = matches
+        .iter()
+        .filter(|matched| matched.width == width && !matched.ignored)
+        .collect::<SmallVec<[&NormalizedMatch; 16]>>();
+    if group.len() < 2 {
+        return None;
+    }
+    for matched in &group {
+        if continuation_states.iter().any(|&state| {
+            constraint
+                .tokenizer
+                .possible_future_terminals(state)
+                .contains(matched.terminal_id as usize)
+        }) {
+            return None;
+        }
+    }
+
+    let mut terminal_by_top = SmallVec::<[(u32, u32); 8]>::new();
+    for top in gss.peek_values() {
+        let mut selected = None;
+        for matched in &group {
+            if constraint.table.action(top, matched.terminal_id).is_none() {
+                continue;
+            }
+            if selected.is_some() {
+                return None;
+            }
+            selected = Some(matched.terminal_id);
+        }
+        if let Some(terminal) = selected {
+            terminal_by_top.push((top, terminal));
+        }
+    }
+    if terminal_by_top.len() < 2 {
+        return None;
+    }
+    advance_stacks_disjoint_top_terminals_bounded(
+        &constraint.table,
+        gss,
+        &terminal_by_top,
+    )
+}
+
+fn try_batch_same_width_pure_matches(
+    constraint: &Constraint,
+    gss: &ParserGSS,
+    matches: &[NormalizedMatch],
+    width: usize,
+    continuation_states: &[u32],
+) -> Option<ParserGSS> {
+    if !constraint.table.control_terminals.is_empty() {
+        return None;
+    }
+    let group = matches
+        .iter()
+        .filter(|matched| matched.width == width && !matched.ignored)
+        .collect::<SmallVec<[&NormalizedMatch; 16]>>();
+    if group.len() < 2 {
+        return None;
+    }
+
+    // The historical per-terminal path adds delayed longest-match exclusions
+    // only when that same logical terminal remains possible after the model
+    // token. Batch only when that transform is identity for every member.
+    for matched in &group {
+        if continuation_states.iter().any(|&state| {
+            constraint
+                .tokenizer
+                .possible_future_terminals(state)
+                .contains(matched.terminal_id as usize)
+        }) {
+            return None;
+        }
+    }
+
+    let tops = gss.peek_values();
+    let mut shifts = SmallVec::<[(u32, u32, bool); 32]>::new();
+    for &top in &tops {
+        for matched in &group {
+            let Some(action) = constraint.table.action(top, matched.terminal_id) else {
+                continue;
+            };
+            match action {
+                Action::Shift(target, replace) => {
+                    let edge = (top, *target, *replace);
+                    if !shifts.contains(&edge) {
+                        shifts.push(edge);
+                    }
+                }
+                Action::ReplaceShifts(targets) => {
+                    for &target in targets.iter() {
+                        let edge = (top, target, true);
+                        if !shifts.contains(&edge) {
+                            shifts.push(edge);
+                        }
+                    }
+                }
+                Action::StackShifts(stack_shifts) => {
+                    for shift in stack_shifts {
+                        if shift.pushes.len() != 1 || shift.pop > 1 {
+                            return None;
+                        }
+                        let edge = (top, shift.pushes[0], shift.pop == 1);
+                        if !shifts.contains(&edge) {
+                            shifts.push(edge);
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    if shifts.is_empty() {
+        return None;
+    }
+
+    let advanced = if tops.len() == 1
+        && shifts.iter().all(|(top, _, _)| *top == tops[0])
+        && shifts
+            .first()
+            .is_some_and(|(_, _, replace)| shifts.iter().all(|(_, _, other)| other == replace))
+        && shifts
+            .iter()
+            .enumerate()
+            .all(|(index, (_, target, _))| {
+                !shifts[..index]
+                    .iter()
+                    .any(|(_, prior_target, _)| prior_target == target)
+            })
+        && let Some(stack) = gss.try_virtual_stack()
+    {
+        let replace = shifts[0].2;
+        stack
+            .into_gss_after_popping_and_pushing_unique_single_branches(
+                usize::from(replace),
+                shifts.iter().map(|(_, target, _)| target),
+            )
+            .unwrap_or_else(|| gss.apply_top_pure_shifts(shifts.clone()))
+    } else {
+        gss.apply_top_pure_shifts(shifts)
+    };
+    (!advanced.is_empty()).then_some(advanced)
+}
+
 fn commit_bytes_small_queue_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     queue_scratch: &mut SmallCommitQueueScratch,
+    admission_cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
+    prune_tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
 ) -> Option<Result<(), String>> {
     let has_linker_controls = !constraint.table.control_terminals.is_empty();
-    if bytes.len() > 8 || state.len() > 2 {
+    if bytes.len() > 16 || state.len() > 8 {
         return None;
     }
     queue_scratch.clear();
@@ -3250,11 +3772,51 @@ fn commit_bytes_small_queue_fast_path(
         }
 
         let states_to_process = std::mem::take(&mut queue_scratch.processing[offset]);
-        for (tokenizer_state, mut gss_at_offset) in states_to_process {
-            if !execute_tokenizer_reusable(
+        let mut groups = SmallVec::<[(ParserGSS, SmallVec<[u32; 8]>); 8]>::new();
+        for (tokenizer_state, gss) in states_to_process {
+            let can_group = gss.all_accs_satisfy(|acc: &TerminalsDisallowed| acc.is_empty());
+            let mut grouped = false;
+            if can_group {
+                'groups: for (existing_gss, tokenizer_states) in &mut groups {
+                    if !existing_gss.ptr_eq(&gss) {
+                        continue;
+                    }
+                    let future = constraint.tokenizer.possible_future_terminals(tokenizer_state);
+                    for &other_state in tokenizer_states.iter() {
+                        if !future.is_disjoint(
+                            constraint.tokenizer.possible_future_terminals(other_state),
+                        ) {
+                            continue 'groups;
+                        }
+                    }
+                    tokenizer_states.push(tokenizer_state);
+                    grouped = true;
+                    break;
+                }
+            }
+            if !grouped {
+                groups.push((gss, smallvec::smallvec![tokenizer_state]));
+            }
+        }
+
+        for (mut gss_at_offset, tokenizer_states) in groups {
+            let tokenizer_state = tokenizer_states[0];
+            let reused_prune_scan = offset == 0
+                && !queue_scratch.prune_union_starts.is_empty()
+                && queue_scratch.prune_union_starts.as_slice() == tokenizer_states.as_slice();
+            if reused_prune_scan {
+                tokenizer_scratch.states.clear();
+                tokenizer_scratch
+                    .states
+                    .extend(prune_tokenizer_scratch.states.iter().copied());
+                tokenizer_scratch.matches.clear();
+                tokenizer_scratch
+                    .matches
+                    .extend(prune_tokenizer_scratch.matches.iter().cloned());
+            } else if !execute_tokenizer_reusable_from_states(
                 constraint,
                 &bytes[offset..],
-                tokenizer_state,
+                &tokenizer_states,
                 tokenizer_scratch,
             ) {
                 return None;
@@ -3263,33 +3825,99 @@ fn commit_bytes_small_queue_fast_path(
             if offset == 0
                 && !gss_at_offset.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
             {
-                gss_at_offset = prune_single_initial_state_for_parts(
+                gss_at_offset = try_prune_single_initial_state_batched_accumulators(
                     constraint,
-                    gss_at_offset,
-                    tokenizer_state,
-                    &tokenizer_scratch.states,
-                    &tokenizer_scratch.matches,
+                    &gss_at_offset,
                     bytes,
-                );
+                    prune_tokenizer_scratch,
+                    &mut queue_scratch.prune_union_starts,
+                )
+                .unwrap_or_else(|| {
+                    prune_single_initial_state_for_parts(
+                        constraint,
+                        gss_at_offset,
+                        tokenizer_state,
+                        &tokenizer_scratch.states,
+                        &tokenizer_scratch.matches,
+                        bytes,
+                    )
+                });
                 if gss_at_offset.is_empty() {
                     continue;
                 }
             }
 
-            let actionable_terminals = (!has_linker_controls)
-                .then(|| ActionableTerminals::from_gss(constraint, &gss_at_offset))
-                .flatten();
-            let normalized_matches = collect_unique_actionable_matches(
-                constraint,
-                actionable_terminals.as_ref(),
-                constraint.ignore_terminal,
-                &tokenizer_scratch.matches,
-                None,
-            );
+            let (actionable_terminals, normalized_matches) =
+                if tokenizer_scratch.matches.is_empty() {
+                    (None, SmallVec::<[NormalizedMatch; 16]>::new())
+                } else {
+                    let actionable_terminals = (!has_linker_controls)
+                        .then(|| ActionableTerminals::from_gss(constraint, &gss_at_offset))
+                        .flatten();
+                    let normalized_matches = collect_unique_actionable_reusable_matches(
+                        constraint,
+                        actionable_terminals.as_ref(),
+                        constraint.ignore_terminal,
+                        &tokenizer_scratch.matches,
+                    );
+                    (actionable_terminals, normalized_matches)
+                };
             let mut emitted_terminal_outputs = SmallVec::<[(usize, ParserGSS); 4]>::new();
+            let mut batched_widths = SmallVec::<[usize; 4]>::new();
+            for matched in &normalized_matches {
+                if matched.ignored || batched_widths.contains(&matched.width) {
+                    continue;
+                }
+                let batched = try_batch_same_width_pure_matches(
+                    constraint,
+                    &gss_at_offset,
+                    &normalized_matches,
+                    matched.width,
+                    &tokenizer_scratch.states,
+                )
+                .or_else(|| {
+                    try_batch_same_width_disjoint_alias_actions(
+                        constraint,
+                        &gss_at_offset,
+                        &normalized_matches,
+                        matched.width,
+                        &tokenizer_scratch.states,
+                    )
+                });
+                if let Some(advanced) = batched {
+                    let new_offset = offset + matched.width;
+                    if new_offset > bytes.len() {
+                        return None;
+                    }
+                    if emitted_terminal_outputs.iter().any(|(emitted_offset, emitted_gss)| {
+                        *emitted_offset == new_offset && emitted_gss == &advanced
+                    }) {
+                        batched_widths.push(matched.width);
+                        continue;
+                    }
+                    emitted_terminal_outputs.push((new_offset, advanced.clone()));
+                    if new_offset == bytes.len() {
+                        merge_small_parser_state(
+                            &mut queue_scratch.pending,
+                            initial_tokenizer_state,
+                            advanced,
+                        );
+                    } else {
+                        merge_small_parser_state(
+                            &mut queue_scratch.processing[new_offset],
+                            initial_tokenizer_state,
+                            advanced,
+                        );
+                    }
+                    batched_widths.push(matched.width);
+                }
+            }
 
             for matched in normalized_matches {
                 let new_offset = offset + matched.width;
+                if !matched.ignored && batched_widths.contains(&matched.width) {
+                    continue;
+                }
                 if new_offset > bytes.len() {
                     return None;
                 }
@@ -3312,6 +3940,15 @@ fn commit_bytes_small_queue_fast_path(
                 }
 
                 let advanced = if !has_linker_controls
+                    && !template_advance_enabled()
+                    && let Some(advanced) = try_advance_unique_actionable_top_fast(
+                        constraint,
+                        &gss_at_offset,
+                        matched.terminal_id,
+                    )
+                {
+                    advanced
+                } else if !has_linker_controls
                     && !template_advance_enabled()
                     && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                     && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
@@ -3364,8 +4001,39 @@ fn commit_bytes_small_queue_fast_path(
                 }
             }
 
+            let local_row_admission = try_local_row_presence_admission_words(
+                constraint,
+                &gss_at_offset,
+                &tokenizer_scratch.states,
+            );
+            let admission_cache_index = if local_row_admission.is_none() {
+                cached_batched_end_state_admission(
+                    constraint,
+                    &gss_at_offset,
+                    &tokenizer_scratch.states,
+                    admission_cache,
+                )
+            } else {
+                None
+            };
             for &end_state in &tokenizer_scratch.states {
-                if end_state_may_advance(constraint, &gss_at_offset, end_state) {
+                let may_advance = if let Some(words) = local_row_admission.as_ref() {
+                    end_state_may_advance_from_row_words(constraint, end_state, words)
+                } else if let Some(index) = admission_cache_index {
+                    end_state_may_advance_from_cache_entry(
+                        constraint,
+                        end_state,
+                        &admission_cache[index],
+                    )
+                } else {
+                    cached_single_end_state_may_advance(
+                        constraint,
+                        &gss_at_offset,
+                        end_state,
+                        admission_cache,
+                    )
+                };
+                if may_advance {
                     merge_small_parser_state(
                         &mut queue_scratch.pending,
                         end_state,
@@ -3378,10 +4046,53 @@ fn commit_bytes_small_queue_fast_path(
     }
 
     let mut new_state = ParserStateMap::default();
+    let mut fused_by_source = SmallVec::<[(ParserGSS, ParserGSS); 8]>::new();
     for (tokenizer_state, parser_state) in queue_scratch.pending.drain(..) {
-        let fused = parser_state.fuse(Some(1));
+        let mut fused = fused_by_source
+            .iter()
+            .find(|(source, _)| source.ptr_eq(&parser_state))
+            .map(|(_, fused)| fused.clone())
+            .unwrap_or_else(|| {
+                let source = parser_state.clone();
+                let fused = parser_state.fuse(Some(1));
+                fused_by_source.push((source, fused.clone()));
+                fused
+            });
+        if let Some((_, canonical)) = fused_by_source
+            .iter()
+            .find(|(_, candidate)| *candidate == fused)
+        {
+            fused = canonical.clone();
+        }
         if !fused.is_empty() {
-            new_state.merge_insert(tokenizer_state, fused);
+            if let Some(_uniform) = fused.uniform_accumulator() {
+                new_state.insert_flat_alternative(tokenizer_state, fused);
+            } else {
+                let mut accumulators = SmallVec::<[TerminalsDisallowed; 4]>::new();
+                let mut overflow = false;
+                fused.for_each_acc(|acc| {
+                    if overflow || accumulators.contains(acc) {
+                        return;
+                    }
+                    if accumulators.len() == accumulators.capacity() {
+                        overflow = true;
+                        return;
+                    }
+                    accumulators.push(acc.clone());
+                });
+                if overflow || accumulators.len() <= 1 {
+                    new_state.insert_flat_alternative(tokenizer_state, fused);
+                } else {
+                    for acc in accumulators {
+                        let part = fused.apply_and_prune_no_promote(|candidate| {
+                            (candidate == &acc).then_some(candidate.clone())
+                        });
+                        if !part.is_empty() {
+                            new_state.insert_flat_alternative(tokenizer_state, part);
+                        }
+                    }
+                }
+            }
         }
     }
     if new_state.is_empty() {
@@ -6181,6 +6892,33 @@ fn commit_bytes_impl_inner(
             return result;
         }
     }
+    // Exact-simulation tables make continuation admission the dominant cost
+    // for tiny composed frontiers.  The small queue batches that exact set query,
+    // so try it before the flat accelerator (whose bounded proof may decline and
+    // duplicate the work) when its ordinary profitability bounds already hold.
+    if !has_linker_controls
+        && !direct_dynamic
+        && constraint.table.admission_policy == AdmissionPolicy::ExactSimulation
+        && bytes.len() <= 16
+        && state.len() <= 8
+    {
+        let early_small_queue = commit_bytes_small_queue_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.small_queue,
+            &mut bufs.admission_cache,
+            &mut bufs.prune_tokenizer_exec,
+        );
+        if let Some(result) = early_small_queue {
+            if debug_path {
+                eprintln!("[glrmask/debug][commit_path] early_small_queue states={}", state.len());
+            }
+            return result;
+        }
+    }
+
     if !has_linker_controls
         && !direct_dynamic
         && state.len() <= FLAT_FRONTIER_MAX_BRANCHES
@@ -6407,6 +7145,8 @@ fn commit_bytes_impl_inner(
         bytes,
         &mut bufs.reusable_tokenizer_exec,
         &mut bufs.small_queue,
+        &mut bufs.admission_cache,
+        &mut bufs.prune_tokenizer_exec,
     );
     if let Some(result) = small_queue_result {
         if debug_path {

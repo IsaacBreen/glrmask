@@ -1036,6 +1036,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
+        self.table.rebuild_unconditional_advance_rows();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -2279,6 +2280,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
+        self.table.rebuild_unconditional_advance_rows();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -2631,7 +2633,13 @@ impl Constraint {
         // finalization rather than charging its one-time allocations to the
         // first decoding commit.
         let tokenizer_closures_started_at = profile.then(std::time::Instant::now);
-        let _ = self.tokenizer.all_singleton_epsilon_closures();
+        let tokenizer_closures = self.tokenizer.all_singleton_epsilon_closures();
+        if tokenizer_closures
+            .get(self.tokenizer.initial_state() as usize)
+            .is_some_and(|closure| closure.len() > 64)
+        {
+            let _ = self.tokenizer.initial_byte_frontiers();
+        }
         let tokenizer_closures_ms = tokenizer_closures_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let initial_commit_prime_started_at = profile.then(std::time::Instant::now);

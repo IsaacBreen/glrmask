@@ -326,6 +326,8 @@ pub(crate) struct CommitBuffers {
     pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
     pub reusable_tokenizer_exec:
         crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
+    pub prune_tokenizer_exec:
+        crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
     pub small_queue: crate::runtime::commit::SmallCommitQueueScratch,
     pub flat_frontier: crate::runtime::commit::FlatFrontierScratch,
     pub linear_stack_original: Vec<u32>,
@@ -349,6 +351,8 @@ impl Default for CommitBuffers {
                 matches: Vec::with_capacity(8),
             },
             reusable_tokenizer_exec:
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+            prune_tokenizer_exec:
                 crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
             small_queue: crate::runtime::commit::SmallCommitQueueScratch::default(),
             flat_frontier: crate::runtime::commit::FlatFrontierScratch::default(),
@@ -380,6 +384,8 @@ impl CommitBuffers {
         self.small_exec_result.matches.clear();
         self.reusable_tokenizer_exec.states.clear();
         self.reusable_tokenizer_exec.matches.clear();
+        self.prune_tokenizer_exec.states.clear();
+        self.prune_tokenizer_exec.matches.clear();
         self.small_queue.clear();
         self.flat_frontier.clear();
         self.linear_stack_original.clear();

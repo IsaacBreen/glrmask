@@ -99,6 +99,11 @@ pub struct GLRTable {
     /// optimized action body.
     #[serde(default)]
     pub advance: Vec<BitSet>,
+    /// Runtime-derived subset of `advance` whose current-row action is
+    /// unconditionally admissible without inspecting deeper parser stack.
+    /// Rebuilt after load/final table mutation; never serialized.
+    #[serde(skip, default)]
+    pub unconditional_advance: Vec<BitSet>,
     /// Set of (state, terminal) pairs where the shift was created by the
     /// transfer mechanism. The characterization should treat these as
     /// non-replace to avoid creating pop-0 reduces in the template NFA.
@@ -318,6 +323,7 @@ impl GLRTable {
             construction: GlrTableConstruction::LegacyRowBisim,
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
+            unconditional_advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             control_terminals: Default::default(),
             skip_terminals: Default::default(),
@@ -357,6 +363,40 @@ impl GLRTable {
 
     pub fn rebuild_advance_rows_from_actions(&mut self) {
         self.advance = action_presence_rows(&self.action, self.num_terminals);
+    }
+
+    pub fn rebuild_unconditional_advance_rows(&mut self) {
+        let terminal_count = self.num_terminals as usize;
+        self.unconditional_advance = self
+            .action
+            .iter()
+            .map(|row| {
+                let mut admitted = BitSet::new(terminal_count);
+                for (terminal, action) in row.iter() {
+                    let unconditional = match action {
+                        Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
+                        Action::Split { shift, accept, .. } => {
+                            shift.is_some() || (*accept && terminal == crate::glr::analysis::EOF)
+                        }
+                        Action::StackShifts(_)
+                        | Action::GuardedStackShifts(_)
+                        | Action::Reduce(..)
+                        | Action::Accept => false,
+                    };
+                    if unconditional {
+                        admitted.set(terminal as usize);
+                    }
+                }
+                admitted
+            })
+            .collect();
+    }
+
+    #[inline]
+    pub fn unconditional_advance_row(&self, state: u32) -> Option<&BitSet> {
+        (self.unconditional_advance.len() == self.num_states as usize)
+            .then(|| self.unconditional_advance.get(state as usize))
+            .flatten()
     }
 
     pub fn rebuild_guarded_shift_index(&mut self) {
@@ -726,6 +766,7 @@ pub mod testing {
             construction: GlrTableConstruction::LegacyRowBisim,
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance,
+            unconditional_advance: Vec::new(),
             forwarded_shifts: Default::default(),
             control_terminals: Default::default(),
             skip_terminals: Default::default(),
