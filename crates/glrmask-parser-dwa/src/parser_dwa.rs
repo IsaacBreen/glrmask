@@ -1554,6 +1554,24 @@ fn determinize_with_supports(
         }
     }
 
+    #[derive(Clone)]
+    enum DeferredEdgeWeight {
+        Immediate(Weight),
+        Job(usize),
+    }
+
+    #[derive(Clone)]
+    struct DeferredClosure {
+        to_state: u32,
+        edge_weight: DeferredEdgeWeight,
+    }
+
+    struct DeferredTransition {
+        from_state: u32,
+        label: i32,
+        to_state: u32,
+        edge_weight: DeferredEdgeWeight,
+    }
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -1693,9 +1711,49 @@ fn determinize_with_supports(
         ..UnionAllCache::default()
     };
 
+    let defer_edge_unions =
+        std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+            && rayon::current_num_threads() > 1;
+    let mut deferred_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
+    let mut deferred_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
+    let mut deferred_closure_cache =
+        FxHashMap::<Vec<(u32, usize)>, DeferredClosure>::default();
+    let mut deferred_transitions = Vec::<DeferredTransition>::new();
+    let mut deferred_hits = 0usize;
+    let mut deferred_misses = 0usize;
+    let mut deferred_key_len_sum = 0usize;
+    let mut deferred_key_len_max = 0usize;
+
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
     let mut deferred_final_entries: Vec<(u32, DeferredFinalEntries)> = Vec::new();
+    let mut defer_edge_weight = |contribs: &TargetContribs| -> DeferredEdgeWeight {
+        debug_assert!(!contribs.is_empty());
+        if contribs.iter().any(|(_, weight)| weight.is_full()) {
+            return DeferredEdgeWeight::Immediate(Weight::all());
+        }
+        if contribs.len() == 1 {
+            return DeferredEdgeWeight::Immediate(contribs[0].1.clone());
+        }
+        let key: SmallVec<[usize; 16]> =
+            contribs.iter().map(|(_, weight)| weight.ptr_key()).collect();
+        deferred_key_len_sum += key.len();
+        deferred_key_len_max = deferred_key_len_max.max(key.len());
+        if let Some(&job) = deferred_union_ids.get(&key) {
+            deferred_hits += 1;
+            return DeferredEdgeWeight::Job(job);
+        }
+        deferred_misses += 1;
+        let job = deferred_union_jobs.len();
+        deferred_union_ids.insert(key, job);
+        deferred_union_jobs.push(
+            contribs
+                .iter()
+                .map(|(_, weight)| weight.clone())
+                .collect::<SmallVec<[Weight; 8]>>(),
+        );
+        DeferredEdgeWeight::Job(job)
+    };
 
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
         if let Some(detail) = detail.as_mut() {
@@ -1826,35 +1884,60 @@ fn determinize_with_supports(
             }
 
             let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
-            let cached = closure_cache.get(&pre_closure_key).cloned();
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
-                detail.closure_lookup_ms += elapsed_ms(started_at);
-            }
-            if let Some(cached) = cached {
-                if let Some(detail) = detail.as_mut() {
-                    detail.closure_cache_hits += 1;
+            if defer_edge_unions {
+                let cached = deferred_closure_cache.get(&pre_closure_key).cloned();
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                    detail.closure_lookup_ms += elapsed_ms(started_at);
                 }
-                let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                dwa.add_transition(from_state, label, cached.to_state, cached.edge_weight);
-                if let (Some(detail), Some(started_at)) =
-                    (detail.as_mut(), add_transition_started)
-                {
-                    detail.add_transition_ms += elapsed_ms(started_at);
+                if let Some(cached) = cached {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.closure_cache_hits += 1;
+                    }
+                    deferred_transitions.push(DeferredTransition {
+                        from_state,
+                        label,
+                        to_state: cached.to_state,
+                        edge_weight: cached.edge_weight,
+                    });
+                    return;
                 }
-                return;
+            } else {
+                let cached = closure_cache.get(&pre_closure_key).cloned();
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                    detail.closure_lookup_ms += elapsed_ms(started_at);
+                }
+                if let Some(cached) = cached {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.closure_cache_hits += 1;
+                    }
+                    let add_transition_started = detail.as_ref().map(|_| Instant::now());
+                    dwa.add_transition(from_state, label, cached.to_state, cached.edge_weight);
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), add_transition_started)
+                    {
+                        detail.add_transition_ms += elapsed_ms(started_at);
+                    }
+                    return;
+                }
             }
 
             if let Some(detail) = detail.as_mut() {
                 detail.closure_cache_misses += 1;
             }
-            let edge_weight_started = detail.as_ref().map(|_| Instant::now());
-            let edge_weight = union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), edge_weight_started) {
-                detail.edge_weight_union_ms += elapsed_ms(started_at);
-            }
-            if edge_weight.is_empty() {
-                return;
-            }
+            let deferred_edge_weight = defer_edge_unions.then(|| defer_edge_weight(&contribs));
+            let edge_weight = if defer_edge_unions {
+                None
+            } else {
+                let edge_weight_started = detail.as_ref().map(|_| Instant::now());
+                let edge_weight = union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), edge_weight_started) {
+                    detail.edge_weight_union_ms += elapsed_ms(started_at);
+                }
+                if edge_weight.is_empty() {
+                    return;
+                }
+                Some(edge_weight)
+            };
             let closure_started = detail.as_ref().map(|_| Instant::now());
             let mut owned_canon = Vec::new();
             if use_flat_canonical_closure {
@@ -1946,17 +2029,36 @@ fn determinize_with_supports(
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
                 detail.subset_map_lookup_ms += elapsed_ms(started_at);
             }
-            closure_cache.insert(
-                pre_closure_key.clone(),
-                CachedClosure {
+            if defer_edge_unions {
+                let edge_weight = deferred_edge_weight
+                    .expect("deferred parser support edge must retain its union job");
+                deferred_closure_cache.insert(
+                    pre_closure_key.clone(),
+                    DeferredClosure {
+                        to_state,
+                        edge_weight: edge_weight.clone(),
+                    },
+                );
+                deferred_transitions.push(DeferredTransition {
+                    from_state,
+                    label,
                     to_state,
-                    edge_weight: edge_weight.clone(),
-                },
-            );
-            let add_transition_started = detail.as_ref().map(|_| Instant::now());
-            dwa.add_transition(from_state, label, to_state, edge_weight);
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
-                detail.add_transition_ms += elapsed_ms(started_at);
+                    edge_weight,
+                });
+            } else {
+                let edge_weight = edge_weight.expect("eager support edge union must exist");
+                closure_cache.insert(
+                    pre_closure_key.clone(),
+                    CachedClosure {
+                        to_state,
+                        edge_weight: edge_weight.clone(),
+                    },
+                );
+                let add_transition_started = detail.as_ref().map(|_| Instant::now());
+                dwa.add_transition(from_state, label, to_state, edge_weight);
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
+                    detail.add_transition_ms += elapsed_ms(started_at);
+                }
             }
         };
 
@@ -1975,6 +2077,36 @@ fn determinize_with_supports(
         }
         if let (Some(detail), Some(started_at)) = (detail.as_mut(), label_started) {
             detail.label_processing_ms += elapsed_ms(started_at);
+        }
+    }
+
+    if defer_edge_unions {
+        use rayon::prelude::*;
+        let union_started = detail.as_ref().map(|_| Instant::now());
+        let union_results = deferred_union_jobs
+            .par_iter()
+            .map(|weights| Weight::union_all_direct(weights.iter()))
+            .collect::<Vec<_>>();
+        if let (Some(detail), Some(started_at)) = (detail.as_mut(), union_started) {
+            detail.edge_weight_union_ms += elapsed_ms(started_at);
+            detail.union_cache_ms += elapsed_ms(started_at);
+        }
+        let add_started = detail.as_ref().map(|_| Instant::now());
+        for transition in deferred_transitions {
+            let edge_weight = match transition.edge_weight {
+                DeferredEdgeWeight::Immediate(weight) => weight,
+                DeferredEdgeWeight::Job(job) => union_results[job].clone(),
+            };
+            debug_assert!(!edge_weight.is_empty());
+            dwa.add_transition(
+                transition.from_state,
+                transition.label,
+                transition.to_state,
+                edge_weight,
+            );
+        }
+        if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_started) {
+            detail.add_transition_ms += elapsed_ms(started_at);
         }
     }
 
@@ -2189,11 +2321,18 @@ fn determinize_with_supports(
     }
 
     if let Some(detail) = detail.as_mut() {
-        detail.union_cache_hits = union_cache.hits;
-        detail.union_cache_misses = union_cache.misses;
-        detail.union_cache_key_len_sum = union_cache.key_len_sum;
-        detail.union_cache_key_len_max = union_cache.key_len_max;
-        detail.union_cache_ms = union_cache.total_ms;
+        if defer_edge_unions {
+            detail.union_cache_hits = deferred_hits;
+            detail.union_cache_misses = deferred_misses;
+            detail.union_cache_key_len_sum = deferred_key_len_sum;
+            detail.union_cache_key_len_max = deferred_key_len_max;
+        } else {
+            detail.union_cache_hits = union_cache.hits;
+            detail.union_cache_misses = union_cache.misses;
+            detail.union_cache_key_len_sum = union_cache.key_len_sum;
+            detail.union_cache_key_len_max = union_cache.key_len_max;
+            detail.union_cache_ms = union_cache.total_ms;
+        }
     }
 
     if let Some(detail) = detail {
