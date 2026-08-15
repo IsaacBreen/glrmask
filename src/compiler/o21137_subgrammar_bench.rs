@@ -427,6 +427,31 @@ fn build_parent(
     )
 }
 
+fn compose_named_parent_owned(
+    parent: Constraint,
+    children: &[(&str, &Constraint)],
+    vocab: &Vocab,
+) -> Constraint {
+    let inputs = children
+        .iter()
+        .map(|(name, child)| {
+            let placeholder_terminal = parent
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap_or_else(|| panic!("benchmark placeholder terminal {name:?}"))
+                as u32;
+            crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                placeholder_terminal,
+                constraint: child,
+            }
+        })
+        .collect::<Vec<_>>();
+    crate::compiler::constraint_compose::compose_constraints_owned_parent(parent, &inputs, vocab)
+        .expect("compose benchmark subgrammars")
+        .constraint
+}
+
 fn terminal_child(source: &GrammarDef, terminal: u32) -> GrammarDef {
     let source_terminal = &source.terminals[terminal as usize];
     let terminals = vec![clone_terminal_with_id(source_terminal, 0)];
@@ -595,9 +620,7 @@ fn build_terminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedB
         .collect::<Vec<_>>();
     profile_owned_parent_tokenizer(&parent, &child_bindings);
     let composition_started = Instant::now();
-    let constraint = parent
-        .compose_subgrammars_owned(&child_bindings, vocab)
-        .expect("compose extracted o21137 terminal subgrammars");
+    let constraint = compose_named_parent_owned(parent, &child_bindings, vocab);
     let composition_ms = elapsed_ms(composition_started);
     DecomposedBuild {
         constraint,
@@ -802,10 +825,7 @@ fn build_nonterminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> Decompos
     let bindings = child_bindings(&parts.placeholder_names, &parts.children);
     profile_owned_parent_tokenizer(&parts.parent, &bindings);
     let composition_started = Instant::now();
-    let constraint = parts
-        .parent
-        .compose_subgrammars_owned(&bindings, vocab)
-        .expect("compose extracted o21137 subgrammars");
+    let constraint = compose_named_parent_owned(parts.parent, &bindings, vocab);
     let composition_ms = elapsed_ms(composition_started);
     DecomposedBuild {
         constraint,
@@ -1039,9 +1059,7 @@ pub(crate) fn run(mode: &str) {
                 };
                 let bindings = child_bindings(&parts.placeholder_names, &parts.children);
                 let compose_started = Instant::now();
-                let composed = parent
-                    .compose_subgrammars_owned(&bindings, &vocab)
-                    .expect("compose extracted o21137 subgrammars");
+                let composed = compose_named_parent_owned(parent, &bindings, &vocab);
                 let compose_ms = elapsed_ms(compose_started);
                 eprintln!(
                     "O21137_COMPOSE_SAMPLE sample={sample} clone_ms={clone_ms:.3} compose_ms={compose_ms:.3} tokenizer_states={} parser_dwa_states={}",

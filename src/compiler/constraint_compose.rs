@@ -6195,6 +6195,70 @@ mod tests {
             .unwrap() as u32
     }
 
+    trait ComposeLinkedChildrenForTest {
+        fn compose_linked_children_for_test(
+            &self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint>;
+
+        fn compose_linked_children_for_test_owned(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint>;
+    }
+
+    impl ComposeLinkedChildrenForTest for Constraint {
+        fn compose_linked_children_for_test(
+            &self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint> {
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = terminal(self, name);
+                if !seen.insert(placeholder_terminal) {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    constraint: child,
+                });
+            }
+            compose_constraints(self, &inputs, vocab)
+                .map(|composition| composition.constraint)
+                .map_err(crate::GlrMaskError::Compilation)
+        }
+
+        fn compose_linked_children_for_test_owned(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint> {
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = terminal(&self, name);
+                if !seen.insert(placeholder_terminal) {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent(self, &inputs, vocab)
+                .map(|composition| composition.constraint)
+                .map_err(crate::GlrMaskError::Compilation)
+        }
+    }
+
     #[test]
     fn structural_sharing_quotients_duplicate_child_lr_regions() {
         let vocab = Vocab::new(vec![
@@ -6310,7 +6374,7 @@ mod tests {
         )
         .unwrap();
         let runtime_composed = parent
-            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &loaded_child)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &child), ("RIGHT", &loaded_child)], &vocab)
             .unwrap();
         assert_constraints_equivalent_on_reachable_prefixes(
             &runtime_composed,
@@ -6428,7 +6492,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
             .unwrap();
 
         let mut state = composed.start();
@@ -6856,10 +6920,10 @@ mod tests {
         .unwrap();
         let borrowed_parent = compile_parent();
         let borrowed = borrowed_parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         let owned = compile_parent()
-            .compose_subgrammars_owned(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_owned(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -6925,7 +6989,7 @@ mod tests {
         )
         .unwrap();
         let error = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .expect_err("real vocabulary tokens cannot be used as composition sentinels");
         assert!(error.to_string().contains("non-vocabulary sentinels"));
         assert!(error.to_string().contains("outside the supplied vocabulary"));
@@ -6973,7 +7037,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -7023,7 +7087,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -7076,7 +7140,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -7123,7 +7187,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save())
             .expect("composed exact-special-token constraint must survive serialization");
@@ -7198,7 +7262,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert!(composed.ignore_terminal.is_none());
@@ -7290,7 +7354,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -7399,10 +7463,10 @@ mod tests {
         // edge.  The direct continuation row therefore exposes a control
         // terminal, not lexical terminal "b".
         let parent_with_right = parent
-            .compose_subgrammars(&[("RIGHT", &right)], &vocab)
+            .compose_linked_children_for_test(&[("RIGHT", &right)], &vocab)
             .unwrap();
         let composed = parent_with_right
-            .compose_subgrammars(&[("LEFT", &left)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &left)], &vocab)
             .unwrap();
 
         let monolithic = Constraint::from_glrm_grammar(
@@ -7516,7 +7580,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         let mut actual = composed.start();
@@ -7588,7 +7652,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -7664,10 +7728,10 @@ mod tests {
         .unwrap();
         let outer = outer_parent
             .clone()
-            .compose_subgrammars(&[("INNER", &composed)], &vocab)
+            .compose_linked_children_for_test(&[("INNER", &composed)], &vocab)
             .unwrap();
         let outer_from_loaded = outer_parent
-            .compose_subgrammars(&[("INNER", &loaded)], &vocab)
+            .compose_linked_children_for_test(&[("INNER", &loaded)], &vocab)
             .unwrap();
         for constraint in [&outer, &outer_from_loaded] {
             assert!(constraint.ignore_terminal.is_some());
@@ -7736,7 +7800,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -7790,7 +7854,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -7964,7 +8028,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         assert_eq!(composed.table.embedded_end_token_ids(), vec![END_TOKEN]);
 
@@ -8026,7 +8090,7 @@ mod tests {
         .unwrap();
 
         let error = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .expect_err("a placeholder sentinel ID cannot remain live as an end token");
         assert!(
             error
@@ -8073,7 +8137,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         assert_eq!(composed.table.embedded_end_token_ids(), vec![END_TOKEN]);
         let loaded = Constraint::load(&composed.save()).unwrap();
@@ -8101,7 +8165,7 @@ mod tests {
         )
         .unwrap();
         let error = outer
-            .compose_subgrammars(&[("INNER", &loaded)], &vocab)
+            .compose_linked_children_for_test(&[("INNER", &loaded)], &vocab)
             .expect_err("nested placeholder must not reuse the child's end-token ID");
         assert!(
             error
@@ -8139,7 +8203,7 @@ mod tests {
         )
         .unwrap();
         let middle = nullable_parent
-            .compose_subgrammars(&[("CHILD", &nullable_child)], &vocab)
+            .compose_linked_children_for_test(&[("CHILD", &nullable_child)], &vocab)
             .unwrap();
         assert!(middle.table.embedded_start_nullable());
         let middle = Constraint::load(&middle.save()).unwrap();
@@ -8155,7 +8219,7 @@ mod tests {
         )
         .unwrap();
         let composed = outer_parent
-            .compose_subgrammars(&[("MIDDLE", &middle)], &vocab)
+            .compose_linked_children_for_test(&[("MIDDLE", &middle)], &vocab)
             .unwrap();
         let monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -8456,7 +8520,7 @@ mod tests {
 
         for child in [&child, &loaded_child] {
             let composed = parent
-                .compose_subgrammars(&[("SUB", child)], &vocab)
+                .compose_linked_children_for_test(&[("SUB", child)], &vocab)
                 .unwrap();
             for sequence in [vec![0], vec![1], vec![2, 4], vec![2, 3, 4]] {
                 let mut expected = monolithic.start();
@@ -8506,7 +8570,7 @@ mod tests {
         )
         .unwrap();
         let middle = middle_parent
-            .compose_subgrammars(&[("LEAF", &leaf)], &vocab)
+            .compose_linked_children_for_test(&[("LEAF", &leaf)], &vocab)
             .unwrap();
         let outer_parent = Constraint::from_glrm_grammar(
             r#"
@@ -8518,7 +8582,7 @@ mod tests {
         )
         .unwrap();
         let composed = outer_parent
-            .compose_subgrammars(&[("MIDDLE", &middle)], &vocab)
+            .compose_linked_children_for_test(&[("MIDDLE", &middle)], &vocab)
             .unwrap();
         let monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -8569,7 +8633,7 @@ mod tests {
         )
         .unwrap();
         let middle = middle_parent
-            .compose_subgrammars(&[("LEAF", &leaf)], &vocab)
+            .compose_linked_children_for_test(&[("LEAF", &leaf)], &vocab)
             .unwrap();
         assert!(middle.table.embedded_start_nullable());
         let middle = Constraint::load(&middle.save()).unwrap();
@@ -8635,7 +8699,7 @@ mod tests {
     }
 
     #[test]
-    fn public_composition_matches_monolithic_for_child_alternatives() {
+    fn internal_composition_matches_monolithic_for_child_alternatives() {
         let vocab = Vocab::new(vec![
             (0, b"Xa".to_vec()),
             (1, b"b!".to_vec()),
@@ -8691,13 +8755,13 @@ mod tests {
         )
         .unwrap();
         let duplicate_error = parent
-            .compose_subgrammars(&[("LEFT", &left), ("LEFT", &right)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &left), ("LEFT", &right)], &vocab)
             .expect_err("duplicate placeholder inputs must be rejected");
         assert!(duplicate_error
             .to_string()
             .contains("was supplied more than once"));
         let composed = parent
-            .compose_subgrammars(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save())
             .expect("composed constraints must survive serialization");
@@ -8784,7 +8848,7 @@ mod tests {
             let composition_started = Instant::now();
             eprintln!("[compose-bench] compose {mode} run={} start", run + 1);
             let composed = parent
-                .compose_subgrammars(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
+                .compose_linked_children_for_test(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
                 .unwrap();
             let composition_ms = composition_started.elapsed().as_secs_f64() * 1000.0;
             eprintln!(
@@ -8849,7 +8913,7 @@ mod tests {
         )
         .unwrap();
         let composed = parent
-            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
         let monolithic = Constraint::from_glrm_grammar(
             r#"
