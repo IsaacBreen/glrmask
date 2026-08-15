@@ -6835,6 +6835,7 @@ mod tests {
                 construction: GlrTableConstruction::LegacyRowBisim,
                 admission_policy: AdmissionPolicy::RowPresenceExact,
                 advance: Vec::new(),
+                unconditional_advance: Vec::new(),
                 forwarded_shifts: FxHashSet::default(),
                 control_terminals: Default::default(),
                 skip_terminals: Default::default(),

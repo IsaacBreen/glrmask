@@ -92,6 +92,20 @@ impl BitSet {
         }
     }
 
+    /// Union `other` into this set and report whether any bit was newly added.
+    /// This avoids allocating the delta when callers need only fixed-point
+    /// scheduling information.
+    pub fn union_with_changed(&mut self, other: &BitSet) -> bool {
+        self.assert_same_len(other);
+        let mut changed = false;
+        for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
+            let merged = *lhs | *rhs;
+            changed |= merged != *lhs;
+            *lhs = merged;
+        }
+        changed
+    }
+
     /// Union `left ∩ right` into this set and report whether the intersection
     /// contained any bits.
     ///
@@ -290,6 +304,20 @@ mod tests {
                 legacy,
             );
         }
+    }
+
+    #[test]
+    fn union_with_changed_reports_only_real_growth() {
+        let mut left = BitSet::new(130);
+        left.set(1);
+        left.set(65);
+        let mut right = BitSet::new(130);
+        right.set(65);
+        assert!(!left.union_with_changed(&right));
+        right.set(129);
+        assert!(left.union_with_changed(&right));
+        assert!(left.contains(129));
+        assert!(!left.union_with_changed(&right));
     }
 
     #[test]
