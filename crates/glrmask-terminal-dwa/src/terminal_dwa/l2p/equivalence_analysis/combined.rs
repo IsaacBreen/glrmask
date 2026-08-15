@@ -285,9 +285,10 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     );
     let mut collisions = FxHashMap::<u128, Vec<usize>>::default();
     let mut representative_token_bytes = Vec::new();
+    let mut representative_original_indices = Vec::new();
     let mut original_to_repr = Vec::with_capacity(tokens.len());
 
-    for token in tokens {
+    for (original_index, token) in tokens.iter().enumerate() {
         let bytes = token.as_ref();
         let hash = hash_byte_class_seq(bytes, byte_to_class);
         let repr_idx = if let Some(&primary) = hash_to_repr.get(&hash) {
@@ -306,12 +307,14 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
             } else {
                 let idx = representative_token_bytes.len();
                 representative_token_bytes.push(bytes);
+                representative_original_indices.push(original_index);
                 collisions.entry(hash).or_default().push(idx);
                 idx
             }
         } else {
             let idx = representative_token_bytes.len();
             representative_token_bytes.push(bytes);
+            representative_original_indices.push(original_index);
             hash_to_repr.insert(hash, idx);
             idx
         };
@@ -320,6 +323,7 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
 
     TokenDedup {
         representative_token_bytes,
+        representative_original_indices,
         original_to_repr,
     }
 }
@@ -2529,10 +2533,12 @@ fn analyze_equivalences_impl(
                 })
                 .flatten();
             let common_atom_preclasses = common_atom_preclass_enabled().then(|| {
-                common_atom_preclass::try_find_common_atom_preclasses(
+                common_atom_preclass::try_find_common_atom_preclasses_with_vocab(
                     tokenizer,
                     active_groups,
                     &dedup.representative_token_bytes,
+                    vocab,
+                    &dedup.representative_original_indices,
                 )
             });
             let precomputed_vocab = if let Some((classes, factor_profile)) = first_byte_factored {

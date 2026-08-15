@@ -157,20 +157,28 @@ pub struct L2pVocabBoundarySplit {
 impl L2pVocabBoundarySplit {
     fn materialize_vocab(vocab: &Vocab, token_ids: &[u32]) -> Vocab {
         let mut entries = Vec::with_capacity(token_ids.len());
+        let mut parent_entry_indices = Vec::with_capacity(token_ids.len());
         let mut token_ids = token_ids.iter().copied().peekable();
-        for (&token_id, bytes) in vocab.entries_map().iter() {
+        for (parent_entry_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
             while token_ids.peek().is_some_and(|candidate| *candidate < token_id) {
                 token_ids.next();
             }
             if token_ids.peek().is_some_and(|candidate| *candidate == token_id) {
                 entries.push((token_id, bytes.clone()));
+                parent_entry_indices.push(parent_entry_index);
                 token_ids.next();
             }
             if token_ids.peek().is_none() {
                 break;
             }
         }
-        Vocab::new(entries)
+        let child = Vocab::new(entries);
+        super::l2p::equivalence_analysis::vocab::common_atom::inherit_vocab_suffix_index(
+            vocab,
+            &child,
+            parent_entry_indices,
+        );
+        child
     }
 
     pub fn boundary_vocab(&self, vocab: &Vocab) -> Vocab {
@@ -236,6 +244,19 @@ struct VocabSuffixTrie {
 }
 
 impl crate::vocab::VocabDerivedArtifact for VocabSuffixTrie {}
+
+#[derive(Debug)]
+struct VocabPrefixTrie {
+    /// Parent node for every trie node; node zero is the root and points to itself.
+    parents: Box<[u32]>,
+    /// Incoming byte for every node. The root byte is unused.
+    incoming_bytes: Box<[u8]>,
+    /// Trie node after consuming bytes `[..=split_after]` for each vocabulary split.
+    /// Indices use the same flattened split coordinate as `entry_split_offsets`.
+    split_nodes: Box<[u32]>,
+}
+
+impl crate::vocab::VocabDerivedArtifact for VocabPrefixTrie {}
 
 const PREPARED_SUFFIX_TRIE_MIN_SPLITS: usize = 32_768;
 
@@ -338,6 +359,45 @@ fn vocab_suffix_trie(vocab: &Vocab) -> Arc<VocabSuffixTrie> {
     trie
 }
 
+fn vocab_prefix_trie(vocab: &Vocab) -> Arc<VocabPrefixTrie> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabPrefixTrie>() {
+        return cached;
+    }
+    let split_index = vocab_adjacent_pair_index(vocab);
+    let mut parents = vec![0u32];
+    let mut incoming_bytes = vec![0u8];
+    let mut split_nodes = vec![0u32; split_index.total_splits];
+    let mut child_by_edge = FxHashMap::<(u32, u8), u32>::default();
+
+    for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
+        let split_base = split_index.entry_split_offsets[entry_index];
+        let mut node = 0u32;
+        for split_after in 0..bytes.len().saturating_sub(1) {
+            let byte = bytes[split_after];
+            let key = (node, byte);
+            node = if let Some(&existing) = child_by_edge.get(&key) {
+                existing
+            } else {
+                let child = u32::try_from(parents.len())
+                    .expect("vocabulary prefix trie exceeds u32 node space");
+                parents.push(node);
+                incoming_bytes.push(byte);
+                child_by_edge.insert(key, child);
+                child
+            };
+            split_nodes[split_base + split_after] = node;
+        }
+    }
+
+    let trie = Arc::new(VocabPrefixTrie {
+        parents: parents.into_boxed_slice(),
+        incoming_bytes: incoming_bytes.into_boxed_slice(),
+        split_nodes: split_nodes.into_boxed_slice(),
+    });
+    vocab.vocab_derived_cache_set(Arc::clone(&trie));
+    trie
+}
+
 fn vocab_classification_facts(vocab: &Vocab) -> Arc<VocabClassificationFacts> {
     if let Some(cached) = vocab.vocab_derived_cache_get::<VocabClassificationFacts>() {
         return cached;
@@ -398,12 +458,16 @@ pub fn vocab_tokens_with_adjacent_pairs(
 
 pub fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
     let _ = vocab_classification_facts(vocab);
+    if std::env::var_os("GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_some() {
+        super::l2p::equivalence_analysis::vocab::common_atom::prepare_vocab_suffix_index(vocab);
+    }
     let adjacent = vocab_adjacent_pair_index(vocab);
     // Large terminal-boundary classifiers can amortize a suffix trie across
     // every grammar compiled against this fixed vocabulary. Build it during
     // explicit vocabulary preparation, never on the schema critical path.
     if prepared_suffix_trie_enabled() && adjacent.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS {
         let _ = vocab_suffix_trie(vocab);
+        let _ = vocab_prefix_trie(vocab);
     }
 }
 
@@ -885,6 +949,26 @@ pub fn classify_terminal_path_lengths(
     num_terminals: u32,
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<TerminalPathLength> {
+    classify_terminal_path_lengths_with_probe(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        num_terminals,
+        shared_classify_cache,
+        None,
+    )
+}
+
+pub(crate) fn classify_terminal_path_lengths_with_probe(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    shared_classify_cache: Option<&SharedClassifyCache>,
+    witness_probe_callback: Option<&dyn Fn(&BitSet)>,
+) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let vocab_facts = vocab_classification_facts(vocab);
@@ -954,6 +1038,7 @@ pub fn classify_terminal_path_lengths(
             disallowed_follows,
             &heuristic_two_plus,
             bytesets,
+            witness_probe_callback,
         )
     });
     if std::env::var_os("GLRMASK_TERMINAL_PATH_STRICT_REFERENCE").is_some() {
@@ -2809,6 +2894,39 @@ fn merge_word_continuation(continuations: &mut Vec<(u32, u64)>, state: u32, acti
     }
 }
 
+struct DenseWordContinuations {
+    masks: Vec<u64>,
+    touched: Vec<u32>,
+}
+
+impl DenseWordContinuations {
+    fn new(num_states: usize) -> Self {
+        Self {
+            masks: vec![0; num_states],
+            touched: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn merge(&mut self, state: u32, active: u64) {
+        if active == 0 {
+            return;
+        }
+        let slot = &mut self.masks[state as usize];
+        if *slot == 0 {
+            self.touched.push(state);
+        }
+        *slot |= active;
+    }
+
+    fn clear(&mut self) {
+        for &state in &self.touched {
+            self.masks[state as usize] = 0;
+        }
+        self.touched.clear();
+    }
+}
+
 fn merge_mask_continuation(
     continuations: &mut Vec<(u32, Box<[u64]>)>,
     state: u32,
@@ -2856,12 +2974,27 @@ fn execute_prepared_dense_suffix_trie(
     (state_by_node, matched_by_node)
 }
 
+fn execute_prepared_prefix_trie(
+    trie: &VocabPrefixTrie,
+    scanner: &mut CandidatePrefixPowerset<'_>,
+    prefix_start: u32,
+) -> Vec<u32> {
+    let mut state_by_node = vec![PREFIX_DEAD_STATE; trie.parents.len()];
+    state_by_node[0] = prefix_start;
+    for node in 1..trie.parents.len() {
+        let parent = trie.parents[node] as usize;
+        state_by_node[node] = scanner.step(state_by_node[parent], trie.incoming_bytes[node]);
+    }
+    state_by_node
+}
+
 fn exact_terminal_path_two_plus_candidate_dfa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     candidates: &BitSet,
     bytesets: &SharedClassifyBytesets,
+    witness_probe_callback: Option<&dyn Fn(&BitSet)>,
 ) -> ExactTerminalPathTwoPlus {
     let total_started_at = std::time::Instant::now();
     let candidate_ids = candidates.iter().collect::<Vec<_>>();
@@ -2937,6 +3070,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             .is_some_and(|index| index.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
         && prepared_suffix_trie_enabled())
     .then(|| vocab.vocab_derived_cache_get::<VocabSuffixTrie>())
+    .flatten();
+
+    let prepared_prefix_trie = (words_per_mask == 1
+        && adjacent_pair_index
+            .as_ref()
+            .is_some_and(|index| index.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
+        && std::env::var_os("GLRMASK_CLASSIFY_PREPARED_PREFIX_TRIE").is_some())
+    .then(|| vocab.vocab_derived_cache_get::<VocabPrefixTrie>())
     .flatten();
 
     let compile_started_at = std::time::Instant::now();
@@ -3052,8 +3193,22 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         };
         &owned_split_offsets
     };
+    let prefix_started_at = std::time::Instant::now();
+    let prepared_prefix_states = prepared_prefix_trie.as_ref().map(|trie| {
+        execute_prepared_prefix_trie(trie, &mut prefix_scanner, prefix_start)
+    });
+    let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
     let trie_ms = 0.0;
-    let prefix_ms = 0.0;
+    if super::types::compile_profile_enabled() {
+        if let (Some(trie), Some(_)) = (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref()) {
+            eprintln!(
+                "[glrmask/profile][terminal_path_prefix_trie] nodes={} splits={} execute_ms={:.3}",
+                trie.parents.len(),
+                trie.split_nodes.len(),
+                prefix_ms,
+            );
+        }
+    }
 
     let suffix_started_at = std::time::Instant::now();
     let mut dense_flat_trans = Vec::new();
@@ -3092,6 +3247,21 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1024);
+    let emit_witness_probe = |found: u64| {
+        if let Some(callback) = witness_probe_callback {
+            let mut global = BitSet::new(candidates.len());
+            let mut pending = found;
+            while pending != 0 {
+                let local = pending.trailing_zeros() as usize;
+                pending &= pending - 1;
+                if local < candidate_ids.len() {
+                    global.set(candidate_ids[local]);
+                }
+            }
+            callback(&global);
+        }
+    };
+    let mut witness_probe_emitted = false;
     if words_per_mask == 1
         && candidate_count < 64
         && feasible_split_work >= 10_000
@@ -3183,6 +3353,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                             }
                         }
                         if witness_probe_found == all_local {
+                            emit_witness_probe(witness_probe_found);
                             if super::types::compile_profile_enabled() {
                                 eprintln!(
                                     "[glrmask/profile][terminal_path_witness_probe] candidates={} checks={} found={} selected=true ms={:.3}",
@@ -3209,6 +3380,11 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             }
         }
     }
+    if !witness_probe_emitted && witness_probe_checks != 0 {
+        emit_witness_probe(witness_probe_found);
+        witness_probe_emitted = true;
+    }
+    let _ = witness_probe_emitted;
     if super::types::compile_profile_enabled() && witness_probe_checks != 0 {
         eprintln!(
             "[glrmask/profile][terminal_path_witness_probe] candidates={} checks={} found={} selected=false ms={:.3}",
@@ -3222,6 +3398,9 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
     let mut any_viable_suffix = false;
+    let mut internal_reset_completion_splits = 0usize;
+    let mut internal_reset_completion_mask = 0u64;
+    let mut per_token_continuations_needed: Option<Vec<bool>> = None;
     let use_prepared_suffix_trie = prepared_suffix_trie.is_some()
         && !uses_original_tokenizer
         && total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS;
@@ -3258,6 +3437,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             &dense_future_masks,
         );
 
+        let token_continuations_needed =
+            per_token_continuations_needed.get_or_insert_with(|| vec![false; vocab.len()]);
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
@@ -3265,6 +3446,15 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let split_after = packed as u32 as usize;
                     let split_index = index.entry_split_offsets[entry_index] + split_after;
                     let node = trie.split_nodes[split_index] as usize;
+                    if node != 0 {
+                        let parent = trie.parents[node] as usize;
+                        let prior_matched = matched_by_node[parent];
+                        if prior_matched != 0 {
+                            internal_reset_completion_splits += 1;
+                            internal_reset_completion_mask |= prior_matched;
+                            token_continuations_needed[entry_index] = true;
+                        }
+                    }
                     let mut matched = matched_by_node[node];
                     let state = state_by_node[node];
                     if state != u32::MAX {
@@ -3278,10 +3468,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
         if super::types::compile_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][terminal_path_suffix_trie] nodes={} splits={} candidate_splits={}",
+                "[glrmask/profile][terminal_path_suffix_trie] nodes={} splits={} candidate_splits={} internal_reset_completion_splits={} internal_reset_completion_mask=0x{:x} continuation_tokens={}",
                 trie.parents.len(),
                 trie.split_nodes.len(),
                 candidate_splits,
+                internal_reset_completion_splits,
+                internal_reset_completion_mask,
+                token_continuations_needed.iter().filter(|&&needed| needed).count(),
             );
         }
     } else if parallel_dense_suffix {
@@ -3552,6 +3745,16 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
 
     let combine_started_at = std::time::Instant::now();
+    let per_token_boundary_certificate = per_token_continuations_needed.is_some()
+        && std::env::var_os("GLRMASK_CLASSIFY_PER_TOKEN_BOUNDARY_CERTIFICATE").is_some();
+    let single_boundary_certified = use_prepared_suffix_trie
+        && internal_reset_completion_splits == 0
+        && std::env::var_os("GLRMASK_CLASSIFY_SINGLE_BOUNDARY_CERTIFICATE").is_some();
+    if super::types::compile_profile_enabled() && single_boundary_certified {
+        eprintln!(
+            "[glrmask/profile][terminal_path_single_boundary_certificate] certified=true"
+        );
+    }
     let mut allowed_after = vec![0u64; candidate_count * words_per_mask];
     for terminal_1 in 0..candidate_count {
         let blocked = local_disallowed.get(&(terminal_1 as u32));
@@ -3562,106 +3765,462 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             }
         }
     }
+    let small_mask_lut = (words_per_mask == 1
+        && candidate_count <= 16
+        && std::env::var_os("GLRMASK_CLASSIFY_DISABLE_SMALL_MASK_LUT").is_none())
+    .then(|| {
+        let mask_count = 1usize << candidate_count;
+        let valid_mask = mask_count as u64 - 1;
+        let mut allowed_union_by_matched = vec![0u64; mask_count];
+        for mask in 1..mask_count {
+            let bit = mask & mask.wrapping_neg();
+            let terminal = bit.trailing_zeros() as usize;
+            allowed_union_by_matched[mask] =
+                allowed_union_by_matched[mask ^ bit] | allowed_after[terminal];
+        }
+        let mut left_with_follow_by_suffix = vec![0u64; mask_count];
+        for suffix in 1..mask_count {
+            let suffix_word = suffix as u64;
+            let mut left = 0u64;
+            for terminal in 0..candidate_count {
+                if suffix_word & allowed_after[terminal] != 0 {
+                    left |= 1u64 << terminal;
+                }
+            }
+            left_with_follow_by_suffix[suffix] = left;
+        }
+        (
+            allowed_union_by_matched,
+            left_with_follow_by_suffix,
+            valid_mask,
+        )
+    });
+
     let collect_witnesses = std::env::var_os("GLRMASK_DUMP_TERMINAL_PATH_WITNESSES").is_some();
     let mut local_two_plus_words = vec![0u64; words_per_mask];
     let mut local_witnesses = vec![None; candidate_count];
     let mut split_checks = 0usize;
     let mut allowed_pairs = 0usize;
     if words_per_mask == 1 {
-        let mut continuations = Vec::<(u32, u64)>::new();
-        let mut next_continuations = Vec::<(u32, u64)>::new();
-        let mut matched = [0u64; 1];
-        let mut followers = [0u64; 1];
-        for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
-            continuations.clear();
-            let split_start = split_offsets[token_index];
-            let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-            else {
-                continue;
-            };
-            let split_end = split_start + last_candidate_split + 1;
-            let mut prefix_state = prefix_start;
-            for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let byte = bytes[split_after];
-                prefix_state = prefix_scanner.step(prefix_state, byte);
-                matched[0] = if prefix_state == PREFIX_DEAD_STATE {
-                    0
-                } else {
-                    prefix_scanner.matched_mask(prefix_state)[0]
-                };
-                next_continuations.clear();
-                for &(state, active) in &continuations {
-                    let target = if uses_original_tokenizer {
-                        prefix_scanner.step(state, byte)
-                    } else {
-                        dense_flat_trans[state as usize * 256 + byte as usize]
-                    };
-                    if target == PREFIX_DEAD_STATE || target == u32::MAX {
-                        continue;
-                    }
-                    let (target_matched, target_future) = if uses_original_tokenizer {
-                        (
-                            prefix_scanner.matched_mask(target)[0],
-                            prefix_scanner.future_mask(target)[0],
-                        )
-                    } else {
-                        (
-                            dense_finalizer_masks[target as usize],
-                            dense_future_masks[target as usize],
-                        )
-                    };
-                    matched[0] |= target_matched & active;
-                    let live = target_future & active;
-                    merge_word_continuation(&mut next_continuations, target, live);
-                }
+        let parallel_combine = !collect_witnesses
+            && !uses_original_tokenizer
+            && std::env::var_os("GLRMASK_CLASSIFY_PARALLEL_COMBINE").is_some()
+            && rayon::current_num_threads() > 1
+            && vocab.len() >= 256;
+        if parallel_combine {
+            let token_entries = vocab.entries_map().values().collect::<Vec<_>>();
 
-                followers[0] = 0;
-                let suffix_word = suffix_viable_masks[split_index];
-                if matched[0] != 0 && suffix_word != 0 {
-                    split_checks += 1;
-                    if collect_witnesses {
-                        let suffix = [suffix_word];
-                        allowed_pairs += accumulate_terminal_path_boundaries(
-                            &matched,
-                            &suffix,
-                            &allowed_after,
-                            words_per_mask,
-                            candidate_count,
-                            &mut local_two_plus_words,
-                            &mut followers,
-                            Some((
-                                local_witnesses.as_mut_slice(),
-                                token_id,
-                                bytes.as_slice(),
-                                split_after + 1,
-                            )),
-                        );
+            // The prefix powerset is the only mutable automaton in this hot
+            // path. Materialize its matched-terminal mask once per candidate
+            // split, serially, then let all token-local continuation work use
+            // immutable dense DFA tables in parallel.
+            let prefix_precompute_started_at = std::time::Instant::now();
+            let mut prefix_matched_at_split = vec![0u64; total_splits];
+            for (token_index, bytes) in token_entries.iter().enumerate() {
+                let split_start = split_offsets[token_index];
+                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+                else {
+                    continue;
+                };
+                let mut prefix_state = prefix_start;
+                for split_after in 0..=last_candidate_split {
+                    prefix_state = prefix_scanner.step(prefix_state, bytes[split_after]);
+                    if prefix_state == PREFIX_DEAD_STATE {
+                        break;
+                    }
+                    prefix_matched_at_split[split_start + split_after] =
+                        prefix_scanner.matched_mask(prefix_state)[0];
+                }
+            }
+            let _prefix_precompute_ms =
+                prefix_precompute_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let (two_plus_word, total_split_checks, total_allowed_pairs) = token_entries
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || {
+                        (
+                            DenseWordContinuations::new(candidate_tokenizer.num_states() as usize),
+                            DenseWordContinuations::new(candidate_tokenizer.num_states() as usize),
+                        )
+                    },
+                    |(continuations, next_continuations), (token_index, bytes)| {
+                        continuations.clear();
+                        next_continuations.clear();
+                        let token_needs_continuations = !per_token_boundary_certificate
+                            || per_token_continuations_needed
+                                .as_ref()
+                                .expect("per-token certificate requires prepared suffix metadata")[token_index];
+                        let split_start = split_offsets[token_index];
+                        let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                            .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+                        else {
+                            return (0u64, 0usize, 0usize);
+                        };
+                        let split_end = split_start + last_candidate_split + 1;
+                        let mut local_two_plus = 0u64;
+                        let mut local_split_checks = 0usize;
+                        let mut local_allowed_pairs = 0usize;
+                        for (split_after, split_index) in (split_start..split_end).enumerate() {
+                            let byte = bytes[split_after];
+                            let mut matched = prefix_matched_at_split[split_index];
+                            next_continuations.clear();
+                            if token_needs_continuations {
+                                for &state in &continuations.touched {
+                                    let active = continuations.masks[state as usize];
+                                    let target =
+                                        dense_flat_trans[state as usize * 256 + byte as usize];
+                                    if target == u32::MAX {
+                                        continue;
+                                    }
+                                    matched |= dense_finalizer_masks[target as usize] & active;
+                                    let live = dense_future_masks[target as usize] & active;
+                                    next_continuations.merge(target, live);
+                                }
+                            }
+
+                            let mut followers = 0u64;
+                            let suffix_word = suffix_viable_masks[split_index];
+                            if matched != 0 && suffix_word != 0 {
+                                local_split_checks += 1;
+                                if let Some((allowed_union, left_with_follow, valid_mask)) =
+                                    small_mask_lut.as_ref()
+                                {
+                                    let matched_word = matched & *valid_mask;
+                                    let suffix_word = suffix_word & *valid_mask;
+                                    followers = suffix_word & allowed_union[matched_word as usize];
+                                    local_two_plus |= followers
+                                        | (matched_word & left_with_follow[suffix_word as usize]);
+                                    local_allowed_pairs += followers.count_ones() as usize;
+                                } else {
+                                    let mut pending_matched = matched;
+                                    while pending_matched != 0 {
+                                        let terminal_1 = pending_matched.trailing_zeros() as usize;
+                                        pending_matched &= pending_matched - 1;
+                                        if terminal_1 >= candidate_count {
+                                            continue;
+                                        }
+                                        let accepted = suffix_word & allowed_after[terminal_1];
+                                        if accepted == 0 {
+                                            continue;
+                                        }
+                                        local_allowed_pairs += accepted.count_ones() as usize;
+                                        followers |= accepted;
+                                        local_two_plus |= accepted | (1u64 << terminal_1);
+                                    }
+                                }
+                            }
+                            if token_needs_continuations {
+                                next_continuations.merge(continuation_reset_state, followers);
+                                std::mem::swap(continuations, next_continuations);
+                            }
+                        }
+                        (local_two_plus, local_split_checks, local_allowed_pairs)
+                    },
+                )
+                .reduce(
+                    || (0u64, 0usize, 0usize),
+                    |left, right| (left.0 | right.0, left.1 + right.1, left.2 + right.2),
+                );
+            local_two_plus_words[0] = two_plus_word;
+            split_checks = total_split_checks;
+            allowed_pairs = total_allowed_pairs;
+        } else if !collect_witnesses && !uses_original_tokenizer && single_boundary_certified {
+            let mut matched = [0u64; 1];
+            let mut followers = [0u64; 1];
+            for (token_index, bytes) in vocab.entries_map().values().enumerate() {
+                let split_start = split_offsets[token_index];
+                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+                else {
+                    continue;
+                };
+                let split_end = split_start + last_candidate_split + 1;
+                let mut prefix_state = prefix_start;
+                for (_split_after, split_index) in (split_start..split_end).enumerate() {
+                    let byte = bytes[split_index - split_start];
+                    prefix_state = if let (Some(trie), Some(states)) =
+                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
+                    {
+                        states[trie.split_nodes[split_index] as usize]
                     } else {
-                        let mut pending_matched = matched[0];
-                        while pending_matched != 0 {
-                            let terminal_1 = pending_matched.trailing_zeros() as usize;
-                            pending_matched &= pending_matched - 1;
-                            if terminal_1 >= candidate_count {
-                                continue;
+                        prefix_scanner.step(prefix_state, byte)
+                    };
+                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
+                        0
+                    } else {
+                        prefix_scanner.matched_mask(prefix_state)[0]
+                    };
+                    followers[0] = 0;
+                    let suffix_word = suffix_viable_masks[split_index];
+                    if matched[0] != 0 && suffix_word != 0 {
+                        split_checks += 1;
+                        if let Some((allowed_union, left_with_follow, valid_mask)) =
+                            small_mask_lut.as_ref()
+                        {
+                            let matched_word = matched[0] & *valid_mask;
+                            let suffix_word = suffix_word & *valid_mask;
+                            followers[0] = suffix_word & allowed_union[matched_word as usize];
+                            local_two_plus_words[0] |= followers[0]
+                                | (matched_word & left_with_follow[suffix_word as usize]);
+                            allowed_pairs += followers[0].count_ones() as usize;
+                        } else {
+                            let mut pending_matched = matched[0];
+                            while pending_matched != 0 {
+                                let terminal_1 = pending_matched.trailing_zeros() as usize;
+                                pending_matched &= pending_matched - 1;
+                                if terminal_1 >= candidate_count {
+                                    continue;
+                                }
+                                let accepted = suffix_word & allowed_after[terminal_1];
+                                if accepted == 0 {
+                                    continue;
+                                }
+                                allowed_pairs += accepted.count_ones() as usize;
+                                followers[0] |= accepted;
+                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
                             }
-                            let accepted = suffix_word & allowed_after[terminal_1];
-                            if accepted == 0 {
-                                continue;
-                            }
-                            allowed_pairs += accepted.count_ones() as usize;
-                            followers[0] |= accepted;
-                            local_two_plus_words[0] |=
-                                accepted | (1u64 << terminal_1);
                         }
                     }
                 }
-                merge_word_continuation(
-                    &mut next_continuations,
-                    continuation_reset_state,
-                    followers[0],
+            }
+        } else if !uses_original_tokenizer
+            && std::env::var_os("GLRMASK_CLASSIFY_DENSE_WORD_CONTINUATIONS").is_some()
+        {
+            let num_dense_states = candidate_tokenizer.num_states() as usize;
+            let mut continuations = DenseWordContinuations::new(num_dense_states);
+            let mut next_continuations = DenseWordContinuations::new(num_dense_states);
+            let mut matched = [0u64; 1];
+            let mut followers = [0u64; 1];
+            let mut continuation_entries = 0usize;
+            let mut continuation_max = 0usize;
+            let mut continuation_match_events = 0usize;
+            let mut continuation_match_bits = 0usize;
+            for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
+                continuations.clear();
+                next_continuations.clear();
+                let split_start = split_offsets[token_index];
+                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+                else {
+                    continue;
+                };
+                let split_end = split_start + last_candidate_split + 1;
+                let mut prefix_state = prefix_start;
+                for (split_after, split_index) in (split_start..split_end).enumerate() {
+                    let byte = bytes[split_after];
+                    prefix_state = if let (Some(trie), Some(states)) =
+                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
+                    {
+                        states[trie.split_nodes[split_index] as usize]
+                    } else {
+                        prefix_scanner.step(prefix_state, byte)
+                    };
+                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
+                        0
+                    } else {
+                        prefix_scanner.matched_mask(prefix_state)[0]
+                    };
+                    next_continuations.clear();
+                    continuation_entries += continuations.touched.len();
+                    continuation_max = continuation_max.max(continuations.touched.len());
+                    for &state in &continuations.touched {
+                        let active = continuations.masks[state as usize];
+                        let target = dense_flat_trans[state as usize * 256 + byte as usize];
+                        if target == u32::MAX {
+                            continue;
+                        }
+                        let continuation_matched = dense_finalizer_masks[target as usize] & active;
+                        continuation_match_events += usize::from(continuation_matched != 0);
+                        continuation_match_bits += continuation_matched.count_ones() as usize;
+                        matched[0] |= continuation_matched;
+                        let live = dense_future_masks[target as usize] & active;
+                        next_continuations.merge(target, live);
+                    }
+
+                    followers[0] = 0;
+                    let suffix_word = suffix_viable_masks[split_index];
+                    if matched[0] != 0 && suffix_word != 0 {
+                        split_checks += 1;
+                        if collect_witnesses {
+                            let suffix = [suffix_word];
+                            allowed_pairs += accumulate_terminal_path_boundaries(
+                                &matched,
+                                &suffix,
+                                &allowed_after,
+                                words_per_mask,
+                                candidate_count,
+                                &mut local_two_plus_words,
+                                &mut followers,
+                                Some((
+                                    local_witnesses.as_mut_slice(),
+                                    token_id,
+                                    bytes.as_slice(),
+                                    split_after + 1,
+                                )),
+                            );
+                        } else if let Some((allowed_union, left_with_follow, valid_mask)) =
+                            small_mask_lut.as_ref()
+                        {
+                            let matched_word = matched[0] & *valid_mask;
+                            let suffix_word = suffix_word & *valid_mask;
+                            followers[0] = suffix_word & allowed_union[matched_word as usize];
+                            local_two_plus_words[0] |= followers[0]
+                                | (matched_word & left_with_follow[suffix_word as usize]);
+                            allowed_pairs += followers[0].count_ones() as usize;
+                        } else {
+                            let mut pending_matched = matched[0];
+                            while pending_matched != 0 {
+                                let terminal_1 = pending_matched.trailing_zeros() as usize;
+                                pending_matched &= pending_matched - 1;
+                                if terminal_1 >= candidate_count {
+                                    continue;
+                                }
+                                let accepted = suffix_word & allowed_after[terminal_1];
+                                if accepted == 0 {
+                                    continue;
+                                }
+                                allowed_pairs += accepted.count_ones() as usize;
+                                followers[0] |= accepted;
+                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
+                            }
+                        }
+                    }
+                    next_continuations.merge(continuation_reset_state, followers[0]);
+                    std::mem::swap(&mut continuations, &mut next_continuations);
+                }
+            }
+            if super::types::compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][terminal_path_dense_continuations] states={} entries={} max={} match_events={} match_bits={}",
+                    num_dense_states,
+                    continuation_entries,
+                    continuation_max,
+                    continuation_match_events,
+                    continuation_match_bits,
                 );
-                std::mem::swap(&mut continuations, &mut next_continuations);
+            }
+        } else {
+            let mut continuations = Vec::<(u32, u64)>::new();
+            let mut next_continuations = Vec::<(u32, u64)>::new();
+            let mut matched = [0u64; 1];
+            let mut followers = [0u64; 1];
+            for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
+                let token_needs_continuations = !per_token_boundary_certificate
+                    || per_token_continuations_needed
+                        .as_ref()
+                        .expect("per-token certificate requires prepared suffix metadata")[token_index];
+                continuations.clear();
+                let split_start = split_offsets[token_index];
+                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+                else {
+                    continue;
+                };
+                let split_end = split_start + last_candidate_split + 1;
+                let mut prefix_state = prefix_start;
+                for (split_after, split_index) in (split_start..split_end).enumerate() {
+                    let byte = bytes[split_after];
+                    prefix_state = if let (Some(trie), Some(states)) =
+                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
+                    {
+                        states[trie.split_nodes[split_index] as usize]
+                    } else {
+                        prefix_scanner.step(prefix_state, byte)
+                    };
+                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
+                        0
+                    } else {
+                        prefix_scanner.matched_mask(prefix_state)[0]
+                    };
+                    next_continuations.clear();
+                    if token_needs_continuations {
+                    for &(state, active) in &continuations {
+                        let target = if uses_original_tokenizer {
+                            prefix_scanner.step(state, byte)
+                        } else {
+                            dense_flat_trans[state as usize * 256 + byte as usize]
+                        };
+                        if target == PREFIX_DEAD_STATE || target == u32::MAX {
+                            continue;
+                        }
+                        let (target_matched, target_future) = if uses_original_tokenizer {
+                            (
+                                prefix_scanner.matched_mask(target)[0],
+                                prefix_scanner.future_mask(target)[0],
+                            )
+                        } else {
+                            (
+                                dense_finalizer_masks[target as usize],
+                                dense_future_masks[target as usize],
+                            )
+                        };
+                        matched[0] |= target_matched & active;
+                        let live = target_future & active;
+                        merge_word_continuation(&mut next_continuations, target, live);
+                    }
+                    }
+
+                    followers[0] = 0;
+                    let suffix_word = suffix_viable_masks[split_index];
+                    if matched[0] != 0 && suffix_word != 0 {
+                        split_checks += 1;
+                        if collect_witnesses {
+                            let suffix = [suffix_word];
+                            allowed_pairs += accumulate_terminal_path_boundaries(
+                                &matched,
+                                &suffix,
+                                &allowed_after,
+                                words_per_mask,
+                                candidate_count,
+                                &mut local_two_plus_words,
+                                &mut followers,
+                                Some((
+                                    local_witnesses.as_mut_slice(),
+                                    token_id,
+                                    bytes.as_slice(),
+                                    split_after + 1,
+                                )),
+                            );
+                        } else if let Some((allowed_union, left_with_follow, valid_mask)) =
+                            small_mask_lut.as_ref()
+                        {
+                            let matched_word = matched[0] & *valid_mask;
+                            let suffix_word = suffix_word & *valid_mask;
+                            followers[0] = suffix_word & allowed_union[matched_word as usize];
+                            local_two_plus_words[0] |= followers[0]
+                                | (matched_word & left_with_follow[suffix_word as usize]);
+                            // Diagnostic count only; correctness depends on the masks above.
+                            allowed_pairs += followers[0].count_ones() as usize;
+                        } else {
+                            let mut pending_matched = matched[0];
+                            while pending_matched != 0 {
+                                let terminal_1 = pending_matched.trailing_zeros() as usize;
+                                pending_matched &= pending_matched - 1;
+                                if terminal_1 >= candidate_count {
+                                    continue;
+                                }
+                                let accepted = suffix_word & allowed_after[terminal_1];
+                                if accepted == 0 {
+                                    continue;
+                                }
+                                allowed_pairs += accepted.count_ones() as usize;
+                                followers[0] |= accepted;
+                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
+                            }
+                        }
+                    }
+                    if token_needs_continuations {
+                        merge_word_continuation(
+                            &mut next_continuations,
+                            continuation_reset_state,
+                            followers[0],
+                        );
+                        std::mem::swap(&mut continuations, &mut next_continuations);
+                    }
+                }
             }
         }
     } else {
@@ -5400,6 +5959,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,
@@ -5489,6 +6049,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
 
         assert_eq!(specialized.two_plus, active);
@@ -5535,6 +6096,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,

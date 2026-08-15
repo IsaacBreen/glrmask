@@ -29,8 +29,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
+use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::compile::build_regex_monolithic;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -40,6 +43,14 @@ use super::fast::VocabEquivalenceResult;
 
 const MIN_TOKENS: usize = 4_096;
 const MAX_TOKENS: usize = 20_000;
+
+fn max_tokens() -> usize {
+    std::env::var("GLRMASK_L2P_COMMON_ATOM_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value >= MIN_TOKENS)
+        .unwrap_or(MAX_TOKENS)
+}
 const MAX_ACTIVE_TERMINALS: usize = 64;
 const MAX_ATOM_STAR_STATES: usize = 64;
 const MIN_REDUCTION_FACTOR: usize = 4;
@@ -386,13 +397,13 @@ enum AtomRunEnd {
 }
 
 struct AtomRun {
-    completion_widths: Vec<usize>,
+    completion_widths: SmallVec<[usize; 8]>,
     end: AtomRunEnd,
 }
 
 fn scan_atom_run(machine: &TraceMachine, input: &[u8]) -> AtomRun {
     let mut state = machine.boundary_state;
-    let mut completion_widths = Vec::new();
+    let mut completion_widths = SmallVec::<[usize; 8]>::new();
     for (index, &byte) in input.iter().enumerate() {
         let Some(target) = machine.tokenizer.step(state, byte) else {
             let suffix = machine.suffix_id[byte as usize];
@@ -487,7 +498,10 @@ fn shape_root_observation(
     (longest_match.filter(|&width| width > 0), can_continue)
 }
 
-fn root_observation(machine: &TraceMachine, input: &[u8]) -> (Vec<u32>, Vec<(u32, usize)>) {
+fn root_observation(
+    machine: &TraceMachine,
+    input: &[u8],
+) -> (SmallVec<[u32; 8]>, SmallVec<[(u32, usize); 8]>) {
     let unprefixed_run = scan_atom_run(machine, input);
     let matching_prefix_run = input.first().and_then(|first| {
         machine
@@ -496,8 +510,12 @@ fn root_observation(machine: &TraceMachine, input: &[u8]) -> (Vec<u32>, Vec<(u32
             .is_ok()
             .then(|| scan_atom_run(machine, &input[1..]))
     });
-    let mut future_terminals = Vec::new();
-    let mut matches = Vec::new();
+    // The common-atom path is intentionally selected only for a small active
+    // terminal family. Keep the root observation inline: allocating two Vecs
+    // for every suffix made this phase pay hundreds of thousands of tiny heap
+    // allocations on large vocabularies.
+    let mut future_terminals = SmallVec::<[u32; 8]>::new();
+    let mut matches = SmallVec::<[(u32, usize); 8]>::new();
     for &shape in &machine.shapes {
         let (longest_match, can_continue) = shape_root_observation(
             shape,
@@ -519,7 +537,7 @@ fn root_semantic_id_at(
     machine: &TraceMachine,
     bytes: &[u8],
     offset: usize,
-    semantic_ids: &mut FxHashMap<Vec<u32>, u32>,
+    semantic_ids: &mut FxHashMap<SmallVec<[u32; 32]>, u32>,
     semantic_by_suffix: &mut FxHashMap<Vec<u8>, u32>,
     token_memo: &mut [Option<u32>],
 ) -> u32 {
@@ -532,7 +550,7 @@ fn root_semantic_id_at(
         return semantic_id;
     }
     let (future_terminals, matches) = root_observation(machine, suffix);
-    let mut signature = Vec::new();
+    let mut signature = SmallVec::<[u32; 32]>::new();
     if future_terminals.is_empty() {
         signature.push(ROOT_DEAD);
     } else {
@@ -563,11 +581,11 @@ fn root_semantic_id_at(
     semantic_id
 }
 
-fn classify_tokens<S: AsRef<[u8]>>(
+fn classify_tokens_serial<S: AsRef<[u8]>>(
     machine: &TraceMachine,
     tokens: &[S],
 ) -> Vec<Vec<usize>> {
-    let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut root_semantic_ids = FxHashMap::<SmallVec<[u32; 32]>, u32>::default();
     let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
     let mut classes = FxHashMap::<Vec<u32>, Vec<usize>>::default();
     for (token_index, token) in tokens.iter().enumerate() {
@@ -626,14 +644,632 @@ fn classify_tokens<S: AsRef<[u8]>>(
     classes
 }
 
-pub fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum CompactTraceEnd {
+    Dead,
+    Suffix { suffix: u16, width: u8, at_end: bool },
+    Alive { state: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct CompactTrace {
+    completion_positions: u64,
+    end: CompactTraceEnd,
+}
+
+#[inline]
+fn common_atom_fingerprint_mix(hash: &mut u64, value: u64) {
+    *hash ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    *hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+}
+
+#[inline]
+fn common_atom_fingerprint_trace(hash: &mut u64, trace: CompactTrace) {
+    common_atom_fingerprint_mix(hash, trace.completion_positions);
+    match trace.end {
+        CompactTraceEnd::Dead => common_atom_fingerprint_mix(hash, 0),
+        CompactTraceEnd::Suffix { suffix, width, at_end } => {
+            common_atom_fingerprint_mix(hash, 1);
+            common_atom_fingerprint_mix(
+                hash,
+                suffix as u64 | ((width as u64) << 16) | ((at_end as u64) << 24),
+            );
+        }
+        CompactTraceEnd::Alive { state } => {
+            common_atom_fingerprint_mix(hash, 2);
+            common_atom_fingerprint_mix(hash, state as u64);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct CommonAtomPartialTrace {
+    // Vector position is the tokenizer start-state ID, so the explicit
+    // TRACE_START/state words from the generic serialization are redundant.
+    traces: SmallVec<[CompactTrace; 16]>,
+    // Prefix vector position is the prefix ID. `None` is the exact PREFIX_MISS
+    // marker; `Some(trace)` is PREFIX_MATCH followed by the boundary trace.
+    prefix_traces: SmallVec<[Option<CompactTrace>; 4]>,
+    candidate_cuts: u64,
+    root_semantics: SmallVec<[(u8, u32); 8]>,
+    fingerprint: u64,
+}
+
+#[derive(Debug)]
+struct CommonAtomSuffixUniverse {
+    token_offsets: Vec<usize>,
+    suffix_ids: Vec<u32>,
+    representatives: Vec<(usize, usize)>,
+    lengths: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub struct PreparedCommonAtomSuffixIndex {
+    all_tokens: CommonAtomSuffixUniverse,
+    token_bytes: Box<[Vec<u8>]>,
+    ids_by_len: Box<[Box<[u32]>]>,
+}
+
+impl crate::vocab::VocabDerivedArtifact for PreparedCommonAtomSuffixIndex {}
+
+#[derive(Debug)]
+pub struct PreparedCommonAtomSuffixView {
+    index: Arc<PreparedCommonAtomSuffixIndex>,
+    /// Child-vocabulary entry position -> entry position in `index.token_bytes`.
+    parent_entry_indices: Box<[usize]>,
+}
+
+impl crate::vocab::VocabDerivedArtifact for PreparedCommonAtomSuffixView {}
+
+/// Propagate a prepared suffix universe through a token-subset vocabulary.
+/// `parent_entry_indices` is collected while the subset is materialized, so
+/// schema compilation does not need a second token-ID lookup pass.
+pub fn inherit_vocab_suffix_index(
+    parent: &Vocab,
+    child: &Vocab,
+    parent_entry_indices: Vec<usize>,
+) {
+    if let Some(index) = parent.vocab_derived_cache_get::<PreparedCommonAtomSuffixIndex>() {
+        debug_assert_eq!(child.len(), parent_entry_indices.len());
+        child.vocab_derived_cache_set(Arc::new(PreparedCommonAtomSuffixView {
+            index,
+            parent_entry_indices: parent_entry_indices.into_boxed_slice(),
+        }));
+        return;
+    }
+    if let Some(parent_view) = parent.vocab_derived_cache_get::<PreparedCommonAtomSuffixView>() {
+        debug_assert_eq!(child.len(), parent_entry_indices.len());
+        let composed = parent_entry_indices
+            .into_iter()
+            .map(|index| parent_view.parent_entry_indices[index])
+            .collect::<Vec<_>>();
+        child.vocab_derived_cache_set(Arc::new(PreparedCommonAtomSuffixView {
+            index: Arc::clone(&parent_view.index),
+            parent_entry_indices: composed.into_boxed_slice(),
+        }));
+    }
+}
+
+/// Precompute grammar-independent suffix identity for one (possibly already
+/// partitioned) vocabulary. `prepare_vocab_for_terminal_dwa` calls this on the
+/// cached char-type sub-vocabs, so grammar compilation can select its dedup
+/// representatives by integer provenance rather than rebuilding suffix IDs.
+pub fn prepare_vocab_suffix_index(vocab: &Vocab) {
+    if vocab
+        .vocab_derived_cache_get::<PreparedCommonAtomSuffixIndex>()
+        .is_some()
+    {
+        return;
+    }
+    let token_bytes = vocab.entries_map().values().cloned().collect::<Vec<_>>();
+    let all_tokens = CommonAtomSuffixUniverse::build(&token_bytes);
+    let max_len = all_tokens.lengths.iter().copied().max().unwrap_or(0);
+    let mut ids_by_len = vec![Vec::<u32>::new(); max_len + 1];
+    for (id, &len) in all_tokens.lengths.iter().enumerate() {
+        ids_by_len[len].push(id as u32);
+    }
+    let prepared = Arc::new(PreparedCommonAtomSuffixIndex {
+        all_tokens,
+        token_bytes: token_bytes.into_boxed_slice(),
+        ids_by_len: ids_by_len
+            .into_iter()
+            .map(Vec::into_boxed_slice)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    });
+    vocab.vocab_derived_cache_set(prepared);
+}
+
+impl CommonAtomSuffixUniverse {
+    fn build<S: AsRef<[u8]> + Sync>(tokens: &[S]) -> Self {
+        let total_positions = tokens
+            .iter()
+            .map(|token| token.as_ref().len() + 1)
+            .sum::<usize>();
+        let mut token_offsets = Vec::with_capacity(tokens.len() + 1);
+        let mut suffix_ids = Vec::with_capacity(total_positions);
+        let mut representatives = vec![(0usize, tokens.first().map_or(0, |t| t.as_ref().len()))];
+        let mut lengths = vec![0usize];
+
+        // Equal suffixes are equal prefixes after reversing the token bytes.
+        // Sort those reversed strings once, then reuse exactly the LCP nodes
+        // from the previous token. This constructs the same canonical reverse
+        // trie as `(byte, tail_id)` hash-consing without any edge dictionary.
+        token_offsets.resize(tokens.len() + 1, 0);
+        for (index, token) in tokens.iter().enumerate() {
+            token_offsets[index + 1] = token_offsets[index] + token.as_ref().len() + 1;
+        }
+        suffix_ids.resize(*token_offsets.last().unwrap_or(&0), 0);
+        let mut order = (0..tokens.len()).collect::<Vec<_>>();
+        order.par_sort_unstable_by(|&left, &right| {
+            tokens[left]
+                .as_ref()
+                .iter()
+                .rev()
+                .cmp(tokens[right].as_ref().iter().rev())
+                .then_with(|| left.cmp(&right))
+        });
+        let mut previous_token = None::<usize>;
+        let mut previous_ids = vec![0u32];
+        for token_index in order {
+            let bytes = tokens[token_index].as_ref();
+            let lcp = previous_token.map_or(0usize, |previous_index| {
+                tokens[previous_index]
+                    .as_ref()
+                    .iter()
+                    .rev()
+                    .zip(bytes.iter().rev())
+                    .take_while(|(left, right)| left == right)
+                    .count()
+            });
+            let base = token_offsets[token_index];
+            suffix_ids[base + bytes.len()] = 0;
+            let mut current_ids = Vec::with_capacity(bytes.len() + 1);
+            current_ids.push(0);
+            for depth in 1..=bytes.len() {
+                let id = if depth <= lcp {
+                    previous_ids[depth]
+                } else {
+                    let offset = bytes.len() - depth;
+                    let id = representatives.len() as u32;
+                    representatives.push((token_index, offset));
+                    lengths.push(depth);
+                    id
+                };
+                current_ids.push(id);
+                suffix_ids[base + bytes.len() - depth] = id;
+            }
+            previous_token = Some(token_index);
+            previous_ids = current_ids;
+        }
+        Self {
+            token_offsets,
+            suffix_ids,
+            representatives,
+            lengths,
+        }
+    }
+
+    #[inline]
+    fn suffix_id(&self, token_index: usize, offset: usize) -> u32 {
+        self.suffix_ids[self.token_offsets[token_index] + offset]
+    }
+}
+
+fn compact_trace(
+    machine: &TraceMachine,
+    input: &[u8],
+    start_state: u32,
+    width_base: usize,
+) -> (CompactTrace, u64) {
+    debug_assert!(width_base + input.len() <= 64);
+    let mut state = start_state;
+    let mut completion_positions = 0u64;
+    let mut candidate_cuts = 0u64;
+    for (index, &byte) in input.iter().enumerate() {
+        let width = width_base + index + 1;
+        let bit = 1u64 << (width - 1);
+        let Some(target) = machine.tokenizer.step(state, byte) else {
+            let suffix = machine.suffix_id[byte as usize];
+            let end = if state == machine.boundary_state && suffix != u16::MAX {
+                candidate_cuts |= bit;
+                CompactTraceEnd::Suffix {
+                    suffix,
+                    width: width as u8,
+                    at_end: index + 1 == input.len(),
+                }
+            } else {
+                CompactTraceEnd::Dead
+            };
+            return (
+                CompactTrace {
+                    completion_positions,
+                    end,
+                },
+                candidate_cuts,
+            );
+        };
+        state = target;
+        if state == machine.boundary_state {
+            completion_positions |= bit;
+            candidate_cuts |= bit;
+        }
+    }
+    (
+        CompactTrace {
+            completion_positions,
+            end: CompactTraceEnd::Alive { state },
+        },
+        candidate_cuts,
+    )
+}
+
+fn common_atom_partial_trace(machine: &TraceMachine, bytes: &[u8]) -> CommonAtomPartialTrace {
+    debug_assert!(bytes.len() <= 64);
+    let mut traces = SmallVec::<[CompactTrace; 16]>::new();
+    let mut candidate_cuts = 0u64;
+    let mut fingerprint = 0x243f_6a88_85a3_08d3u64;
+    for start_state in 0..machine.tokenizer.num_states() {
+        let (trace, cuts) = compact_trace(machine, bytes, start_state, 0);
+        common_atom_fingerprint_trace(&mut fingerprint, trace);
+        traces.push(trace);
+        candidate_cuts |= cuts;
+    }
+    let mut prefix_traces = SmallVec::<[Option<CompactTrace>; 4]>::new();
+    for &prefix in &machine.prefix_bytes {
+        if bytes.first() == Some(&prefix) {
+            let (trace, cuts) = compact_trace(machine, &bytes[1..], machine.boundary_state, 1);
+            common_atom_fingerprint_mix(&mut fingerprint, 1);
+            common_atom_fingerprint_trace(&mut fingerprint, trace);
+            prefix_traces.push(Some(trace));
+            candidate_cuts |= cuts;
+        } else {
+            common_atom_fingerprint_mix(&mut fingerprint, 0);
+            prefix_traces.push(None);
+        }
+    }
+    common_atom_fingerprint_mix(&mut fingerprint, candidate_cuts);
+    CommonAtomPartialTrace {
+        traces,
+        prefix_traces,
+        candidate_cuts,
+        root_semantics: SmallVec::new(),
+        fingerprint,
+    }
+}
+
+struct PreparedSuffixContext<'a> {
+    index: &'a PreparedCommonAtomSuffixIndex,
+    representative_original_indices: &'a [usize],
+}
+
+enum CommonAtomSuffixSource<'a> {
+    Local(CommonAtomSuffixUniverse),
+    Prepared {
+        context: PreparedSuffixContext<'a>,
+    },
+}
+
+fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
+    machine: &TraceMachine,
+    tokens: &[S],
+    prepared_suffixes: Option<PreparedSuffixContext<'_>>,
+) -> Vec<Vec<usize>> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMMON_ATOM_DETAIL").is_some();
+    let total_started = Instant::now();
+
+    let trace_started = Instant::now();
+    let mut partials = tokens
+        .par_iter()
+        .map(|token| common_atom_partial_trace(machine, token.as_ref()))
+        .collect::<Vec<_>>();
+    let trace_ms = trace_started.elapsed().as_secs_f64() * 1000.0;
+
+    let suffix_build_started = Instant::now();
+    let suffix_source = if let Some(context) = prepared_suffixes {
+        CommonAtomSuffixSource::Prepared { context }
+    } else {
+        CommonAtomSuffixSource::Local(CommonAtomSuffixUniverse::build(tokens))
+    };
+    let suffix_build_ms = suffix_build_started.elapsed().as_secs_f64() * 1000.0;
+
+    let local_ids_by_len;
+    let (ids_by_len, semantic_slot_count, suffix_count): (&[Box<[u32]>], usize, usize) =
+        match &suffix_source {
+            CommonAtomSuffixSource::Local(local) => {
+                let max_len = local.lengths.iter().copied().max().unwrap_or(0);
+                let mut buckets = vec![Vec::<u32>::new(); max_len + 1];
+                for (id, &len) in local.lengths.iter().enumerate() {
+                    buckets[len].push(id as u32);
+                }
+                local_ids_by_len = buckets
+                    .into_iter()
+                    .map(Vec::into_boxed_slice)
+                    .collect::<Vec<_>>();
+                (
+                    local_ids_by_len.as_slice(),
+                    local.representatives.len(),
+                    local.representatives.len(),
+                )
+            }
+            CommonAtomSuffixSource::Prepared { context } => (
+                context.index.ids_by_len.as_ref(),
+                context.index.all_tokens.representatives.len(),
+                context.index.all_tokens.representatives.len(),
+            ),
+        };
+
+    let root_started = Instant::now();
+    let cut_filtered_root = std::env::var_os("GLRMASK_COMMON_ATOM_CUT_FILTERED_ROOT").is_some();
+    let mut semantic_ids = FxHashMap::<SmallVec<[u32; 32]>, u32>::default();
+    let mut semantic_by_suffix = vec![u32::MAX; semantic_slot_count];
+    let mut cut_filtered_suffixes = 0usize;
+    let mut cut_filtered_fallback = false;
+
+    let mut needed = Vec::<bool>::new();
+    if cut_filtered_root {
+        needed.resize(semantic_slot_count, false);
+        for (token_index, partial) in partials.iter().enumerate() {
+            let mut cuts = partial.candidate_cuts;
+            while cuts != 0 {
+                let bit = cuts.trailing_zeros() as usize;
+                cuts &= cuts - 1;
+                let cut = bit + 1;
+                let suffix_id = match &suffix_source {
+                    CommonAtomSuffixSource::Local(local) => local.suffix_id(token_index, cut),
+                    CommonAtomSuffixSource::Prepared { context, .. } => {
+                        let original_index = context.representative_original_indices[token_index];
+                        let source = &context.index.all_tokens;
+                        source.suffix_ids[source.token_offsets[original_index] + cut]
+                    }
+                } as usize;
+                needed[suffix_id] = true;
+            }
+        }
+        cut_filtered_suffixes = needed.iter().filter(|&&yes| yes).count();
+    }
+
+    let run_root_pass = |filter: Option<&[bool]>,
+                         semantic_ids: &mut FxHashMap<SmallVec<[u32; 32]>, u32>,
+                         semantic_by_suffix: &mut [u32]|
+     -> bool {
+        for ids in ids_by_len {
+            if ids.is_empty() {
+                continue;
+            }
+            let raw_signatures = ids
+                .par_iter()
+                .filter(|&&id| filter.is_none_or(|needed| needed[id as usize]))
+                .map(|&id| {
+                    let (bytes, offset, source_token_index) = match &suffix_source {
+                        CommonAtomSuffixSource::Local(local) => {
+                            let (token_index, offset) = local.representatives[id as usize];
+                            (tokens[token_index].as_ref(), offset, token_index)
+                        }
+                        CommonAtomSuffixSource::Prepared { context } => {
+                            let (entry_index, offset) =
+                                context.index.all_tokens.representatives[id as usize];
+                            (context.index.token_bytes[entry_index].as_slice(), offset, entry_index)
+                        }
+                    };
+                    let suffix = &bytes[offset..];
+                    let (future_terminals, matches) = root_observation(machine, suffix);
+                    let mut signature = SmallVec::<[u32; 32]>::new();
+                    signature.reserve(4 + future_terminals.len() + matches.len() * 3);
+                    if future_terminals.is_empty() {
+                        signature.push(ROOT_DEAD);
+                    } else {
+                        signature.push(ROOT_LIVE);
+                        signature.push(future_terminals.len() as u32);
+                        signature.extend(future_terminals);
+                    }
+                    signature.push(ROOT_MATCHES);
+                    signature.push(matches.len() as u32);
+                    for (terminal, width) in matches {
+                        debug_assert!(width > 0 && offset + width <= bytes.len());
+                        let continuation_id = match &suffix_source {
+                            CommonAtomSuffixSource::Local(local) => {
+                                local.suffix_id(source_token_index, offset + width)
+                            }
+                            CommonAtomSuffixSource::Prepared { context, .. } => {
+                                let source = &context.index.all_tokens;
+                                source.suffix_ids
+                                    [source.token_offsets[source_token_index] + offset + width]
+                            }
+                        } as usize;
+                        let continuation = semantic_by_suffix[continuation_id];
+                        if continuation == u32::MAX {
+                            return (id, None);
+                        }
+                        signature.push(terminal);
+                        signature.push(width as u32);
+                        signature.push(continuation);
+                    }
+                    (id, Some(signature))
+                })
+                .collect::<Vec<_>>();
+            if raw_signatures.iter().any(|(_, signature)| signature.is_none()) {
+                return false;
+            }
+            for (id, signature) in raw_signatures {
+                let signature = signature.expect("root signature checked above");
+                let next = semantic_ids.len() as u32;
+                let semantic = *semantic_ids.entry(signature).or_insert(next);
+                semantic_by_suffix[id as usize] = semantic;
+            }
+        }
+        true
+    };
+
+    if cut_filtered_root && !run_root_pass(Some(&needed), &mut semantic_ids, &mut semantic_by_suffix) {
+        // The shortcut is only valid when every continuation observed by a
+        // candidate-cut suffix is itself candidate-cut-observable and therefore
+        // already has a shorter semantic. If not, discard the partial result and
+        // run the full exact suffix dynamic program.
+        cut_filtered_fallback = true;
+        semantic_ids.clear();
+        semantic_by_suffix.fill(u32::MAX);
+        assert!(run_root_pass(None, &mut semantic_ids, &mut semantic_by_suffix));
+    } else if !cut_filtered_root {
+        assert!(run_root_pass(None, &mut semantic_ids, &mut semantic_by_suffix));
+    }
+    let root_ms = root_started.elapsed().as_secs_f64() * 1000.0;
+
+    let finish_started = Instant::now();
+    partials
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(token_index, partial)| {
+            let mut cuts = partial.candidate_cuts;
+            while cuts != 0 {
+                let bit = cuts.trailing_zeros() as usize;
+                cuts &= cuts - 1;
+                let cut = bit + 1;
+                let suffix_id = match &suffix_source {
+                    CommonAtomSuffixSource::Local(local) => local.suffix_id(token_index, cut),
+                    CommonAtomSuffixSource::Prepared { context, .. } => {
+                        let original_index = context.representative_original_indices[token_index];
+                        let source = &context.index.all_tokens;
+                        source.suffix_ids[source.token_offsets[original_index] + cut]
+                    }
+                } as usize;
+                let semantic = semantic_by_suffix[suffix_id];
+                debug_assert_ne!(semantic, u32::MAX);
+                partial.root_semantics.push((cut as u8, semantic));
+                common_atom_fingerprint_mix(
+                    &mut partial.fingerprint,
+                    cut as u64 | ((semantic as u64) << 8),
+                );
+            }
+        });
+    let finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
+
+    let group_started = Instant::now();
+    let parallel_group = std::env::var_os("GLRMASK_COMMON_ATOM_PARALLEL_GROUP").is_some()
+        && partials.len() >= 8_192
+        && rayon::current_num_threads() > 1;
+    let mut classes = if parallel_group {
+        // Do the expensive exact-key comparisons in independent token chunks.
+        // Fingerprints are only routing keys: every local bucket and every
+        // cross-chunk merge is verified against the full exact trace key.
+        let chunk_size = 2_048usize;
+        let local_classes = partials
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let base = chunk_index * chunk_size;
+                let mut by_hash = FxHashMap::<u64, Vec<usize>>::default();
+                for (offset, partial) in chunk.iter().enumerate() {
+                    by_hash
+                        .entry(partial.fingerprint)
+                        .or_default()
+                        .push(base + offset);
+                }
+                let mut exact_classes = Vec::<(u64, Vec<usize>)>::new();
+                for (fingerprint, bucket) in by_hash {
+                    let mut collision_classes = Vec::<Vec<usize>>::new();
+                    for index in bucket {
+                        if let Some(class) = collision_classes.iter_mut().find(|class| {
+                            partials[class[0]] == partials[index]
+                        }) {
+                            class.push(index);
+                        } else {
+                            collision_classes.push(vec![index]);
+                        }
+                    }
+                    exact_classes.extend(
+                        collision_classes
+                            .into_iter()
+                            .map(|class| (fingerprint, class)),
+                    );
+                }
+                exact_classes
+            })
+            .collect::<Vec<_>>();
+
+        let mut merged = FxHashMap::<u64, Vec<Vec<usize>>>::default();
+        for (fingerprint, class) in local_classes.into_iter().flatten() {
+            let candidates = merged.entry(fingerprint).or_default();
+            if let Some(existing) = candidates.iter_mut().find(|existing| {
+                partials[existing[0]] == partials[class[0]]
+            }) {
+                existing.extend(class);
+            } else {
+                candidates.push(class);
+            }
+        }
+        merged
+            .into_values()
+            .flatten()
+            .map(|mut class| {
+                class.sort_unstable();
+                class
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let mut by_hash = FxHashMap::<u64, Vec<usize>>::default();
+        by_hash.reserve(tokens.len() / 8);
+        for (token_index, partial) in partials.iter().enumerate() {
+            by_hash.entry(partial.fingerprint).or_default().push(token_index);
+        }
+        let mut classes = Vec::<Vec<usize>>::with_capacity(by_hash.len());
+        for bucket in by_hash.into_values() {
+            let first = bucket[0];
+            if bucket
+                .iter()
+                .skip(1)
+                .all(|&index| partials[index] == partials[first])
+            {
+                classes.push(bucket);
+                continue;
+            }
+            let mut exact = FxHashMap::<CommonAtomPartialTrace, Vec<usize>>::default();
+            for index in bucket {
+                exact.entry(partials[index].clone()).or_default().push(index);
+            }
+            classes.extend(exact.into_values());
+        }
+        classes
+    };
+    classes.sort_unstable();
+    let group_ms = group_started.elapsed().as_secs_f64() * 1000.0;
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][common_atom_phased] tokens={} suffixes={} semantics={} classes={} cut_filtered_root={} cut_filtered_suffixes={} cut_filtered_fallback={} parallel_group={} trace_ms={:.3} suffix_build_ms={:.3} root_ms={:.3} finish_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            tokens.len(), suffix_count, semantic_ids.len(), classes.len(), cut_filtered_root,
+            cut_filtered_suffixes, cut_filtered_fallback, parallel_group,
+            trace_ms, suffix_build_ms, root_ms, finish_ms, group_ms,
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    classes
+}
+
+fn classify_tokens<S: AsRef<[u8]> + Sync>(
+    machine: &TraceMachine,
+    tokens: &[S],
+    prepared_suffixes: Option<PreparedSuffixContext<'_>>,
+) -> Vec<Vec<usize>> {
+    if std::env::var_os("GLRMASK_COMMON_ATOM_PARALLEL_PHASED").is_some()
+        && rayon::current_num_threads() > 1
+        && tokens.iter().all(|token| token.as_ref().len() <= 64)
+    {
+        classify_tokens_phased(machine, tokens, prepared_suffixes)
+    } else {
+        classify_tokens_serial(machine, tokens)
+    }
+}
+
+fn try_find_common_atom_preclasses_impl<S: AsRef<[u8]> + Sync>(
     tokenizer: &Tokenizer,
     active_groups: Option<&[bool]>,
     tokens: &[S],
+    prepared_suffixes: Option<PreparedSuffixContext<'_>>,
 ) -> Option<CommonAtomPreclasses> {
     if std::env::var_os("GLRMASK_DISABLE_L2P_COMMON_ATOM_PRECLASS").is_some()
         || tokens.len() < MIN_TOKENS
-        || tokens.len() > MAX_TOKENS
+        || tokens.len() > max_tokens()
         || tokens
             .iter()
             .any(|token| token.as_ref().len() > u32::MAX as usize)
@@ -663,7 +1299,7 @@ pub fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
     let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let classify_started_at = Instant::now();
-    let classes = classify_tokens(&machine, tokens);
+    let classes = classify_tokens(&machine, tokens, prepared_suffixes);
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
     if classes.len().saturating_mul(MIN_REDUCTION_FACTOR) >= tokens.len() {
         return None;
@@ -676,6 +1312,48 @@ pub fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
         build_ms,
         classify_ms,
     })
+}
+
+pub fn try_find_common_atom_preclasses<S: AsRef<[u8]> + Sync>(
+    tokenizer: &Tokenizer,
+    active_groups: Option<&[bool]>,
+    tokens: &[S],
+) -> Option<CommonAtomPreclasses> {
+    try_find_common_atom_preclasses_impl(tokenizer, active_groups, tokens, None)
+}
+
+pub fn try_find_common_atom_preclasses_with_vocab<S: AsRef<[u8]> + Sync>(
+    tokenizer: &Tokenizer,
+    active_groups: Option<&[bool]>,
+    tokens: &[S],
+    vocab: &Vocab,
+    representative_original_indices: &[usize],
+) -> Option<CommonAtomPreclasses> {
+    if let Some(view) = vocab.vocab_derived_cache_get::<PreparedCommonAtomSuffixView>() {
+        let mapped = representative_original_indices
+            .iter()
+            .map(|&index| view.parent_entry_indices[index])
+            .collect::<Vec<_>>();
+        return try_find_common_atom_preclasses_impl(
+            tokenizer,
+            active_groups,
+            tokens,
+            Some(PreparedSuffixContext {
+                index: &view.index,
+                representative_original_indices: &mapped,
+            }),
+        );
+    }
+    let prepared = vocab.vocab_derived_cache_get::<PreparedCommonAtomSuffixIndex>();
+    try_find_common_atom_preclasses_impl(
+        tokenizer,
+        active_groups,
+        tokens,
+        prepared.as_deref().map(|index| PreparedSuffixContext {
+            index,
+            representative_original_indices,
+        }),
+    )
 }
 
 #[cfg(test)]

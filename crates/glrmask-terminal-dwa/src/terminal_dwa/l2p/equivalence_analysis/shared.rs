@@ -3,6 +3,11 @@ use super::vocab::fast::VocabEquivalenceResult;
 
 pub struct TokenDedup<'a> {
     pub representative_token_bytes: Vec<&'a [u8]>,
+    /// Input-token position that supplied each representative byte string.
+    /// This is pure provenance; it does not participate in the equivalence
+    /// relation, but lets vocabulary-derived artifacts address the same token
+    /// without byte-string lookups.
+    pub representative_original_indices: Vec<usize>,
     pub original_to_repr: Vec<usize>,
 }
 

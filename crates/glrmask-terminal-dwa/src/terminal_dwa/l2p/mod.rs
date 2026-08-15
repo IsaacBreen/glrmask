@@ -12,7 +12,7 @@ use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
 pub mod postprocess;
-mod terminal_dwa_equivalence;
+pub(crate) mod terminal_dwa_equivalence;
 mod terminal_interchangeability;
 
 #[cfg(feature = "internal-api")]
