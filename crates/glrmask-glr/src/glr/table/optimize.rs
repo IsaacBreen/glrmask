@@ -124,6 +124,10 @@ pub struct ControlEliminationReport {
     pub compiled_cells: usize,
     pub closure_frames: usize,
     pub stack_effect_visits: usize,
+    /// Real terminal columns whose consuming action changed while compiling
+    /// zero-width control closure. Component-local templates remain exact for
+    /// every other terminal and can therefore be transported directly.
+    pub changed_terminals: Vec<TerminalID>,
     pub elapsed_ms: f64,
 }
 
@@ -439,6 +443,88 @@ impl UnitInlineBudget {
             self.abort(child_code);
         }
     }
+}
+
+/// Certify that zero-width control closure never needs to discover an unknown
+/// parser state below the represented stack prefix.
+///
+/// Reductions are the only consuming actions whose effect depends on goto
+/// predecessors. A control may also expose an unknown predecessor when it pops
+/// without pushing a replacement top. In every other case the post-control top
+/// is explicit in the action, so exact elimination can use an empty predecessor
+/// relation.
+fn control_elimination_has_known_tops(
+    table: &GLRTable,
+    controls: &BTreeSet<TerminalID>,
+) -> bool {
+    let mut queue = VecDeque::<u32>::new();
+    let mut visited = vec![false; table.num_states as usize];
+    for (state, row) in table.action.iter().enumerate() {
+        if controls.iter().any(|control| row.contains_key(control)) {
+            queue.push_back(state as u32);
+        }
+    }
+
+    while let Some(state) = queue.pop_front() {
+        let Some(visited_state) = visited.get_mut(state as usize) else {
+            return false;
+        };
+        if *visited_state {
+            continue;
+        }
+        *visited_state = true;
+        let Some(row) = table.action.get(state as usize) else {
+            return false;
+        };
+
+        for (terminal, action) in row.iter() {
+            if !controls.contains(&terminal) {
+                if action.reduce_count() != 0 {
+                    return false;
+                }
+                continue;
+            }
+
+            match action {
+                Action::Shift(target, _) => queue.push_back(*target),
+                Action::ReplaceShifts(targets) => queue.extend(targets.iter().copied()),
+                Action::StackShifts(shifts) => {
+                    for shift in shifts {
+                        if let Some(&target) = shift.pushes.last() {
+                            queue.push_back(target);
+                        } else if shift.pop != 0 {
+                            return false;
+                        } else {
+                            queue.push_back(state);
+                        }
+                    }
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    for shift in shifts {
+                        if let Some(&target) = shift.pushes.last() {
+                            queue.push_back(target);
+                        } else if shift.pop != 0 {
+                            return false;
+                        } else {
+                            queue.push_back(state);
+                        }
+                    }
+                }
+                Action::Split { shift, reduces, .. } => {
+                    if !reduces.is_empty() {
+                        return false;
+                    }
+                    if let Some((target, _)) = shift {
+                        queue.push_back(*target);
+                    }
+                }
+                Action::Skip => queue.push_back(state),
+                Action::Accept => {}
+                Action::Reduce(..) => return false,
+            }
+        }
+    }
+    true
 }
 
 impl GLRTable {
@@ -1735,6 +1821,7 @@ impl GLRTable {
                 compiled_cells: 0,
                 closure_frames: 0,
                 stack_effect_visits: 0,
+                changed_terminals: Vec::new(),
                 elapsed_ms: 0.0,
             });
         }
@@ -1743,7 +1830,12 @@ impl GLRTable {
         let source = self.clone();
         let controls = source.control_terminals.clone();
         let predecessor_started_at = std::time::Instant::now();
-        let predecessors = build_control_elimination_predecessors(&source)?;
+        let predecessor_free = control_elimination_has_known_tops(&source, &controls);
+        let predecessors = if predecessor_free {
+            Vec::new()
+        } else {
+            build_control_elimination_predecessors(&source)?
+        };
         let predecessor_ms = predecessor_started_at.elapsed().as_secs_f64() * 1000.0;
         let budget = UnitInlineBudget::exact_control_elimination();
         let mut compiled_rows = Vec::with_capacity(source.num_states as usize);
@@ -1751,6 +1843,7 @@ impl GLRTable {
         let mut closure_frames = 0usize;
         let mut copied_row_count = 0usize;
         let mut symbolic_row_count = 0usize;
+        let mut changed_terminals = BTreeSet::<TerminalID>::new();
         let mut slowest_rows = Vec::<(u64, u32, usize, usize)>::new();
         let profile_control = std::env::var_os("GLRMASK_PROFILE_CONTROL_ELIMINATION").is_some();
 
@@ -1890,6 +1983,14 @@ impl GLRTable {
                     compiled_cells += 1;
                 }
             }
+            for terminal in source_row.keys().chain(row.keys()) {
+                if controls.contains(&terminal) {
+                    continue;
+                }
+                if source_row.get(&terminal) != row.get(&terminal) {
+                    changed_terminals.insert(terminal);
+                }
+            }
             compiled_rows.push(row);
             if let Some(row_started_at) = row_started_at {
                 let elapsed_ns = row_started_at.elapsed().as_nanos() as u64;
@@ -1918,7 +2019,7 @@ impl GLRTable {
             slowest_rows.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
             slowest_rows.truncate(20);
             eprintln!(
-                "[glrmask/profile][control_elimination] states={} controls={} copied_rows={} symbolic_rows={} compiled_cells={} closure_frames={} stack_effect_visits={} predecessor_ms={predecessor_ms:.3} total_ms={:.3} slowest_rows={:?}",
+                "[glrmask/profile][control_elimination] states={} controls={} copied_rows={} symbolic_rows={} compiled_cells={} closure_frames={} stack_effect_visits={} predecessor_free={} predecessor_ms={predecessor_ms:.3} total_ms={:.3} slowest_rows={:?}",
                 source.num_states,
                 controls.len(),
                 copied_row_count,
@@ -1926,6 +2027,7 @@ impl GLRTable {
                 compiled_cells,
                 closure_frames,
                 budget.stack_effect_visits(),
+                predecessor_free,
                 started_at.elapsed().as_secs_f64() * 1000.0,
                 slowest_rows,
             );
@@ -1937,6 +2039,7 @@ impl GLRTable {
             compiled_cells,
             closure_frames,
             stack_effect_visits: budget.stack_effect_visits(),
+            changed_terminals: changed_terminals.into_iter().collect(),
             elapsed_ms: started_at.elapsed().as_secs_f64() * 1000.0,
         })
     }
@@ -4638,7 +4741,6 @@ fn build_control_elimination_predecessors(
     }
     deep_rules.sort_unstable();
     deep_rules.dedup();
-
     let pass_limit = (table.num_states as usize)
         .saturating_mul(table.num_states as usize)
         .saturating_add(2);
