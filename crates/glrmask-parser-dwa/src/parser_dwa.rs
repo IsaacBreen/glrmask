@@ -1543,7 +1543,11 @@ fn determinize_with_supports(
             }
 
             self.misses += 1;
-            let weight = Weight::union_all(meaningful.into_iter());
+            let weight = if std::env::var_os("GLRMASK_PARSER_SUPPORT_DIRECT_UNION").is_some() {
+                Weight::union_all_direct(meaningful.into_iter())
+            } else {
+                Weight::union_all(meaningful.into_iter())
+            };
             self.entries.insert(key, weight.clone());
             self.record_elapsed(started);
             weight
