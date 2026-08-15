@@ -458,7 +458,11 @@ pub fn vocab_tokens_with_adjacent_pairs(
 
 pub fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
     let _ = vocab_classification_facts(vocab);
-    if std::env::var_os("GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_some() {
+    let prepare_common_atom_suffix_index =
+        std::env::var_os("GLRMASK_DISABLE_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_none()
+            && (std::env::var_os("GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_some()
+                || (16_384..=100_000).contains(&vocab.len()));
+    if prepare_common_atom_suffix_index {
         super::l2p::equivalence_analysis::vocab::common_atom::prepare_vocab_suffix_index(vocab);
     }
     let adjacent = vocab_adjacent_pair_index(vocab);

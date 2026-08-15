@@ -1544,7 +1544,11 @@ fn determinize_with_supports_mode(
             }
 
             self.misses += 1;
-            let weight = if std::env::var_os("GLRMASK_PARSER_SUPPORT_DIRECT_UNION").is_some() {
+            let direct_union =
+                std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_DIRECT_UNION").is_none()
+                    && (std::env::var_os("GLRMASK_PARSER_SUPPORT_DIRECT_UNION").is_some()
+                        || meaningful.len() >= 5);
+            let weight = if direct_union {
                 Weight::union_all_direct(meaningful.into_iter())
             } else {
                 Weight::union_all(meaningful.into_iter())
@@ -1713,10 +1717,7 @@ fn determinize_with_supports_mode(
     };
 
     let defer_edge_unions = defer_edge_unions_override
-        .unwrap_or_else(|| {
-            std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
-        })
-        && rayon::current_num_threads() > 1;
+        .unwrap_or_else(|| parser_support_defer_edge_unions_enabled(nwa.states().len()));
     let mut deferred_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
     let mut deferred_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
     let mut deferred_closure_cache =
@@ -2256,12 +2257,14 @@ fn determinize_with_supports_mode(
                     component_results.iter().map(|(_, _, ms)| *ms).sum::<f64>();
             }
             let output_started_at = Instant::now();
-            let direct_final_union =
-                std::env::var_os("GLRMASK_PARSER_FINAL_DIRECT_UNION").is_some();
             let compute_signature = |component_ids: &SmallVec<[usize; 8]>| {
                 let weights = component_ids
                     .iter()
                     .filter_map(|&component_id| component_results[component_id].0.as_ref());
+                let direct_final_union =
+                    std::env::var_os("GLRMASK_DISABLE_PARSER_FINAL_DIRECT_UNION").is_none()
+                        && (std::env::var_os("GLRMASK_PARSER_FINAL_DIRECT_UNION").is_some()
+                            || component_ids.len() >= 5);
                 let weight = if direct_final_union {
                     Weight::union_all_direct(weights)
                 } else {
@@ -2343,6 +2346,13 @@ fn determinize_with_supports_mode(
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
+}
+
+fn parser_support_defer_edge_unions_enabled(nwa_states: usize) -> bool {
+    std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_none()
+        && rayon::current_num_threads() > 1
+        && (std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+            || nwa_states >= 512)
 }
 
 fn determinize_with_supports(
@@ -3504,7 +3514,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
     if std::env::var_os("GLRMASK_VALIDATE_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
-        && std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+        && parser_support_defer_edge_unions_enabled(parser_nwa.states().len())
     {
         let reference = determinize_with_supports_mode(
             &parser_nwa,

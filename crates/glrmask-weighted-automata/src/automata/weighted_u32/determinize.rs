@@ -747,14 +747,23 @@ fn determinize_impl_with_options(
     let mut profile_direct_general_single_dst_labels = 0usize;
     let mut profile_direct_general_single_dst_contributions = 0usize;
 
-    let parallel_direct_waves =
-        std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some()
-            && rayon::current_num_threads() > 1;
+    // A large ready frontier benefits from preparing label aggregations in
+    // parallel, but forcing waves on tiny NWAs disables the very cheap direct
+    // singleton path and can be a net loss.  Make the proven large-NWA path
+    // automatic while retaining the historical force-on knob and an explicit
+    // production kill switch.
+    let parallel_direct_waves_forced =
+        std::env::var_os("GLRMASK_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some();
+    let parallel_direct_waves_disabled =
+        std::env::var_os("GLRMASK_DISABLE_DETERMINIZE_PARALLEL_DIRECT_WAVES").is_some();
+    let parallel_direct_waves = !parallel_direct_waves_disabled
+        && rayon::current_num_threads() > 1
+        && (parallel_direct_waves_forced || nwa.states().len() >= 128);
     let wave_max = std::env::var("GLRMASK_DETERMINIZE_WAVE_MAX")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(64);
+        .unwrap_or(1_000);
 
     while !worklist.is_empty() {
         // Only states already discovered at wave start are expanded. Newly

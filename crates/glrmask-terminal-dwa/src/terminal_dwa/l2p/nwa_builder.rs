@@ -1590,11 +1590,15 @@ pub fn build_nwa_via_trie_walk<'a>(
             initial_source_states[source as usize] = true;
         }
     }
-    let parallel_root_trie =
-        std::env::var_os("GLRMASK_L2P_PARALLEL_ROOT_TRIE").is_some()
-            && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
-            && vocab_tree_root.children().len() >= 2
-            && rayon::current_num_threads() > 1;
+    let parallel_root_trie_forced =
+        std::env::var_os("GLRMASK_L2P_PARALLEL_ROOT_TRIE").is_some();
+    let parallel_root_trie_disabled =
+        std::env::var_os("GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE").is_some();
+    let parallel_root_trie = !parallel_root_trie_disabled
+        && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
+        && vocab_tree_root.children().len() >= 2
+        && rayon::current_num_threads() > 1
+        && (parallel_root_trie_forced || vocab_tree_root.reachable_token_ids().len() >= 512);
 
     if parallel_root_trie {
         let base_nwa = nwa.clone();

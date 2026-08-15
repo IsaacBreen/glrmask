@@ -42,7 +42,7 @@ use crate::automata::regex::Expr;
 use super::fast::VocabEquivalenceResult;
 
 const MIN_TOKENS: usize = 4_096;
-const MAX_TOKENS: usize = 20_000;
+const MAX_TOKENS: usize = 100_000;
 
 fn max_tokens() -> usize {
     std::env::var("GLRMASK_L2P_COMMON_ATOM_MAX_TOKENS")
@@ -1000,7 +1000,8 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
         };
 
     let root_started = Instant::now();
-    let cut_filtered_root = std::env::var_os("GLRMASK_COMMON_ATOM_CUT_FILTERED_ROOT").is_some();
+    let cut_filtered_root =
+        std::env::var_os("GLRMASK_DISABLE_COMMON_ATOM_CUT_FILTERED_ROOT").is_none();
     let mut semantic_ids = FxHashMap::<SmallVec<[u32; 32]>, u32>::default();
     let mut semantic_by_suffix = vec![u32::MAX; semantic_slot_count];
     let mut cut_filtered_suffixes = 0usize;
@@ -1145,7 +1146,7 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
     let finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
 
     let group_started = Instant::now();
-    let parallel_group = std::env::var_os("GLRMASK_COMMON_ATOM_PARALLEL_GROUP").is_some()
+    let parallel_group = std::env::var_os("GLRMASK_DISABLE_COMMON_ATOM_PARALLEL_GROUP").is_none()
         && partials.len() >= 8_192
         && rayon::current_num_threads() > 1;
     let mut classes = if parallel_group {
@@ -1251,7 +1252,7 @@ fn classify_tokens<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     prepared_suffixes: Option<PreparedSuffixContext<'_>>,
 ) -> Vec<Vec<usize>> {
-    if std::env::var_os("GLRMASK_COMMON_ATOM_PARALLEL_PHASED").is_some()
+    if std::env::var_os("GLRMASK_DISABLE_COMMON_ATOM_PARALLEL_PHASED").is_none()
         && rayon::current_num_threads() > 1
         && tokens.iter().all(|token| token.as_ref().len() <= 64)
     {
