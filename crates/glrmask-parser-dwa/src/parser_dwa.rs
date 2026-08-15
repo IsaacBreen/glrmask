@@ -2074,7 +2074,10 @@ fn determinize_with_supports(
             let parallel_min_signatures = std::env::var("GLRMASK_PARSER_FINAL_PARALLEL_MIN_SIGNATURES")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
-                .unwrap_or_else(|| 128usize.max(rayon_workers.saturating_mul(4)));
+                // Above 48 workers, continuing to scale the threshold makes
+                // larger machines *less* likely to parallelize the same exact
+                // signature workload. Cap at the 48-worker crossover instead.
+                .unwrap_or_else(|| 128usize.max(rayon_workers.saturating_mul(4).min(192)));
             let has_parallel_workers = rayon_workers > 1;
             let use_parallel_final_components = has_parallel_workers
                 && components.len() >= parallel_min_components;
