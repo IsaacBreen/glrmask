@@ -1252,8 +1252,11 @@ fn classify_tokens<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     prepared_suffixes: Option<PreparedSuffixContext<'_>>,
 ) -> Vec<Vec<usize>> {
+    let parallel_phased_forced =
+        std::env::var_os("GLRMASK_COMMON_ATOM_PARALLEL_PHASED").is_some();
     if std::env::var_os("GLRMASK_DISABLE_COMMON_ATOM_PARALLEL_PHASED").is_none()
         && rayon::current_num_threads() > 1
+        && (parallel_phased_forced || tokens.len() >= 32_768)
         && tokens.iter().all(|token| token.as_ref().len() <= 64)
     {
         classify_tokens_phased(machine, tokens, prepared_suffixes)
