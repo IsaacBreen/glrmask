@@ -1467,9 +1467,10 @@ fn local_epsilon_closure_canonical(
     }
 }
 
-fn determinize_with_supports(
+fn determinize_with_supports_mode(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
+    defer_edge_unions_override: Option<bool>,
 ) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
@@ -1711,9 +1712,11 @@ fn determinize_with_supports(
         ..UnionAllCache::default()
     };
 
-    let defer_edge_unions =
-        std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
-            && rayon::current_num_threads() > 1;
+    let defer_edge_unions = defer_edge_unions_override
+        .unwrap_or_else(|| {
+            std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+        })
+        && rayon::current_num_threads() > 1;
     let mut deferred_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
     let mut deferred_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
     let mut deferred_closure_cache =
@@ -2340,6 +2343,13 @@ fn determinize_with_supports(
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
+}
+
+fn determinize_with_supports(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_mode(nwa, dense_positive_label_limit, None)
 }
 
 fn determinize_parser_dwa_with_fallbacks_impl(
@@ -3493,6 +3503,28 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
+    if std::env::var_os("GLRMASK_VALIDATE_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+        && std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+    {
+        let reference = determinize_with_supports_mode(
+            &parser_nwa,
+            Some(num_parser_states),
+            Some(false),
+        );
+        assert_eq!(
+            determinized.supports, reference.supports,
+            "deferred parser support unions changed NWA support sets",
+        );
+        let difference = find_difference(&determinized.dwa, &reference.dwa)
+            .expect("parser support equivalence checker failed");
+        assert!(
+            difference.is_none(),
+            "deferred parser support unions changed the weighted language: {difference:?}",
+        );
+        eprintln!(
+            "[glrmask/profile][parser_support_deferred_union_equivalence] result=equivalent"
+        );
+    }
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
     let guaranteed_read_started_at = Instant::now();
