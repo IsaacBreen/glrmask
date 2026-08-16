@@ -2278,6 +2278,141 @@ impl Constraint {
         }
     }
 
+    fn compute_scoped_ignore_runtime_tokens(
+        &self,
+    ) -> (
+        Vec<(TerminalID, Box<[u32]>)>,
+        Vec<(TerminalID, Box<[(u32, u32)]>)>,
+    ) {
+        if self.static_dynamic_overlay.is_none() || self.table.skip_terminals.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let special_tokens = self
+            .special_token_terminals
+            .iter()
+            .map(|special| special.token_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut tokens_by_bytes = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
+        for (&token, bytes) in self.token_bytes.iter() {
+            // A suffix is replayed as ordinary bytes inside a larger model
+            // token. Do not use an exact-special-token-only identity as the
+            // witness for that byte suffix.
+            if !special_tokens.contains(&token) {
+                tokens_by_bytes.entry(bytes.as_slice()).or_default().push(token);
+            }
+        }
+
+        let rows = self
+            .table
+            .skip_terminals
+            .par_iter()
+            .filter_map(|&terminal| {
+                let expr = self.tokenizer.terminal_expr(terminal)?;
+                let dfa = crate::automata::lexer::compile::compile_terminal_expr_dfa(expr);
+                if dfa.has_epsilon_transitions() || dfa.finalizers(0).contains(0) {
+                    return None;
+                }
+
+                let mut tokens = Vec::<u32>::new();
+                let mut fusions = Vec::<(u32, u32)>::new();
+                for (&token, bytes) in self.token_bytes.iter() {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let mut states = SmallVec::<[u32; 8]>::new();
+                    states.push(0);
+                    let mut valid_end = false;
+                    for (index, &byte) in bytes.iter().enumerate() {
+                        let mut next = SmallVec::<[u32; 8]>::new();
+                        for &state in &states {
+                            if let Some(target) = dfa.step(state, byte)
+                                && !next.contains(&target)
+                            {
+                                next.push(target);
+                            }
+                        }
+                        if next.is_empty() {
+                            valid_end = false;
+                            states.clear();
+                            break;
+                        }
+                        let completed_here = next
+                            .iter()
+                            .any(|&state| dfa.finalizers(state).contains(0));
+                        valid_end = completed_here
+                            || next.iter().any(|&state| {
+                                dfa.possible_future_group_ids(state).contains(0)
+                            });
+
+                        let prefix_end = index + 1;
+                        if completed_here && prefix_end < bytes.len() {
+                            let suffix_bytes = &bytes[prefix_end..];
+                            if let Some(suffix_tokens) = tokens_by_bytes.get(suffix_bytes) {
+                                // This is deliberately a permissive candidate
+                                // relation, not an acceptance proof. Runtime
+                                // correlates the suffix with the exact parser
+                                // branch and then sends the fused token through
+                                // the exact dynamic recognizer before admitting
+                                // it. Keeping unfinished suffixes here is what
+                                // recovers model tokens such as " (" or " &&\n".
+                                fusions.extend(
+                                    suffix_tokens
+                                        .iter()
+                                        .copied()
+                                        .map(|suffix| (token, suffix)),
+                                );
+                            }
+                            if !next.contains(&0) {
+                                // The completed Skip may reset before the next
+                                // byte, while the current accepting DFA state
+                                // remains live for a possible longer match.
+                                next.push(0);
+                            }
+                        }
+                        states = next;
+                    }
+                    if valid_end && !states.is_empty() {
+                        tokens.push(token);
+                    }
+                }
+                tokens.sort_unstable();
+                tokens.dedup();
+                fusions.sort_unstable_by_key(|&(fused, suffix)| {
+                    (
+                        self.token_bytes.get(&fused).map_or(usize::MAX, Vec::len),
+                        fused,
+                        suffix,
+                    )
+                });
+                fusions.dedup();
+                Some((
+                    terminal,
+                    tokens.into_boxed_slice(),
+                    fusions.into_boxed_slice(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let mut tokens = Vec::with_capacity(rows.len());
+        let mut fusions = Vec::with_capacity(rows.len());
+        for (terminal, token_row, fusion_row) in rows {
+            if !token_row.is_empty() {
+                tokens.push((terminal, token_row));
+            }
+            if !fusion_row.is_empty() {
+                fusions.push((terminal, fusion_row));
+            }
+        }
+        (tokens, fusions)
+    }
+
+    pub(crate) fn rebuild_scoped_ignore_runtime_tokens(&mut self) {
+        let (tokens, fusions) = self.compute_scoped_ignore_runtime_tokens();
+        self.scoped_ignore_only_tokens = tokens;
+        self.scoped_ignore_prefix_fusions = fusions;
+    }
+
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.table.rebuild_unconditional_advance_rows();
@@ -2290,6 +2425,25 @@ impl Constraint {
         }
         let terminal_live_ms = terminal_live_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let scoped_ignore_started_at = profile.then(std::time::Instant::now);
+        self.rebuild_scoped_ignore_runtime_tokens();
+        let scoped_ignore_ms = scoped_ignore_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile && !self.scoped_ignore_only_tokens.is_empty() {
+            eprintln!(
+                "[glrmask/profile][scoped_ignore_only_tokens] terminals={} tokens={} fusions={} ms={:.3}",
+                self.scoped_ignore_only_tokens.len(),
+                self.scoped_ignore_only_tokens
+                    .iter()
+                    .map(|(_, tokens)| tokens.len())
+                    .sum::<usize>(),
+                self.scoped_ignore_prefix_fusions
+                    .iter()
+                    .map(|(_, pairs)| pairs.len())
+                    .sum::<usize>(),
+                scoped_ignore_ms,
+            );
+        }
         if self.uses_sparse_direct_regular_runtime() {
             let support = self
                 .direct_regular_automaton

@@ -14,7 +14,7 @@ use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualS
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 
 mod profile;
@@ -6569,6 +6569,285 @@ pub fn stack_admissible_terminals(
 /// TODO: Rename this eventually, e.g. to `stack_can_advance_on_any`. The current
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
+
+
+/// Return one exact mask-only reduction factor for a concrete parser frontier.
+///
+/// Let `R` be the set of exactly-admissible lookaheads whose current top-state
+/// action is one common `Reduce(nt, len)`. We return the post-reduction frontier
+/// only when its exact admissible-lookahead set is *exactly* `R`. Therefore the
+/// new frontier denotes precisely a subset of the original future language:
+/// every lookahead it can consume was forced to take this reduction first in
+/// the original frontier, while lookaheads belonging to another action class
+/// (notably a scoped `Skip`) remain exclusively on the original branch.
+pub fn lookahead_reduction_factor(
+    table: &GLRTable,
+    stack: &ParserGSS,
+) -> Option<(ParserGSS, SmallVec<[TerminalID; 4]>)> {
+    stack.try_virtual_stack()?;
+    let top = stack.single_exclusive_top_value()?;
+    let all_terminals = BitSet::all(table.num_terminals as usize + 1);
+    let before = stack_admissible_terminals(table, stack, &all_terminals);
+    if before.is_empty() {
+        return None;
+    }
+
+    let mut reduction = None::<(u32, u32)>;
+    let mut reduction_terminals = BitSet::new(all_terminals.len());
+    for bit in before.iter_ones() {
+        let terminal = exact_admission_terminal_from_bit(table, bit)?;
+        let Some(Action::Reduce(nt, len)) = table.action(top, terminal) else {
+            continue;
+        };
+        match reduction {
+            None => reduction = Some((*nt, *len)),
+            Some(expected) if expected == (*nt, *len) => {}
+            Some(_) => return None,
+        }
+        reduction_terminals.set(bit);
+    }
+    let (nt, rhs_len) = reduction?;
+    if reduction_terminals.is_empty() || reduction_terminals == before {
+        return None;
+    }
+
+    let mut next = ParserGSS::empty();
+    for (base, target, is_replace) in
+        reduce_branches_from_isolated(table, stack, nt, rhs_len as usize)
+    {
+        let branch = if is_replace {
+            base.popn(1).push(target)
+        } else {
+            base.push(target)
+        };
+        merge_into(&mut next, branch);
+    }
+    if next.is_empty() {
+        return None;
+    }
+
+    let after = stack_admissible_terminals(table, &next, &all_terminals);
+    // Every terminal in the reduction class must remain admissible after the
+    // reduction. Any additional post-reduction terminals are guarded away on
+    // the mask-only factor with exact delayed terminal exclusions.
+    if reduction_terminals
+        .iter_ones()
+        .any(|bit| !after.contains(bit))
+    {
+        return None;
+    }
+    let mut blocked = SmallVec::<[TerminalID; 4]>::new();
+    for bit in after.iter_ones() {
+        if reduction_terminals.contains(bit) {
+            continue;
+        }
+        // EOF cannot be represented as a lexer-terminal exclusion. Decline
+        // rather than weakening the certificate.
+        if bit == table.num_terminals as usize || blocked.len() == blocked.capacity() {
+            return None;
+        }
+        blocked.push(bit as TerminalID);
+    }
+
+    if std::env::var_os("GLRMASK_DEBUG_LOOKAHEAD_FACTOR").is_some() {
+        eprintln!(
+            "[glrmask/debug][lookahead_factor] policy={:?} top={} reduce=({},{}) reduce_terms={:?} after={:?} blocked={:?} next={:?}",
+            table.admission_policy,
+            top,
+            nt,
+            rhs_len,
+            reduction_terminals.iter_ones().collect::<Vec<_>>(),
+            after.iter_ones().collect::<Vec<_>>(),
+            blocked,
+            next.to_stacks(64),
+        );
+    }
+    Some((next, blocked))
+}
+
+/// Cheap, exact-under-approximate form of [`lookahead_reduction_factor`].
+///
+/// This deliberately avoids `ExactSimulation` admission closure.  If every
+/// terminal in one current-row class has the same first action
+/// `Reduce(nt, len)`, then applying that reduction without consuming input is
+/// semantics-preserving *for that class*.  The returned frontier is guarded
+/// against every terminal appearing in a post-reduction top row outside the
+/// reduction class.  Thus any terminal that the added frontier can actually
+/// consume is forced to belong to the class for which the original parser's
+/// first action was exactly this reduction.
+///
+/// `advance` rows may over-approximate exact admission on composed tables. That
+/// only makes the guard stronger: we can block a terminal which was impossible
+/// anyway without adding language.  We decline when the conservative guard
+/// would be too large for the inline accumulator or would need to block EOF.
+pub fn lookahead_reduction_factor_row_subset(
+    table: &GLRTable,
+    stack: &ParserGSS,
+) -> Option<(ParserGSS, BitSet, BitSet)> {
+    stack.try_virtual_stack()?;
+    let top = stack.single_exclusive_top_value()?;
+    let top_row = table.advance_row(top)?;
+    let mut reduction = None::<(u32, u32)>;
+    let mut reduction_terminals = BitSet::new(table.num_terminals as usize + 1);
+    let mut saw_exception = false;
+
+    for bit in top_row.iter_ones() {
+        let terminal = exact_admission_terminal_from_bit(table, bit)?;
+        match table.action(top, terminal) {
+            Some(Action::Reduce(nt, len)) => match reduction {
+                None => {
+                    reduction = Some((*nt, *len));
+                    reduction_terminals.set(bit);
+                }
+                Some(expected) if expected == (*nt, *len) => {
+                    reduction_terminals.set(bit);
+                }
+                Some(_) => return None,
+            },
+            Some(_) => saw_exception = true,
+            None => return None,
+        }
+    }
+    let (nt, rhs_len) = reduction?;
+    if reduction_terminals.is_empty() || !saw_exception {
+        return None;
+    }
+
+    let mut next = ParserGSS::empty();
+    for (base, target, is_replace) in
+        reduce_branches_from_isolated(table, stack, nt, rhs_len as usize)
+    {
+        let branch = if is_replace {
+            base.popn(1).push(target)
+        } else {
+            base.push(target)
+        };
+        merge_into(&mut next, branch);
+    }
+    if next.is_empty() {
+        return None;
+    }
+
+    let mut after_terminals = BitSet::new(table.num_terminals as usize + 1);
+    for state in next.peek_values() {
+        let row = table.advance_row(state)?;
+        for bit in row.iter_ones() {
+            after_terminals.set(bit);
+        }
+    }
+
+    if std::env::var_os("GLRMASK_VALIDATE_FAST_LOOKAHEAD_FACTOR").is_some() {
+        if let Some((exact_next, exact_blocked)) = lookahead_reduction_factor(table, stack) {
+            let exact_blocked = exact_blocked.into_iter().collect::<BTreeSet<_>>();
+            let fast_blocked = after_terminals
+                .difference(&reduction_terminals)
+                .iter_ones()
+                .filter_map(|bit| (bit < table.num_terminals as usize).then_some(bit as TerminalID))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(next, exact_next, "fast lookahead factor changed reduction frontier");
+            assert!(
+                exact_blocked.is_subset(&fast_blocked),
+                "fast lookahead factor failed to conservatively guard exact blockers: exact={exact_blocked:?} fast={fast_blocked:?}",
+            );
+        }
+    }
+
+    Some((next, reduction_terminals, after_terminals))
+}
+
+/// Eagerly apply parser reductions that are provably independent of the next
+/// lookahead terminal for this concrete parser frontier.
+///
+/// A reduction is applied only when:
+/// 1. the frontier is one concrete stack;
+/// 2. every exactly-admissible next terminal (including EOF) has the same
+///    `Reduce(nt, len)` as its first parser action; and
+/// 3. after applying that one reduction without consuming input, the exact set
+///    of admissible next terminals is unchanged.
+///
+/// Under those conditions the reduction commutes with every possible next
+/// terminal: the original parser must take that same reduction before it can
+/// consume any valid lookahead, and the post-reduction frontier introduces no
+/// new lookaheads. Repeating the certificate therefore preserves the complete
+/// future terminal language while exposing lookahead-independent reductions
+/// earlier to runtimes that reuse precompiled parser summaries.
+pub fn normalize_lookahead_invariant_reductions(
+    table: &GLRTable,
+    stack: &ParserGSS,
+) -> ParserGSS {
+    const MAX_EAGER_REDUCTIONS: usize = 64;
+
+    let mut current = stack.clone();
+    let all_terminals = BitSet::all(table.num_terminals as usize + 1);
+
+    for _ in 0..MAX_EAGER_REDUCTIONS {
+        // Keep this optimization deliberately narrow. A single concrete stack
+        // covers the subgrammar-return cliff without having to prove that a
+        // reduction commutes independently across ambiguous GSS branches.
+        if current.try_virtual_stack().is_none() {
+            break;
+        }
+        let Some(top) = current.single_exclusive_top_value() else {
+            break;
+        };
+
+        let before = stack_admissible_terminals(table, &current, &all_terminals);
+        if before.is_empty() {
+            break;
+        }
+
+        let mut common_reduce = None::<(u32, u32)>;
+        let mut certified = true;
+        for bit in before.iter_ones() {
+            let Some(terminal) = exact_admission_terminal_from_bit(table, bit) else {
+                certified = false;
+                break;
+            };
+            let Some(Action::Reduce(nt, len)) = table.action(top, terminal) else {
+                certified = false;
+                break;
+            };
+            match common_reduce {
+                None => common_reduce = Some((*nt, *len)),
+                Some(expected) if expected == (*nt, *len) => {}
+                Some(_) => {
+                    certified = false;
+                    break;
+                }
+            }
+        }
+        if !certified {
+            break;
+        }
+        let Some((nt, rhs_len)) = common_reduce else {
+            break;
+        };
+
+        let mut next = ParserGSS::empty();
+        for (base, target, is_replace) in
+            reduce_branches_from_isolated(table, &current, nt, rhs_len as usize)
+        {
+            let branch = if is_replace {
+                base.popn(1).push(target)
+            } else {
+                base.push(target)
+            };
+            merge_into(&mut next, branch);
+        }
+        if next.is_empty() || next == current {
+            break;
+        }
+
+        let after = stack_admissible_terminals(table, &next, &all_terminals);
+        if after != before {
+            break;
+        }
+        current = next;
+    }
+
+    current
+}
+
 pub fn stack_may_advance_on_any(
     table: &GLRTable,
     stack: &ParserGSS,

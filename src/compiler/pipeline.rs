@@ -1,4 +1,4 @@
-use crate::automata::lexer::Lexer;
+﻿use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -2559,6 +2559,80 @@ fn compacted_possible_matches_id_map(
     mapped.id_map().clone()
 }
 
+
+fn maybe_dump_terminal_dwa_experiment(
+    families: &TerminalDwaFamilies,
+    terminal_display_names: &[String],
+) {
+    let Ok(path) = std::env::var("GLRMASK_EXPERIMENT_DUMP_TERMINAL_DWA") else {
+        return;
+    };
+    use std::io::Write;
+    let copies = [&families.l1, &families.l2p, &families.special]
+        .into_iter()
+        .filter_map(|family| family.as_ref())
+        .map(|family| MappedArtifact::new(family.artifact().clone(), family.id_map().clone()))
+        .collect::<Vec<_>>();
+    if copies.is_empty() {
+        return;
+    }
+    let reconciled = MappedArtifact::reconcile_vec(copies);
+    let (automata, id_map) = reconciled.into_parts();
+    let mut union = crate::automata::weighted_u32::nwa::NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let mut starts = Vec::new();
+    for automaton in automata {
+        let nwa = match automaton {
+            TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
+            TerminalAutomaton::TokenDeterministicNwa(nwa)
+            | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
+        };
+        let body = union.append_with_body(&nwa);
+        starts.extend(body.start_states);
+    }
+    union.set_start_states(starts);
+    let dwa = crate::automata::weighted_u32::determinize::determinize(&union).expect("terminal-DWA experiment dump union must determinize");
+
+    fn write_u32(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_le_bytes()); }
+    fn write_u64(out: &mut Vec<u8>, value: u64) { out.extend_from_slice(&value.to_le_bytes()); }
+    fn write_vec(out: &mut Vec<u8>, values: &[u32]) {
+        write_u32(out, values.len() as u32);
+        for &value in values { write_u32(out, value); }
+    }
+    fn write_vec_vec(out: &mut Vec<u8>, values: &[Vec<u32>]) {
+        write_u32(out, values.len() as u32);
+        for value in values { write_vec(out, value); }
+    }
+    fn write_map(out: &mut Vec<u8>, map: &ManyToOneIdMap) {
+        write_vec(out, &map.original_to_internal);
+        write_vec_vec(out, &map.internal_to_originals);
+        write_vec(out, &map.representative_original_ids);
+    }
+
+    let encoded_dwa = bincode::serialize(&dwa).expect("serialize terminal-DWA experiment dump");
+    let mut out = Vec::with_capacity(encoded_dwa.len() + 1024);
+    out.extend_from_slice(b"GLRMTD1\0");
+    write_u32(&mut out, terminal_display_names.len() as u32);
+    for name in terminal_display_names {
+        write_u32(&mut out, name.len() as u32);
+        out.extend_from_slice(name.as_bytes());
+    }
+    write_map(&mut out, &id_map.tokenizer_states);
+    write_map(&mut out, &id_map.vocab_tokens);
+    write_u64(&mut out, encoded_dwa.len() as u64);
+    out.extend_from_slice(&encoded_dwa);
+    let mut file = std::fs::File::create(&path).expect("create terminal-DWA experiment dump");
+    file.write_all(&out).expect("write terminal-DWA experiment dump");
+    eprintln!(
+        "[glrmask/experiment][terminal_dwa_dump] path={} states={} transitions={} tsids={} tokens={} bytes={}",
+        path,
+        dwa.num_states(),
+        dwa.num_transitions(),
+        id_map.num_tsids(),
+        id_map.num_internal_tokens(),
+        out.len(),
+    );
+}
+
 fn reconcile_terminal_dwa_families(
     families: TerminalDwaFamilies,
 ) -> (MappedArtifact<Vec<TerminalAutomaton>>, TerminalFamilyLayout) {
@@ -3680,6 +3754,10 @@ fn compile_prepared_with_profile_and_table_construction(
             .into_inner()
             .expect("compile DAG result slot poisoned")
             .expect("compile DAG did not produce a result");
+        maybe_dump_terminal_dwa_experiment(
+            &terminal_dwas,
+            &analyzed_grammar.terminal_display_names,
+        );
         if derive_single_use_terminal_possible_matches {
             match cpm::complete_single_use_terminal_possible_matches_from_l1(
                 &terminal_dwas,
@@ -4222,6 +4300,8 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
+            scoped_ignore_only_tokens: Vec::new(),
+            scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,
@@ -4628,3 +4708,4 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
 }
+

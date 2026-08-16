@@ -4,7 +4,13 @@ pub(crate) mod queue;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{
+    lookahead_reduction_factor,
+    lookahead_reduction_factor_row_subset,
+    stack_may_advance_on,
+    ParserGSS,
+};
+use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
 };
@@ -63,6 +69,12 @@ fn set_original_mask_bit(buf: &mut [u32], token_id: u32) {
     if let Some(slot) = buf.get_mut(word) {
         *slot |= 1u32 << bit;
     }
+}
+
+#[inline(always)]
+fn original_mask_contains(buf: &[u32], token_id: u32) -> bool {
+    buf.get(token_id as usize / 32)
+        .is_some_and(|word| word & (1u32 << (token_id % 32)) != 0)
 }
 
 fn single_path_direct_stack_work(
@@ -4318,6 +4330,221 @@ impl<'a> ConstraintState<'a> {
     ///
     /// `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
     /// words are cleared.
+
+    fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {
+        let reset_state = self.constraint.runtime_commit_initial_state();
+        let mut shadow = self.clone_without_history();
+        shadow.state.clear();
+        shadow.state.insert_flat_alternative(reset_state, gss.clone());
+        if let Some(factored) = shadow.lookahead_factored_mask_shadow() {
+            factored.fill_mask_uncached(buf);
+        } else {
+            shadow.fill_mask_uncached(buf);
+        }
+        shadow.update_control_special_token_mask(buf);
+    }
+
+    fn add_admissible_scoped_ignore_tokens(&self, buf: &mut [u32]) {
+        if self.constraint.static_dynamic_overlay.is_none()
+            || std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
+        {
+            return;
+        }
+        let reset_state = self.constraint.runtime_commit_initial_state();
+        let use_fusions = std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_FUSIONS").is_some();
+        let use_residual_possible_matches =
+            std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_RESIDUAL_PM").is_some();
+        let mut suffix_mask = use_fusions.then(|| vec![0u32; buf.len()]);
+        let mut candidate_mask = use_fusions.then(|| vec![0u32; buf.len()]);
+        for (&tokenizer_state, gss) in self.state.iter() {
+            if use_residual_possible_matches
+                && tokenizer_state != reset_state
+                && gss.all_accs_satisfy(|blocked: &TerminalsDisallowed| blocked.is_empty())
+            {
+                for &terminal in &self.constraint.table.skip_terminals {
+                    if !stack_may_advance_on(&self.constraint.table, gss, terminal) {
+                        continue;
+                    }
+                    self.constraint.visit_possible_match_original_tokens(
+                        tokenizer_state,
+                        terminal,
+                        |token| set_original_mask_bit(buf, token),
+                    );
+                }
+            }
+            if tokenizer_state != reset_state
+                || !gss.all_accs_satisfy(|blocked: &TerminalsDisallowed| blocked.is_empty())
+            {
+                continue;
+            }
+            for (terminal, tokens) in &self.constraint.scoped_ignore_only_tokens {
+                if !stack_may_advance_on(&self.constraint.table, gss, *terminal) {
+                    continue;
+                }
+                for &token in tokens.iter() {
+                    set_original_mask_bit(buf, token);
+                }
+                if !use_fusions {
+                    continue;
+                }
+                let Some((_, fusions)) = self
+                    .constraint
+                    .scoped_ignore_prefix_fusions
+                    .iter()
+                    .find(|(candidate, _)| candidate == terminal)
+                else {
+                    continue;
+                };
+                let suffix_mask = suffix_mask
+                    .as_deref_mut()
+                    .expect("fusion suffix mask was requested");
+                suffix_mask.fill(0);
+                // A completed Skip inside one model token resets the lexer but
+                // leaves this exact parser GSS unchanged. Test the remaining
+                // suffix against *that branch-local reset state*, never against
+                // the global union mask: another residual tokenizer branch may
+                // admit the same suffix token for unrelated reasons.
+                self.static_mask_for_reset_branch(gss, suffix_mask);
+                for &(fused, suffix) in fusions.iter() {
+                    if original_mask_contains(suffix_mask, suffix) {
+                        set_original_mask_bit(
+                            candidate_mask
+                                .as_deref_mut()
+                                .expect("fusion candidate mask was requested"),
+                            fused,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(candidate_mask) = candidate_mask.as_deref()
+            && candidate_mask.iter().any(|&word| word != 0)
+        {
+            super::dynamic_mask::or_mask_dynamic_candidate_additions(self, buf, candidate_mask);
+        }
+    }
+
+    fn lookahead_factored_mask_shadow(&self) -> Option<Self> {
+        if self.constraint.static_dynamic_overlay.is_none()
+            || std::env::var_os("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR").is_none()
+        {
+            return None;
+        }
+
+        // Two factors are sufficient to expose the parent continuation for the
+        // nested-subgrammar return shape. Keep the experiment configurable for
+        // differential work, but do not accumulate every intermediate factor:
+        // only the deepest certified subset can add anything the shallower
+        // subset could add, while carrying at least the same lookahead guards.
+        let max_factor_depth = std::env::var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(2)
+            .min(8);
+        let mut additions = SmallVec::<[(u32, ParserGSS); 4]>::new();
+        for (&tokenizer_state, gss) in self.state.iter() {
+            let mut factor = gss.clone();
+            let mut blocked = SmallVec::<[TerminalID; 8]>::new();
+            let mut deepest = None::<ParserGSS>;
+            let use_fast_factor = std::env::var_os(
+                "GLRMASK_EXPERIMENT_FAST_LOOKAHEAD_FACTOR",
+            )
+            .is_some();
+            let mut chain_forced = None::<BitSet>;
+            let mut final_after = None::<BitSet>;
+            let mut fast_guard_representable = true;
+            for _ in 0..max_factor_depth {
+                if use_fast_factor
+                    && let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref()
+                    && !overlay.non_parent_only_parser_states.is_empty()
+                {
+                    let Some(top) = factor.single_exclusive_top_value() else {
+                        break;
+                    };
+                    if !overlay
+                        .non_parent_only_parser_states
+                        .get(top as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                }
+                let next = if use_fast_factor {
+                    let Some((next, forced, after)) =
+                        lookahead_reduction_factor_row_subset(&self.constraint.table, &factor)
+                    else {
+                        break;
+                    };
+                    chain_forced = Some(match chain_forced.take() {
+                        None => forced,
+                        Some(existing) => {
+                            let not_forced = existing.difference(&forced);
+                            existing.difference(&not_forced)
+                        }
+                    });
+                    final_after = Some(after);
+                    next
+                } else {
+                    let Some((next, newly_blocked)) =
+                        lookahead_reduction_factor(&self.constraint.table, &factor)
+                    else {
+                        break;
+                    };
+                    for terminal in newly_blocked {
+                        if !blocked.contains(&terminal) {
+                            blocked.push(terminal);
+                        }
+                    }
+                    next
+                };
+                factor = next;
+                deepest = Some(factor.clone());
+            }
+            let Some(deepest) = deepest else {
+                continue;
+            };
+            if use_fast_factor {
+                blocked.clear();
+                let Some(chain_forced) = chain_forced.as_ref() else {
+                    continue;
+                };
+                let Some(final_after) = final_after.as_ref() else {
+                    continue;
+                };
+                for bit in final_after.difference(chain_forced).iter_ones() {
+                    if bit >= self.constraint.table.num_terminals as usize {
+                        fast_guard_representable = false;
+                        break;
+                    }
+                    blocked.push(bit as TerminalID);
+                }
+                if !fast_guard_representable {
+                    continue;
+                }
+            }
+            let guarded = deepest.apply(|acc: &TerminalsDisallowed| {
+                let mut guarded = acc.clone();
+                for &terminal in &blocked {
+                    guarded = guarded.with_insert(tokenizer_state, terminal);
+                }
+                guarded
+            });
+            additions.push((tokenizer_state, guarded));
+        }
+        if additions.is_empty() {
+            return None;
+        }
+
+        let mut shadow = self.clone_without_history();
+        for (tokenizer_state, factored) in additions {
+            shadow
+                .state
+                .insert_flat_alternative(tokenizer_state, factored);
+        }
+        Some(shadow)
+    }
+
     pub fn fill_mask(&self, buf: &mut [u32]) {
         let required = self.constraint.mask_len();
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
@@ -4332,12 +4559,38 @@ impl<'a> ConstraintState<'a> {
         }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
-            self.fill_mask_uncached(mask);
+            let factor_profile = std::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
+            let factor_started = factor_profile.then(Instant::now);
+            if let Some(shadow) = self.lookahead_factored_mask_shadow() {
+                let factor_ns = factor_started.map_or(0, elapsed_ns);
+                let fill_started = factor_profile.then(Instant::now);
+                shadow.fill_mask_uncached(mask);
+                if let Some(fill_started) = fill_started {
+                    eprintln!(
+                        "[glrmask/profile][lookahead_factor] built_ns={} fill_ns={} original_branches={} shadow_branches={}",
+                        factor_ns,
+                        elapsed_ns(fill_started),
+                        self.state.len(),
+                        shadow.state.len(),
+                    );
+                }
+                self.store_mask_cache_reuse_dense(mask);
+            } else {
+                if let Some(factor_started) = factor_started {
+                    eprintln!(
+                        "[glrmask/profile][lookahead_factor] built_none_ns={} branches={}",
+                        elapsed_ns(factor_started),
+                        self.state.len(),
+                    );
+                }
+                self.fill_mask_uncached(mask);
+            }
             self.update_control_special_token_mask(mask);
             if !self.constraint.table.control_terminals.is_empty() {
                 self.store_mask_cache_reuse_dense(mask);
             }
         }
+        self.add_admissible_scoped_ignore_tokens(mask);
         if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
             super::dynamic_mask::or_mask_dynamic_additions(self, mask);
         }

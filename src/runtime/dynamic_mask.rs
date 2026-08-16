@@ -97,6 +97,37 @@ fn overlay_advance_repair(
     )
 }
 
+#[inline]
+fn lazy_repair_parser_enabled(constraint: &Constraint, branch: &DynamicBranch) -> bool {
+    !branch.repair_used
+        && constraint.static_dynamic_overlay.is_some()
+        && std::env::var_os("GLRMASK_EXPERIMENT_LAZY_REPAIR_PARSER").is_some()
+}
+
+fn replay_pending_terminals(
+    constraint: &Constraint,
+    gss: &ParserStacks,
+    pending: &[TerminalID],
+    cache: &mut DynamicTraversalCache,
+) -> Option<ParserStacks> {
+    let mut current = gss.clone();
+    for &terminal in pending {
+        current = parser_child_cached(constraint, &current, terminal, cache)?;
+    }
+    Some(current)
+}
+
+fn replay_pending_with_terminal(
+    constraint: &Constraint,
+    branch: &DynamicBranch,
+    terminal: TerminalID,
+    cache: &mut DynamicTraversalCache,
+) -> Option<ParserStacks> {
+    let current = replay_pending_terminals(constraint, &branch.gss, &branch.pending_terminals, cache)?;
+    parser_child_cached(constraint, &current, terminal, cache)
+}
+
+
 
 #[inline]
 fn overlay_branch_can_finish_with_repair(
@@ -108,6 +139,20 @@ fn overlay_branch_can_finish_with_repair(
     if branch.repair_used {
         return true;
     }
+    let materialized = if branch.pending_terminals.is_empty() {
+        None
+    } else {
+        let Some(gss) = replay_pending_terminals(
+            constraint,
+            &branch.gss,
+            &branch.pending_terminals,
+            traversal_cache,
+        ) else {
+            return false;
+        };
+        Some(gss)
+    };
+    let gss = materialized.as_ref().unwrap_or(&branch.gss);
     for config_index in 0..lexer_scan_cache.config_len(branch.tokenizer_config) {
         let tokenizer_state = lexer_scan_cache.config_state(branch.tokenizer_config, config_index);
         for terminal in constraint.tokenizer.possible_future_terminals_iter(tokenizer_state) {
@@ -125,7 +170,7 @@ fn overlay_branch_can_finish_with_repair(
                 && parser_terminal_admissible_cached(
                     constraint,
                     terminal,
-                    &branch.gss,
+                    gss,
                     traversal_cache,
                 )
             {
@@ -148,6 +193,10 @@ struct DynamicBranch {
     /// component parser artifacts: either a cross-component terminal switch or
     /// a terminal whose composed template requires additive repair.
     repair_used: bool,
+    /// Parser terminals matched since the last materialized parser advance.
+    /// Additive repair masking may defer these while `repair_used == false`:
+    /// such a branch cannot contribute a token until a repair event occurs.
+    pending_terminals: SmallVec<[TerminalID; 4]>,
     /// The lexer was reset by a terminal match on the most recently consumed
     /// byte. At a compressed-edge boundary that fresh initial state is already
     /// a valid continuation and must not be stripped as though it were an
@@ -172,6 +221,7 @@ struct DynamicBranchKey {
     initial_prune_guard: InitialPruneGuard,
     last_component: u32,
     repair_used: bool,
+    pending_terminals: SmallVec<[TerminalID; 4]>,
     fresh_reset: bool,
 }
 
@@ -213,6 +263,7 @@ impl DynamicRecognizerStateCache {
             initial_prune_guard: branch.initial_prune_guard.clone(),
             last_component: branch.last_component,
             repair_used: branch.repair_used,
+            pending_terminals: branch.pending_terminals.clone(),
             fresh_reset: branch.fresh_reset,
         }
     }
@@ -298,22 +349,32 @@ impl DynamicRecognizerStateCache {
                 continue;
             }
 
-            let boundary_allowed = branch.tokenizer_config == initial_config
-                || config_token_boundary_allowed_cached(
-                    constraint,
-                    lexer_scan_cache,
-                    branch.tokenizer_config,
-                    &branch.gss,
-                    traversal_cache,
-                );
+            let lazy_pending = lazy_repair_parser_enabled(constraint, branch)
+                && !branch.pending_terminals.is_empty();
+            let boundary_allowed = if lazy_pending {
+                false
+            } else {
+                branch.tokenizer_config == initial_config
+                    || config_token_boundary_allowed_cached(
+                        constraint,
+                        lexer_scan_cache,
+                        branch.tokenizer_config,
+                        &branch.gss,
+                        traversal_cache,
+                    )
+            };
             token_boundary_allowed |= boundary_allowed;
-            let repair_boundary_allowed = boundary_allowed
-                && overlay_branch_can_finish_with_repair(
-                    constraint,
-                    branch,
-                    lexer_scan_cache,
-                    traversal_cache,
-                );
+            let repair_boundary_allowed = if branch.repair_used {
+                boundary_allowed
+            } else {
+                branch.initial_prune_guard.allows_token_boundary()
+                    && overlay_branch_can_finish_with_repair(
+                        constraint,
+                        branch,
+                        lexer_scan_cache,
+                        traversal_cache,
+                    )
+            };
             repair_token_boundary_allowed |= repair_boundary_allowed;
 
             if collect_subtree_loops
@@ -382,14 +443,6 @@ impl DynamicRecognizerStateCache {
             for config_index in 0..lexer_scan_cache.config_len(next_config) {
                 let matched_state = lexer_scan_cache.config_state(next_config, config_index);
                 for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
-                    let Some(advanced_parser) = parser_child_cached(
-                        constraint,
-                        &branch.gss,
-                        terminal,
-                        traversal_cache,
-                    ) else {
-                        continue;
-                    };
                     let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
                         advanced_prune_guard.clone()
                     } else {
@@ -401,14 +454,50 @@ impl DynamicRecognizerStateCache {
                     };
                     let (last_component, repair_used) =
                         overlay_advance_repair(constraint, &branch, terminal);
-                    next.push(DynamicBranch {
-                        tokenizer_config: initial_config,
-                        gss: advanced_parser,
-                        initial_prune_guard: matched_prune_guard,
-                        last_component,
-                        repair_used,
-                        fresh_reset: true,
-                    });
+                    if lazy_repair_parser_enabled(constraint, &branch)
+                        && !repair_used
+                        && branch.pending_terminals.is_empty()
+                    {
+                        let mut pending_terminals = branch.pending_terminals.clone();
+                        pending_terminals.push(terminal);
+                        next.push(DynamicBranch {
+                            tokenizer_config: initial_config,
+                            gss: branch.gss.clone(),
+                            initial_prune_guard: matched_prune_guard,
+                            last_component,
+                            repair_used: false,
+                            pending_terminals,
+                            fresh_reset: true,
+                        });
+                    } else {
+                        let advanced_parser = if lazy_repair_parser_enabled(constraint, &branch) {
+                            replay_pending_with_terminal(
+                                constraint,
+                                &branch,
+                                terminal,
+                                traversal_cache,
+                            )
+                        } else {
+                            parser_child_cached(
+                                constraint,
+                                &branch.gss,
+                                terminal,
+                                traversal_cache,
+                            )
+                        };
+                        let Some(advanced_parser) = advanced_parser else {
+                            continue;
+                        };
+                        next.push(DynamicBranch {
+                            tokenizer_config: initial_config,
+                            gss: advanced_parser,
+                            initial_prune_guard: matched_prune_guard,
+                            last_component,
+                            repair_used,
+                            pending_terminals: SmallVec::new(),
+                            fresh_reset: true,
+                        });
+                    }
                 }
             }
 
@@ -418,6 +507,7 @@ impl DynamicRecognizerStateCache {
                 initial_prune_guard: advanced_prune_guard,
                 last_component: branch.last_component,
                 repair_used: branch.repair_used,
+                pending_terminals: branch.pending_terminals.clone(),
                 fresh_reset: false,
             });
         }
@@ -463,6 +553,8 @@ impl DynamicRecognizerStateCache {
                 end_config
             };
             if !was_fresh_reset
+                && !(lazy_repair_parser_enabled(constraint, &branch)
+                    && !branch.pending_terminals.is_empty())
                 && !lexer_config_relevant_cached(
                     constraint,
                     lexer_scan_cache,
@@ -548,6 +640,47 @@ impl DynamicBaselineCoverage {
         unsafe {
             *self.uncovered_prefix.get_unchecked(range.start)
                 == *self.uncovered_prefix.get_unchecked(range.end)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DynamicCandidateCoverage {
+    /// Prefix count over `DynamicMaskTrie::all_subtree_tokens()`: one unit for
+    /// each canonical token with at least one original-token alias present in
+    /// the candidate mask. This lets the exact dynamic recognizer skip every
+    /// trie subtree that cannot possibly contribute a requested candidate.
+    candidate_prefix: Vec<u32>,
+}
+
+impl DynamicCandidateCoverage {
+    fn new(vocab: &DynamicMaskVocab, trie: &DynamicMaskTrie, candidates: &[u32]) -> Self {
+        let ordered = trie.all_subtree_tokens();
+        let mut candidate_prefix = Vec::with_capacity(ordered.len() + 1);
+        candidate_prefix.push(0);
+        let mut count = 0u32;
+        for &canonical_token in ordered {
+            let is_candidate = vocab.token_ids(canonical_token).is_some_and(|aliases| {
+                aliases.iter().any(|&token_id| {
+                    let word = token_id as usize / 32;
+                    let bit = token_id % 32;
+                    candidates
+                        .get(word)
+                        .is_some_and(|bits| (bits & (1u32 << bit)) != 0)
+                })
+            });
+            count += u32::from(is_candidate);
+            candidate_prefix.push(count);
+        }
+        Self { candidate_prefix }
+    }
+
+    #[inline(always)]
+    fn subtree_has_candidate(&self, trie: &DynamicMaskTrie, node: u32) -> bool {
+        let range = trie.subtree_token_index_range(node);
+        unsafe {
+            *self.candidate_prefix.get_unchecked(range.start)
+                != *self.candidate_prefix.get_unchecked(range.end)
         }
     }
 }
@@ -1726,7 +1859,7 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    fill_mask_dynamic_impl(state, buf, None, false)
+    fill_mask_dynamic_impl(state, buf, None, false, None)
         .expect("unbounded dynamic mask generation cannot time out");
 }
 
@@ -1740,6 +1873,7 @@ pub(crate) fn fill_mask_dynamic_bounded(
         buf,
         Some(Instant::now() + Duration::from_millis(timeout_ms)),
         false,
+        None,
     )
 }
 
@@ -1748,8 +1882,21 @@ pub(crate) fn fill_mask_dynamic_bounded(
 /// mask. The baseline is used solely as a trie-pruning certificate; all
 /// surviving leaves are still validated by the ordinary exact dynamic walker.
 pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    fill_mask_dynamic_impl(state, buf, None, true)
+    fill_mask_dynamic_impl(state, buf, None, true, None)
         .expect("unbounded additive dynamic mask generation cannot time out");
+}
+
+/// Validate only the requested additive candidates with the exact dynamic
+/// recognizer. `buf` is both the static baseline and the output; additions not
+/// present in `candidate_mask` are discarded even if an internal subtree
+/// certificate marked them while validating a candidate-bearing subtree.
+pub(crate) fn or_mask_dynamic_candidate_additions(
+    state: &ConstraintState<'_>,
+    buf: &mut [u32],
+    candidate_mask: &[u32],
+) {
+    fill_mask_dynamic_impl(state, buf, None, true, Some(candidate_mask))
+        .expect("unbounded candidate dynamic mask generation cannot time out");
 }
 
 #[inline]
@@ -1831,6 +1978,7 @@ fn try_advance_scalar_branch_over_segment(
         initial_prune_guard: InitialPruneGuard::Passed,
         last_component: branch.last_component,
         repair_used: branch.repair_used,
+        pending_terminals: branch.pending_terminals.clone(),
         fresh_reset: false,
     });
     Ok(Some(result))
@@ -1881,14 +2029,6 @@ fn advance_dynamic_branches_over_segment(
             for state_index in 0..config_len {
                 let matched_state = lexer_scan_cache.config_state(next_config, state_index);
                 for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
-                    let Some(advanced_parser) = parser_child_cached(
-                        constraint,
-                        &branch.gss,
-                        terminal,
-                        traversal_cache,
-                    ) else {
-                        continue;
-                    };
                     let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
                         advanced_prune_guard.clone()
                     } else {
@@ -1898,21 +2038,52 @@ fn advance_dynamic_branches_over_segment(
                             terminal,
                         )
                     };
-                    if !push_unique_dynamic_branch(
-                        &mut next,
-                        {
-                            let (last_component, repair_used) =
-                                overlay_advance_repair(constraint, &branch, terminal);
-                            DynamicBranch {
-                                tokenizer_config: initial_config,
-                                gss: advanced_parser,
-                                initial_prune_guard: matched_prune_guard,
-                                last_component,
-                                repair_used,
-                                fresh_reset: true,
-                            }
-                        },
-                    ) {
+                    let (last_component, repair_used) =
+                        overlay_advance_repair(constraint, &branch, terminal);
+                    let child = if lazy_repair_parser_enabled(constraint, &branch)
+                        && !repair_used
+                        && branch.pending_terminals.is_empty()
+                    {
+                        let mut pending_terminals = branch.pending_terminals.clone();
+                        pending_terminals.push(terminal);
+                        Some(DynamicBranch {
+                            tokenizer_config: initial_config,
+                            gss: branch.gss.clone(),
+                            initial_prune_guard: matched_prune_guard,
+                            last_component,
+                            repair_used: false,
+                            pending_terminals,
+                            fresh_reset: true,
+                        })
+                    } else {
+                        let advanced_parser = if lazy_repair_parser_enabled(constraint, &branch) {
+                            replay_pending_with_terminal(
+                                constraint,
+                                &branch,
+                                terminal,
+                                traversal_cache,
+                            )
+                        } else {
+                            parser_child_cached(
+                                constraint,
+                                &branch.gss,
+                                terminal,
+                                traversal_cache,
+                            )
+                        };
+                        advanced_parser.map(|advanced_parser| DynamicBranch {
+                            tokenizer_config: initial_config,
+                            gss: advanced_parser,
+                            initial_prune_guard: matched_prune_guard,
+                            last_component,
+                            repair_used,
+                            pending_terminals: SmallVec::new(),
+                            fresh_reset: true,
+                        })
+                    };
+                    if let Some(child) = child
+                        && !push_unique_dynamic_branch(&mut next, child)
+                    {
                         *duplicate_branches += 1;
                     }
                 }
@@ -1926,6 +2097,7 @@ fn advance_dynamic_branches_over_segment(
                     initial_prune_guard: advanced_prune_guard,
                     last_component: branch.last_component,
                     repair_used: branch.repair_used,
+                    pending_terminals: branch.pending_terminals.clone(),
                     fresh_reset: false,
                 },
             ) {
@@ -1970,6 +2142,7 @@ fn advance_dynamic_branches_over_segment(
                 initial_prune_guard: branch.initial_prune_guard,
                 last_component: branch.last_component,
                 repair_used: branch.repair_used,
+                pending_terminals: branch.pending_terminals,
                 fresh_reset: false,
             },
         ) {
@@ -2120,6 +2293,7 @@ fn walk_scalar_dynamic_subtree(
                 initial_prune_guard: InitialPruneGuard::Passed,
                 last_component: DYNAMIC_NO_COMPONENT,
                 repair_used: true,
+                pending_terminals: SmallVec::new(),
                 fresh_reset: false,
             });
             let child_branches = advance_dynamic_branches_over_segment(
@@ -2350,6 +2524,7 @@ fn walk_interned_dynamic_trie_range(
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     baseline_coverage: Option<&DynamicBaselineCoverage>,
+    candidate_coverage: Option<&DynamicCandidateCoverage>,
     require_repair_used: bool,
     root_branches: DynamicBranches,
     initial_config: u32,
@@ -2374,6 +2549,8 @@ fn walk_interned_dynamic_trie_range(
         debug_assert!((edge.subtree_end as usize) <= walk_end);
         if baseline_coverage
             .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+            || candidate_coverage
+                .is_some_and(|coverage| !coverage.subtree_has_candidate(trie, edge.child))
         {
             walk_index = edge.subtree_end as usize;
             continue;
@@ -2450,6 +2627,7 @@ fn walk_interned_dynamic_trie(
     trie: &DynamicMaskTrie,
     projection: Option<&DynamicSelfLoopProjection>,
     baseline_coverage: Option<&DynamicBaselineCoverage>,
+    candidate_coverage: Option<&DynamicCandidateCoverage>,
     require_repair_used: bool,
     root_branches: DynamicBranches,
     initial_config: u32,
@@ -2465,7 +2643,9 @@ fn walk_interned_dynamic_trie(
     let root_state = recognizer.intern(root_branches.clone());
     stats.max_branches = stats.max_branches.max(recognizer.branches(root_state).len());
     stats.work_items += 1;
-    if baseline_coverage.is_some_and(|coverage| coverage.subtree_fully_covered(trie, 0)) {
+    if baseline_coverage.is_some_and(|coverage| coverage.subtree_fully_covered(trie, 0))
+        || candidate_coverage.is_some_and(|coverage| !coverage.subtree_has_candidate(trie, 0))
+    {
         stats.recognizer_states = recognizer.branches.len();
         stats.recognizer_transition_misses = recognizer.transition_misses;
         return Ok(());
@@ -2507,6 +2687,8 @@ fn walk_interned_dynamic_trie(
             debug_assert!(index < end && end <= walk_edges.len());
             if !baseline_coverage
                 .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+                && !candidate_coverage
+                    .is_some_and(|coverage| !coverage.subtree_has_candidate(trie, edge.child))
             {
                 top_ranges.push((index, end));
             }
@@ -2528,6 +2710,7 @@ fn walk_interned_dynamic_trie(
                         vocab,
                         trie,
                         baseline_coverage,
+                        candidate_coverage,
                         require_repair_used,
                         root_branches.clone(),
                         initial_config,
@@ -2564,6 +2747,8 @@ fn walk_interned_dynamic_trie(
         let edge = walk_edges[walk_index];
         if baseline_coverage
             .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+            || candidate_coverage
+                .is_some_and(|coverage| !coverage.subtree_has_candidate(trie, edge.child))
         {
             walk_index = edge.subtree_end as usize;
             continue;
@@ -2648,6 +2833,7 @@ fn fill_mask_dynamic_impl(
     buf: &mut [u32],
     deadline: Option<Instant>,
     additive_static_baseline: bool,
+    candidate_mask: Option<&[u32]>,
 ) -> Result<(), String> {
     let required = state.constraint.mask_len();
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
@@ -2678,8 +2864,11 @@ fn fill_mask_dynamic_impl(
         return Ok(());
     }
 
+    let baseline_snapshot = candidate_mask.map(|_| buf.to_vec());
     let baseline_coverage = additive_static_baseline
         .then(|| DynamicBaselineCoverage::new(vocab, vocab.trie.as_ref(), buf));
+    let candidate_coverage = candidate_mask
+        .map(|candidates| DynamicCandidateCoverage::new(vocab, vocab.trie.as_ref(), candidates));
     if !additive_static_baseline {
         buf.fill(0);
     }
@@ -2768,6 +2957,7 @@ fn fill_mask_dynamic_impl(
                         DYNAMIC_NO_COMPONENT
                     },
                     repair_used: !additive_static_baseline,
+                    pending_terminals: SmallVec::new(),
                     fresh_reset: false,
                 },
             ) {
@@ -2821,6 +3011,7 @@ fn fill_mask_dynamic_impl(
             trie,
             projection,
             baseline_coverage.as_ref(),
+            candidate_coverage.as_ref(),
             additive_static_baseline,
             root_branches,
             initial_config,
@@ -2835,6 +3026,13 @@ fn fill_mask_dynamic_impl(
     }
 
     update_special_token_mask(state, buf);
+    if let (Some(baseline), Some(candidates)) = (baseline_snapshot.as_deref(), candidate_mask) {
+        for (word_index, dst) in buf.iter_mut().enumerate() {
+            let base = baseline.get(word_index).copied().unwrap_or(0);
+            let candidate = candidates.get(word_index).copied().unwrap_or(0);
+            *dst = base | ((*dst & !base) & candidate);
+        }
+    }
     if let Some(cache_key) = cache_key {
         vocab.cache_mask(cache_key, buf);
     }

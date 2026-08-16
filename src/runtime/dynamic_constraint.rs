@@ -369,6 +369,8 @@ impl DynamicConstraint {
         let inner = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
+            scoped_ignore_only_tokens: Vec::new(),
+            scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),

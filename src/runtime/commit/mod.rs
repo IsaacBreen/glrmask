@@ -1,4 +1,4 @@
-use crate::automata::lexer::Lexer;
+﻿use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 mod template_advance;
 pub(crate) use template_advance::advance_stacks_template_dfa;
@@ -18,6 +18,7 @@ use crate::compiler::glr::parser::{
     advance_stacks_profiled,
     advance_stacks_owned,
     advance_stacks_disjoint_top_terminals_bounded,
+    normalize_lookahead_invariant_reductions,
     AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_control_closed,
@@ -145,7 +146,7 @@ impl FlatActionScratch {
 }
 // Keep a bounded reserve large enough for repeated handoffs between persistent
 // GSS states and the allocation-free flat frontier.  One object reserves a
-// 64-entry linear stack, so 256 spares cost about 65–75 KiB per active
+// 64-entry linear stack, so 256 spares cost about 65â€“75 KiB per active
 // constraint state while avoiding allocator cliffs on multi-thousand-token
 // JSON examples. The bound remains fixed; unsupported larger frontiers still
 // fall back to the general persistent-GSS path.
@@ -1143,7 +1144,7 @@ fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStat
 /// parser alternatives.
 ///
 /// For source subset `S` and alternatives `G`, the exact relation is then the
-/// Cartesian product `S × G`, which duplicate entries under one product key
+/// Cartesian product `S Ã— G`, which duplicate entries under one product key
 /// represent without loss. Grouping independently by GSS is insufficient:
 /// distinct source groups can transition to the same product state while
 /// carrying different alternative sets, erasing provenance on the next step.
@@ -1164,7 +1165,7 @@ fn coalesce_uniform_runtime_source_states(
     // Product states are a boundary-only representation. The whole source
     // frontier may therefore collapse exactly when every source key carries
     // the same multiset of existing parser alternatives: the relation is
-    // `S × G`. Keep the representative GSS objects themselves so their
+    // `S Ã— G`. Keep the representative GSS objects themselves so their
     // allocation-free in-place capacities and flat decomposition are retained.
     if old.is_empty() || old.iter().any(|(key, _)| *key < source_offset) {
         state.entries = old;
@@ -1266,6 +1267,7 @@ fn commit_token_impl(
         state.clear();
     }
     merge_special_token_paths(constraint, state, special_paths);
+    maybe_normalize_lookahead_invariant_reductions(constraint, state);
     coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
 }
@@ -4784,6 +4786,7 @@ fn commit_bytes_impl_profiled(
         allow_fast_paths,
     );
     if result.is_ok() {
+        maybe_normalize_lookahead_invariant_reductions(constraint, state);
         coalesce_uniform_runtime_source_states(constraint, state);
     }
     result
@@ -6768,6 +6771,22 @@ fn try_commit_direct_linear_in_place(
         .then_some(Ok(()))
 }
 
+
+#[inline]
+fn maybe_normalize_lookahead_invariant_reductions(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+) {
+    if constraint.static_dynamic_overlay.is_none()
+        || std::env::var_os("GLRMASK_EXPERIMENT_EAGER_INVARIANT_REDUCTIONS").is_none()
+    {
+        return;
+    }
+    for gss in state.values_mut() {
+        *gss = normalize_lookahead_invariant_reductions(&constraint.table, gss);
+    }
+}
+
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -7348,7 +7367,7 @@ fn commit_bytes_impl_inner(
             }
         }
 
-        // Fast path failed — build scan data from already-computed exec_result
+        // Fast path failed â€” build scan data from already-computed exec_result
         bufs.clear_all();
         bufs.exec_results.insert(tokenizer_state, exec_result);
     } else {
@@ -7507,7 +7526,7 @@ impl<'a> ConstraintState<'a> {
     /// `token_id` must either exist in the vocabulary the constraint was built
     /// with or be declared by a special-token terminal in the grammar.
     /// Committing a token that is grammatically invalid (not in the current
-    /// mask) drives the constraint into a fail state — this is normal and
+    /// mask) drives the constraint into a fail state â€” this is normal and
     /// observable via an all-zero mask.
     ///
     /// # Errors
@@ -7876,6 +7895,267 @@ mod tests {
         );
         buffers.reset_all();
         assert!(buffers.admission_cache.is_empty());
+    }
+
+
+    #[test]
+    #[ignore]
+    fn debug_selected10_completed_child_lookahead_actions() {
+        use crate::compiler::glr::analysis::EOF;
+        use crate::compiler::glr::parser::stack_admissible_terminals;
+        use crate::compiler::glr::table::Action;
+        use crate::ds::bitset::BitSet;
+        use std::collections::BTreeMap;
+
+        let path = std::env::var("GLRMASK_DEBUG_ARTIFACT").expect("GLRMASK_DEBUG_ARTIFACT");
+        let bytes = std::fs::read(path).unwrap();
+        let constraint = Constraint::load(&bytes).unwrap();
+        let mut state = constraint.start();
+        state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
+        eprintln!("STACKS {:?}", state.debug_parser_stacks());
+        for (_, gss) in state.state.iter() {
+            let all = BitSet::all(constraint.table.num_terminals as usize + 1);
+            let admitted = stack_admissible_terminals(&constraint.table, gss, &all);
+            let mut factor = gss.clone();
+            let mut blockers = Vec::<u32>::new();
+            for depth in 0..16 {
+                let top = factor.single_exclusive_top_value();
+                let admitted_now =
+                    stack_admissible_terminals(&constraint.table, &factor, &all);
+                eprintln!(
+                    "FACTOR_DEPTH {depth} top={top:?} stack={:?} admitted={:?} blockers={:?}",
+                    factor.to_stacks(64),
+                    admitted_now.iter_ones().collect::<Vec<_>>(),
+                    blockers,
+                );
+                let Some((next, blocked)) =
+                    crate::compiler::glr::parser::lookahead_reduction_factor(
+                        &constraint.table,
+                        &factor,
+                    )
+                else {
+                    break;
+                };
+                for terminal in blocked {
+                    if !blockers.contains(&terminal) {
+                        blockers.push(terminal);
+                    }
+                }
+                factor = next;
+            }
+            for top in gss.peek_values() {
+                let mut kinds = BTreeMap::<String, Vec<u32>>::new();
+                for bit in admitted.iter_ones() {
+                    let terminal = if bit == constraint.table.num_terminals as usize {
+                        EOF
+                    } else {
+                        bit as u32
+                    };
+                    let desc = match constraint.table.action(top, terminal) {
+                        Some(Action::Reduce(nt, len)) => format!("reduce:{nt}:{len}"),
+                        Some(Action::Shift(target, replace)) => format!("shift:{target}:{replace}"),
+                        Some(Action::StackShifts(shifts)) => format!("stackshifts:{}", shifts.len()),
+                        Some(Action::GuardedStackShifts(shifts)) => format!("guarded:{}", shifts.len()),
+                        Some(Action::ReplaceShifts(targets)) => format!("replace:{}", targets.len()),
+                        Some(Action::Split { shift, reduces, accept }) => format!("split:{shift:?}:{reduces:?}:{accept}"),
+                        Some(Action::Accept) => "accept".into(),
+                        Some(Action::Skip) => "skip".into(),
+                        None => "none".into(),
+                    };
+                    kinds.entry(desc).or_default().push(terminal);
+                }
+                eprintln!("TOP {top} ADMITTED {} KINDS {}", admitted.count_ones(), kinds.len());
+                for (kind, terminals) in kinds {
+                    eprintln!("  {kind} count={} sample={:?}", terminals.len(), &terminals[..terminals.len().min(24)]);
+                }
+            }
+        }
+    }
+
+
+    #[test]
+    #[ignore]
+    fn debug_selected10_core_fast_weight_transport() {
+        use crate::compiler::glr::labels::DEFAULT_LABEL;
+        use crate::ds::weight::Weight;
+
+        fn accepted_weight(constraint: &Constraint, labels: &[u32]) -> Weight {
+            let mut state = constraint.parser_dwa.start_state();
+            let mut weight = Weight::all();
+            for &label in labels {
+                let row = &constraint.parser_dwa.states()[state as usize];
+                let Some((target, edge_weight)) = row
+                    .transitions
+                    .get(&(label as i32))
+                    .or_else(|| row.transitions.get(&DEFAULT_LABEL))
+                else {
+                    return Weight::empty();
+                };
+                weight = weight.intersection(edge_weight);
+                state = *target;
+            }
+            let Some(final_weight) = constraint.parser_dwa.states()[state as usize]
+                .final_weight
+                .as_ref()
+            else {
+                return Weight::empty();
+            };
+            weight.intersection(final_weight)
+        }
+
+        fn dump(name: &str, constraint: &Constraint, tokenizer_state: u32, token: u32) {
+            let internal_token = constraint
+                .original_token_to_internal
+                .get(token as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            let tsids = constraint.internal_tsids_for_state(tokenizer_state).to_vec();
+            eprintln!("WEIGHT_TRANSPORT {name} tokenizer_state={tokenizer_state} tsids={tsids:?} token={token} internal_token={internal_token}");
+            for labels in [&[22_u32][..], &[22_u32, 0][..]] {
+                let weight = accepted_weight(constraint, labels);
+                let memberships = tsids
+                    .iter()
+                    .map(|&tsid| (tsid, internal_token != u32::MAX && weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len()))
+                    .collect::<Vec<_>>();
+                eprintln!("WEIGHT_TRANSPORT {name} labels={labels:?} empty={} memberships={memberships:?}", weight.is_empty());
+            }
+            for key in [22_i32, DEFAULT_LABEL] {
+                if let Some(weight) = constraint.parser_top_accept.get(&key) {
+                    let memberships = tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>();
+                    eprintln!("WEIGHT_TRANSPORT {name} top_accept key={key} memberships={memberships:?}");
+                }
+                if let Some(parts) = constraint.parser_top_accept_parts.get(&key) {
+                    for (part, weight) in parts.iter().enumerate() {
+                        let memberships = tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>();
+                        eprintln!("WEIGHT_TRANSPORT {name} top_part key={key} part={part} memberships={memberships:?}");
+                    }
+                }
+            }
+            let mut l1 = Vec::new();
+            constraint.for_each_direct_regular_l1_acceptance(22, |weight| {
+                l1.push(tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>());
+            });
+            eprintln!("WEIGHT_TRANSPORT {name} l1={l1:?}");
+        }
+
+        let core_path = std::env::var("GLRMASK_DEBUG_CORE_ARTIFACT").unwrap();
+        let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
+        let core = Constraint::load(&std::fs::read(core_path).unwrap()).unwrap();
+        let fast = Constraint::load(&std::fs::read(fast_path).unwrap()).unwrap();
+        dump("core", &core, 38, 443);
+        dump("fast", &fast, 39, 443);
+    }
+
+    #[test]
+    #[ignore]
+    fn debug_selected10_boundary_shallow_acceptance() {
+        use crate::compiler::glr::labels::DEFAULT_LABEL;
+        use crate::ds::weight::Weight;
+
+        fn accepted_weight(constraint: &Constraint, labels: &[u32]) -> Weight {
+            let mut state = constraint.parser_dwa.start_state();
+            let mut weight = Weight::all();
+            for &label in labels {
+                let row = &constraint.parser_dwa.states()[state as usize];
+                let Some((target, edge_weight)) = row
+                    .transitions
+                    .get(&(label as i32))
+                    .or_else(|| row.transitions.get(&DEFAULT_LABEL))
+                else { return Weight::empty(); };
+                weight = weight.intersection(edge_weight);
+                state = *target;
+            }
+            let Some(final_weight) = constraint.parser_dwa.states()[state as usize].final_weight.as_ref()
+            else { return Weight::empty(); };
+            weight.intersection(final_weight)
+        }
+
+        fn contains(constraint: &Constraint, tokenizer_state: u32, token: u32, weight: &Weight) -> bool {
+            let internal = constraint.original_token_to_internal[token as usize];
+            constraint.internal_tsids_for_state(tokenizer_state)
+                .iter()
+                .any(|&tsid| weight.tokens_for_tsid(tsid).contains(internal))
+        }
+
+        fn dump_case(constraint: &Constraint, name: &str, tokenizer_state: u32, stack: &[u32], tokens: &[u32]) {
+            let reversed = stack.iter().rev().copied().collect::<Vec<_>>();
+            eprintln!("SHALLOW {name} tokenizer_state={tokenizer_state} stack={stack:?} tsids={:?}", constraint.internal_tsids_for_state(tokenizer_state));
+            let start_final = constraint.parser_dwa.states()[constraint.parser_dwa.start_state() as usize]
+                .final_weight.clone().unwrap_or_else(Weight::empty);
+            for &token in tokens {
+                let mut first = contains(constraint, tokenizer_state, token, &start_final).then_some(0usize);
+                for depth in 1..=reversed.len() {
+                    let w = accepted_weight(constraint, &reversed[..depth]);
+                    if contains(constraint, tokenizer_state, token, &w) {
+                        first = Some(depth);
+                        break;
+                    }
+                }
+                eprintln!("SHALLOW {name} token={token} first_depth={first:?}");
+            }
+        }
+
+        let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
+        let full = Constraint::load(&std::fs::read(full_path).unwrap()).unwrap();
+        dump_case(&full, "tools_reset_a", 0, &[0,22,198,18], &[739,2446,7255,21966]);
+        dump_case(&full, "tools_reset_b", 0, &[0,22,198,167], &[739,2446,7255,21966]);
+        dump_case(&full, "tools_residual", 444, &[0,22,198], &[739,2446,7255,21966]);
+        dump_case(&full, "tool0", 0, &[0,22,198,193,862], &[49209,69906]);
+        dump_case(&full, "inside", 0, &[0,22,198,193,873,903], &[3033,3602,4649,9000,14419,16638,17041,29448,31893,32988,35183,36199,39942,44160,53511,71741,79237,82274,95445]);
+        dump_case(&full, "await_tools", 0, &[0,22,198,109,193], &[3324,32809]);
+    }
+
+    #[test]
+    #[ignore]
+    fn debug_selected10_iterated_mask_factor() {
+        use std::time::Instant;
+
+        let fast_path = std::env::var("GLRMASK_DEBUG_ARTIFACT").unwrap();
+        let full_path = std::env::var("GLRMASK_DEBUG_FULL_ARTIFACT").unwrap();
+        let fast = Constraint::load(&std::fs::read(fast_path).unwrap()).unwrap();
+        let full = Constraint::load(&std::fs::read(full_path).unwrap()).unwrap();
+        unsafe {
+            std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR", "1");
+            std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", "2");
+            std::env::set_var("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY", "1");
+            std::env::remove_var("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY");
+            std::env::remove_var("GLRMASK_EXPERIMENT_LAZY_REPAIR_PARSER");
+        }
+        let prefixes: &[&[u8]] = &[
+            b"",
+            b"const x",
+            b"const x =",
+            b"const x = tools",
+            b"const x = tools.tool_0",
+            b"const x = tools.tool_0({",
+            b"const x = tools.tool_0({})",
+            b"const x = tools.tool_0({});",
+            b"const r = await tools.",
+        ];
+        for &prefix in prefixes {
+            let mut fs = full.start();
+            let mut hs = fast.start();
+            if !prefix.is_empty() {
+                fs.commit_bytes(prefix).unwrap();
+                hs.commit_bytes(prefix).unwrap();
+            }
+            let fm = fs.mask();
+            let started = Instant::now();
+            let hm = hs.mask();
+            let elapsed = started.elapsed().as_micros();
+            let mut extra = 0usize;
+            let mut missing = 0usize;
+            for (&left, &right) in hm.iter().zip(&fm) {
+                extra += (left & !right).count_ones() as usize;
+                missing += (right & !left).count_ones() as usize;
+            }
+            eprintln!(
+                "IGNORE_PM prefix={:?} us={} extra={} missing={}",
+                String::from_utf8_lossy(prefix), elapsed, extra, missing
+            );
+        }
+        std::mem::forget(fast);
+        std::mem::forget(full);
     }
 
     #[test]
@@ -8998,3 +9278,5 @@ nt start ::= item item? item?;
         assert_eq!(profile.n_advances, 1, "profile={profile:?}");
     }
 }
+
+

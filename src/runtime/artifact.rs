@@ -1813,6 +1813,12 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// transported component parser artifacts (including scoped-ignore repair
     /// and conservative unsafe terminals).
     pub(crate) repair_terminals: Vec<bool>,
+    /// Composed LR states which belong to one or more child components but not
+    /// to the parent component. Runtime lookahead-return factoring is useful
+    /// only while the concrete top state is still inside such a child-owned
+    /// region; ordinary parent reductions must not pay for that machinery.
+    #[serde(default)]
+    pub(crate) non_parent_only_parser_states: Vec<bool>,
 }
 
 /// Fully compiled, immutable grammar constraint.
@@ -1825,6 +1831,22 @@ pub struct Constraint {
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(default)]
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    /// Runtime-derived exact original-token sets for `Skip` terminals in a
+    /// composed grammar. Each token is wholly in `L(skip)+`: it can be
+    /// consumed as one or more complete instances of that scoped-ignore
+    /// terminal with a lexer reset between instances. This is deliberately
+    /// not serialized; it is cheap to rebuild from the retained terminal
+    /// expression and vocabulary and therefore does not change artifact wire
+    /// compatibility.
+    #[serde(skip, default)]
+    pub(crate) scoped_ignore_only_tokens: Vec<(TerminalID, Box<[u32]>)>,
+    /// Exact byte-token fusions `(fused, suffix)` grouped by scoped Skip. The
+    /// fused token begins with one or more complete instances of the Skip
+    /// language and the remaining bytes equal `suffix` exactly. If `suffix`
+    /// is admitted by the ordinary static mask, `fused` is therefore admitted
+    /// as well. Runtime-only for the same wire-compatibility reason as above.
+    #[serde(skip, default)]
+    pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
     pub(crate) parser_dwa: DWA,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
