@@ -2123,15 +2123,71 @@ fn build_parser_dwa_for_terminal_family(
 ) -> Option<MappedArtifact<DWA>> {
     let family = family?;
     let internal_ids = family.id_map().clone();
+
+    let mut minimized_terminal_family = None::<TerminalAutomaton>;
+    if family_name == "l2p" && cfg!(target_os = "windows") {
+        let stats = family.artifact().stats();
+        // On Windows, a moderately sized and sparse merged L2P family can be
+        // much cheaper to minimize once here than to carry through the parser
+        // product.  Dense families pay too much in the determinization step,
+        // while small parser tables do not have enough downstream work to
+        // amortize it.  Keep the gate deliberately narrow.
+        let should_preminimize = stats.states >= 45
+            && stats.states <= 69
+            && stats.transitions >= 1200
+            && stats.transitions <= stats.states.saturating_mul(32)
+            && table.num_states >= 2000;
+        if should_preminimize {
+            let started = Instant::now();
+            let determinize_started = Instant::now();
+            let determinized = match family.artifact() {
+                TerminalAutomaton::Dwa(dwa) => dwa.clone(),
+                TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+                    crate::automata::weighted_u32::determinize::determinize(nwa)
+                        .expect("L2P token-deterministic NWA must determinize")
+                }
+                TerminalAutomaton::EpsilonNwa(nwa) => {
+                    crate::automata::weighted_u32::determinize::determinize(nwa)
+                        .expect("L2P epsilon NWA must determinize")
+                }
+            };
+            let determinize_ms = determinize_started.elapsed().as_secs_f64() * 1000.0;
+            let det_stats = determinized.stats();
+            let minimize_started = Instant::now();
+            let minimized = crate::automata::weighted_u32::minimize_acyclic::minimize_acyclic_owned_with_pointwise_class_order(
+                determinized,
+                crate::automata::weighted_u32::minimize_acyclic::PointwiseClassOrder::DescendingDomain,
+            );
+            let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_premin] input_states={} input_transitions={} det_states={} det_transitions={} min_states={} min_transitions={} determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+                    stats.states,
+                    stats.transitions,
+                    det_stats.states,
+                    det_stats.transitions,
+                    minimized.num_states(),
+                    minimized.num_transitions(),
+                    determinize_ms,
+                    minimize_ms,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            minimized_terminal_family = Some(TerminalAutomaton::Dwa(minimized));
+        }
+    }
+    let family_automaton = minimized_terminal_family
+        .as_ref()
+        .unwrap_or_else(|| family.artifact());
     let (parser_dwa, immediate_fast_path) =
-        if let Some(parser_dwa) = try_build_immediate_parser_dwa(family.artifact(), grammar, table) {
+        if let Some(parser_dwa) = try_build_immediate_parser_dwa(family_automaton, grammar, table) {
             (parser_dwa, true)
         } else {
             (
                 build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
                     table,
                     grammar,
-                    family.artifact(),
+                    family_automaton,
                     templates,
                     vocab,
                     &internal_ids,
