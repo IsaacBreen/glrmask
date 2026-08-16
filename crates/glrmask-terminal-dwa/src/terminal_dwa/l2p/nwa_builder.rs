@@ -1569,6 +1569,42 @@ fn merge_root_fragment_buffers(
     }
 }
 
+const ROOT_TRIE_FULL_PARALLEL_MIN_TOKENS: u128 = 512;
+const ROOT_TRIE_MODERATE_PARALLEL_MIN_TOKENS: u128 = 160;
+const ROOT_TRIE_MODERATE_PARALLEL_MIN_WORK: u128 = 250_000;
+const ROOT_TRIE_MODERATE_PARALLEL_MAX_TASKS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootTrieAutoParallelism {
+    None,
+    Moderate { task_count: usize },
+    Full { task_count: usize },
+}
+
+fn root_trie_auto_parallelism(
+    reachable_token_count: u128,
+    tokenizer_state_count: usize,
+    worker_count: usize,
+) -> RootTrieAutoParallelism {
+    if worker_count <= 1 {
+        return RootTrieAutoParallelism::None;
+    }
+    if reachable_token_count >= ROOT_TRIE_FULL_PARALLEL_MIN_TOKENS {
+        return RootTrieAutoParallelism::Full {
+            task_count: worker_count,
+        };
+    }
+    let estimated_work = reachable_token_count.saturating_mul(tokenizer_state_count as u128);
+    if reachable_token_count >= ROOT_TRIE_MODERATE_PARALLEL_MIN_TOKENS
+        && estimated_work >= ROOT_TRIE_MODERATE_PARALLEL_MIN_WORK
+    {
+        return RootTrieAutoParallelism::Moderate {
+            task_count: worker_count.min(ROOT_TRIE_MODERATE_PARALLEL_MAX_TASKS),
+        };
+    }
+    RootTrieAutoParallelism::None
+}
+
 pub fn build_nwa_via_trie_walk<'a>(
     tokenizer: &'a Tokenizer,
     terminal_coloring: &TerminalColoring,
@@ -1594,11 +1630,15 @@ pub fn build_nwa_via_trie_walk<'a>(
         std::env::var_os("GLRMASK_L2P_PARALLEL_ROOT_TRIE").is_some();
     let parallel_root_trie_disabled =
         std::env::var_os("GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE").is_some();
+    let worker_count = rayon::current_num_threads();
+    let reachable_token_count = vocab_tree_root.reachable_token_ids().len();
+    let auto_parallelism =
+        root_trie_auto_parallelism(reachable_token_count, num_tokenizer_states, worker_count);
     let parallel_root_trie = !parallel_root_trie_disabled
         && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
         && vocab_tree_root.children().len() >= 2
-        && rayon::current_num_threads() > 1
-        && (parallel_root_trie_forced || vocab_tree_root.reachable_token_ids().len() >= 512);
+        && worker_count > 1
+        && (parallel_root_trie_forced || auto_parallelism != RootTrieAutoParallelism::None);
 
     if parallel_root_trie {
         let base_nwa = nwa.clone();
@@ -1612,7 +1652,17 @@ pub fn build_nwa_via_trie_walk<'a>(
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|&value| value > 0)
-            .unwrap_or_else(rayon::current_num_threads)
+            .unwrap_or_else(|| {
+                if parallel_root_trie_forced {
+                    worker_count
+                } else {
+                    match auto_parallelism {
+                        RootTrieAutoParallelism::None => worker_count,
+                        RootTrieAutoParallelism::Moderate { task_count }
+                        | RootTrieAutoParallelism::Full { task_count } => task_count,
+                    }
+                }
+            })
             .min(children.len())
             .max(1);
         let mut bins = (0..task_count).map(|_| Vec::new()).collect::<Vec<_>>();
@@ -1773,6 +1823,58 @@ mod tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_dwa_equivalence::compare as compare_terminal_dwa;
     use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+
+    #[test]
+    fn root_trie_auto_parallelism_keeps_tiny_work_serial() {
+        assert_eq!(
+            root_trie_auto_parallelism(8, 286, 8),
+            RootTrieAutoParallelism::None
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(32, 2_839, 8),
+            RootTrieAutoParallelism::None
+        );
+    }
+
+    #[test]
+    fn root_trie_auto_parallelism_uses_four_tasks_for_measured_moderate_work() {
+        assert_eq!(
+            root_trie_auto_parallelism(176, 1_685, 8),
+            RootTrieAutoParallelism::Moderate { task_count: 4 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(160, 2_839, 8),
+            RootTrieAutoParallelism::Moderate { task_count: 4 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(323, 2_839, 8),
+            RootTrieAutoParallelism::Moderate { task_count: 4 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(139, 2_839, 8),
+            RootTrieAutoParallelism::None
+        );
+    }
+
+    #[test]
+    fn root_trie_auto_parallelism_preserves_full_parallelism_for_large_tries() {
+        assert_eq!(
+            root_trie_auto_parallelism(512, 100, 8),
+            RootTrieAutoParallelism::Full { task_count: 8 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(512, 100, 3),
+            RootTrieAutoParallelism::Full { task_count: 3 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(323, 2_839, 3),
+            RootTrieAutoParallelism::Moderate { task_count: 3 }
+        );
+        assert_eq!(
+            root_trie_auto_parallelism(512, 100, 1),
+            RootTrieAutoParallelism::None
+        );
+    }
 
     fn one_terminal_tokenizer() -> Tokenizer {
         let expressions = vec![Expr::U8Seq(b" ".to_vec())];
