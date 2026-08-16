@@ -553,11 +553,16 @@ fn determinize_impl_with_options(
     group_transition_weights: bool,
     profile: bool,
 ) -> Result<DWA, GlrMaskError> {
+    let impl_total_started_at = profile.then(Instant::now);
+    let acyclic_started_at = profile.then(Instant::now);
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
             "weighted determinization currently supports only acyclic NWAs".into(),
         ));
     }
+    let acyclic_ms = acyclic_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     let weight_group_build_started_at = profile.then(Instant::now);
     let weight_grouped_transitions = group_transition_weights.then(|| build_weight_grouped_transitions(nwa));
@@ -600,10 +605,21 @@ fn determinize_impl_with_options(
                 if contribution.is_empty() {
                     continue;
                 }
-                let existing = closure.get(dst).cloned().unwrap_or_else(Weight::empty);
-                if !contribution.is_subset(&existing) {
-                    closure.insert(*dst, existing.union(&contribution));
-                    queue.push_back(*dst);
+                match closure.entry(*dst) {
+                    std::collections::hash_map::Entry::Vacant(vacant) => {
+                        // First contribution to this epsilon-closure state is
+                        // already exact. Avoid rebuilding a potentially wide
+                        // Weight as empty ∪ contribution.
+                        vacant.insert(contribution);
+                        queue.push_back(*dst);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                        if !contribution.is_subset(occupied.get()) {
+                            let updated = occupied.get().union(&contribution);
+                            occupied.insert(updated);
+                            queue.push_back(*dst);
+                        }
+                    }
                 }
             }
         }
@@ -614,7 +630,11 @@ fn determinize_impl_with_options(
     let mut dwa = DWA::new(0, 0);
     let start_id = dwa.start_state();
 
+    let start_closure_started_at = profile.then(Instant::now);
     let start_subset = epsilon_closure(nwa, seed_start_subset(nwa));
+    let start_closure_ms = start_closure_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     if start_subset.is_empty() {
         return Ok(dwa);
@@ -625,8 +645,16 @@ fn determinize_impl_with_options(
     // `subset_map`, which retains structural equality as the source of truth.
     let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
     let mut worklist: VecDeque<(u32, Arc<[(u32, Weight)]>)> = VecDeque::new();
+    let start_canonicalize_started_at = profile.then(Instant::now);
     let start_entries: Arc<[(u32, Weight)]> = canonicalize(&start_subset).into();
+    let start_canonicalize_ms = start_canonicalize_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let start_insert_started_at = profile.then(Instant::now);
     subset_map.insert(Arc::clone(&start_entries), start_id);
+    let start_insert_ms = start_insert_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     worklist.push_back((start_id, start_entries));
 
     // Almost every label has one surviving destination. Keep that common
@@ -661,7 +689,13 @@ fn determinize_impl_with_options(
     let mut profile_normalize_ms = 0.0;
     let mut profile_canonicalize_ms = 0.0;
     let mut profile_subset_lookup_ms = 0.0;
+    let mut profile_direct_point_check_ms = 0.0;
+    let mut profile_direct_point_aggregate_ms = 0.0;
+    let mut profile_direct_sort_ms = 0.0;
+    let mut profile_direct_duplicate_union_ms = 0.0;
+    let mut profile_direct_edge_union_ms = 0.0;
 
+    let main_loop_started_at = profile.then(Instant::now);
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
         if profile {
             profile_subset_entries += subset_entries.len();
@@ -850,11 +884,19 @@ fn determinize_impl_with_options(
                     continue;
                 }
 
+                let direct_point_check_started_at = profile.then(Instant::now);
                 let direct_point_entries = target_contributions
                     .iter()
                     .all(|(_, weight)| weight.single_tsid_shared_entry().is_some());
+                if let Some(started_at) = direct_point_check_started_at {
+                    profile_direct_point_check_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 if direct_point_entries {
+                    let direct_point_aggregate_started_at = profile.then(Instant::now);
                     let (next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
+                    if let Some(started_at) = direct_point_aggregate_started_at {
+                        profile_direct_point_aggregate_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                    }
                     debug_assert!(!edge_weight.is_empty());
                     let subset_lookup_started_at = profile.then(Instant::now);
                     let to_state = intern_determinized_subset(
@@ -874,20 +916,42 @@ fn determinize_impl_with_options(
                 if profile {
                     profile_direct_multi_target_labels += 1;
                 }
+                let direct_sort_started_at = profile.then(Instant::now);
                 let mut sorted_targets = target_contributions;
                 sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
+                if let Some(started_at) = direct_sort_started_at {
+                    profile_direct_sort_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 let mut next_key: Vec<(u32, Weight)> =
                     Vec::with_capacity(sorted_targets.len());
-                for (dst, weight) in sorted_targets {
-                    if let Some((last_dst, last_weight)) = next_key.last_mut() {
-                        if *last_dst == dst {
-                            *last_weight = last_weight.union(&weight);
-                            continue;
-                        }
+                let direct_duplicate_union_started_at = profile.then(Instant::now);
+                let mut run_start = 0usize;
+                while run_start < sorted_targets.len() {
+                    let dst = sorted_targets[run_start].0;
+                    let mut run_end = run_start + 1;
+                    while run_end < sorted_targets.len() && sorted_targets[run_end].0 == dst {
+                        run_end += 1;
                     }
-                    next_key.push((dst, weight));
+                    let merged = if run_end == run_start + 1 {
+                        sorted_targets[run_start].1.clone()
+                    } else {
+                        Weight::union_all(
+                            sorted_targets[run_start..run_end]
+                                .iter()
+                                .map(|(_, weight)| weight),
+                        )
+                    };
+                    next_key.push((dst, merged));
+                    run_start = run_end;
                 }
+                if let Some(started_at) = direct_duplicate_union_started_at {
+                    profile_direct_duplicate_union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                let direct_edge_union_started_at = profile.then(Instant::now);
                 let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                if let Some(started_at) = direct_edge_union_started_at {
+                    profile_direct_edge_union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 debug_assert!(!edge_weight.is_empty());
 
                 let subset_lookup_started_at = profile.then(Instant::now);
@@ -1011,6 +1075,9 @@ fn determinize_impl_with_options(
         }
     }
 
+    let main_loop_ms = main_loop_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     if profile {
         eprintln!(
             "[glrmask/profile][determinize_scoped_weight_cache] intersections={}",
@@ -1149,7 +1216,16 @@ fn determinize_impl_with_options(
         );
 
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} weight_grouped_transitions={} weight_group_build_ms={:.3} weight_group_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} direct_singleton_cache_hits={} direct_singleton_cache_misses={} direct_singleton_fast_path_groups={} direct_singleton_fast_path_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
+            "[glrmask/profile][determinize_direct_multi] point_check_ms={:.3} point_aggregate_ms={:.3} sort_ms={:.3} duplicate_union_ms={:.3} edge_union_ms={:.3}",
+            profile_direct_point_check_ms,
+            profile_direct_point_aggregate_ms,
+            profile_direct_sort_ms,
+            profile_direct_duplicate_union_ms,
+            profile_direct_edge_union_ms,
+        );
+
+        eprintln!(
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} weight_grouped_transitions={} weight_group_build_ms={:.3} start_closure_ms={:.3} start_canonicalize_ms={:.3} start_insert_ms={:.3} weight_group_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} direct_singleton_cache_hits={} direct_singleton_cache_misses={} direct_singleton_fast_path_groups={} direct_singleton_fast_path_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
@@ -1159,6 +1235,9 @@ fn determinize_impl_with_options(
             profile_raw_transition_visits,
             group_transition_weights,
             weight_group_build_ms,
+            start_closure_ms,
+            start_canonicalize_ms,
+            start_insert_ms,
             profile_weight_group_visits,
             profile_labels,
             profile_target_contributions,
@@ -1192,6 +1271,12 @@ fn determinize_impl_with_options(
         );
     }
 
+    if let Some(impl_total_started_at) = impl_total_started_at {
+        eprintln!(
+            "[glrmask/profile][determinize_wall] acyclic_ms={acyclic_ms:.3} weight_group_build_ms={weight_group_build_ms:.3} start_closure_ms={start_closure_ms:.3} start_canonicalize_ms={start_canonicalize_ms:.3} start_insert_ms={start_insert_ms:.3} main_loop_ms={main_loop_ms:.3} final_weights_ms={final_weights_ms:.3} total_ms={:.3}",
+            impl_total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Ok(dwa)
 }
 

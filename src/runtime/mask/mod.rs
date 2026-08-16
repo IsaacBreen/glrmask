@@ -4338,6 +4338,9 @@ impl<'a> ConstraintState<'a> {
                 self.store_mask_cache_reuse_dense(mask);
             }
         }
+        if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
+            super::dynamic_mask::or_mask_dynamic_additions(self, mask);
+        }
         assert_dynamic_mask_equivalence(self, mask);
     }
 

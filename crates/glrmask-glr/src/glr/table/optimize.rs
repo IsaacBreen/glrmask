@@ -1680,6 +1680,26 @@ impl GLRTable {
             }
             plan.generated_guard_states.sort_unstable();
             plan.generated_guard_states.dedup();
+
+            // State 0 is the table's distinguished subgrammar entry state. A
+            // later composition overlays that row onto each caller instead of
+            // copying state 0 as an ordinary child state. Therefore an
+            // internal macro action that observes state 0 in a stack guard is
+            // exact for this standalone table but is not representable by the
+            // current subgrammar-splice ABI without expanding the observation
+            // to caller states (and preserving caller correlation). Keep the
+            // structural quotient closed under further composition by simply
+            // rejecting such an optimization. This can only leave states
+            // unmerged; it cannot change the accepted language.
+            if plan.generated_guard_states.binary_search(&0).is_ok() {
+                if debug_context_share {
+                    eprintln!(
+                        "[glrmask/debug][context_state_share] reject=compositional_start_guard group={group:?}",
+                    );
+                }
+                continue;
+            }
+
             plan.action_row = action_row;
             viable.push(plan);
         }
@@ -2018,6 +2038,7 @@ impl GLRTable {
         self.forwarded_shifts.clear();
         self.admission_policy = AdmissionPolicy::RowPresenceExact;
         self.rebuild_advance_rows_from_actions();
+        self.rebuild_unconditional_advance_rows();
         self.rebuild_guarded_shift_index();
 
         if profile_control {

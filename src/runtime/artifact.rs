@@ -622,7 +622,7 @@ impl DynamicMaskTrie {
     }
 
     #[inline]
-    fn all_subtree_tokens(&self) -> &[u32] {
+    pub(crate) fn all_subtree_tokens(&self) -> &[u32] {
         &self.subtree_tokens
     }
 
@@ -1802,6 +1802,19 @@ pub(crate) enum ConstraintRuntimeBackend {
     Dynamic,
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StaticDynamicOverlayMetadata {
+    /// Global terminal-id offsets for the transported composition components.
+    pub(crate) terminal_offsets: Vec<u32>,
+    /// Global raw-tokenizer-state offsets for those same components. State zero
+    /// is the merged reset dispatcher and deliberately belongs to no component.
+    pub(crate) tokenizer_state_offsets: Vec<u32>,
+    /// Terminals whose composed parser template has behavior absent from the
+    /// transported component parser artifacts (including scoped-ignore repair
+    /// and conservative unsafe terminals).
+    pub(crate) repair_terminals: Vec<bool>,
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
@@ -1810,6 +1823,8 @@ pub(crate) enum ConstraintRuntimeBackend {
 pub struct Constraint {
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
+    #[serde(default)]
+    pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     pub(crate) parser_dwa: DWA,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the

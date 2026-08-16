@@ -117,6 +117,7 @@ pub struct ScopedWeightOpCache {
     union_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
     intersection_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
     difference_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
+    bulk_token_union_entries: FxHashMap<Vec<usize>, SharedTokenSet>,
 }
 
 impl ScopedWeightOpCache {
@@ -188,8 +189,18 @@ impl ScopedWeightOpCache {
         value
     }
 
+    pub fn union_entry_count(&self) -> usize {
+        self.union_entries.len()
+    }
+
     pub fn intersection_entry_count(&self) -> usize {
         self.intersection_entries.len()
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn bulk_token_union_entry_count(&self) -> usize {
+        self.bulk_token_union_entries.len()
     }
 
     pub fn difference(&mut self, left: &Weight, right: &Weight) -> Weight {
@@ -282,7 +293,10 @@ impl ScopedWeightOpCache {
                 } else if let Some(result) = union_all_single_tsid_entries(&meaningful) {
                     result
                 } else if meaningful.len() > 4 {
-                    union_all_multiway(&meaningful)
+                    union_all_multiway_with_token_cache(
+                        &meaningful,
+                        &mut self.bulk_token_union_entries,
+                    )
                 } else {
                     let mut iter = meaningful.into_iter();
                     let mut acc = iter.next().unwrap().clone();
@@ -1634,6 +1648,26 @@ fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
 /// boundary, which is quadratic for long overlapping ranges.  The event sweep
 /// maintains the active distinct token sets incrementally instead.
 fn union_all_multiway_impl(weights: &[&Weight], coalesce_repeated_token_ranges: bool) -> Weight {
+    let mut token_union_cache = FxHashMap::default();
+    union_all_multiway_impl_with_token_cache(
+        weights,
+        coalesce_repeated_token_ranges,
+        &mut token_union_cache,
+    )
+}
+
+fn union_all_multiway_with_token_cache(
+    weights: &[&Weight],
+    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+) -> Weight {
+    union_all_multiway_impl_with_token_cache(weights, false, token_union_cache)
+}
+
+fn union_all_multiway_impl_with_token_cache(
+    weights: &[&Weight],
+    coalesce_repeated_token_ranges: bool,
+    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+) -> Weight {
     let total_entry_hint: usize = weights.iter().map(|w| w.0.range_values_len()).sum();
     let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
     for weight in weights {
@@ -1674,9 +1708,9 @@ fn union_all_multiway_impl(weights: &[&Weight], coalesce_repeated_token_ranges: 
     // overlapping unions.
     const INCREMENTAL_SWEEP_MIN_ENTRIES: usize = 64;
     if all_entries.len() < INCREMENTAL_SWEEP_MIN_ENTRIES {
-        return union_all_multiway_rescan(all_entries);
+        return union_all_multiway_rescan_with_cache(all_entries, token_union_cache);
     }
-    union_all_multiway_incremental(all_entries)
+    union_all_multiway_incremental_with_cache(all_entries, token_union_cache)
 }
 
 fn union_all_multiway(weights: &[&Weight]) -> Weight {
@@ -1684,6 +1718,14 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
 }
 
 fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
+    let mut token_union_cache = FxHashMap::default();
+    union_all_multiway_rescan_with_cache(all_entries, &mut token_union_cache)
+}
+
+fn union_all_multiway_rescan_with_cache(
+    all_entries: Vec<WeightRangeEntry>,
+    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+) -> Weight {
     let mut boundaries = Vec::with_capacity(all_entries.len() * 2);
     for entry in &all_entries {
         boundaries.push(u64::from(entry.start));
@@ -1699,7 +1741,6 @@ fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
     let mut builder = CompactRangeBuilder::new();
     let mut scan_start = 0usize;
     let mut active_tokens = Vec::<SharedTokenSet>::new();
-    let mut token_union_cache: FxHashMap<Vec<usize>, SharedTokenSet> = FxHashMap::default();
 
     for window in boundaries.windows(2) {
         let interval_start = window[0] as u32;
@@ -1722,7 +1763,7 @@ fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
         active_tokens.sort_unstable_by_key(|tokens| Arc::as_ptr(tokens) as usize);
         active_tokens.dedup_by_key(|tokens| Arc::as_ptr(tokens) as usize);
 
-        let tokens = union_active_token_sets(&active_tokens, &mut token_union_cache);
+        let tokens = union_active_token_sets(&active_tokens, token_union_cache);
         if let Some(tokens) = tokens {
             builder.push(interval_start, interval_end, tokens);
         } else {
@@ -1734,6 +1775,14 @@ fn union_all_multiway_rescan(all_entries: Vec<WeightRangeEntry>) -> Weight {
 }
 
 fn union_all_multiway_incremental(all_entries: Vec<WeightRangeEntry>) -> Weight {
+    let mut token_union_cache = FxHashMap::default();
+    union_all_multiway_incremental_with_cache(all_entries, &mut token_union_cache)
+}
+
+fn union_all_multiway_incremental_with_cache(
+    all_entries: Vec<WeightRangeEntry>,
+    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+) -> Weight {
     // Entries are already sorted by start in `union_all_multiway_impl`.
     // End events are exclusive so entries ending at `boundary - 1` leave the
     // active set before entries beginning at `boundary` enter it.
@@ -1746,7 +1795,6 @@ fn union_all_multiway_incremental(all_entries: Vec<WeightRangeEntry>) -> Weight 
     let mut builder = CompactRangeBuilder::new();
     let mut active: BTreeMap<usize, (SharedTokenSet, usize)> = BTreeMap::new();
     let mut active_tokens = Vec::<SharedTokenSet>::new();
-    let mut token_union_cache: FxHashMap<Vec<usize>, SharedTokenSet> = FxHashMap::default();
     let mut start_index = 0usize;
     let mut end_index = 0usize;
 
@@ -1811,7 +1859,7 @@ fn union_all_multiway_incremental(all_entries: Vec<WeightRangeEntry>) -> Weight 
 
         active_tokens.clear();
         active_tokens.extend(active.values().map(|(tokens, _)| Arc::clone(tokens)));
-        let tokens = union_active_token_sets(&active_tokens, &mut token_union_cache)
+        let tokens = union_active_token_sets(&active_tokens, token_union_cache)
             .expect("non-empty active set has a token union");
         builder.push(boundary as u32, (next_boundary - 1) as u32, tokens);
     }
@@ -2017,6 +2065,78 @@ where
     }
 
     builder.finish()
+}
+
+
+fn difference_weights(left: &Weight, right: &Weight) -> Weight {
+    let mut right_iter = right.0.range_values();
+    let mut right_entry = right_iter.next();
+    let mut builder = CompactRangeBuilder::new();
+    let mut same_as_left = true;
+
+    for (left_range, left_tokens) in left.0.range_values() {
+        let left_start = *left_range.start();
+        let left_end = *left_range.end();
+        let mut cursor = u64::from(left_start);
+        let left_end_u64 = u64::from(left_end);
+
+        while let Some((right_range, _)) = right_entry.as_ref() {
+            if *right_range.end() < left_start {
+                right_entry = right_iter.next();
+            } else {
+                break;
+            }
+        }
+
+        while cursor <= left_end_u64 {
+            let Some((right_range, right_tokens)) = right_entry.as_ref() else {
+                builder.push(cursor as u32, left_end, Arc::clone(left_tokens));
+                break;
+            };
+            let right_start = u64::from(*right_range.start());
+            let right_end = u64::from(*right_range.end());
+
+            if right_start > left_end_u64 {
+                builder.push(cursor as u32, left_end, Arc::clone(left_tokens));
+                break;
+            }
+            if right_end < cursor {
+                right_entry = right_iter.next();
+                continue;
+            }
+
+            if cursor < right_start {
+                let gap_end = (right_start - 1).min(left_end_u64);
+                builder.push(cursor as u32, gap_end as u32, Arc::clone(left_tokens));
+                cursor = gap_end + 1;
+                if cursor > left_end_u64 {
+                    break;
+                }
+            }
+
+            let overlap_end = left_end_u64.min(right_end);
+            if let Some(tokens) = shared_token_difference(left_tokens, right_tokens) {
+                if !same_shared_token_set(&tokens, left_tokens) {
+                    same_as_left = false;
+                }
+                builder.push(cursor as u32, overlap_end as u32, tokens);
+            } else {
+                same_as_left = false;
+                builder.flush();
+            }
+            cursor = overlap_end + 1;
+
+            if right_end <= overlap_end {
+                right_entry = right_iter.next();
+            }
+        }
+    }
+
+    if same_as_left {
+        left.clone()
+    } else {
+        builder.finish()
+    }
 }
 
 fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
@@ -2961,7 +3081,7 @@ impl Weight {
     }
 
     fn difference_uncached(&self, other: &Self) -> Self {
-        combine_compact_entries(self, other, difference_token_sets)
+        difference_weights(self, other)
     }
 
     pub fn complement(&self) -> Self {
@@ -3420,6 +3540,30 @@ mod tests {
     }
 
     #[test]
+    fn scoped_bulk_union_cache_matches_plain_multiway_across_repeated_calls() {
+        let weights = (0u32..8)
+            .map(|index| {
+                Weight::from_per_tsid_token_sets([
+                    (index % 3, RangeSetBlaze::from_iter([index..=index + 5])),
+                    ((index + 1) % 3, RangeSetBlaze::from_iter([20 + index..=24 + index])),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let refs = weights.iter().collect::<Vec<_>>();
+        let expected = Weight::union_all(refs.iter().copied());
+
+        let mut cache = ScopedWeightOpCache::default();
+        let first = cache.union_all(refs.iter().copied());
+        let entries_after_first = cache.bulk_token_union_entry_count();
+        let second = cache.union_all(refs.iter().copied());
+
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
+        assert!(entries_after_first > 0);
+        assert_eq!(cache.bulk_token_union_entry_count(), entries_after_first);
+    }
+
+    #[test]
     fn sorted_point_entry_union_matches_sequential_weight_union() {
         let first = shared_rangeset(rangeset_from_ranges([1..=3]));
         let second = shared_rangeset(rangeset_from_ranges([3..=5]));
@@ -3698,6 +3842,34 @@ mod tests {
         let actual =
             base.with_sparse_tsid_range_overrides_intersection(&range_overrides, &domain);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn streaming_difference_matches_boundary_reference_exhaustively() {
+        let weights = (0u32..64)
+            .map(|code| {
+                Weight::from_per_tsid_token_sets((0u32..3).filter_map(|tsid| {
+                    let token_bits = (code >> (tsid * 2)) & 0b11;
+                    (token_bits != 0).then(|| {
+                        let tokens = (0u32..2)
+                            .filter(|token| token_bits & (1 << token) != 0)
+                            .collect::<RangeSetBlaze<_>>();
+                        (tsid, tokens)
+                    })
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        for left in &weights {
+            for right in &weights {
+                let streaming = difference_weights(left, right);
+                let reference = combine_compact_entries(left, right, difference_token_sets);
+                assert_eq!(
+                    streaming, reference,
+                    "streaming difference differs for left={left} right={right}",
+                );
+            }
+        }
     }
 
     #[test]

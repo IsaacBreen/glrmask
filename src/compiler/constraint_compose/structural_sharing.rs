@@ -942,7 +942,12 @@ fn structural_state_classes(
     // colouring states with exact membership in every guard set before any
     // refinement, every final guard set is a union of quotient classes.
     let guard_memberships = guarded_state_memberships(table);
+    // Parser state 0 is not merely another language-equivalent LR row: it is
+    // the distinguished entry row consumed by later subgrammar composition.
+    // Keep that compositional role in the initial colour so the ordinary
+    // quotient can never identify it with an internal state.
     let mut classes = vec![0u32; num_states];
+    classes[0] = 1;
     loop {
         let mut class_by_signature = FxHashMap::<StructuralStateSignature, u32>::default();
         let mut next_classes = Vec::with_capacity(num_states);

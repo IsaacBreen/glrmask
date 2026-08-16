@@ -368,6 +368,7 @@ impl DynamicConstraint {
             .unwrap_or(0);
         let inner = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
+            static_dynamic_overlay: None,
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),

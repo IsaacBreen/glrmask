@@ -1162,6 +1162,7 @@ fn apply_finality_fixpoint_worklist(
     }
 }
 
+
 fn apply_finality_fixpoint_acyclic_direct(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
@@ -1378,6 +1379,125 @@ fn apply_finality_fixpoint_acyclic_parallel_waves_chunked(
     }
 }
 
+
+/// Exact parallel acyclic finality propagation with shared algebraic jobs.
+///
+/// The older wave-parallel solver evaluates every predecessor-edge intersection
+/// independently. Large parser NWAs have extreme operand repetition, so that
+/// throws away the invocation-local cache that makes the serial direct solver
+/// fast. This variant separates graph fanout from Weight algebra: within and
+/// across dependency-free waves, identical `(reachable_final, edge_weight)`
+/// operand pairs are interned once, newly discovered pairs are evaluated in
+/// parallel, and the result is fanned back out to every predecessor edge.
+/// Strong operand clones live in `intersection_jobs`, so pointer keys cannot be
+/// invalidated/reused while the cache is active.
+fn apply_finality_fixpoint_acyclic_parallel_dedup_waves(
+    preds: &[Vec<PredEdge<'_>>],
+    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reverse_topo_order: &[usize],
+) {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_FINALITY_WAVES_DETAIL").is_some();
+    let mut pending_by_state: Vec<SmallVec<[GuardedFinalWeight; 4]>> =
+        (0..preds.len()).map(|_| SmallVec::new()).collect();
+    for (state_id, final_weight) in reachable_final_weights.iter_mut().enumerate() {
+        if let Some(final_weight) = final_weight.take() {
+            pending_by_state[state_id].push(final_weight);
+        }
+    }
+
+    let mut intersection_job_ids = FxHashMap::<(usize, usize), usize>::default();
+    let mut intersection_jobs = Vec::<(GuardedFinalWeight, Weight)>::new();
+    let mut intersection_results = Vec::<Option<GuardedFinalWeight>>::new();
+    let mut total_edge_uses = 0usize;
+    let mut total_live_states = 0usize;
+
+    for (wave_index, wave) in finality_reverse_topo_waves(preds, reverse_topo_order)
+        .into_iter()
+        .enumerate()
+    {
+        let state_jobs = wave
+            .into_iter()
+            .map(|state_id| (state_id, std::mem::take(&mut pending_by_state[state_id])))
+            .collect::<Vec<_>>();
+        let state_results = state_jobs
+            .into_par_iter()
+            .map_init(ScopedWeightOpCache::default, |weight_ops, (state_id, pending)| {
+                (state_id, union_guarded_pending(pending, weight_ops))
+            })
+            .collect::<Vec<_>>();
+
+        let first_new_job = intersection_jobs.len();
+        let mut edge_uses = Vec::<(usize, usize)>::new();
+        let mut live_states = 0usize;
+        for (state_id, reachable_final) in &state_results {
+            let Some(reachable_final) = reachable_final.as_ref() else {
+                continue;
+            };
+            live_states += 1;
+            for edge in &preds[*state_id] {
+                let key = (reachable_final.weight.ptr_key(), edge.weight.ptr_key());
+                let job = if let Some(&job) = intersection_job_ids.get(&key) {
+                    job
+                } else {
+                    let job = intersection_jobs.len();
+                    intersection_job_ids.insert(key, job);
+                    intersection_jobs.push((reachable_final.clone(), edge.weight.clone()));
+                    job
+                };
+                edge_uses.push((edge.from, job));
+            }
+        }
+        total_live_states += live_states;
+        total_edge_uses += edge_uses.len();
+
+        if first_new_job < intersection_jobs.len() {
+            let new_results = intersection_jobs[first_new_job..]
+                .par_iter()
+                .map(|(reachable_final, edge_weight)| {
+                    reachable_final.intersection_with_edge(edge_weight)
+                })
+                .collect::<Vec<_>>();
+            debug_assert_eq!(intersection_results.len(), first_new_job);
+            intersection_results.extend(new_results);
+        }
+
+        for (state_id, reachable_final) in state_results {
+            if let Some(reachable_final) = reachable_final {
+                reachable_final_weights[state_id] = Some(reachable_final);
+            }
+        }
+        let mut propagated_edges = 0usize;
+        for (predecessor, job) in edge_uses {
+            if let Some(weight) = intersection_results[job].as_ref() {
+                pending_by_state[predecessor].push(weight.clone());
+                propagated_edges += 1;
+            }
+        }
+
+        if profile_detail {
+            eprintln!(
+                "[glrmask/profile][finality_dedup_wave] wave={} live_states={} edge_uses={} total_jobs={} new_jobs={} propagated_edges={}",
+                wave_index,
+                live_states,
+                total_edge_uses,
+                intersection_jobs.len(),
+                intersection_jobs.len().saturating_sub(first_new_job),
+                propagated_edges,
+            );
+        }
+    }
+
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][finality_dedup_summary] live_state_visits={} edge_uses={} unique_intersection_jobs={} compression={:.2}",
+            total_live_states,
+            total_edge_uses,
+            intersection_jobs.len(),
+            total_edge_uses as f64 / intersection_jobs.len().max(1) as f64,
+        );
+    }
+}
+
 pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     let n = nwa.states().len();
     if n == 0 {
@@ -1464,21 +1584,34 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     let force_parallel_finality = std::env::var("GLRMASK_FORCE_PARALLEL_FINALITY")
         .map(|value| value == "1")
         .unwrap_or(false);
-    let use_chunked_parallel_waves = force_parallel_finality
+    let use_dedup_parallel_waves =
+        std::env::var_os("GLRMASK_DISABLE_DEDUP_PARALLEL_FINALITY").is_none()
+            && acyclic
+            && n >= DIRECT_ACYCLIC_FINALITY_MIN_STATES
+            && rayon_workers > 1
+            && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
+    let use_chunked_parallel_waves = !use_dedup_parallel_waves
+        && force_parallel_finality
         && acyclic
         && rayon_workers > 1
         && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
     let direct_acyclic_finality_disabled =
         std::env::var_os("GLRMASK_DISABLE_DIRECT_ACYCLIC_FINALITY").is_some();
-    let use_direct_acyclic_finality = !use_chunked_parallel_waves
+    let use_direct_acyclic_finality = !use_dedup_parallel_waves
+        && !use_chunked_parallel_waves
         && acyclic
         && !direct_acyclic_finality_disabled
         && (n >= DIRECT_ACYCLIC_FINALITY_MIN_STATES
             || std::env::var_os("GLRMASK_FORCE_DIRECT_ACYCLIC_FINALITY").is_some());
-
     let solve_started_at = profile_enabled.then(std::time::Instant::now);
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
-        if use_chunked_parallel_waves {
+        if use_dedup_parallel_waves {
+            apply_finality_fixpoint_acyclic_parallel_dedup_waves(
+                &preds,
+                &mut reachable_final_weights,
+                reverse_topo_order,
+            );
+        } else if use_chunked_parallel_waves {
             apply_finality_fixpoint_acyclic_parallel_waves_chunked(
                 &preds,
                 &mut reachable_final_weights,
@@ -1536,7 +1669,7 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     )
     {
         eprintln!(
-            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} direct_acyclic={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
+            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} dedup_parallel_waves={} chunked_parallel_waves={} direct_acyclic={} intersection_cache_entries={} union_cache_entries={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
             n,
             edge_count,
             unique_edge_weights,
@@ -1547,8 +1680,11 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
             unique_wide_edge_weights,
             acyclic,
             rayon_workers,
+            use_dedup_parallel_waves,
             use_chunked_parallel_waves,
             use_direct_acyclic_finality,
+            weight_ops.intersection_entry_count(),
+            weight_ops.union_entry_count(),
             preds_ms,
             topo_ms,
             initial_ms,
@@ -1964,6 +2100,7 @@ mod terminal_default_tests {
         let mut serial = collect_initial_final_weights(&nwa);
         let mut direct = serial.clone();
         let mut chunked_parallel = serial.clone();
+        let mut dedup_parallel = serial.clone();
         let mut weight_ops = ScopedWeightOpCache::default();
 
         apply_finality_fixpoint_acyclic(
@@ -1984,9 +2121,17 @@ mod terminal_default_tests {
             &mut chunked_parallel,
             &reverse_topo_order,
         );
+        apply_finality_fixpoint_acyclic_parallel_dedup_waves(
+            &preds,
+            &mut dedup_parallel,
+            &reverse_topo_order,
+        );
 
-        for ((serial_weight, direct_weight), chunked_weight) in
-            serial.iter().zip(&direct).zip(&chunked_parallel)
+        for (((serial_weight, direct_weight), chunked_weight), dedup_weight) in serial
+            .iter()
+            .zip(&direct)
+            .zip(&chunked_parallel)
+            .zip(&dedup_parallel)
         {
             let serial_weight = serial_weight
                 .as_ref()
@@ -2000,6 +2145,10 @@ mod terminal_default_tests {
                 .as_ref()
                 .map(|weight| weight.weight.clone())
                 .unwrap_or_else(Weight::empty);
+            let dedup_weight = dedup_weight
+                .as_ref()
+                .map(|weight| weight.weight.clone())
+                .unwrap_or_else(Weight::empty);
             for tsid in 0..=7 {
                 assert_eq!(
                     serial_weight.tokens_for_tsid(tsid),
@@ -2009,7 +2158,107 @@ mod terminal_default_tests {
                     serial_weight.tokens_for_tsid(tsid),
                     chunked_weight.tokens_for_tsid(tsid),
                 );
+                assert_eq!(
+                    serial_weight.tokens_for_tsid(tsid),
+                    dedup_weight.tokens_for_tsid(tsid),
+                );
             }
         }
     }
+
+    #[test]
+    fn dedup_parallel_finality_matches_direct_serial_on_generated_dags() {
+        use crate::compiler::glr::labels::encode_negative_label;
+
+        for seed in 0u32..64 {
+            let state_count = 9 + (seed % 8);
+            let mut nwa = NWA::new(1, 31);
+            for _ in 0..state_count {
+                nwa.add_state();
+            }
+            let weights = [
+                weight(0..=7),
+                weight(4..=15),
+                weight(8..=23),
+                weight(16..=31),
+                weight(0..=31),
+            ];
+            for state in 0..state_count {
+                if (state.wrapping_mul(7) + seed) % 3 != 0 {
+                    nwa.set_final_weight(
+                        state,
+                        weights[((state + seed) as usize) % weights.len()].clone(),
+                    );
+                }
+                for step in 1..=3u32 {
+                    let target = state + step;
+                    if target >= state_count {
+                        continue;
+                    }
+                    let selector = state
+                        .wrapping_mul(17)
+                        .wrapping_add(step.wrapping_mul(11))
+                        .wrapping_add(seed)
+                        % 4;
+                    let edge_weight = weights
+                        [((state.wrapping_mul(3) + step + seed) as usize) % weights.len()]
+                    .clone();
+                    match selector {
+                        0 => nwa.add_epsilon(state, target, edge_weight),
+                        1 => nwa.add_transition(state, DEFAULT_LABEL, target, edge_weight),
+                        2 => nwa.add_transition(
+                            state,
+                            encode_negative_label((state + step + seed) % 5),
+                            target,
+                            edge_weight,
+                        ),
+                        _ => {
+                            // Positive labels are deliberately invisible to
+                            // finality propagation and exercise that filter.
+                            nwa.add_transition(
+                                state,
+                                ((state + step + seed) % 5) as i32,
+                                target,
+                                edge_weight,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let (preds, outdegree) = build_finality_preds_and_outdegree(&nwa);
+            let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree)
+                .expect("generated graph is acyclic");
+            let mut direct = collect_initial_final_weights(&nwa);
+            let mut dedup = direct.clone();
+            let mut weight_ops = ScopedWeightOpCache::default();
+            apply_finality_fixpoint_acyclic_direct(
+                &preds,
+                &mut direct,
+                &reverse_topo_order,
+                &mut weight_ops,
+            );
+            apply_finality_fixpoint_acyclic_parallel_dedup_waves(
+                &preds,
+                &mut dedup,
+                &reverse_topo_order,
+            );
+
+            for (state, (direct_weight, dedup_weight)) in direct.iter().zip(&dedup).enumerate() {
+                let direct_weight = direct_weight
+                    .as_ref()
+                    .map(|weight| weight.weight.clone())
+                    .unwrap_or_else(Weight::empty);
+                let dedup_weight = dedup_weight
+                    .as_ref()
+                    .map(|weight| weight.weight.clone())
+                    .unwrap_or_else(Weight::empty);
+                assert_eq!(
+                    direct_weight, dedup_weight,
+                    "finality mismatch for seed {seed}, state {state}",
+                );
+            }
+        }
+    }
+
 }

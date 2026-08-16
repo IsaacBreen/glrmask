@@ -30,8 +30,14 @@ pub struct DwaStats {
 }
 
 // --- Two-level weight-pool serde for DWA ---
-// Level 1: Pool unique RangeSetBlaze<u32> (token sets) by Arc pointer
-// Level 2: Pool unique Weight (RangeMapBlaze) by Arc pointer, referencing token set indices
+// Level 1: Pool structurally equal RangeSetBlaze<u32> token sets.
+// Level 2: Pool structurally equal Weight values, referencing token-set indices.
+//
+// Both levels retain a pointer cache as the hot path, but pointer identity is
+// deliberately not the serialization identity.  Equivalent DWAs can be built
+// with different Arc-sharing layouts (especially when independent support
+// operations are evaluated in parallel); the artifact bytes must not depend
+// on allocator/interner timing.
 
 /// Serialized token set: Vec of [start, end] range pairs
 type EncodedTokenSet = Vec<[u32; 2]>;
@@ -64,32 +70,49 @@ struct DWASerde {
 
 impl Serialize for DWA {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Level 1: Pool unique token sets by Arc pointer
+        // Level 1: pointer cache first, structural fallback for a new Arc.
         let mut ts_ptr_to_idx: std::collections::HashMap<usize, u32> =
             std::collections::HashMap::new();
+        let mut ts_value_to_idx: std::collections::HashMap<
+            std::sync::Arc<RangeSetBlaze<u32>>,
+            u32,
+        > = std::collections::HashMap::new();
         let mut token_set_pool: Vec<EncodedTokenSet> = Vec::new();
 
         let mut intern_token_set = |ts: &std::sync::Arc<RangeSetBlaze<u32>>| -> u32 {
             let ptr = std::sync::Arc::as_ptr(ts) as usize;
-            *ts_ptr_to_idx.entry(ptr).or_insert_with(|| {
-                let idx = token_set_pool.len() as u32;
-                token_set_pool.push(
-                    ts.ranges()
-                        .map(|r| [*r.start(), *r.end()])
-                        .collect(),
-                );
+            if let Some(&idx) = ts_ptr_to_idx.get(&ptr) {
+                return idx;
+            }
+            let idx = if let Some(&idx) = ts_value_to_idx.get(ts) {
                 idx
-            })
+            } else {
+                let idx = token_set_pool.len() as u32;
+                token_set_pool.push(ts.ranges().map(|r| [*r.start(), *r.end()]).collect());
+                ts_value_to_idx.insert(std::sync::Arc::clone(ts), idx);
+                idx
+            };
+            ts_ptr_to_idx.insert(ptr, idx);
+            idx
         };
 
-        // Level 2: Pool unique weights by Arc pointer
+        // Level 2: same scheme for weights.  `Weight::Hash` is the cached full
+        // structural hash and `Weight::Eq` is structural equality, so this
+        // fallback is exact rather than probabilistic.
         let mut w_ptr_to_idx: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
+        let mut w_value_to_idx: std::collections::HashMap<Weight, u32> =
             std::collections::HashMap::new();
         let mut weight_pool: Vec<WeightPoolEntry> = Vec::new();
 
         let mut intern_weight = |w: &Weight| -> u32 {
             let ptr = w.ptr_key();
-            *w_ptr_to_idx.entry(ptr).or_insert_with(|| {
+            if let Some(&idx) = w_ptr_to_idx.get(&ptr) {
+                return idx;
+            }
+            let idx = if let Some(&idx) = w_value_to_idx.get(w) {
+                idx
+            } else {
                 let idx = weight_pool.len() as u32;
                 if w.is_full() {
                     weight_pool.push(WeightPoolEntry {
@@ -109,8 +132,11 @@ impl Serialize for DWA {
                         entries,
                     });
                 }
+                w_value_to_idx.insert(w.clone(), idx);
                 idx
-            })
+            };
+            w_ptr_to_idx.insert(ptr, idx);
+            idx
         };
 
         let states: Vec<DWAStateSerde> = self
@@ -527,5 +553,55 @@ mod cache_tests {
         assert!(decoded.acyclic_cache.get().is_none());
         assert_eq!(decoded.num_transitions(), 2);
         assert!(!decoded.is_acyclic());
+    }
+
+    #[test]
+    fn serde_pools_structural_weights_and_token_sets_not_arc_identity() {
+        use std::sync::Arc;
+
+        fn weight_with_tokens(
+            tsid: u32,
+            tokens: Arc<RangeSetBlaze<u32>>,
+        ) -> Weight {
+            let mut map = RangeMapBlaze::new();
+            map.extend_simple(std::iter::once((tsid..=tsid, tokens)));
+            finalize_weight_map(map)
+        }
+
+        // Deliberately bypass the token-set interner so the two equal token
+        // languages have different Arc identities.  `finalize_weight_map`
+        // consequently also sees distinct token-body pointers, giving us the
+        // allocation-layout case that used to leak into artifact bytes.
+        let token_a = Arc::new(RangeSetBlaze::from_iter([3..=7, 11..=13]));
+        let token_b = Arc::new(RangeSetBlaze::from_iter([3..=7, 11..=13]));
+        assert!(!Arc::ptr_eq(&token_a, &token_b));
+
+        let equal_a = weight_with_tokens(5, Arc::clone(&token_a));
+        let equal_b = weight_with_tokens(5, Arc::clone(&token_b));
+        assert_eq!(equal_a, equal_b);
+        assert_ne!(equal_a.ptr_key(), equal_b.ptr_key());
+
+        let distinct_a = weight_with_tokens(6, token_a);
+        let distinct_b = weight_with_tokens(7, token_b);
+        assert_ne!(distinct_a, distinct_b);
+
+        let mut dwa = DWA::new(8, 13);
+        let target = dwa.add_state();
+        dwa.add_transition(0, 1, target, equal_a);
+        dwa.add_transition(0, 2, target, equal_b);
+        dwa.add_transition(0, 3, target, distinct_a);
+        dwa.add_transition(0, 4, target, distinct_b);
+
+        let bytes = bincode::serialize(&dwa).unwrap();
+        let encoded: DWASerde = bincode::deserialize(&bytes).unwrap();
+        // equal_a/equal_b share one structural weight pool entry, while the
+        // two TSID-distinct weights remain separate.
+        assert_eq!(encoded.weight_pool.len(), 3);
+        // All three structural weights refer to the same token language even
+        // though the source Arcs were intentionally different.
+        assert_eq!(encoded.token_set_pool.len(), 1);
+
+        let decoded: DWA = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, dwa);
     }
 }

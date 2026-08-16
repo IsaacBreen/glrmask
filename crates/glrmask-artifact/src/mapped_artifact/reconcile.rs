@@ -1267,13 +1267,13 @@ fn remap_weight_with_identity_tsids(
     }
     let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
     weight.remap_token_sets_preserving_tsid_ranges(|tokens| {
-        if let Some(token_map) = token_map {
-            remap_token_set_with_injective_map(tokens, token_map, &mut token_cache)
-        } else if let Some(precomputed_token_sets) = precomputed_token_sets {
+        if let Some(precomputed_token_sets) = precomputed_token_sets {
             precomputed_token_sets
                 .get(&(Arc::as_ptr(tokens) as usize))
                 .cloned()
                 .expect("precomputed token remap must cover every source token set")
+        } else if let Some(token_map) = token_map {
+            remap_token_set_with_injective_map(tokens, token_map, &mut token_cache)
         } else if let Some(token_run_map) = token_run_map {
             remap_token_set_with_disjoint_runs(tokens, token_run_map, &mut token_cache)
         } else {

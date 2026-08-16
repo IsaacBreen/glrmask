@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -46,11 +47,107 @@ fn parser_stacks_cache_key(stacks: &ParserStacks) -> usize {
         .unwrap_or_else(|| stacks.ptr_key())
 }
 
+
+const DYNAMIC_NO_COMPONENT: u32 = u32::MAX;
+
+#[inline]
+fn overlay_terminal_component(constraint: &Constraint, terminal: TerminalID) -> u32 {
+    let Some(metadata) = constraint.static_dynamic_overlay.as_ref() else {
+        return DYNAMIC_NO_COMPONENT;
+    };
+    metadata
+        .terminal_offsets
+        .partition_point(|&offset| offset <= terminal)
+        .saturating_sub(1) as u32
+}
+
+#[inline]
+fn overlay_tokenizer_component(constraint: &Constraint, tokenizer_state: u32) -> u32 {
+    if tokenizer_state == 0 {
+        return DYNAMIC_NO_COMPONENT;
+    }
+    let Some(metadata) = constraint.static_dynamic_overlay.as_ref() else {
+        return DYNAMIC_NO_COMPONENT;
+    };
+    metadata
+        .tokenizer_state_offsets
+        .partition_point(|&offset| offset <= tokenizer_state)
+        .saturating_sub(1) as u32
+}
+
+#[inline]
+fn overlay_advance_repair(
+    constraint: &Constraint,
+    branch: &DynamicBranch,
+    terminal: TerminalID,
+) -> (u32, bool) {
+    let next_component = overlay_terminal_component(constraint, terminal);
+    let switched = branch.last_component != DYNAMIC_NO_COMPONENT
+        && next_component != DYNAMIC_NO_COMPONENT
+        && branch.last_component != next_component;
+    let terminal_repairs = constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .and_then(|metadata| metadata.repair_terminals.get(terminal as usize))
+        .copied()
+        .unwrap_or(false);
+    (
+        next_component,
+        branch.repair_used || switched || terminal_repairs,
+    )
+}
+
+
+#[inline]
+fn overlay_branch_can_finish_with_repair(
+    constraint: &Constraint,
+    branch: &DynamicBranch,
+    lexer_scan_cache: &DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+) -> bool {
+    if branch.repair_used {
+        return true;
+    }
+    for config_index in 0..lexer_scan_cache.config_len(branch.tokenizer_config) {
+        let tokenizer_state = lexer_scan_cache.config_state(branch.tokenizer_config, config_index);
+        for terminal in constraint.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            let next_component = overlay_terminal_component(constraint, terminal);
+            let switched = branch.last_component != DYNAMIC_NO_COMPONENT
+                && next_component != DYNAMIC_NO_COMPONENT
+                && branch.last_component != next_component;
+            let terminal_repairs = constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .and_then(|metadata| metadata.repair_terminals.get(terminal as usize))
+                .copied()
+                .unwrap_or(false);
+            if (switched || terminal_repairs)
+                && parser_terminal_admissible_cached(
+                    constraint,
+                    terminal,
+                    &branch.gss,
+                    traversal_cache,
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone)]
 struct DynamicBranch {
     tokenizer_config: u32,
     gss: ParserStacks,
     initial_prune_guard: InitialPruneGuard,
+    /// Component containing the most recently committed lexical terminal.
+    /// `u32::MAX` means the merged reset dispatcher has not selected one yet.
+    last_component: u32,
+    /// True once this token path has used behavior absent from the transported
+    /// component parser artifacts: either a cross-component terminal switch or
+    /// a terminal whose composed template requires additive repair.
+    repair_used: bool,
     /// The lexer was reset by a terminal match on the most recently consumed
     /// byte. At a compressed-edge boundary that fresh initial state is already
     /// a valid continuation and must not be stripped as though it were an
@@ -73,6 +170,8 @@ struct DynamicBranchKey {
     tokenizer_config: u32,
     gss_ptr: usize,
     initial_prune_guard: InitialPruneGuard,
+    last_component: u32,
+    repair_used: bool,
     fresh_reset: bool,
 }
 
@@ -91,6 +190,8 @@ struct DynamicRecognizerStateCache {
 struct DynamicRecognizerStateMetadata {
     token_boundary_allowed: bool,
     subtree_loop_bytes: SmallVec<[U8Set; 4]>,
+    repair_token_boundary_allowed: bool,
+    repair_subtree_loop_bytes: SmallVec<[U8Set; 4]>,
 }
 
 impl DynamicRecognizerStateCache {
@@ -110,6 +211,8 @@ impl DynamicRecognizerStateCache {
             tokenizer_config: branch.tokenizer_config,
             gss_ptr: branch.gss.ptr_key(),
             initial_prune_guard: branch.initial_prune_guard.clone(),
+            last_component: branch.last_component,
+            repair_used: branch.repair_used,
             fresh_reset: branch.fresh_reset,
         }
     }
@@ -186,6 +289,8 @@ impl DynamicRecognizerStateCache {
     ) {
         let mut token_boundary_allowed = false;
         let mut subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
+        let mut repair_token_boundary_allowed = false;
+        let mut repair_subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
         let collect_subtree_loops = self.branches[state_index].len() == 1
             || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX;
         for branch in &self.branches[state_index] {
@@ -202,6 +307,14 @@ impl DynamicRecognizerStateCache {
                     traversal_cache,
                 );
             token_boundary_allowed |= boundary_allowed;
+            let repair_boundary_allowed = boundary_allowed
+                && overlay_branch_can_finish_with_repair(
+                    constraint,
+                    branch,
+                    lexer_scan_cache,
+                    traversal_cache,
+                );
+            repair_token_boundary_allowed |= repair_boundary_allowed;
 
             if collect_subtree_loops
                 && boundary_allowed
@@ -218,11 +331,16 @@ impl DynamicRecognizerStateCache {
                 if !subtree_loop_bytes.contains(&loop_bytes) {
                     subtree_loop_bytes.push(loop_bytes);
                 }
+                if branch.repair_used && !repair_subtree_loop_bytes.contains(&loop_bytes) {
+                    repair_subtree_loop_bytes.push(loop_bytes);
+                }
             }
         }
         self.metadata[state_index] = Some(DynamicRecognizerStateMetadata {
             token_boundary_allowed,
             subtree_loop_bytes,
+            repair_token_boundary_allowed,
+            repair_subtree_loop_bytes,
         });
     }
 
@@ -281,10 +399,14 @@ impl DynamicRecognizerStateCache {
                             terminal,
                         )
                     };
+                    let (last_component, repair_used) =
+                        overlay_advance_repair(constraint, &branch, terminal);
                     next.push(DynamicBranch {
                         tokenizer_config: initial_config,
                         gss: advanced_parser,
                         initial_prune_guard: matched_prune_guard,
+                        last_component,
+                        repair_used,
                         fresh_reset: true,
                     });
                 }
@@ -294,6 +416,8 @@ impl DynamicRecognizerStateCache {
                 tokenizer_config: next_config,
                 gss: branch.gss,
                 initial_prune_guard: advanced_prune_guard,
+                last_component: branch.last_component,
+                repair_used: branch.repair_used,
                 fresh_reset: false,
             });
         }
@@ -385,6 +509,49 @@ fn set_mask_bit_known_in_range(buf: &mut [u32], token_id: u32) {
     }
 }
 
+#[derive(Debug)]
+struct DynamicBaselineCoverage {
+    /// Prefix count over `DynamicMaskTrie::all_subtree_tokens()`: one unit for
+    /// each canonical token with at least one original-token alias not already
+    /// present in the static baseline mask. Every trie subtree occupies a
+    /// contiguous interval in that token order, making `subtree_fully_covered`
+    /// O(1) while preserving exact alias semantics.
+    uncovered_prefix: Vec<u32>,
+}
+
+impl DynamicBaselineCoverage {
+    fn new(vocab: &DynamicMaskVocab, trie: &DynamicMaskTrie, baseline: &[u32]) -> Self {
+        let ordered = trie.all_subtree_tokens();
+        let mut uncovered_prefix = Vec::with_capacity(ordered.len() + 1);
+        uncovered_prefix.push(0);
+        let mut missing = 0u32;
+        for &canonical_token in ordered {
+            let covered = vocab.token_ids(canonical_token).is_some_and(|aliases| {
+                !aliases.is_empty()
+                    && aliases.iter().all(|&token_id| {
+                        let word = token_id as usize / 32;
+                        let bit = token_id % 32;
+                        baseline
+                            .get(word)
+                            .is_some_and(|bits| (bits & (1u32 << bit)) != 0)
+                    })
+            });
+            missing += u32::from(!covered);
+            uncovered_prefix.push(missing);
+        }
+        Self { uncovered_prefix }
+    }
+
+    #[inline(always)]
+    fn subtree_fully_covered(&self, trie: &DynamicMaskTrie, node: u32) -> bool {
+        let range = trie.subtree_token_index_range(node);
+        unsafe {
+            *self.uncovered_prefix.get_unchecked(range.start)
+                == *self.uncovered_prefix.get_unchecked(range.end)
+        }
+    }
+}
+
 const DYNAMIC_TOKEN_MARKER_FALLBACK: u64 = 1u64 << 63;
 
 #[inline(always)]
@@ -413,6 +580,7 @@ fn mark_dynamic_token_marker(vocab: &DynamicMaskVocab, marker: u64, buf: &mut [u
 const DYNAMIC_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const DYNAMIC_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
+#[derive(Clone)]
 struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
     deterministic: bool,
@@ -944,6 +1112,7 @@ fn parser_child(
     // for every terminal branch explored by the dynamic traversal.
     let advanced = constraint
         .direct_regular_cached_advance(&parser_gss, terminal)
+        .or_else(|| super::commit::advance_stacks_template_dfa(constraint, &parser_gss, terminal))
         .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
         .apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
@@ -1197,6 +1366,21 @@ struct DynamicWalkStats {
     recognizer_transition_misses: usize,
 }
 
+
+impl DynamicWalkStats {
+    fn merge_from(&mut self, other: &Self) {
+        self.work_items += other.work_items;
+        self.trie_edges += other.trie_edges;
+        self.branch_steps += other.branch_steps;
+        self.duplicate_branches += other.duplicate_branches;
+        self.max_branches = self.max_branches.max(other.max_branches);
+        self.subtree_marks += other.subtree_marks;
+        self.subtree_mark_tokens += other.subtree_mark_tokens;
+        self.recognizer_states += other.recognizer_states;
+        self.recognizer_transition_misses += other.recognizer_transition_misses;
+    }
+}
+
 impl DynamicDeadlinePoll {
     fn new(deadline: Option<Instant>) -> Self {
         Self {
@@ -1395,6 +1579,7 @@ fn process_interned_dynamic_trie_node(
     traversal_cache: &mut DynamicTraversalCache,
     buf: &mut [u32],
     stats: &mut DynamicWalkStats,
+    require_repair_used: bool,
 ) -> bool {
     let branch_count = recognizer.branches(recognizer_state).len();
     let metadata = recognizer.metadata(
@@ -1406,6 +1591,37 @@ fn process_interned_dynamic_trie_node(
         config_self_loop_cache,
         traversal_cache,
     );
+
+    if require_repair_used {
+        let subtree_tokens = trie.subtree_tokens(node_id);
+        let min_subtree_tokens = if branch_count == 1 {
+            dynamic_subtree_loop_min_tokens()
+        } else {
+            dynamic_multi_branch_subtree_loop_min_tokens()
+        };
+        if subtree_tokens.len() >= min_subtree_tokens
+            && !metadata.repair_subtree_loop_bytes.is_empty()
+        {
+            let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node_id));
+            if metadata
+                .repair_subtree_loop_bytes
+                .iter()
+                .any(|loop_bytes| subtree_bytes.is_subset(loop_bytes))
+            {
+                stats.subtree_marks += 1;
+                stats.subtree_mark_tokens += subtree_tokens.len();
+                mark_subtree_tokens(vocab, trie, node_id, buf);
+                return true;
+            }
+        }
+        if metadata.repair_token_boundary_allowed {
+            let token_marker = vocab.node_token_marker(node_id);
+            if token_marker != 0 {
+                mark_dynamic_token_marker(vocab, token_marker, buf);
+            }
+        }
+        return false;
+    }
 
     // Most recognizer states have no exact self-loop certificate. Keep that
     // overwhelmingly common node path independent of subtree metadata: only a
@@ -1510,7 +1726,7 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    fill_mask_dynamic_impl(state, buf, None)
+    fill_mask_dynamic_impl(state, buf, None, false)
         .expect("unbounded dynamic mask generation cannot time out");
 }
 
@@ -1523,7 +1739,17 @@ pub(crate) fn fill_mask_dynamic_bounded(
         state,
         buf,
         Some(Instant::now() + Duration::from_millis(timeout_ms)),
+        false,
     )
+}
+
+
+/// OR only the dynamic language contribution not already covered by a static
+/// mask. The baseline is used solely as a trie-pruning certificate; all
+/// surviving leaves are still validated by the ordinary exact dynamic walker.
+pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    fill_mask_dynamic_impl(state, buf, None, true)
+        .expect("unbounded additive dynamic mask generation cannot time out");
 }
 
 #[inline]
@@ -1603,6 +1829,8 @@ fn try_advance_scalar_branch_over_segment(
         tokenizer_config,
         gss: branch.gss.clone(),
         initial_prune_guard: InitialPruneGuard::Passed,
+        last_component: branch.last_component,
+        repair_used: branch.repair_used,
         fresh_reset: false,
     });
     Ok(Some(result))
@@ -1672,11 +1900,17 @@ fn advance_dynamic_branches_over_segment(
                     };
                     if !push_unique_dynamic_branch(
                         &mut next,
-                        DynamicBranch {
-                            tokenizer_config: initial_config,
-                            gss: advanced_parser,
-                            initial_prune_guard: matched_prune_guard,
-                            fresh_reset: true,
+                        {
+                            let (last_component, repair_used) =
+                                overlay_advance_repair(constraint, &branch, terminal);
+                            DynamicBranch {
+                                tokenizer_config: initial_config,
+                                gss: advanced_parser,
+                                initial_prune_guard: matched_prune_guard,
+                                last_component,
+                                repair_used,
+                                fresh_reset: true,
+                            }
                         },
                     ) {
                         *duplicate_branches += 1;
@@ -1690,6 +1924,8 @@ fn advance_dynamic_branches_over_segment(
                     tokenizer_config: next_config,
                     gss: branch.gss,
                     initial_prune_guard: advanced_prune_guard,
+                    last_component: branch.last_component,
+                    repair_used: branch.repair_used,
                     fresh_reset: false,
                 },
             ) {
@@ -1732,6 +1968,8 @@ fn advance_dynamic_branches_over_segment(
                 tokenizer_config: end_config,
                 gss: branch.gss,
                 initial_prune_guard: branch.initial_prune_guard,
+                last_component: branch.last_component,
+                repair_used: branch.repair_used,
                 fresh_reset: false,
             },
         ) {
@@ -1880,6 +2118,8 @@ fn walk_scalar_dynamic_subtree(
                 tokenizer_config: parent_config,
                 gss: stacks.clone(),
                 initial_prune_guard: InitialPruneGuard::Passed,
+                last_component: DYNAMIC_NO_COMPONENT,
+                repair_used: true,
                 fresh_reset: false,
             });
             let child_branches = advance_dynamic_branches_over_segment(
@@ -2105,11 +2345,112 @@ fn walk_dynamic_subtree(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn walk_interned_dynamic_trie_range(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    baseline_coverage: Option<&DynamicBaselineCoverage>,
+    require_repair_used: bool,
+    root_branches: DynamicBranches,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    walk_start: usize,
+    walk_end: usize,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> Result<(), String> {
+    let mut recognizer = DynamicRecognizerStateCache::new();
+    let root_state = recognizer.intern(root_branches.clone());
+    stats.max_branches = stats.max_branches.max(recognizer.branches(root_state).len());
+    let mut state_stack = Vec::<u32>::with_capacity(64);
+    state_stack.push(root_state);
+    let walk_edges = trie.walk_edges();
+    let mut walk_index = walk_start;
+    while walk_index < walk_end {
+        let edge = walk_edges[walk_index];
+        debug_assert!((edge.subtree_end as usize) <= walk_end);
+        if baseline_coverage
+            .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+        {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+        let parent_depth = edge.parent_depth as usize;
+        debug_assert!(parent_depth < state_stack.len());
+        state_stack.truncate(parent_depth + 1);
+        let mut recognizer_state = state_stack[parent_depth];
+        stats.trie_edges += 1;
+        let mut alive = true;
+        for &byte in trie.walk_edge_bytes(&edge) {
+            let Some(next_state) = recognizer.step(
+                recognizer_state,
+                byte,
+                state.constraint,
+                initial_config,
+                lexer_scan_cache,
+                traversal_cache,
+                stats,
+            )? else {
+                alive = false;
+                break;
+            };
+            recognizer_state = next_state;
+        }
+        if !alive {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+        let normalized = recognizer.normalize(
+            recognizer_state,
+            state.constraint,
+            lexer_scan_cache,
+            traversal_cache,
+            stats,
+        )?;
+        let Some(recognizer_state) = normalized else {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        };
+        stats.work_items += 1;
+        let processed = process_interned_dynamic_trie_node(
+            state,
+            vocab,
+            trie,
+            edge.child,
+            &mut recognizer,
+            recognizer_state,
+            initial_config,
+            lexer_scan_cache,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            traversal_cache,
+            buf,
+            stats,
+            require_repair_used,
+        );
+        if processed {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+        state_stack.push(recognizer_state);
+        walk_index += 1;
+    }
+    stats.recognizer_states += recognizer.branches.len();
+    stats.recognizer_transition_misses += recognizer.transition_misses;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn walk_interned_dynamic_trie(
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     projection: Option<&DynamicSelfLoopProjection>,
+    baseline_coverage: Option<&DynamicBaselineCoverage>,
+    require_repair_used: bool,
     root_branches: DynamicBranches,
     initial_config: u32,
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
@@ -2121,9 +2462,14 @@ fn walk_interned_dynamic_trie(
     stats: &mut DynamicWalkStats,
 ) -> Result<(), String> {
     let mut recognizer = DynamicRecognizerStateCache::new();
-    let root_state = recognizer.intern(root_branches);
+    let root_state = recognizer.intern(root_branches.clone());
     stats.max_branches = stats.max_branches.max(recognizer.branches(root_state).len());
     stats.work_items += 1;
+    if baseline_coverage.is_some_and(|coverage| coverage.subtree_fully_covered(trie, 0)) {
+        stats.recognizer_states = recognizer.branches.len();
+        stats.recognizer_transition_misses = recognizer.transition_misses;
+        return Ok(());
+    }
     let root_processed = process_interned_dynamic_trie_node(
         state,
         vocab,
@@ -2138,11 +2484,75 @@ fn walk_interned_dynamic_trie(
         traversal_cache,
         buf,
         stats,
+        require_repair_used,
     );
     if root_processed {
         stats.recognizer_states = recognizer.branches.len();
         stats.recognizer_transition_misses = recognizer.transition_misses;
         return Ok(());
+    }
+
+    let use_parallel_overlay = require_repair_used
+        && std::env::var_os("GLRMASK_EXPERIMENT_PARALLEL_DYNAMIC_OVERLAY").is_some()
+        && rayon::current_num_threads() > 1
+        && trie.walk_edges().len() >= 1_024;
+    if use_parallel_overlay {
+        let walk_edges = trie.walk_edges();
+        let mut top_ranges = Vec::<(usize, usize)>::new();
+        let mut index = 0usize;
+        while index < walk_edges.len() {
+            let edge = walk_edges[index];
+            debug_assert_eq!(edge.parent_depth, 0);
+            let end = edge.subtree_end as usize;
+            debug_assert!(index < end && end <= walk_edges.len());
+            if !baseline_coverage
+                .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+            {
+                top_ranges.push((index, end));
+            }
+            index = end;
+        }
+        if top_ranges.len() > 1 {
+            let base_scan_cache = lexer_scan_cache.clone();
+            let results = top_ranges
+                .par_iter()
+                .map(|&(walk_start, walk_end)| -> Result<(Vec<u32>, DynamicWalkStats), String> {
+                    let mut local_scan_cache = base_scan_cache.clone();
+                    let mut local_traversal_cache = DynamicTraversalCache::default();
+                    let mut local_raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
+                    let mut local_config_self_loop_cache = FxHashMap::<u32, U8Set>::default();
+                    let mut local_buf = vec![0u32; buf.len()];
+                    let mut local_stats = DynamicWalkStats::default();
+                    walk_interned_dynamic_trie_range(
+                        state,
+                        vocab,
+                        trie,
+                        baseline_coverage,
+                        require_repair_used,
+                        root_branches.clone(),
+                        initial_config,
+                        &mut local_scan_cache,
+                        &mut local_traversal_cache,
+                        &mut local_raw_self_loop_cache,
+                        &mut local_config_self_loop_cache,
+                        walk_start,
+                        walk_end,
+                        &mut local_buf,
+                        &mut local_stats,
+                    )?;
+                    Ok((local_buf, local_stats))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (local_buf, local_stats) in results {
+                for (dst, src) in buf.iter_mut().zip(local_buf) {
+                    *dst |= src;
+                }
+                stats.merge_from(&local_stats);
+            }
+            stats.recognizer_states += recognizer.branches.len();
+            stats.recognizer_transition_misses += recognizer.transition_misses;
+            return Ok(());
+        }
     }
 
     let mut state_stack = Vec::<u32>::with_capacity(64);
@@ -2152,6 +2562,12 @@ fn walk_interned_dynamic_trie(
     while walk_index < walk_edges.len() {
         deadline_poll.check()?;
         let edge = walk_edges[walk_index];
+        if baseline_coverage
+            .is_some_and(|coverage| coverage.subtree_fully_covered(trie, edge.child))
+        {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
         if projection.is_some_and(|projection| projection.subtree_is_safe(edge.child)) {
             stats.subtree_marks += 1;
             stats.subtree_mark_tokens += trie.subtree_tokens(edge.child).len();
@@ -2211,6 +2627,7 @@ fn walk_interned_dynamic_trie(
             traversal_cache,
             buf,
             stats,
+            require_repair_used,
         );
         if processed {
             walk_index = edge.subtree_end as usize;
@@ -2230,6 +2647,7 @@ fn fill_mask_dynamic_impl(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
     deadline: Option<Instant>,
+    additive_static_baseline: bool,
 ) -> Result<(), String> {
     let required = state.constraint.mask_len();
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
@@ -2240,7 +2658,7 @@ fn fill_mask_dynamic_impl(
     let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
     let total_started_at = profile.then(std::time::Instant::now);
     let key_started_at = profile.then(std::time::Instant::now);
-    let cache_key = dynamic_mask_cache_enabled()
+    let cache_key = (!additive_static_baseline && dynamic_mask_cache_enabled())
         .then(|| dynamic_mask_state_key(state))
         .flatten();
     let key_ms = key_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -2260,7 +2678,11 @@ fn fill_mask_dynamic_impl(
         return Ok(());
     }
 
-    buf.fill(0);
+    let baseline_coverage = additive_static_baseline
+        .then(|| DynamicBaselineCoverage::new(vocab, vocab.trie.as_ref(), buf));
+    if !additive_static_baseline {
+        buf.fill(0);
+    }
     let initial_tsid = state.constraint.tokenizer.initial_state();
     let mut root_branches = DynamicBranches::new();
     let mut raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
@@ -2290,6 +2712,14 @@ fn fill_mask_dynamic_impl(
                 &terminals_disallowed,
             );
             if profile {
+                if let Some((stack, _)) = stacks.try_single_stack_bounded(128) {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_seed_stack] tokenizer_state={} depth={} bottom_first={:?}",
+                        tokenizer_state,
+                        stack.len(),
+                        stack,
+                    );
+                }
                 let loop_bytes = cached_self_loop_bytes(
                     state.constraint,
                     tokenizer_state,
@@ -2332,6 +2762,12 @@ fn fill_mask_dynamic_impl(
                     tokenizer_config,
                     gss: stacks,
                     initial_prune_guard,
+                    last_component: if additive_static_baseline {
+                        overlay_tokenizer_component(state.constraint, tokenizer_state)
+                    } else {
+                        DYNAMIC_NO_COMPONENT
+                    },
+                    repair_used: !additive_static_baseline,
                     fresh_reset: false,
                 },
             ) {
@@ -2339,7 +2775,12 @@ fn fill_mask_dynamic_impl(
             }
         }
     }
-    let projection = if let [branch] = root_branches.as_slice()
+    let projection = if additive_static_baseline {
+        // These projections certify the complete dynamic language, not the
+        // additive repair sublanguage. Static masking already covers their
+        // ordinary local paths, so do not use them for overlay marking.
+        None
+    } else if let [branch] = root_branches.as_slice()
         && !branch.fresh_reset
         && branch.initial_prune_guard.is_passed()
         && lexer_scan_cache.config_len(branch.tokenizer_config) == 1
@@ -2379,6 +2820,8 @@ fn fill_mask_dynamic_impl(
             vocab,
             trie,
             projection,
+            baseline_coverage.as_ref(),
+            additive_static_baseline,
             root_branches,
             initial_config,
             &mut lexer_scan_cache,

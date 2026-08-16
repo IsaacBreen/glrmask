@@ -4221,6 +4221,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
+            static_dynamic_overlay: None,
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,

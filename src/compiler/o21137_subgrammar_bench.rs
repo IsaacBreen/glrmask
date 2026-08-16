@@ -635,6 +635,7 @@ fn profile_owned_parent_tokenizer(
         .collect::<Vec<_>>();
     let composed_table = crate::compiler::glr::table::compose_subgrammar_tables(
         &parent.table,
+        None,
         &table_inputs,
     )
     .expect("benchmark table composition");

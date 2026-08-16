@@ -1,6 +1,7 @@
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 mod template_advance;
+pub(crate) use template_advance::advance_stacks_template_dfa;
 pub(crate) mod tokenizer_scan;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,9 +40,7 @@ use self::profile::{
     CommitProfile,
     PerAdvanceEntry,
 };
-use self::template_advance::{
-    advance_stacks_template_dfa, advance_stacks_template_dfa_owned,
-};
+use self::template_advance::advance_stacks_template_dfa_owned;
 pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
     execute_tokenizer_from_state_small, execute_tokenizer_reusable, execute_tokenizer_reusable_from_states, InitialCommitScan,

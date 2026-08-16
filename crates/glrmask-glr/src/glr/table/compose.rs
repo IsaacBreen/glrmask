@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::row::{ActionRow, GotoRow};
 use super::{
@@ -401,6 +401,7 @@ fn accept_state(table: &GLRTable) -> Result<u32, String> {
 ///   terminals for that placeholder.
 pub fn compose_subgrammar_tables(
     parent: &GLRTable,
+    parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
@@ -425,6 +426,11 @@ pub fn compose_subgrammar_tables(
 
     let mut action = parent.action.clone();
     let mut goto = parent.goto.clone();
+    if let Some(ignore) = parent_scoped_ignore_terminal {
+        for row in &mut action {
+            merge_action_cell(row, ignore, identity_skip_action())?;
+        }
+    }
     let mut state_relations = Vec::with_capacity(children.len() + 1);
     state_relations.push(
         (0..parent.num_states)
@@ -444,6 +450,33 @@ pub fn compose_subgrammar_tables(
     let mut forwarded_shifts = parent.forwarded_shifts.clone();
     let mut direct_regular_wide_frontiers = parent.direct_regular_wide_frontiers.clone();
     let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
+    let mut skip_terminals = parent.skip_terminals.clone();
+    if let Some(ignore) = parent_scoped_ignore_terminal {
+        skip_terminals.insert(ignore);
+    }
+
+    // Observable entry terminals for non-nullable child placeholders.  These
+    // are used when one child is followed immediately by another: the first
+    // child's EOF reduction must be keyed by the next child's first *real*
+    // terminal, never by the impossible placeholder symbol itself.
+    let placeholder_entry_terminals = children
+        .iter()
+        .enumerate()
+        .map(|(child_index, input)| {
+            let terminal_offset = terminal_offsets[child_index + 1];
+            let mut entries = input
+                .table
+                .action[0]
+                .keys()
+                .filter(|&terminal| terminal != EOF)
+                .map(|terminal| terminal + terminal_offset)
+                .collect::<BTreeSet<_>>();
+            if let Some(ignore) = input.ignore_terminal {
+                entries.insert(ignore + terminal_offset);
+            }
+            (input.placeholder_terminal, entries)
+        })
+        .collect::<BTreeMap<_, _>>();
 
     for (child_index, child_input) in children.iter().enumerate() {
         let child = child_input.table;
@@ -498,16 +531,26 @@ pub fn compose_subgrammar_tables(
         for &(_, target, _) in &call_sites {
             continuation_terminals.extend(parent.action[target as usize].keys());
         }
+        if let Some(ignore) = parent_scoped_ignore_terminal {
+            continuation_terminals.insert(ignore);
+        }
+        let raw_continuations = std::mem::take(&mut continuation_terminals);
+        for terminal in raw_continuations {
+            if let Some(entries) = placeholder_entry_terminals.get(&terminal) {
+                continuation_terminals.extend(entries.iter().copied());
+            } else {
+                continuation_terminals.insert(terminal);
+            }
+        }
         // A placeholder lookahead may first trigger one or more parent
         // reductions before reaching the actual shift call site. Once the
         // placeholder is replaced, those precursor reductions must be keyed
         // by every real child-entry lookahead instead. Otherwise later
         // sequential subgrammar calls fail before reaching their caller row.
-        let mut child_entry_terminals = child.action[child_start as usize]
-            .keys()
-            .filter(|&terminal| terminal != EOF)
-            .map(|terminal| terminal + terminal_offset)
-            .collect::<BTreeSet<_>>();
+        let mut child_entry_terminals = placeholder_entry_terminals
+            .get(&child_input.placeholder_terminal)
+            .cloned()
+            .unwrap_or_default();
         if child_input.start_nullable {
             child_entry_terminals.extend(continuation_terminals.iter().copied());
         }
@@ -533,9 +576,29 @@ pub fn compose_subgrammar_tables(
             goto.push(GotoRow::default());
         }
 
+        // If the child has a scope-local ignore distinct from the parent's
+        // scope, consuming that ignore is the first observable proof that the
+        // zero-width call boundary has been crossed.  Refine the caller state
+        // with one same-depth phase state per call site.  The phase carries
+        // exactly the child's start-row behavior but not parent-scope ignore
+        // actions.  This is ordinary LR state splitting, not a control/epsilon
+        // transition: the first child-ignore token replaces caller -> phase.
+        let mut child_scope_phase = BTreeMap::<u32, u32>::new();
+        if child_input.ignore_terminal.is_some() {
+            for &(caller, _, _) in &call_sites {
+                let phase = next_state;
+                next_state += 1;
+                action.push(ActionRow::default());
+                goto.push(GotoRow::default());
+                child_scope_phase.insert(caller, phase);
+            }
+        }
+
         let mut child_relation = vec![Vec::<u32>::new(); child.num_states as usize];
         child_relation[child_start as usize] =
             call_sites.iter().map(|&(caller, _, _)| caller).collect();
+        child_relation[child_start as usize]
+            .extend(child_scope_phase.values().copied());
         child_relation[child_accept as usize] =
             call_sites.iter().map(|&(_, target, _)| target).collect();
         for child_state in 0..child.num_states {
@@ -581,6 +644,14 @@ pub fn compose_subgrammar_tables(
                         mapped_action,
                     )?;
                 }
+            }
+            if let Some(local_ignore) = child_input.ignore_terminal {
+                merge_action_cell(
+                    &mut action[merged_state],
+                    local_ignore + terminal_offset,
+                    identity_skip_action(),
+                )?;
+                skip_terminals.insert(local_ignore + terminal_offset);
             }
             for (nonterminal, &(target, replace)) in child.goto[child_state as usize].iter() {
                 let target = remap_state(
@@ -653,6 +724,82 @@ pub fn compose_subgrammar_tables(
                         continuation,
                         Action::Reduce(child_root, 0),
                     )?;
+                }
+            }
+
+            if let (Some(local_ignore), Some(&phase_state)) = (
+                child_input.ignore_terminal,
+                child_scope_phase.get(&caller_state),
+            ) {
+                let scoped_ignore = local_ignore + terminal_offset;
+                // Consuming the first child-scope ignore refines only the state
+                // identity; it must not change LR stack depth.
+                merge_action_cell(
+                    &mut action[caller_state as usize],
+                    scoped_ignore,
+                    Action::Shift(phase_state, true),
+                )?;
+                merge_action_cell(
+                    &mut action[phase_state as usize],
+                    scoped_ignore,
+                    identity_skip_action(),
+                )?;
+                skip_terminals.insert(scoped_ignore);
+
+                // Phase state is the child-entry refinement of this caller.
+                // Rebuild the same child-start actions/gotos with the phase as
+                // the start-state representative.  Parent-scope actions are
+                // deliberately absent.
+                for (terminal, child_action) in child.action[child_start as usize].iter() {
+                    let mapped_action = remap_action(
+                        child_action,
+                        &child_state_map,
+                        terminal_offset,
+                        nonterminal_offset,
+                        Some(phase_state),
+                        Some(placeholder_target),
+                        child_start,
+                        child_accept,
+                    )?;
+                    if terminal == EOF {
+                        for &continuation in &continuation_terminals {
+                            merge_action_cell(
+                                &mut action[phase_state as usize],
+                                continuation,
+                                mapped_action.clone(),
+                            )?;
+                        }
+                    } else {
+                        merge_action_cell(
+                            &mut action[phase_state as usize],
+                            terminal + terminal_offset,
+                            mapped_action,
+                        )?;
+                    }
+                }
+                for (nonterminal, &(target, replace)) in
+                    child.goto[child_start as usize].iter()
+                {
+                    let is_child_root = *nonterminal == child_root_local;
+                    let target = remap_state(
+                        target,
+                        &child_state_map,
+                        Some(phase_state),
+                        Some(placeholder_target),
+                        child_start,
+                        child_accept,
+                    )?;
+                    goto[phase_state as usize].insert(
+                        nonterminal + nonterminal_offset,
+                        (
+                            target,
+                            if is_child_root {
+                                placeholder_replace
+                            } else {
+                                replace
+                            },
+                        ),
+                    );
                 }
             }
         }
@@ -744,12 +891,13 @@ pub fn compose_subgrammar_tables(
         unconditional_advance: Vec::new(),
         forwarded_shifts,
         control_terminals: Default::default(),
-        skip_terminals: Default::default(),
+        skip_terminals,
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers,
     };
     let _ = terminal_display_suffixes;
     table.rebuild_advance_rows_from_actions();
+    table.rebuild_unconditional_advance_rows();
     table.rebuild_guarded_shift_index();
     table.compress_default_action_rows();
     table.set_embedded_start_nullable(result_start_nullable);
@@ -930,6 +1078,25 @@ pub fn compose_subgrammar_tables_explicit(
                 control,
                 Action::Shift(mapped_start, placeholder_replace),
             );
+
+            // A compiled child can retain exact root-nullability metadata even
+            // after its internal epsilon reduction has been normalized out of
+            // the LR action rows.  The explicit-control linker must therefore
+            // make the empty child derivation explicit too.  From the mapped
+            // child start, reducing an empty root and then taking the ordinary
+            // child-return control has net stack effect `pop start; push parent
+            // continuation`, independent of whether the child's root goto
+            // itself uses replace semantics.
+            if child_input.start_nullable {
+                merge_action_cell(
+                    &mut action[mapped_start as usize],
+                    control,
+                    Action::StackShifts(vec![StackShift {
+                        pop: 1,
+                        pushes: vec![placeholder_target],
+                    }]),
+                )?;
+            }
 
             for local_state in 0..child.num_states {
                 let merged_state = state_map[local_state as usize] as usize;
@@ -1391,6 +1558,7 @@ mod tests {
         let placeholder = terminal(&parent_analysis, "SUB");
         let composed = compose_subgrammar_tables(
             &parent,
+            None,
             &[SubgrammarTableInput {
                 placeholder_terminal: placeholder,
                 table: &child,
@@ -1460,7 +1628,7 @@ mod tests {
             ignore_terminal: None,
             start_nullable: false,
         };
-        let optimized = compose_subgrammar_tables(&parent, std::slice::from_ref(&input)).unwrap();
+        let optimized = compose_subgrammar_tables(&parent, None, std::slice::from_ref(&input)).unwrap();
         let explicit =
             compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
                 .unwrap();
@@ -1508,7 +1676,7 @@ mod tests {
             ignore_terminal: None,
             start_nullable: true,
         };
-        let optimized = compose_subgrammar_tables(&parent, std::slice::from_ref(&input)).unwrap();
+        let optimized = compose_subgrammar_tables(&parent, None, std::slice::from_ref(&input)).unwrap();
         let explicit =
             compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
                 .unwrap();
@@ -1724,6 +1892,10 @@ mod tests {
         assert!(explicit.control_terminals.len() >= 2);
         let mut compiled = explicit.clone();
         compiled.eliminate_control_terminals_exact().unwrap();
+        assert_eq!(compiled.unconditional_advance.len(), compiled.num_states as usize);
+        let mut rebuilt = compiled.clone();
+        rebuilt.rebuild_unconditional_advance_rows();
+        assert_eq!(compiled.unconditional_advance, rebuilt.unconditional_advance);
 
         let alphabet = [
             outer_middle_offset + middle_leaf_a,
@@ -1740,7 +1912,7 @@ mod tests {
 
     #[test]
 
-    fn optimized_splice_counterexample_adjacent_calls_to_same_child() {
+    fn optimized_splice_matches_explicit_for_adjacent_calls_to_same_child() {
         let (child, child_analysis) = table(
             r#"
                 start child;
@@ -1760,22 +1932,23 @@ mod tests {
             ignore_terminal: None,
             start_nullable: false,
         };
-        let optimized = compose_subgrammar_tables(&parent, std::slice::from_ref(&input)).unwrap();
+        let optimized = compose_subgrammar_tables(&parent, None, std::slice::from_ref(&input)).unwrap();
         let explicit =
             compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
                 .unwrap();
         let child_offset = explicit.terminal_offsets[1];
-        let word = [
+        let alphabet = [
             terminal(&parent_analysis, "X"),
-            child_offset + terminal(&child_analysis, "a"),
             child_offset + terminal(&child_analysis, "a"),
             terminal(&parent_analysis, "!"),
         ];
-        assert!(accepts(&explicit.table, &word));
-        assert!(
-            !accepts(&optimized.table, &word),
-            "this counterexample defines where callers must select the explicit linker",
-        );
+        enumerate_words(&alphabet, 5, |word| {
+            assert_eq!(
+                accepts(&optimized.table, word),
+                accepts(&explicit.table, word),
+                "direct splice differs from explicit control semantics for adjacent calls: {word:?}",
+            );
+        });
     }
 
     #[test]
@@ -1812,6 +1985,12 @@ mod tests {
             std::slice::from_ref(&input),
         )
         .unwrap();
+        let direct = compose_subgrammar_tables(
+            &parent,
+            Some(parent_ws),
+            std::slice::from_ref(&input),
+        )
+        .unwrap();
         let child_offset = composed.terminal_offsets[1];
         let child_ws = child_offset + child_ws;
         let a = child_offset + terminal(&child_analysis, "A");
@@ -1835,6 +2014,15 @@ mod tests {
         assert!(!accepts(&composed.table, &[child_ws, l, a, r]));
         assert!(!accepts(&composed.table, &[l, child_ws, parent_ws, a, r]));
         assert!(!accepts(&composed.table, &[l, a, parent_ws, child_ws, r]));
+
+        let alphabet = [l, r, parent_ws, child_ws, a];
+        enumerate_words(&alphabet, 5, |word| {
+            assert_eq!(
+                accepts(&direct.table, word),
+                accepts(&composed.table, word),
+                "direct scoped-ignore splice differs from explicit semantics for {word:?}",
+            );
+        });
     }
 
     #[test]
@@ -1862,6 +2050,7 @@ mod tests {
         );
         let composed = compose_subgrammar_tables(
             &parent,
+            None,
             &[SubgrammarTableInput {
                 placeholder_terminal: terminal(&parent_analysis, "SUB"),
                 table: &child,
@@ -1931,6 +2120,7 @@ mod tests {
         );
         let composed = compose_subgrammar_tables(
             &parent,
+            None,
             &[
                 SubgrammarTableInput {
                     placeholder_terminal: terminal(&parent_analysis, "LEFT"),

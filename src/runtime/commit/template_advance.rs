@@ -23,7 +23,7 @@ const LANGUAGE_QUEUE_MAX_TEMPLATE_PRODUCTS: usize = 1_024;
 const LANGUAGE_QUEUE_MAX_ACCUMULATOR_COMPONENTS: usize = 32;
 const LANGUAGE_QUEUE_MAX_ACCUMULATOR_UPPER_NODES: usize = 512;
 
-pub(super) fn advance_stacks_template_dfa(
+pub(crate) fn advance_stacks_template_dfa(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: TerminalID,

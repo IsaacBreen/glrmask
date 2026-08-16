@@ -156,7 +156,10 @@ bottom element remains in that subspace at every finite iteration, so the least
 fixed point does as well. Thus every member of one class has the same generated
 byte language. ∎
 
-The augmented-start anchor preserves the distinguished start semantics.  The
+The augmented-start nonterminal anchor preserves the grammar-root semantics.
+Separately, the LR-state refinement anchors parser state `0` so a quotient that
+is later reused as a subgrammar cannot identify its entry row with an internal
+row. The
 boundary anchor is stronger than required for grammar language equality; it
 prevents candidate matching from enlarging boundary-analysis scope.
 
@@ -180,7 +183,8 @@ all execution observations, normalized through the current state partition:
 - the exact `advance` set, projected through `~T`;
 - forwarded-shift status;
 - direct-regular wide-frontier descriptors with mapped targets; and
-- exact membership in every guarded-stack-shift predicate.
+- exact membership in every guarded-stack-shift predicate; and
+- the distinguished parser entry state `0` is kept in its own initial colour.
 
 If two different terminal aliases in one physical row have different normalized
 actions, that row is forced to remain a singleton. Thus every non-singleton
@@ -321,8 +325,9 @@ An accepted candidate class `C` additionally satisfies:
 4. no state observed by an existing guarded predicate is merged; and
 5. every LR state mentioned by a *new* guard produced while compiling the
    candidate macro row is also frozen before candidate classes are accepted;
-   and
-6. the concrete goto rows of all members agree exactly, because gotos cannot
+6. no generated macro guard may observe parser state `0`, the distinguished
+   standalone subgrammar entry state; and
+7. the concrete goto rows of all members agree exactly, because gotos cannot
    carry the terminal-action provenance guard used below.
 
 These conditions make the immediate predecessor a stable, injective provenance
@@ -405,7 +410,74 @@ The safety restrictions are intentionally one-sided. If predecessor provenance
 is complex, overlapping, or entangled with existing guards, the candidate is
 simply left unmerged.
 
-## 7. Parser-DWA transport
+### Lemma 9 — closure under later subgrammar composition
+
+The legacy table splice gives standalone parser state `0` an additional
+*compositional* meaning: that row is not copied into the parent as an ordinary
+child state. Instead it is overlaid onto each parent call site. Consequently, a
+standalone table can be language-correct while still being unsuitable as a
+future child if one of its internal guarded macro actions observes state `0`.
+The observation would have to be translated to caller-state provenance at the
+next composition level, which the current splice representation does not encode.
+
+The contextual quotient therefore rejects any candidate whose generated macro
+row contains state `0` in a guard. Rejection leaves the pre-quotient table
+unchanged, so standalone semantics are unchanged. Since the pre-quotient
+composition has no internal reference to its distinguished entry state, the
+optimization cannot introduce one. Thus contextual sharing preserves the table
+invariant required for exact later composition. ∎
+
+This restriction is deliberately conservative. A future linker could transport
+such a guard by explicitly representing caller provenance, but merely treating
+state `0` as a normal child state or broadening it to all callers without a
+correlation proof would not be sufficient.
+
+## 7. Nested tokenizer-coordinate transport
+
+A composed constraint may itself carry the exact runtime lexer product. Such a
+product state can represent several pre-product tokenizer-state classes (TSIDs),
+so nested composition must not assume a raw tokenizer state belongs to exactly
+one local TSID.
+
+For a component raw tokenizer state `s`, let `T(s)` be the finite set of local
+TSIDs represented by `s`. Nested composition defines the global raw-state
+coordinate by the exact membership signature:
+
+```text
+s1 ~ s2  iff  T(s1) = T(s2)
+```
+
+within each independently compiled component. Let `G_S` denote the resulting
+global class for signature `S`. A local TSID `t` is transported to every global
+class whose signature contains it:
+
+```text
+t  ->  { G_S | t in S }.
+```
+
+The merged reset state is additionally included in the image of every TSID
+represented by a component reset.
+
+### Lemma 10 — exactness of TSID membership-signature lifting
+
+For every component raw tokenizer state `s` and every local parser-DWA weight
+`W`, evaluating the remapped weight at `G_T(s)` is exactly the union of the
+local weight contributions for the TSIDs represented by `s`.
+
+**Proof.** By construction, a local TSID `t` maps to `G_T(s)` exactly when
+`t in T(s)`. Therefore every local contribution present at `s` is transported
+to the global class, and no contribution from a TSID absent at `s` is
+transported there. Weight reconciliation combines colliding transported
+contributions with the same semiring union already used for tokenizer-state
+ambiguity. Hence the remapped global weight is exactly the local multi-TSID
+weight at `s`. Grouping two raw states only when their complete `T` signatures
+are equal preserves this observation for every parser-DWA weight. ∎
+
+When every raw state has singleton membership, `T(s) = {t}`, this construction
+is exactly the previous one-global-class-per-local-TSID coordinate. Thus the
+general nested path is a conservative extension of the original fast case.
+
+## 8. Parser-DWA transport
 
 Compiled component parser DWAs do not contain terminal IDs.  Their labels are
 positive and negative LR-state observations.  Composition already transports a
@@ -443,7 +515,129 @@ caller-specific differences introduced only by linking are handled by the
 guarded composed-table behavior of Theorem 2; they are not part of the reused
 child DWA.
 
-## 8. Exact runtime lexer product
+### 8.1 Exact additive boundary repair
+
+Reusing a component parser DWA supplies the component-local baseline. Linking
+can enlarge the stack-effect template of an ordinary terminal `t` from
+`O_t` (the transported component template) to `N_t` (the composed-table
+template). The optimized boundary builder uses an additive repair only after
+proving
+
+```text
+O_t ⊆ N_t.
+```
+
+It then materializes the exact remainder
+
+```text
+Δ_t = N_t \ O_t,
+```
+
+so `N_t = O_t ⊎ Δ_t`, where `⊎` denotes disjoint union. If the inclusion proof
+fails, the terminal is marked unsafe and the ordinary full boundary
+construction is retained.
+
+For a component-local terminal word `w = t1 ... tn`, let `C` be the positions
+whose terminal template changed. The all-old product
+
+```text
+O_t1 ... O_tn
+```
+
+is already recognized by the transported component parser DWA. Every point of
+the new product that is absent from the all-old product has a unique first
+changed position `j ∈ C` at which it chooses `Δ_tj`. Hence
+
+```text
+N_t1 ... N_tn \ O_t1 ... O_tn
+
+  = ⊎_{j ∈ C}
+      P_1 ... P_{j-1} Δ_{t_j} N_{t_{j+1}} ... N_{t_n},
+```
+
+where `P_i = O_{t_i}` for changed positions before `j`, and
+`P_i = N_{t_i} = O_{t_i}` for unchanged positions. The boundary builder implements exactly this
+"first-delta" decomposition with a two-state boolean product recording whether
+the first delta has already occurred. It therefore adds every newly legal
+component-local stack effect exactly once and does not rebuild the cached
+all-old branch.
+
+Scoped skip terminals require one extra distinction. A component's top-level
+ignore has its unqualified empty-word identity support removed from the cached
+standalone parser artifact; a token consisting only of that scoped ignore must
+therefore restore precisely that identity support at the linked boundary. In a
+mixed local token, that same scoped `Skip` is parser identity and can be erased
+inside the first-delta product. Inherited scoped skips from an already-composed
+component may encode a real phase transition and are not erased by this rule.
+Any lexical path that actually crosses component ownership remains on the full
+boundary lane.
+
+**Theorem 3a — additive boundary repair is exact.** The union of transported
+component parser behavior and the additive boundary repair recognizes exactly
+the parser behavior obtained by compiling the same composed table directly.
+
+**Proof.** Component-local all-old behavior is supplied by Theorem 3. For every
+safe changed ordinary terminal, `N_t = O_t ⊎ Δ_t` by construction. The unique
+first-delta partition above is therefore an exhaustive and disjoint partition
+of the new component-local behavior not already cached. Pure stripped-ignore
+identity is restored separately, mixed stripped-ignore occurrences are parser
+identity, and inherited scoped skips are never erased without the corresponding
+proof. Cross-component and unsafe paths use the full composed templates, so no
+factorization assumption applies to them. These cases partition all accepting
+boundary-token paths. Their union is consequently exactly the direct composed
+template semantics. ∎
+
+### 8.2 Exact direct union and deferred support evaluation
+
+The final parser DWA is the weighted union of the transported component DWA and
+the boundary-repair DWA. A determinized state is represented by a finite
+residual subset
+
+```text
+{ (q_i, W_i) },
+```
+
+where `q_i` is a source state and `W_i` is the residual positive support for
+that source lane. Residual subsets are interned by `(q_i, W_i)` using structural
+`Weight` equality and hashing; storage-pointer identity is not semantic state.
+
+For a label with exactly two non-empty source contributions
+`(q1, A)` and `(q2, B)`, the outgoing edge support is `A ∪ B`, while the target
+residual subset is determined by the contributions themselves. Under the
+positive-support representation used here, support outside `A ∪ B` is never
+observed after taking the edge. Thus construction of the graph topology does
+not depend on materializing `A ∪ B`: the union may be evaluated later and
+patched onto the already-created ordinary DWA edge. The same observation holds
+for a state's final support, which affects acceptance weight but no successor.
+Independent support unions are therefore evaluated in parallel after topology
+construction. Cases with more than two contributions retain the general eager
+path.
+
+The pair-state row merge may additionally process maximal consecutive label
+intervals on which both source target/weight vectors are constant. Such an
+interval is only a run-length representation of repeated identical transition
+equations: its successor and support are solved once and then expanded back to
+the ordinary per-label DWA representation. The symbolic `DEFAULT` transition
+is kept separate; interval boundaries include the point at which non-negative
+labels become eligible for DEFAULT fallback.
+
+**Theorem 3b — direct union scheduling preserves the weighted language.**
+Structural residual interning, interval-wise row processing, and deferred
+two-way edge/final support unions produce the same ordinary weighted DWA as the
+corresponding eager per-label construction, up to deterministic state naming.
+
+**Proof.** Structural residual interning identifies exactly equal residual
+relations, so it changes representation only. On each maximal label interval,
+the source transition equations are constant by definition, and expansion
+reinstates the same equation for every member label; DEFAULT-only gaps are not
+expanded. Deferred support evaluation changes only evaluation order:
+set/weight union is a pure operation on immutable operands, and the computed
+support is written to the same edge or final state whose topology was derived
+from those operands. No deferred value participates in discovery of another
+state. Therefore every transition target, edge support, and final support is
+identical to the eager construction. ∎
+
+## 9. Exact runtime lexer product
 
 The parser quotients above retain logical terminal IDs. To reduce duplicated
 *lexer frontier* states, composition optionally installs the same exact runtime
@@ -528,7 +722,7 @@ The representation reduces the visible/persistent lexer frontier, not total
 stored tokenizer memory: the exact source tokenizer is intentionally retained
 as the commit fallback.
 
-## 9. What this proof does *not* assume
+## 10. What this proof does *not* assume
 
 The proof does not assume anything about JSON, JSON Schema, programming
 languages, or the source that generated a grammar.  It also does not assume
