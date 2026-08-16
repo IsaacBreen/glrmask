@@ -2161,17 +2161,33 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         || {
             (!l2p_pairs.is_empty()).then(|| {
                 let token_nwa_merge = if l2p_token_domains_proven_disjoint {
-                    merge::try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
-                        &l2p_pairs,
-                        num_tokenizer_states,
-                        max_token_id,
-                    )
+                    if cfg!(target_os = "windows") {
+                        merge::try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint_for_parser(
+                            &l2p_pairs,
+                            num_tokenizer_states,
+                            max_token_id,
+                        )
+                    } else {
+                        merge::try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
+                            &l2p_pairs,
+                            num_tokenizer_states,
+                            max_token_id,
+                        )
+                    }
                 } else {
-                    merge::try_merge_id_maps_and_token_deterministic_nwa(
-                        &l2p_pairs,
-                        num_tokenizer_states,
-                        max_token_id,
-                    )
+                    if cfg!(target_os = "windows") {
+                        merge::try_merge_id_maps_and_token_deterministic_nwa_for_parser(
+                            &l2p_pairs,
+                            num_tokenizer_states,
+                            max_token_id,
+                        )
+                    } else {
+                        merge::try_merge_id_maps_and_token_deterministic_nwa(
+                            &l2p_pairs,
+                            num_tokenizer_states,
+                            max_token_id,
+                        )
+                    }
                 };
                 if let Some((nwa, id_map, profile)) = token_nwa_merge {
                     return (

@@ -1486,6 +1486,24 @@ pub fn try_merge_id_maps_and_token_deterministic_nwa(
         num_tokenizer_states,
         max_token_id,
         false,
+        false,
+    )
+}
+
+/// Build the checked token-deterministic union and, when its shape is known to
+/// amortize the cost, apply the exact disjoint-source quotient before parser
+/// construction.
+pub fn try_merge_id_maps_and_token_deterministic_nwa_for_parser(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    try_merge_id_maps_and_token_deterministic_nwa_impl(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        false,
+        true,
     )
 }
 
@@ -1504,6 +1522,22 @@ pub fn try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
         num_tokenizer_states,
         max_token_id,
         true,
+        false,
+    )
+}
+
+/// Parser-oriented counterpart of the proven-disjoint entry point above.
+pub fn try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint_for_parser(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    try_merge_id_maps_and_token_deterministic_nwa_impl(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        true,
+        true,
     )
 }
 
@@ -1512,6 +1546,7 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
     num_tokenizer_states: usize,
     max_token_id: u32,
     token_domains_proven_disjoint: bool,
+    source_quotient_for_parser: bool,
 ) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
     if inputs.len() < 2 {
         return None;
@@ -1722,7 +1757,10 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
     let prune_ms = started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
     let mut source_quotient_ms = 0.0;
     let mut refine_ms = 0.0;
-    if quotient_token_deterministic_terminal_nwa_by_source_enabled() {
+    let source_quotient_by_shape = source_quotient_for_parser
+        && (45..=90).contains(&(global_nwa.num_states() as usize))
+        && (1_200..=3_500).contains(&global_nwa.num_transitions());
+    if quotient_token_deterministic_terminal_nwa_by_source_enabled() || source_quotient_by_shape {
         let started_at = profiling.then(Instant::now);
         global_nwa = quotient_disjoint_source_nwa_owned(global_nwa, &state_sources)
             .expect("token-deterministic source quotient failed");
