@@ -592,12 +592,53 @@ fn determinize_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_direct_singletons_enabled(nwa_states: usize) -> bool {
+    if std::env::var_os("GLRMASK_DISABLE_DETERMINIZE_NORMALIZE_SINGLETONS").is_some() {
+        return false;
+    }
+    if std::env::var_os("GLRMASK_DETERMINIZE_NORMALIZE_SINGLETONS").is_some() {
+        return true;
+    }
+    let min_states = std::env::var("GLRMASK_DETERMINIZE_NORMALIZE_SINGLETON_MIN_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(16_384);
+    nwa_states >= min_states
+}
+
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let profile = determinize_profile_enabled();
-    let dwa = determinize_impl_with_options(nwa, true, true, profile)?;
+    let normalize_direct_singletons = normalize_direct_singletons_enabled(nwa.states().len());
+    let dwa = determinize_impl_with_options(
+        nwa,
+        true,
+        true,
+        profile,
+        normalize_direct_singletons,
+    )?;
+
+    if normalize_direct_singletons
+        && std::env::var_os("GLRMASK_VALIDATE_DETERMINIZE_NORMALIZE_SINGLETONS").is_some()
+    {
+        let reference = determinize_impl_with_options(nwa, true, true, false, false)?;
+        if let Some(word) = find_difference(&dwa, &reference)? {
+            return Err(GlrMaskError::Compilation(format!(
+                "normalized-singleton determinization differs on labels {word:?}"
+            )));
+        }
+        if profile {
+            eprintln!("[glrmask/profile][determinize_normalized_singleton_equivalence] result=equivalent");
+        }
+    }
 
     if std::env::var_os("GLRMASK_ASSERT_GROUPED_DETERMINIZE_EQUIVALENCE").is_some() {
-        let reference = determinize_impl_with_options(nwa, true, false, false)?;
+        let reference = determinize_impl_with_options(
+            nwa,
+            true,
+            false,
+            false,
+            normalize_direct_singletons,
+        )?;
         match find_difference(&dwa, &reference)? {
             Some(word) => {
                 return Err(GlrMaskError::Compilation(format!(
@@ -623,6 +664,7 @@ fn determinize_impl(
         direct_single_target_enabled,
         true,
         determinize_profile_enabled(),
+        normalize_direct_singletons_enabled(nwa.states().len()),
     )
 }
 
@@ -631,6 +673,7 @@ fn determinize_impl_with_options(
     direct_single_target_enabled: bool,
     group_transition_weights: bool,
     profile: bool,
+    normalize_direct_singletons: bool,
 ) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
@@ -703,6 +746,7 @@ fn determinize_impl_with_options(
     // This is an identity-only front cache. A miss always falls back through
     // `subset_map`, which retains structural equality as the source of truth.
     let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    let normalized_singleton_weight = Weight::all();
     let mut worklist: VecDeque<(u32, Arc<[(u32, Weight)]>)> = VecDeque::new();
     let start_entries: Arc<[(u32, Weight)]> = canonicalize(&start_subset).into();
     subset_map.insert(Arc::clone(&start_entries), start_id);
@@ -820,7 +864,11 @@ fn determinize_impl_with_options(
                                 let subset_lookup_started_at = profile.then(Instant::now);
                                 let (to_state, cache_hit) = intern_determinized_singleton(
                                     edge.dst,
-                                    &next_weight,
+                                    if normalize_direct_singletons {
+                                        &normalized_singleton_weight
+                                    } else {
+                                        &next_weight
+                                    },
                                     &mut singleton_subsets,
                                     &mut subset_map,
                                     &mut worklist,
@@ -1025,7 +1073,11 @@ fn determinize_impl_with_options(
                     let subset_lookup_started_at = profile.then(Instant::now);
                     let (to_state, cache_hit) = intern_determinized_singleton(
                         dst,
-                        &edge_weight,
+                        if normalize_direct_singletons {
+                            &normalized_singleton_weight
+                        } else {
+                            &edge_weight
+                        },
                         &mut singleton_subsets,
                         &mut subset_map,
                         &mut worklist,
@@ -1052,7 +1104,10 @@ fn determinize_impl_with_options(
                 if direct_point_entries {
                     let contribution_count = target_contributions.len();
                     let direct_point_started_at = profile.then(Instant::now);
-                    let (next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
+                    let (mut next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
+                    if normalize_direct_singletons && next_key.len() == 1 {
+                        next_key[0].1 = normalized_singleton_weight.clone();
+                    }
                     if let Some(started_at) = direct_point_started_at {
                         profile_direct_point_aggregate_ms +=
                             started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1107,7 +1162,14 @@ fn determinize_impl_with_options(
                     debug_assert!(!edge_weight.is_empty());
                     let subset_lookup_started_at = profile.then(Instant::now);
                     let to_state = intern_determinized_subset(
-                        vec![(dst, edge_weight.clone())],
+                        vec![(
+                            dst,
+                            if normalize_direct_singletons {
+                                normalized_singleton_weight.clone()
+                            } else {
+                                edge_weight.clone()
+                            },
+                        )],
                         &mut subset_map,
                         &mut worklist,
                         &mut dwa,
@@ -1477,7 +1539,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false).unwrap();
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
@@ -1582,7 +1644,7 @@ mod tests {
 
             let fast = determinize_impl(&nwa, true).unwrap();
             let generic = determinize_impl(&nwa, false).unwrap();
-            let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+            let grouped = determinize_impl_with_options(&nwa, true, true, false, false).unwrap();
             assert_eq!(
                 find_difference(&fast, &generic).unwrap(),
                 None,
@@ -1612,7 +1674,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false).unwrap();
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[5]), tokens([0, 1, 2, 3, 4, 5]));
@@ -1639,8 +1701,8 @@ mod tests {
         nwa.set_final_weight(second_accept, tokens([0, 1]));
         nwa.set_final_weight(epsilon_accept, tokens([0, 1]));
 
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
-        let generic = determinize_impl_with_options(&nwa, false, false, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false).unwrap();
+        let generic = determinize_impl_with_options(&nwa, false, false, false, false).unwrap();
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(grouped.eval_word(&[7]), tokens([0, 1]));
         assert_eq!(grouped.eval_word(&[8]), tokens([0, 1]));
