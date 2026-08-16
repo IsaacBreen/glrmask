@@ -46,6 +46,11 @@ intended as diagnostic kill switches.
 | `GLRMASK_L2P_PARALLEL_ROOT_TRIE` | presence toggle | auto: on with >1 Rayon worker for L2P tries with at least 512 reachable tokens and at least 2 root children |
 | `GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE` | presence toggle | off |
 | `GLRMASK_L2P_ROOT_TRIE_TASKS` | positive integer (`usize > 0`) | current Rayon worker count, capped by root-child count |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR` | truthy bool | on; exact first-transition vocabulary prepartitioning uses a 5% preliminary-work limit normally, or 10% for 1024–8192-token vocabularies whose ordinary authority fits in one state batch |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO` | positive finite float | adaptive as above; explicit value overrides the automatic 5%/10% limit |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS` | integer (`usize >= 2`) | `2` |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS` | truthy bool | auto; factors admitted only by the moderate-vocabulary 10% extension use sequential buckets to avoid nested Rayon contention |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STRICT_REFERENCE` | truthy bool | off; recompute the ordinary exact partition and require equality |
 | `GLRMASK_ENABLE_L2P_COMMON_ATOM_PRECLASS` | truthy-ish bool (`0`/`false` disable) | on |
 | `GLRMASK_L2P_COMMON_ATOM_MAX_TOKENS` | integer (`usize >= 4096`) | `100000` |
 | `GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX` | presence toggle | auto: prepare vocabularies with 16384–100000 entries |
