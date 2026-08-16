@@ -14,7 +14,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 | Variable | Valid values | Default |
 |---|---|---|
-| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (rayon/macOS logic) |
+| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (available parallelism capped at 6 on Windows, 10 elsewhere) |
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
