@@ -524,7 +524,8 @@ fn build_dimension_compaction(
 
     let use_exact_profile_layout = use_default_layout
         && allow_expensive_layout
-        && weight_ref_count > unique_weights.len().saturating_mul(4);
+        && (weight_ref_count > unique_weights.len().saturating_mul(4)
+            || env_flag("GLRMASK_FORCE_EXACT_PROFILE_LAYOUT"));
     build_default_dimension_compaction(
         unique_weights,
         num_tsids,
