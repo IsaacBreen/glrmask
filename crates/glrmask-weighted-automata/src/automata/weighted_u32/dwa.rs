@@ -393,6 +393,7 @@ fn decode_packed_token_set_chunk(
     let token_set_count = take_var_u32(body, &mut pos)? as usize;
     let mut out = Vec::with_capacity(token_set_count);
     let mut previous = EncodedTokenSet::new();
+    let mut prefix_word_spans = Vec::<u32>::new();
     for _ in 0..token_set_count {
         let prefix_len = take_var_u32(body, &mut pos)? as usize;
         if prefix_len > previous.len() {
@@ -404,7 +405,10 @@ fn decode_packed_token_set_chunk(
         // in place instead of allocating a new Vec and copying the common
         // prefix for every set in the chunk.
         previous.truncate(prefix_len);
+        prefix_word_spans.truncate(prefix_len);
         previous.reserve(suffix_len);
+        prefix_word_spans.reserve(suffix_len);
+        let mut word_spans = prefix_word_spans.last().copied().unwrap_or(0);
         let mut previous_end_plus_one = previous
             .last()
             .map_or(0u64, |range| range[1] as u64 + 1);
@@ -421,13 +425,12 @@ fn decode_packed_token_set_chunk(
                 .ok_or_else(|| "overflowing packed token-set end".to_owned())?;
             previous_end_plus_one = end as u64 + 1;
             previous.push([start, end]);
+            word_spans = word_spans.saturating_add(end / 64 - start / 64 + 1);
+            prefix_word_spans.push(word_spans);
         }
         let tokens = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(
             previous.iter().map(|range| range[0]..=range[1]),
         ));
-        let word_spans = previous.iter().fold(0u32, |total, range| {
-            total.saturating_add(range[1] / 64 - range[0] / 64 + 1)
-        });
         out.push((shared_rangeset_artifact_local(tokens), word_spans));
     }
     if pos != body.len() {
@@ -1563,9 +1566,14 @@ impl DWA {
                     }
                 }
             }
+            let transition_set_count = transition_token_used.iter().filter(|&&used| used).count();
+            let final_set_count = final_token_used.iter().filter(|&&used| used).count();
             let mut transition_sets = FxHashMap::default();
+            transition_sets.reserve(transition_set_count);
             let mut transition_word_spans = FxHashMap::default();
+            transition_word_spans.reserve(transition_set_count);
             let mut final_sets = FxHashMap::default();
+            final_sets.reserve(final_set_count);
             for (index, token_set) in ts_pool.iter().enumerate() {
                 let key = Arc::as_ptr(token_set) as usize;
                 if transition_token_used[index] {
