@@ -933,19 +933,20 @@ impl DWA {
         put_var_u32(&mut out, token_set_pool.len() as u32);
         const TOKEN_SET_CHUNK_SIZE: usize = 64;
         let token_set_chunk_count = token_set_pool.len().div_ceil(TOKEN_SET_CHUNK_SIZE);
+        let token_set_range_count = token_set_pool.iter().map(Vec::len).sum::<usize>();
         put_var_u32(&mut out, token_set_chunk_count as u32);
-        for chunk in token_set_pool.chunks(TOKEN_SET_CHUNK_SIZE) {
-            body.clear();
-            put_var_u32(&mut body, chunk.len() as u32);
-            let mut previous: &[ [u32; 2] ] = &[];
+        let encode_token_set_chunk = |chunk: &[EncodedTokenSet]| {
+            let mut encoded = Vec::new();
+            put_var_u32(&mut encoded, chunk.len() as u32);
+            let mut previous: &[[u32; 2]] = &[];
             for token_set in chunk {
                 let prefix_len = previous
                     .iter()
                     .zip(token_set)
                     .take_while(|(left, right)| left == right)
                     .count();
-                put_var_u32(&mut body, prefix_len as u32);
-                put_var_u32(&mut body, (token_set.len() - prefix_len) as u32);
+                put_var_u32(&mut encoded, prefix_len as u32);
+                put_var_u32(&mut encoded, (token_set.len() - prefix_len) as u32);
                 let mut previous_end_plus_one = if prefix_len == 0 {
                     0u64
                 } else {
@@ -956,14 +957,29 @@ impl DWA {
                     let gap = start64
                         .checked_sub(previous_end_plus_one)
                         .expect("token-set ranges are sorted and disjoint");
-                    put_var_u64(&mut body, gap);
-                    put_var_u32(&mut body, end - start);
+                    put_var_u64(&mut encoded, gap);
+                    put_var_u32(&mut encoded, end - start);
                     previous_end_plus_one = end as u64 + 1;
                 }
                 previous = token_set;
             }
-            put_var_u32(&mut out, body.len() as u32);
-            out.extend_from_slice(&body);
+            encoded
+        };
+        if token_set_range_count >= 1_000_000 && rayon::current_num_threads() > 1 {
+            let encoded_chunks = token_set_pool
+                .par_chunks(TOKEN_SET_CHUNK_SIZE)
+                .map(encode_token_set_chunk)
+                .collect::<Vec<_>>();
+            for encoded in encoded_chunks {
+                put_var_u32(&mut out, encoded.len() as u32);
+                out.extend_from_slice(&encoded);
+            }
+        } else {
+            for chunk in token_set_pool.chunks(TOKEN_SET_CHUNK_SIZE) {
+                body = encode_token_set_chunk(chunk);
+                put_var_u32(&mut out, body.len() as u32);
+                out.extend_from_slice(&body);
+            }
         }
         let token_sets_end = out.len();
 
@@ -1108,6 +1124,52 @@ impl DWA {
 
             let mut encode_u32_pool = |pool: &[Vec<u32>]| {
                 put_var_u32(&mut out, pool.len() as u32);
+                if pool.len() >= 1_024 && rayon::current_num_threads() > 1 {
+                    let encoded = pool
+                        .par_iter()
+                        .map(|sequence| {
+                            let absolute_len = sequence
+                                .iter()
+                                .map(|&value| var_u64_len(value as u64))
+                                .sum::<usize>();
+                            let mut previous = 0i64;
+                            let delta_len = sequence
+                                .iter()
+                                .map(|&value| {
+                                    let value = value as i64;
+                                    let len = var_u64_len(zigzag_i64(value - previous));
+                                    previous = value;
+                                    len
+                                })
+                                .sum::<usize>();
+                            let use_delta = delta_len < absolute_len;
+                            let mut encoded = Vec::with_capacity(
+                                1 + var_u64_len(sequence.len() as u64)
+                                    + absolute_len.min(delta_len),
+                            );
+                            encoded.push(u8::from(use_delta));
+                            put_var_u32(&mut encoded, sequence.len() as u32);
+                            if use_delta {
+                                let mut previous = 0i64;
+                                for &value in sequence {
+                                    let value = value as i64;
+                                    put_var_i64(&mut encoded, value - previous);
+                                    previous = value;
+                                }
+                            } else {
+                                for &value in sequence {
+                                    put_var_u32(&mut encoded, value);
+                                }
+                            }
+                            encoded
+                        })
+                        .collect::<Vec<_>>();
+                    for encoded in encoded {
+                        put_var_u32(&mut out, encoded.len() as u32);
+                        out.extend_from_slice(&encoded);
+                    }
+                    return;
+                }
                 for sequence in pool {
                     body.clear();
                     let absolute_len = sequence
