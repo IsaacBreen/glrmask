@@ -125,6 +125,7 @@ fn terminal_coloring_enabled() -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DwaPossibleMatchesMode {
+    Auto,
     TerminalReconcile,
     TerminalReconcileAndCompact,
     TerminalReconcileAndPreParserCompact,
@@ -135,7 +136,16 @@ enum DwaPossibleMatchesMode {
 }
 
 impl DwaPossibleMatchesMode {
+    fn assert_resolved(self) {
+        assert_ne!(
+            self,
+            Self::Auto,
+            "automatic possible-matches mode must be resolved before use",
+        );
+    }
+
     fn does_terminal_reconcile(self) -> bool {
+        self.assert_resolved();
         matches!(
             self,
             Self::TerminalReconcile
@@ -147,6 +157,7 @@ impl DwaPossibleMatchesMode {
     }
 
     fn does_terminal_compact(self) -> bool {
+        self.assert_resolved();
         matches!(
             self,
             Self::TerminalReconcileAndCompact
@@ -156,6 +167,7 @@ impl DwaPossibleMatchesMode {
     }
 
     fn does_pre_parser_compact(self) -> bool {
+        self.assert_resolved();
         matches!(
             self,
             Self::TerminalReconcileAndPreParserCompact
@@ -164,6 +176,7 @@ impl DwaPossibleMatchesMode {
     }
 
     fn does_parser_compact(self) -> bool {
+        self.assert_resolved();
         matches!(
             self,
             Self::TerminalReconcileAndParserCompact
@@ -204,12 +217,97 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             | "parser_pm_reconcile_compact" => DwaPossibleMatchesMode::ParserReconcileAndCompact,
             _ => DwaPossibleMatchesMode::TerminalReconcile,
         },
-        Err(_) => {
-            // Compact reconciled terminal coordinates before parser-DWA construction.
-            // Explicit GLRMASK_DWA_PM_MODE values still override this default.
-            DwaPossibleMatchesMode::TerminalReconcileAndPreParserCompact
-        }
+        Err(_) => DwaPossibleMatchesMode::Auto,
     }
+}
+
+fn should_auto_preparser_compact(
+    parser_states: u32,
+    epsilon_l2p: bool,
+    l2p_transitions: usize,
+    min_parser_states: u32,
+    min_l2p_transitions: usize,
+) -> bool {
+    epsilon_l2p
+        && parser_states >= min_parser_states
+        && l2p_transitions >= min_l2p_transitions
+}
+
+#[cfg(test)]
+mod dwa_pm_auto_tests {
+    use super::should_auto_preparser_compact;
+
+    #[test]
+    fn auto_preparser_requires_large_epsilon_l2p_and_parser() {
+        assert!(should_auto_preparser_compact(512, true, 512, 512, 512));
+        assert!(!should_auto_preparser_compact(511, true, 512, 512, 512));
+        assert!(!should_auto_preparser_compact(512, true, 511, 512, 512));
+        assert!(!should_auto_preparser_compact(10_000, false, 10_000, 512, 512));
+    }
+}
+
+fn resolve_dwa_possible_matches_mode(
+    mode: DwaPossibleMatchesMode,
+    table: &GLRTable,
+    terminal_dwas: &TerminalDwaFamilies,
+) -> DwaPossibleMatchesMode {
+    if mode != DwaPossibleMatchesMode::Auto {
+        return mode;
+    }
+
+    let min_parser_states = std::env::var("GLRMASK_DWA_PM_AUTO_MIN_PARSER_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(512);
+    let min_l2p_transitions = std::env::var("GLRMASK_DWA_PM_AUTO_MIN_L2P_TRANSITIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(512);
+
+    // Early coordinate compaction pays when the expensive L2P family is still
+    // an epsilon-NWA: parser construction would otherwise repeatedly lift the
+    // same wide residual coordinate. Token-deterministic NWAs intentionally
+    // preserve disjoint source branches and are faster when kept separate until
+    // ParserReconcile. Tiny epsilon-NWAs do not amortize reconciliation either.
+    let (l2p_kind, l2p_states, l2p_transitions, epsilon_l2p) = match terminal_dwas
+        .l2p
+        .as_ref()
+        .map(|family| family.artifact())
+    {
+        Some(TerminalAutomaton::Dwa(dwa)) => {
+            ("dwa", dwa.states().len(), dwa.num_transitions(), false)
+        }
+        Some(TerminalAutomaton::TokenDeterministicNwa(nwa)) => {
+            ("token_nwa", nwa.states().len(), nwa.num_transitions(), false)
+        }
+        Some(TerminalAutomaton::EpsilonNwa(nwa)) => {
+            ("epsilon_nwa", nwa.states().len(), nwa.num_transitions(), true)
+        }
+        None => ("none", 0, 0, false),
+    };
+    let resolved = if should_auto_preparser_compact(
+        table.num_states,
+        epsilon_l2p,
+        l2p_transitions,
+        min_parser_states,
+        min_l2p_transitions,
+    ) {
+        DwaPossibleMatchesMode::TerminalReconcileAndPreParserCompact
+    } else {
+        DwaPossibleMatchesMode::ParserReconcile
+    };
+    if env_flag_enabled("GLRMASK_PROFILE_DWA_PM_AUTO") {
+        eprintln!(
+            "[glrmask/profile][dwa_pm_auto] parser_states={} l2p_kind={} l2p_states={} l2p_transitions={} min_parser_states={} min_l2p_transitions={} resolved={resolved:?}",
+            table.num_states,
+            l2p_kind,
+            l2p_states,
+            l2p_transitions,
+            min_parser_states,
+            min_l2p_transitions,
+        );
+    }
+    resolved
 }
 
 pub(crate) fn compile_profile_summary_enabled() -> bool {
@@ -2077,6 +2175,7 @@ struct ParserDagJoinState {
 }
 
 struct CompileDagResult {
+    dwa_pm_mode: DwaPossibleMatchesMode,
     tokenizer: Arc<Tokenizer>,
     synthetic_candidate_terminals: usize,
     synthetic_token_quotient_certified: bool,
@@ -3573,6 +3672,7 @@ fn launch_parser_dag_if_ready<'scope>(
             templates_started_ms,
             templates_finished_ms,
         } = templates;
+        let dwa_pm_mode = resolve_dwa_possible_matches_mode(dwa_pm_mode, &table, &terminal_dwas);
 
         let terminal_run_collapse_started_at = Instant::now();
         let terminal_run_collapse_profile =
@@ -3670,6 +3770,7 @@ fn launch_parser_dag_if_ready<'scope>(
             };
 
         *result.lock().expect("compile DAG result poisoned") = Some(CompileDagResult {
+            dwa_pm_mode,
             tokenizer: tokenizer.tokenizer,
             synthetic_candidate_terminals: tokenizer.synthetic_candidate_terminals,
             synthetic_token_quotient_certified: tokenizer.synthetic_token_quotient_certified,
@@ -4527,6 +4628,7 @@ fn compile_prepared_with_profile_and_table_construction(
             .expect("runtime tokenizer result slot poisoned")
             .expect("runtime tokenizer task did not complete");
         let CompileDagResult {
+            dwa_pm_mode,
             tokenizer,
             synthetic_candidate_terminals,
             synthetic_token_quotient_certified,
