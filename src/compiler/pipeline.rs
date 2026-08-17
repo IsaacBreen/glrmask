@@ -1,4 +1,4 @@
-﻿use crate::automata::lexer::Lexer;
+use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -4374,7 +4374,6 @@ fn compile_prepared_with_profile_and_table_construction(
                 direct_l1_complete_by_terminal,
             },
         ) = parser_dwa.into_artifact();
-
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
             vocab,
@@ -4517,7 +4516,7 @@ fn compile_prepared_with_profile_and_table_construction(
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-            dwa_fast_transitions: Vec::new(),
+            dwa_fast_transitions: Default::default(),
             parser_runtime_caches_prebuilt: false,
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),

@@ -13029,7 +13029,7 @@ fn build_composed_constraint_unfinalized(
         seed_terminal_dense: FxHashMap::default(),
         seed_terminal_dense_fallback: Default::default(),
         seed_universe_dense: Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-        dwa_fast_transitions: Vec::new(),
+        dwa_fast_transitions: Default::default(),
         parser_runtime_caches_prebuilt: false,
         indexed_dag_dense_transitions: Vec::new(),
         indexed_dag_dense_finals: Vec::new(),

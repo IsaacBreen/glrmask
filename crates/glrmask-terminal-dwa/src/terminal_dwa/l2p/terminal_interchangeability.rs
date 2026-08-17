@@ -11638,7 +11638,7 @@ pub fn expand_representative_dwa_after_minimization(
                 }
             }
             states[state_for(group_index, core_state_index) as usize] = DWAState {
-                transitions,
+                transitions: transitions.into(),
                 final_weight,
             };
         }
@@ -11682,7 +11682,7 @@ pub fn expand_representative_dwa_after_minimization(
         }
     }
     states[0] = DWAState {
-        transitions: dispatcher_transitions,
+        transitions: dispatcher_transitions.into(),
         final_weight: ordinary_start
             .final_weight
             .as_ref()

@@ -167,8 +167,49 @@ impl FastDwaTransitionRow {
         }
     }
 }
+#[derive(Debug, Clone)]
+pub(crate) enum FastDwaTransitions {
+    Direct(Vec<FastDwaTransitionRow>),
+    Shared {
+        rows: Vec<FastDwaTransitionRow>,
+        state_rows: Vec<u32>,
+    },
+}
 
-pub(crate) type FastDwaTransitions = Vec<FastDwaTransitionRow>;
+impl Default for FastDwaTransitions {
+    fn default() -> Self {
+        Self::Direct(Vec::new())
+    }
+}
+
+impl FastDwaTransitions {
+    pub(crate) fn direct(rows: Vec<FastDwaTransitionRow>) -> Self {
+        Self::Direct(rows)
+    }
+
+    pub(crate) fn shared(rows: Vec<FastDwaTransitionRow>, state_rows: Vec<u32>) -> Self {
+        Self::Shared { rows, state_rows }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Direct(rows) => rows.len(),
+            Self::Shared { state_rows, .. } => state_rows.len(),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for FastDwaTransitions {
+    type Output = FastDwaTransitionRow;
+
+    #[inline]
+    fn index(&self, state: usize) -> &Self::Output {
+        match self {
+            Self::Direct(rows) => &rows[state],
+            Self::Shared { rows, state_rows } => &rows[state_rows[state] as usize],
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum IndexedDagDenseMask {
@@ -1815,6 +1856,317 @@ impl Default for DynamicMaskVocab {
     }
 }
 
+/// Version-scoped serde for the inverse token-id map. Current sectioned
+/// artifacts carry only `original_token_to_internal`; the inverse is exactly
+/// derivable from it and is rebuilt after the core section is decoded. Older
+/// artifact versions leave this mode disabled and retain their historical wire
+/// shape.
+pub(crate) mod internal_token_inverse_artifact_serde {
+    use std::cell::Cell;
+
+    use serde::{Deserialize, Serialize};
+
+    thread_local! {
+        static OMIT_INVERSE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_omit(enabled: bool) -> bool {
+        OMIT_INVERSE.with(|mode| mode.replace(enabled))
+    }
+
+    pub fn serialize<S>(value: &[Vec<u32>], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            return ().serialize(serializer);
+        }
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<u32>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            <()>::deserialize(deserializer)?;
+            return Ok(Vec::new());
+        }
+        Vec::<Vec<u32>>::deserialize(deserializer)
+    }
+}
+
+/// Compact v14+ wire form for the dense original-token -> internal-token map.
+/// Internal IDs are normally only a few thousand wide even for 128k-token
+/// vocabularies, so fixed-width u32 storage wastes roughly half this field.
+/// Zero encodes the historical `u32::MAX` sentinel; ordinary IDs are stored as
+/// `id + 1` varints. Older artifact versions leave this mode disabled.
+pub(crate) mod original_token_map_artifact_serde {
+    use std::cell::Cell;
+
+    use serde::{Deserialize, Serialize};
+
+    const MAGIC: &[u8; 4] = b"OTM1";
+
+    thread_local! {
+        static PACKED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_packed(enabled: bool) -> bool {
+        PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    #[inline]
+    fn put_var_u32(out: &mut Vec<u8>, mut value: u32) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    #[inline]
+    fn take_var_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let byte = *input
+                .get(*pos)
+                .ok_or_else(|| "truncated packed original-token map".to_owned())?;
+            *pos += 1;
+            if shift == 28 && byte > 0x0f {
+                return Err("overflowing packed original-token map".to_owned());
+            }
+            value |= ((byte & 0x7f) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+        Err("overflowing packed original-token map".to_owned())
+    }
+
+    fn pack(value: &[u32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(value.len().saturating_mul(2));
+        out.extend_from_slice(MAGIC);
+        put_var_u32(
+            &mut out,
+            u32::try_from(value.len()).expect("token vocabulary should fit u32"),
+        );
+        for &internal in value {
+            let encoded = if internal == u32::MAX {
+                0
+            } else {
+                internal
+                    .checked_add(1)
+                    .expect("u32::MAX is reserved as the unmapped-token sentinel")
+            };
+            put_var_u32(&mut out, encoded);
+        }
+        out
+    }
+
+    fn unpack(input: &[u8]) -> Result<Vec<u32>, String> {
+        if !input.starts_with(MAGIC) {
+            return Err("invalid packed original-token map header".to_owned());
+        }
+        let mut pos = MAGIC.len();
+        let count = take_var_u32(input, &mut pos)? as usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let encoded = take_var_u32(input, &mut pos)?;
+            out.push(if encoded == 0 { u32::MAX } else { encoded - 1 });
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed original-token map".to_owned());
+        }
+        Ok(out)
+    }
+
+    pub fn serialize<S>(value: &[u32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !PACKED.with(Cell::get) {
+            return value.serialize(serializer);
+        }
+        pack(value).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if !PACKED.with(Cell::get) {
+            return Vec::<u32>::deserialize(deserializer);
+        }
+        let packed = Vec::<u8>::deserialize(deserializer)?;
+        unpack(&packed).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Compact v14+ wire encoding for the immutable model-token byte vocabulary.
+/// Ordinary LLM vocabs are dense in token id, so the historical
+/// `BTreeMap<u32, Vec<u8>>` representation spends more bytes on map keys and
+/// per-Vec lengths than on useful token data. The packed form stores a dense
+/// sequence of varint lengths followed by token bytes, with a sparse fallback
+/// for unusual vocabularies. Deserialization reconstructs the exact historical
+/// in-memory BTreeMap, so compiler/composition/runtime APIs do not change.
+pub(crate) mod token_bytes_artifact_serde {
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Serialize};
+
+    const MAGIC: &[u8; 4] = b"TBP1";
+
+    thread_local! {
+        static PACKED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_packed(enabled: bool) -> bool {
+        PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    #[inline]
+    fn put_var_u32(out: &mut Vec<u8>, mut value: u32) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    #[inline]
+    fn take_var_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let byte = *input
+                .get(*pos)
+                .ok_or_else(|| "truncated packed token-byte varint".to_owned())?;
+            *pos += 1;
+            if shift == 28 && byte > 0x0f {
+                return Err("overflowing packed token-byte varint".to_owned());
+            }
+            value |= ((byte & 0x7f) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+        Err("overflowing packed token-byte varint".to_owned())
+    }
+
+    fn pack(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        let dense = value
+            .keys()
+            .copied()
+            .enumerate()
+            .all(|(expected, actual)| actual as usize == expected);
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.push(u8::from(!dense));
+        put_var_u32(
+            &mut out,
+            u32::try_from(value.len()).expect("token vocabulary should fit u32"),
+        );
+        let mut previous_end = 0u64;
+        for (&id, bytes) in value {
+            if !dense {
+                let gap = (id as u64)
+                    .checked_sub(previous_end)
+                    .expect("token ids are sorted");
+                put_var_u32(
+                    &mut out,
+                    u32::try_from(gap).expect("token-id gap should fit u32"),
+                );
+                previous_end = id as u64 + 1;
+            }
+            put_var_u32(
+                &mut out,
+                u32::try_from(bytes.len()).expect("token byte length should fit u32"),
+            );
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+
+    fn unpack(input: &[u8]) -> Result<Arc<BTreeMap<u32, Vec<u8>>>, String> {
+        if !input.starts_with(MAGIC) {
+            return Err("invalid packed token-byte header".to_owned());
+        }
+        let mut pos = MAGIC.len();
+        let sparse = match input.get(pos).copied() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err("invalid packed token-byte mode".to_owned()),
+        };
+        pos += 1;
+        let count = take_var_u32(input, &mut pos)? as usize;
+        let mut map = BTreeMap::new();
+        let mut previous_end = 0u64;
+        for dense_id in 0..count {
+            let id = if sparse {
+                let gap = take_var_u32(input, &mut pos)? as u64;
+                let id = previous_end
+                    .checked_add(gap)
+                    .ok_or_else(|| "overflowing packed token id".to_owned())?;
+                let id = u32::try_from(id)
+                    .map_err(|_| "overflowing packed token id".to_owned())?;
+                previous_end = id as u64 + 1;
+                id
+            } else {
+                u32::try_from(dense_id)
+                    .map_err(|_| "dense packed token id exceeds u32".to_owned())?
+            };
+            let len = take_var_u32(input, &mut pos)? as usize;
+            let end = pos
+                .checked_add(len)
+                .ok_or_else(|| "overflowing packed token-byte length".to_owned())?;
+            let bytes = input
+                .get(pos..end)
+                .ok_or_else(|| "truncated packed token bytes".to_owned())?
+                .to_vec();
+            pos = end;
+            if map.insert(id, bytes).is_some() {
+                return Err("duplicate packed token id".to_owned());
+            }
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed token-byte vocabulary".to_owned());
+        }
+        Ok(Arc::new(map))
+    }
+
+    pub fn serialize<S>(
+        value: &Arc<BTreeMap<u32, Vec<u8>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !PACKED.with(Cell::get) {
+            return value.serialize(serializer);
+        }
+        pack(value).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Arc<BTreeMap<u32, Vec<u8>>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if !PACKED.with(Cell::get) {
+            return Arc::<BTreeMap<u32, Vec<u8>>>::deserialize(deserializer);
+        }
+        let packed = Vec::<u8>::deserialize(deserializer)?;
+        unpack(&packed).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
@@ -1937,6 +2289,7 @@ pub struct Constraint {
     /// runtime indexes. Static artifact format versioning covers this field.
     #[serde(default)]
     pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
+    #[serde(with = "crate::compiler::glr::table::artifact_serde")]
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,
@@ -2051,14 +2404,15 @@ pub struct Constraint {
     /// This is not necessarily equal to the parser-DWA compaction vocab map
     /// produced before possible-match reconciliation. It may contain additional
     /// splits required by possible_matches.
-    #[serde(default)]
+    #[serde(default, with = "original_token_map_artifact_serde")]
     pub(crate) original_token_to_internal: Vec<u32>,
     /// Final shared constraint-internal token id -> original token ids.
     ///
     /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
     /// final internal token ids.
-    #[serde(default)]
+    #[serde(default, with = "internal_token_inverse_artifact_serde")]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
+    #[serde(with = "token_bytes_artifact_serde")]
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,

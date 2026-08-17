@@ -18,6 +18,7 @@ im = "15"
 rayon = "1"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive", "rc"] }
+bincode = "1"
 smallvec = { version = "1", features = ["serde"] }
 
 [dev-dependencies]

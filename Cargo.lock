@@ -622,6 +622,7 @@ dependencies = [
  "dashmap",
  "once_cell",
  "range-set-blaze",
+ "rayon",
  "rustc-hash 1.1.0",
  "serde",
  "smallvec",
