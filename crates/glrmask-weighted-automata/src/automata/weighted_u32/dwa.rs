@@ -56,9 +56,23 @@ impl Deref for DwaTransitionMap {
 
 impl DerefMut for DwaTransitionMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // `Shared` means the Arc identity is a canonical transition-row
+        // identity.  Once a caller mutates the row that invariant no longer
+        // holds, even if Arc::make_mut could give us unique storage.  Move or
+        // clone it into `Owned` explicitly so serializers can continue to use
+        // Shared pointer identity without missing equal rows after mutation.
+        if matches!(self, Self::Shared(_)) {
+            let current = std::mem::take(self);
+            let owned = match current {
+                Self::Shared(transitions) => Arc::try_unwrap(transitions)
+                    .unwrap_or_else(|shared| shared.as_ref().clone()),
+                Self::Owned(_) => unreachable!("checked Shared above"),
+            };
+            *self = Self::Owned(owned);
+        }
         match self {
             Self::Owned(transitions) => transitions,
-            Self::Shared(transitions) => Arc::make_mut(transitions),
+            Self::Shared(_) => unreachable!("Shared row was converted to Owned"),
         }
     }
 }
@@ -646,9 +660,10 @@ impl DWA {
             .sum::<usize>();
 
         let row_hash = |state: &DWAState| -> u64 {
-            // Deserialized packed DWAs already share exact rows physically, so
-            // pointer identity avoids rescanning their transitions on resave.
-            if self.shared_transition_rows {
+            // Canonically shared rows can use pointer identity directly. Rows
+            // that have been mutated are converted back to Owned by DerefMut,
+            // so only those rows pay the structural hashing cost.
+            if matches!(state.transitions, DwaTransitionMap::Shared(_)) {
                 return state.transitions.ptr_key() as u64;
             }
             let mut hasher = FxHasher::default();
@@ -1737,17 +1752,52 @@ impl DWA {
 
         let start_state = old_to_new[self.start_state as usize];
         let mut states = Vec::with_capacity(representatives.len());
+        let mut row_buckets =
+            FxHashMap::<u64, Vec<Arc<BTreeMap<Label, (u32, Weight)>>>>::default();
         for (old_id, mut state) in self.states.into_iter().enumerate() {
             if canonical_old[old_id] != old_id as u32 {
                 continue;
             }
-            for (target, _) in state.transitions.values_mut() {
+
+            // We already have to touch every surviving transition to remap its
+            // target. Hash the remapped row in the same pass, then share exact
+            // duplicate rows independently of final_weight. Large parser DWAs
+            // commonly have far fewer unique outgoing rows than states.
+            let mut row_hasher = FxHasher::default();
+            state.transitions.len().hash(&mut row_hasher);
+            for (label, (target, weight)) in state.transitions.iter_mut() {
                 *target = old_to_new[*target as usize];
+                label.hash(&mut row_hasher);
+                target.hash(&mut row_hasher);
+                weight.ptr_key().hash(&mut row_hasher);
             }
+            let row_hash = row_hasher.finish();
+            let transitions = match std::mem::take(&mut state.transitions) {
+                DwaTransitionMap::Owned(transitions) => transitions,
+                DwaTransitionMap::Shared(transitions) => Arc::try_unwrap(transitions)
+                    .unwrap_or_else(|shared| shared.as_ref().clone()),
+            };
+            let bucket = row_buckets.entry(row_hash).or_default();
+            let shared = bucket
+                .iter()
+                .find(|candidate| candidate.as_ref() == &transitions)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let shared = Arc::new(transitions);
+                    bucket.push(Arc::clone(&shared));
+                    shared
+                });
+            state.transitions = DwaTransitionMap::Shared(shared);
             states.push(state);
         }
 
-        Self::from_parts(states, start_state)
+        Self {
+            states,
+            start_state,
+            shared_transition_rows: true,
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
+        }
     }
 
     pub fn set_start_state(&mut self, state: u32) {
@@ -1981,6 +2031,22 @@ impl PartialEq for DWAState {
 mod cache_tests {
     use super::*;
     use crate::automata::weighted_u32::equivalence::find_difference;
+
+    #[test]
+    fn mutating_shared_transition_row_converts_it_to_owned() {
+        let mut row = BTreeMap::new();
+        row.insert(7, (1, Weight::all()));
+        let shared = Arc::new(row);
+        let mut left = DwaTransitionMap::from_arc(Arc::clone(&shared));
+        let right = DwaTransitionMap::from_arc(shared);
+
+        left.insert(8, (2, Weight::all()));
+
+        assert!(matches!(left, DwaTransitionMap::Owned(_)));
+        assert!(matches!(right, DwaTransitionMap::Shared(_)));
+        assert!(left.contains_key(&8));
+        assert!(!right.contains_key(&8));
+    }
 
     #[test]
     fn exact_duplicate_state_merge_preserves_weighted_language() {
