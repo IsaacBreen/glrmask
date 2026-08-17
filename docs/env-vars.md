@@ -14,7 +14,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 | Variable | Valid values | Default |
 |---|---|---|
-| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (rayon/macOS logic) |
+| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (available parallelism capped at 6 on Windows, 10 elsewhere) |
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
@@ -46,6 +46,7 @@ intended as diagnostic kill switches.
 | `GLRMASK_L2P_PARALLEL_ROOT_TRIE` | presence toggle | auto: on with >1 Rayon worker for L2P tries with at least 512 reachable tokens and at least 2 root children |
 | `GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE` | presence toggle | off |
 | `GLRMASK_L2P_ROOT_TRIE_TASKS` | positive integer (`usize > 0`) | current Rayon worker count, capped by root-child count |
+| `GLRMASK_DISABLE_L2P_DEFER_UNCOLORED_FUTURE_LEAVES` | presence toggle | off; exact uncolored future-leaf token contributions are batched per NWA source/scanner state and expanded once during flush |
 | `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR` | truthy bool | on; exact first-transition vocabulary prepartitioning uses a 5% preliminary-work limit normally, or 10% for 1024–8192-token vocabularies whose ordinary authority fits in one state batch |
 | `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO` | positive finite float | adaptive as above; explicit value overrides the automatic 5%/10% limit |
 | `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS` | integer (`usize >= 2`) | `2` |

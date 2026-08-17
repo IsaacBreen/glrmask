@@ -224,6 +224,9 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+#[cfg(target_os = "windows")]
+const DEFAULT_COMPILE_THREAD_CAP: usize = 6;
+#[cfg(not(target_os = "windows"))]
 const DEFAULT_COMPILE_THREAD_CAP: usize = 10;
 
 #[cfg(target_os = "windows")]
