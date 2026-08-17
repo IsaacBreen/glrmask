@@ -34,6 +34,338 @@ type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type TargetContribs = SmallVec<[(u32, Weight); 4]>;
 type DeferredFinalEntries = SmallVec<[(u32, Weight); 4]>;
+
+#[derive(Clone)]
+struct ParallelFallbackCachedWeightOp {
+    // Pointer keys are only valid while their operands stay alive. Retaining
+    // both operands also makes every cache hit return one canonical result Arc.
+    _left: Weight,
+    _right: Weight,
+    result: Weight,
+}
+
+enum ParallelFallbackWeightOps {
+    Dash {
+        intersections: dashmap::DashMap<(usize, usize), ParallelFallbackCachedWeightOp>,
+        unions: dashmap::DashMap<(usize, usize), ParallelFallbackCachedWeightOp>,
+        singleflight_intersections: bool,
+    },
+    Sharded {
+        shards: Vec<std::sync::Mutex<ScopedWeightOpCache>>,
+    },
+}
+
+impl ParallelFallbackWeightOps {
+    fn new() -> Self {
+        if std::env::var_os("GLRMASK_FALLBACK_PAIR_SHARDED_CACHE").is_some() {
+            let shard_count = (rayon::current_num_threads() * 8)
+                .next_power_of_two()
+                .clamp(16, 128);
+            Self::Sharded {
+                shards: (0..shard_count)
+                    .map(|_| std::sync::Mutex::new(ScopedWeightOpCache::default()))
+                    .collect(),
+            }
+        } else {
+            Self::Dash {
+                intersections: dashmap::DashMap::new(),
+                unions: dashmap::DashMap::new(),
+                singleflight_intersections: std::env::var_os(
+                    "GLRMASK_EXPERIMENTAL_FALLBACK_SINGLEFLIGHT_INTERSECTIONS",
+                )
+                .is_some(),
+            }
+        }
+    }
+
+    #[inline]
+    fn ordered_key(left: &Weight, right: &Weight) -> ((usize, usize), bool) {
+        let left_key = left.ptr_key();
+        let right_key = right.ptr_key();
+        if left_key <= right_key {
+            ((left_key, right_key), false)
+        } else {
+            ((right_key, left_key), true)
+        }
+    }
+
+    #[inline]
+    fn shard_index(shard_count: usize, key: (usize, usize)) -> usize {
+        let mixed = key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15usize) ^ key.1.rotate_left(17);
+        mixed & (shard_count - 1)
+    }
+
+    #[inline]
+    fn intersection(&self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_empty() || right.is_empty() {
+            return Weight::empty();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        if left.is_full() {
+            return right.clone();
+        }
+        if right.is_full() {
+            return left.clone();
+        }
+        let (key, swapped) = Self::ordered_key(left, right);
+        match self {
+            Self::Dash {
+                intersections,
+                singleflight_intersections,
+                ..
+            } => {
+                if *singleflight_intersections {
+                    let (ordered_left, ordered_right) = if swapped {
+                        (right.clone(), left.clone())
+                    } else {
+                        (left.clone(), right.clone())
+                    };
+                    intersections
+                        .entry(key)
+                        .or_insert_with(|| ParallelFallbackCachedWeightOp {
+                            _left: ordered_left,
+                            _right: ordered_right,
+                            result: left.intersection(right),
+                        })
+                        .result
+                        .clone()
+                } else {
+                    if let Some(existing) = intersections.get(&key) {
+                        return existing.result.clone();
+                    }
+                    let result = left.intersection(right);
+                    let (ordered_left, ordered_right) = if swapped {
+                        (right.clone(), left.clone())
+                    } else {
+                        (left.clone(), right.clone())
+                    };
+                    intersections
+                        .entry(key)
+                        .or_insert_with(|| ParallelFallbackCachedWeightOp {
+                            _left: ordered_left,
+                            _right: ordered_right,
+                            result: result.clone(),
+                        })
+                        .result
+                        .clone()
+                }
+            }
+            Self::Sharded { shards } => shards[Self::shard_index(shards.len(), key)]
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .intersection(left, right),
+        }
+    }
+
+    #[inline]
+    fn union(&self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_full() || right.is_full() {
+            return Weight::all();
+        }
+        if left.is_empty() {
+            return right.clone();
+        }
+        if right.is_empty() {
+            return left.clone();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        let (key, swapped) = Self::ordered_key(left, right);
+        match self {
+            Self::Dash { unions, .. } => {
+                if let Some(existing) = unions.get(&key) {
+                    return existing.result.clone();
+                }
+                let result = left.union(right);
+                let (ordered_left, ordered_right) = if swapped {
+                    (right.clone(), left.clone())
+                } else {
+                    (left.clone(), right.clone())
+                };
+                unions
+                    .entry(key)
+                    .or_insert_with(|| ParallelFallbackCachedWeightOp {
+                        _left: ordered_left,
+                        _right: ordered_right,
+                        result: result.clone(),
+                    })
+                    .result
+                    .clone()
+            }
+            Self::Sharded { shards } => shards[Self::shard_index(shards.len(), key)]
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .union(left, right),
+        }
+    }
+
+    fn intersection_entry_count(&self) -> usize {
+        match self {
+            Self::Dash { intersections, .. } => intersections.len(),
+            Self::Sharded { shards } => shards
+                .iter()
+                .map(|shard| {
+                    shard
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .intersection_entry_count()
+                })
+                .sum(),
+        }
+    }
+
+    fn union_entry_count(&self) -> usize {
+        match self {
+            Self::Dash { unions, .. } => unions.len(),
+            Self::Sharded { shards } => shards
+                .iter()
+                .map(|shard| {
+                    shard
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .union_entry_count()
+                })
+                .sum(),
+        }
+    }
+}
+struct ParallelFallbackLocalCacheEntry {
+    key: (usize, usize),
+    result: Weight,
+}
+
+struct ParallelFallbackLocalWeightOps {
+    intersections: FxHashMap<(usize, usize), Weight>,
+    unions: FxHashMap<(usize, usize), Weight>,
+    direct_intersections: Option<Vec<Option<ParallelFallbackLocalCacheEntry>>>,
+    direct_unions: Option<Vec<Option<ParallelFallbackLocalCacheEntry>>>,
+}
+
+impl Default for ParallelFallbackLocalWeightOps {
+    fn default() -> Self {
+        let direct_capacity = std::env::var("GLRMASK_FALLBACK_PAIR_LOCAL_DIRECT_CACHE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .map(usize::next_power_of_two);
+        let make_direct = || {
+            direct_capacity.map(|capacity| {
+                (0..capacity)
+                    .map(|_| None)
+                    .collect::<Vec<Option<ParallelFallbackLocalCacheEntry>>>()
+            })
+        };
+        Self {
+            intersections: FxHashMap::default(),
+            unions: FxHashMap::default(),
+            direct_intersections: make_direct(),
+            direct_unions: make_direct(),
+        }
+    }
+}
+
+impl ParallelFallbackLocalWeightOps {
+    #[inline]
+    fn direct_index(capacity: usize, key: (usize, usize)) -> usize {
+        ParallelFallbackWeightOps::shard_index(capacity, key)
+    }
+
+    #[inline]
+    fn intersection(
+        &mut self,
+        shared: &ParallelFallbackWeightOps,
+        enabled: bool,
+        left: &Weight,
+        right: &Weight,
+    ) -> Weight {
+        if !enabled {
+            return shared.intersection(left, right);
+        }
+        if left.is_empty() || right.is_empty() {
+            return Weight::empty();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        if left.is_full() {
+            return right.clone();
+        }
+        if right.is_full() {
+            return left.clone();
+        }
+        let (key, _) = ParallelFallbackWeightOps::ordered_key(left, right);
+        if let Some(cache) = self.direct_intersections.as_mut() {
+            let index = Self::direct_index(cache.len(), key);
+            if let Some(entry) = cache[index].as_ref()
+                && entry.key == key
+            {
+                return entry.result.clone();
+            }
+            let result = shared.intersection(left, right);
+            cache[index] = Some(ParallelFallbackLocalCacheEntry {
+                key,
+                result: result.clone(),
+            });
+            return result;
+        }
+        if let Some(result) = self.intersections.get(&key) {
+            return result.clone();
+        }
+        let result = shared.intersection(left, right);
+        self.intersections.insert(key, result.clone());
+        result
+    }
+
+    #[inline]
+    fn union(
+        &mut self,
+        shared: &ParallelFallbackWeightOps,
+        enabled: bool,
+        left: &Weight,
+        right: &Weight,
+    ) -> Weight {
+        if !enabled {
+            return shared.union(left, right);
+        }
+        if left.is_full() || right.is_full() {
+            return Weight::all();
+        }
+        if left.is_empty() {
+            return right.clone();
+        }
+        if right.is_empty() {
+            return left.clone();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        let (key, _) = ParallelFallbackWeightOps::ordered_key(left, right);
+        if let Some(cache) = self.direct_unions.as_mut() {
+            let index = Self::direct_index(cache.len(), key);
+            if let Some(entry) = cache[index].as_ref()
+                && entry.key == key
+            {
+                return entry.result.clone();
+            }
+            let result = shared.union(left, right);
+            cache[index] = Some(ParallelFallbackLocalCacheEntry {
+                key,
+                result: result.clone(),
+            });
+            return result;
+        }
+        if let Some(result) = self.unions.get(&key) {
+            return result.clone();
+        }
+        let result = shared.union(left, right);
+        self.unions.insert(key, result.clone());
+        result
+    }
+}
+
 type FinalPathWeights = SmallVec<[Weight; 4]>;
 type FinalGroups = SmallVec<[(Weight, FinalPathWeights); 4]>;
 
@@ -1404,10 +1736,51 @@ fn collapse_final_leaf_targets(mut dwa: DWA) -> DWA {
     trim_unreachable_dwa(dwa)
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum PossibleOutgoingIds {
     Empty,
     All,
     Some(BitSet),
+}
+
+#[derive(Clone)]
+pub struct ParserDwaSupportStage {
+    dwa: DWA,
+    possible_by_state: Vec<PossibleOutgoingIds>,
+}
+
+impl ParserDwaSupportStage {
+    pub fn num_states(&self) -> usize {
+        self.dwa.num_states() as usize
+    }
+
+    pub fn num_transitions(&self) -> usize {
+        self.dwa.num_transitions()
+    }
+}
+
+fn union_possible_outgoing_ids(
+    left: Option<&PossibleOutgoingIds>,
+    right: Option<&PossibleOutgoingIds>,
+    num_parser_states: u32,
+) -> PossibleOutgoingIds {
+    match (left, right) {
+        (Some(PossibleOutgoingIds::All), _) | (_, Some(PossibleOutgoingIds::All)) => {
+            PossibleOutgoingIds::All
+        }
+        (Some(PossibleOutgoingIds::Some(left)), Some(PossibleOutgoingIds::Some(right))) => {
+            let mut combined = left.clone();
+            combined.union_with(right);
+            if combined.count_ones() == num_parser_states as usize {
+                PossibleOutgoingIds::All
+            } else {
+                PossibleOutgoingIds::Some(combined)
+            }
+        }
+        (Some(PossibleOutgoingIds::Some(ids)), _)
+        | (_, Some(PossibleOutgoingIds::Some(ids))) => PossibleOutgoingIds::Some(ids.clone()),
+        _ => PossibleOutgoingIds::Empty,
+    }
 }
 
 fn build_possible_outgoing_ids_by_state(
@@ -1941,11 +2314,13 @@ fn determinize_with_supports_mode(
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 1)
         .unwrap_or(16);
+    let trust_prescanned_contribs =
+        std::env::var_os("GLRMASK_DISABLE_SUPPORT_PRESCAN_PREMERGED").is_none();
     let parallel_frontier_wave = std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_WAVE")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(2_048);
+        .unwrap_or(32_768);
     let fast_support_profile = compile_profile_enabled() && detail.is_none();
     let mut fast_wave_count = 0usize;
     let mut fast_wave_states = 0usize;
@@ -1960,6 +2335,15 @@ fn determinize_with_supports_mode(
     let mut fast_deferred_union_ms = 0.0f64;
     let mut fast_transition_materialize_ms = 0.0f64;
     let mut fast_final_weights_ms = 0.0f64;
+    let mut fast_closure_miss_compute_ms = 0.0f64;
+    let mut fast_closure_miss_intern_ms = 0.0f64;
+    let mut fast_closure_canon_singletons = 0usize;
+    let mut fast_closure_canon_pairs = 0usize;
+    let mut fast_closure_canon_larger = 0usize;
+    let mut fast_closure_canon_entries = 0usize;
+    let mut fast_closure_canon_max = 0usize;
+    let mut fast_closure_canon_all_same_weight = 0usize;
+    let mut fast_closure_canon_all_same_entries = 0usize;
     let mut fast_labels = 0usize;
     let mut fast_label_contribs = 0usize;
     let mut fast_singleton_no_epsilon = 0usize;
@@ -2343,7 +2727,7 @@ fn determinize_with_supports_mode(
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
         let label_started = (detail.is_some() || fast_support_profile).then(Instant::now);
 
-        let mut process_label = |label: i32, mut contribs: TargetContribs| {
+        let mut process_label = |label: i32, mut contribs: TargetContribs, premerged: bool| {
             if contribs.is_empty() {
                 return;
             }
@@ -2360,7 +2744,7 @@ fn determinize_with_supports_mode(
                 detail.label_contribs_max = detail.label_contribs_max.max(contribs.len());
             }
             let sort_started = detail.as_ref().map(|_| Instant::now());
-            if contribs.len() > 1 {
+            if !premerged && contribs.len() > 1 {
                 contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
                 merge_sorted_target_contributions(&mut contribs, detail.as_mut());
             }
@@ -2526,7 +2910,7 @@ fn determinize_with_supports_mode(
                 }
                 Some(edge_weight)
             };
-            let closure_started = detail.as_ref().map(|_| Instant::now());
+            let closure_started = (detail.is_some() || fast_support_profile).then(Instant::now);
             let mut owned_canon = Vec::new();
             if use_flat_canonical_closure {
                 local_epsilon_closure_canonical(
@@ -2557,8 +2941,13 @@ fn determinize_with_supports_mode(
                     .collect();
                 owned_canon.sort_unstable_by_key(|(state_id, _)| *state_id);
             }
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
-                detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
+            if let Some(started_at) = closure_started {
+                let ms = elapsed_ms(started_at);
+                if let Some(detail) = detail.as_mut() {
+                    detail.local_epsilon_closure_miss_ms += ms;
+                } else if fast_support_profile {
+                    fast_closure_miss_compute_ms += ms;
+                }
             }
             let raw_canon = if use_flat_canonical_closure {
                 closure_canon.as_slice()
@@ -2567,6 +2956,26 @@ fn determinize_with_supports_mode(
             };
             if raw_canon.is_empty() {
                 return;
+            }
+            if fast_support_profile {
+                fast_closure_canon_entries += raw_canon.len();
+                fast_closure_canon_max = fast_closure_canon_max.max(raw_canon.len());
+                match raw_canon.len() {
+                    1 => fast_closure_canon_singletons += 1,
+                    2 => fast_closure_canon_pairs += 1,
+                    _ => fast_closure_canon_larger += 1,
+                }
+                if raw_canon.len() > 1 {
+                    let first_key = raw_canon[0].1.ptr_key();
+                    if raw_canon
+                        .iter()
+                        .skip(1)
+                        .all(|(_, weight)| weight.ptr_key() == first_key)
+                    {
+                        fast_closure_canon_all_same_weight += 1;
+                        fast_closure_canon_all_same_entries += raw_canon.len();
+                    }
+                }
             }
 
             // Weighted subset normalization: factor the union of residuals onto
@@ -2597,7 +3006,7 @@ fn determinize_with_supports_mode(
                 raw_canon
             };
 
-            let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
+            let subset_lookup_started = (detail.is_some() || fast_support_profile).then(Instant::now);
             let to_state = if let [(only_state, only_weight)] = canon {
                 let singleton_key = (
                     *only_state,
@@ -2676,8 +3085,13 @@ fn determinize_with_supports_mode(
                     new_state
                 }
             };
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
-                detail.subset_map_lookup_ms += elapsed_ms(started_at);
+            if let Some(started_at) = subset_lookup_started {
+                let ms = elapsed_ms(started_at);
+                if let Some(detail) = detail.as_mut() {
+                    detail.subset_map_lookup_ms += ms;
+                } else if fast_support_profile {
+                    fast_closure_miss_intern_ms += ms;
+                }
             }
             if defer_edge_unions {
                 let edge_weight = if let Some(weight) = normalized_closure_edge_weight.clone() {
@@ -2725,21 +3139,21 @@ fn determinize_with_supports_mode(
 
         if let Some(labels) = prescanned_labels {
             for (label, contribs) in labels {
-                process_label(label, contribs);
+                process_label(label, contribs, trust_prescanned_contribs);
             }
         } else {
             for label_idx in touched_dense_labels.drain(..) {
                 dense_label_touched[label_idx] = false;
-                process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
+                process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]), false);
             }
 
             if default_touched {
                 default_touched = false;
-                process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets));
+                process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets), false);
             }
 
             for (label, contribs) in sparse_raw_targets.drain() {
-                process_label(label, contribs);
+                process_label(label, contribs, false);
             }
         }
         if let Some(started_at) = label_started {
@@ -3099,7 +3513,7 @@ fn determinize_with_supports_mode(
 
     if fast_support_profile {
         eprintln!(
-            "[glrmask/profile][parser_support_fast] nwa_states={} dwa_states={} waves={} wave_states={} component_refs={} component_rows={} component_row_edges={} component_cache_entries={} labels={} label_contribs={} singleton_no_epsilon={} closure_hits={} parallel_closure_hits={} closure_misses={} subset_hits={} parallel_subset_hits={} subset_misses={} component_key_ms={:.3} component_compute_ms={:.3} state_aggregate_ms={:.3} serial_scan_ms={:.3} label_process_ms={:.3} deferred_union_ms={:.3} transition_materialize_ms={:.3} final_weights_ms={:.3}",
+            "[glrmask/profile][parser_support_fast] nwa_states={} dwa_states={} waves={} wave_states={} component_refs={} component_rows={} component_row_edges={} component_cache_entries={} labels={} label_contribs={} singleton_no_epsilon={} closure_hits={} parallel_closure_hits={} closure_misses={} subset_hits={} parallel_subset_hits={} subset_misses={} component_key_ms={:.3} component_compute_ms={:.3} state_aggregate_ms={:.3} serial_scan_ms={:.3} label_process_ms={:.3} deferred_union_ms={:.3} transition_materialize_ms={:.3} final_weights_ms={:.3} closure_miss_compute_ms={:.3} closure_miss_intern_ms={:.3} closure_canon_singletons={} closure_canon_pairs={} closure_canon_larger={} closure_canon_entries={} closure_canon_max={} closure_canon_all_same_weight={} closure_canon_all_same_entries={}",
             nwa.states().len(),
             dwa.states().len(),
             fast_wave_count,
@@ -3125,6 +3539,15 @@ fn determinize_with_supports_mode(
             fast_deferred_union_ms,
             fast_transition_materialize_ms,
             fast_final_weights_ms,
+            fast_closure_miss_compute_ms,
+            fast_closure_miss_intern_ms,
+            fast_closure_canon_singletons,
+            fast_closure_canon_pairs,
+            fast_closure_canon_larger,
+            fast_closure_canon_entries,
+            fast_closure_canon_max,
+            fast_closure_canon_all_same_weight,
+            fast_closure_canon_all_same_entries,
         );
     }
 
@@ -3239,10 +3662,54 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         state: DWAState,
         targets: Vec<u32>,
     }
+
+    struct PreparedFallbackPairTransition {
+        label: i32,
+        targets: TargetContribs,
+        edge_weight: Weight,
+    }
+    struct PreparedFallbackPairRow {
+        from_state: u32,
+        final_weight: Option<Weight>,
+        transitions: Vec<PreparedFallbackPairTransition>,
+        union_calls: usize,
+    }
+    struct RawFallbackPairTransition {
+        label: i32,
+        targets: TargetContribs,
+    }
+    struct RawFallbackPairRow {
+        from_state: u32,
+        final_weights: SmallVec<[Weight; 2]>,
+        transitions: Vec<RawFallbackPairTransition>,
+    }
+    struct PreparedFallbackWeightedComponentRow {
+        final_weight: Option<Weight>,
+        transitions: Vec<(i32, u32, Weight)>,
+    }
     let parallel_fixed_singletons = fixed_singleton_ids
         && detail.is_none()
         && rayon::current_num_threads() > 1
         && std::env::var_os("GLRMASK_DISABLE_FALLBACK_PARALLEL_SINGLETON_ROWS").is_none();
+    let parallel_pair_rows = fixed_singleton_ids
+        && detail.is_none()
+        && rayon::current_num_threads() > 1
+        && std::env::var_os("GLRMASK_DISABLE_FALLBACK_PARALLEL_PAIRS").is_none();
+    let parallel_pair_weight_ops = parallel_pair_rows.then(ParallelFallbackWeightOps::new);
+    let precompute_pair_intersections = parallel_pair_rows
+        && std::env::var_os("GLRMASK_FALLBACK_PAIR_PRECOMPUTE_INTERSECTIONS").is_some();
+    let local_pair_front_cache = parallel_pair_rows
+        && std::env::var_os("GLRMASK_DISABLE_FALLBACK_PAIR_LOCAL_FRONT_CACHE").is_none();
+    let cache_pair_component_rows = parallel_pair_rows
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_FALLBACK_COMPONENT_ROWS").is_some();
+    let defer_pair_unions = parallel_pair_rows
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_FALLBACK_DEFER_UNIONS").is_some();
+    let mut pair_component_rows = FxHashMap::<
+        (u32, usize),
+        Arc<PreparedFallbackWeightedComponentRow>,
+    >::default();
+    let mut precomputed_pair_intersections =
+        FxHashMap::<(usize, usize), ParallelFallbackCachedWeightOp>::default();
     let fallback_parallel_min = std::env::var("GLRMASK_FALLBACK_PARALLEL_MIN_FRONTIER")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -3252,16 +3719,51 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(2_048);
+        .unwrap_or(32_768);
     let fallback_profile = compile_profile_enabled() && detail.is_none();
     let fallback_started = fallback_profile.then(Instant::now);
     let mut fallback_parallel_waves = 0usize;
     let mut fallback_parallel_rows = 0usize;
+    let mut fallback_prepare_ms = 0.0f64;
+    let mut fallback_apply_ms = 0.0f64;
+    let mut fallback_apply_rows = 0usize;
+    let mut fallback_serial_ms = 0.0f64;
+    let mut fallback_serial_rows = 0usize;
+    let mut fallback_serial_singleton_rows = 0usize;
+    let mut fallback_generic_rows = 0usize;
+    let mut fallback_generic_subset_entries = 0usize;
+    let mut fallback_generic_subset_max = 0usize;
+    let mut fallback_generic_default_components = 0usize;
+    let mut fallback_generic_scan_ms = 0.0f64;
+    let mut fallback_generic_label_ms = 0.0f64;
+    let mut fallback_generic_labels = 0usize;
+    let mut fallback_generic_label_contribs = 0usize;
+    let mut fallback_generic_label_contrib_max = 0usize;
+    let mut fallback_pair_prepare_rows = 0usize;
+    let mut fallback_pair_prepare_ms = 0.0f64;
+    let mut fallback_pair_component_refs = 0usize;
+    let mut fallback_pair_component_keys = fallback_profile
+        .then(FxHashSet::<(u32, usize)>::default);
+    let mut fallback_pair_component_rows_computed = 0usize;
+    let mut fallback_pair_component_compute_ms = 0.0f64;
+    let mut fallback_pair_intersection_collect_ms = 0.0f64;
+    let mut fallback_pair_intersection_compute_ms = 0.0f64;
+    let mut fallback_pair_apply_rows = 0usize;
+    let mut fallback_pair_apply_ms = 0.0f64;
+    let mut fallback_pair_union_calls = 0usize;
+    let mut fallback_pair_deferred_union_unique = 0usize;
+    let mut fallback_pair_deferred_union_compute_ms = 0.0f64;
     let mut prepared_singleton_rows = VecDeque::<PreparedFallbackSingletonRow>::new();
+    let mut prepared_pair_rows = VecDeque::<PreparedFallbackPairRow>::new();
     let mut serial_pending = VecDeque::<(u32, Vec<(u32, Weight)>)>::new();
 
-    while !worklist.is_empty() || !serial_pending.is_empty() || !prepared_singleton_rows.is_empty() {
+    while !worklist.is_empty()
+        || !serial_pending.is_empty()
+        || !prepared_singleton_rows.is_empty()
+        || !prepared_pair_rows.is_empty()
+    {
         if prepared_singleton_rows.is_empty()
+            && prepared_pair_rows.is_empty()
             && serial_pending.is_empty()
             && parallel_fixed_singletons
             && worklist.len() >= fallback_parallel_min
@@ -3289,6 +3791,7 @@ fn determinize_parser_dwa_with_fallbacks_impl(
             if !eligible.is_empty() {
                 fallback_parallel_waves += 1;
                 fallback_parallel_rows += eligible.len();
+                let prepare_started = fallback_profile.then(Instant::now);
                 let prepared = eligible
                     .into_par_iter()
                     .map(|(from_state, dwa_state_id)| {
@@ -3306,11 +3809,16 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                         }
                     })
                     .collect::<Vec<_>>();
+                if let Some(started) = prepare_started {
+                    fallback_prepare_ms += elapsed_ms(started);
+                }
                 prepared_singleton_rows.extend(prepared);
             }
         }
 
         if let Some(prepared) = prepared_singleton_rows.pop_front() {
+            let apply_started = fallback_profile.then(Instant::now);
+            fallback_apply_rows += 1;
             let scheduled = fixed_singleton_scheduled
                 .as_mut()
                 .expect("parallel singleton fallback requires fixed state IDs");
@@ -3324,6 +3832,747 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                 }
             }
             result.states_mut()[prepared.from_state as usize] = prepared.state;
+            if let Some(started) = apply_started {
+                fallback_apply_ms += elapsed_ms(started);
+            }
+            continue;
+        }
+
+
+        if prepared_pair_rows.is_empty()
+            && parallel_pair_rows
+            && serial_pending.len() >= fallback_parallel_min
+        {
+            use rayon::prelude::*;
+            // Only take an eligible prefix. Partitioning a mixed batch would
+            // move pair rows ahead of earlier generic rows and change the
+            // otherwise deterministic order of subset interning/state IDs.
+            let batch_len = serial_pending
+                .iter()
+                .take(fallback_parallel_wave)
+                .take_while(|(_, subset_entries)| {
+                    subset_entries.len() == 2
+                        && subset_entries.iter().all(|(state_id, _)| {
+                            !dwa.states()[*state_id as usize]
+                                .transitions
+                                .contains_key(&DEFAULT_LABEL)
+                        })
+                })
+                .count();
+            let eligible = serial_pending.drain(..batch_len).collect::<Vec<_>>();
+            if !eligible.is_empty() {
+                let started = fallback_profile.then(Instant::now);
+                fallback_pair_prepare_rows += eligible.len();
+                if fallback_profile {
+                    fallback_pair_component_refs += eligible
+                        .iter()
+                        .map(|(_, subset_entries)| subset_entries.len())
+                        .sum::<usize>();
+                    if let Some(keys) = fallback_pair_component_keys.as_mut() {
+                        for (_, subset_entries) in &eligible {
+                            for (state_id, path_weight) in subset_entries {
+                                keys.insert((*state_id, path_weight.ptr_key()));
+                            }
+                        }
+                    }
+                }
+                if cache_pair_component_rows {
+                    let compute_started = fallback_profile.then(Instant::now);
+                    let mut missing = FxHashMap::<(u32, usize), (u32, Weight)>::default();
+                    for (_, subset_entries) in &eligible {
+                        for (state_id, path_weight) in subset_entries {
+                            let key = (*state_id, path_weight.ptr_key());
+                            if !pair_component_rows.contains_key(&key) {
+                                missing
+                                    .entry(key)
+                                    .or_insert_with(|| (*state_id, path_weight.clone()));
+                            }
+                        }
+                    }
+                    let shared_weight_ops = parallel_pair_weight_ops
+                        .as_ref()
+                        .expect("fallback component rows require shared weight cache");
+                    let computed = missing
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .into_par_iter()
+                        .map_init(
+                            ParallelFallbackLocalWeightOps::default,
+                            |local_ops, (key, (state_id, path_weight))| {
+                                let source = &dwa.states()[state_id as usize];
+                                debug_assert!(!source.transitions.contains_key(&DEFAULT_LABEL));
+                                let final_weight = source.final_weight.as_ref().and_then(|weight| {
+                                    let contribution = local_ops.intersection(
+                                        shared_weight_ops,
+                                        local_pair_front_cache,
+                                        &path_weight,
+                                        weight,
+                                    );
+                                    (!contribution.is_empty()).then_some(contribution)
+                                });
+                                let transitions = source
+                                    .transitions
+                                    .iter()
+                                    .filter_map(|(&label, (target, weight))| {
+                                        let contribution = local_ops.intersection(
+                                            shared_weight_ops,
+                                            local_pair_front_cache,
+                                            &path_weight,
+                                            weight,
+                                        );
+                                        (!contribution.is_empty())
+                                            .then_some((label, *target, contribution))
+                                    })
+                                    .collect::<Vec<_>>();
+                                (
+                                    key,
+                                    Arc::new(PreparedFallbackWeightedComponentRow {
+                                        final_weight,
+                                        transitions,
+                                    }),
+                                )
+                            },
+                        )
+                        .collect::<Vec<_>>();
+                    fallback_pair_component_rows_computed += computed.len();
+                    for (key, row) in computed {
+                        pair_component_rows.entry(key).or_insert(row);
+                    }
+                    if let Some(started) = compute_started {
+                        fallback_pair_component_compute_ms += elapsed_ms(started);
+                    }
+                }
+                if precompute_pair_intersections {
+                    let collect_started = fallback_profile.then(Instant::now);
+                    let mut missing = FxHashMap::<(usize, usize), (Weight, Weight)>::default();
+                    for (_, subset_entries) in &eligible {
+                        for (state_id, path_weight) in subset_entries {
+                            let state = &dwa.states()[*state_id as usize];
+                            let mut add_operand = |operand: &Weight| {
+                                if path_weight.is_empty()
+                                    || operand.is_empty()
+                                    || path_weight.is_full()
+                                    || operand.is_full()
+                                    || path_weight.ptr_key() == operand.ptr_key()
+                                {
+                                    return;
+                                }
+                                let (key, swapped) =
+                                    ParallelFallbackWeightOps::ordered_key(path_weight, operand);
+                                if precomputed_pair_intersections.contains_key(&key) {
+                                    return;
+                                }
+                                missing.entry(key).or_insert_with(|| {
+                                    if swapped {
+                                        (operand.clone(), path_weight.clone())
+                                    } else {
+                                        (path_weight.clone(), operand.clone())
+                                    }
+                                });
+                            };
+                            if let Some(final_weight) = state.final_weight.as_ref() {
+                                add_operand(final_weight);
+                            }
+                            for (_, transition_weight) in state.transitions.values() {
+                                add_operand(transition_weight);
+                            }
+                        }
+                    }
+                    if let Some(started) = collect_started {
+                        fallback_pair_intersection_collect_ms += elapsed_ms(started);
+                    }
+                    let compute_started = fallback_profile.then(Instant::now);
+                    let computed = missing
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .into_par_iter()
+                        .map(|(key, (left, right))| {
+                            let result = left.intersection(&right);
+                            (
+                                key,
+                                ParallelFallbackCachedWeightOp {
+                                    _left: left,
+                                    _right: right,
+                                    result,
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(started) = compute_started {
+                        fallback_pair_intersection_compute_ms += elapsed_ms(started);
+                    }
+                    for (key, entry) in computed {
+                        precomputed_pair_intersections.entry(key).or_insert(entry);
+                    }
+                }
+                let weight_ops = parallel_pair_weight_ops
+                    .as_ref()
+                    .expect("parallel fallback pair cache enabled with pair rows");
+                let frozen_intersections = &precomputed_pair_intersections;
+                let prepared = if defer_pair_unions {
+                    let raw_rows = eligible
+                        .into_par_iter()
+                        .map_init(
+                            ParallelFallbackLocalWeightOps::default,
+                            |local_ops, (from_state, subset_entries)| {
+                                debug_assert_eq!(subset_entries.len(), 2);
+                                let (left_id, left_path) = &subset_entries[0];
+                                let (right_id, right_path) = &subset_entries[1];
+                                let left_state = &dwa.states()[*left_id as usize];
+                                let right_state = &dwa.states()[*right_id as usize];
+                                let intersection =
+                                    |local_ops: &mut ParallelFallbackLocalWeightOps,
+                                     left: &Weight,
+                                     right: &Weight| {
+                                        if !precompute_pair_intersections {
+                                            return local_ops.intersection(
+                                                weight_ops,
+                                                local_pair_front_cache,
+                                                left,
+                                                right,
+                                            );
+                                        }
+                                        if left.is_empty() || right.is_empty() {
+                                            return Weight::empty();
+                                        }
+                                        if left.ptr_key() == right.ptr_key() {
+                                            return left.clone();
+                                        }
+                                        if left.is_full() {
+                                            return right.clone();
+                                        }
+                                        if right.is_full() {
+                                            return left.clone();
+                                        }
+                                        let (key, _) =
+                                            ParallelFallbackWeightOps::ordered_key(left, right);
+                                        frozen_intersections
+                                            .get(&key)
+                                            .expect("fallback pair intersection was precomputed")
+                                            .result
+                                            .clone()
+                                    };
+
+                                let mut final_weights = SmallVec::<[Weight; 2]>::new();
+                                if let Some(source_final) = left_state.final_weight.as_ref() {
+                                    let contribution =
+                                        intersection(local_ops, left_path, source_final);
+                                    if !contribution.is_empty() {
+                                        final_weights.push(contribution);
+                                    }
+                                }
+                                if let Some(source_final) = right_state.final_weight.as_ref() {
+                                    let contribution =
+                                        intersection(local_ops, right_path, source_final);
+                                    if !contribution.is_empty() {
+                                        final_weights.push(contribution);
+                                    }
+                                }
+
+                                let mut transitions = Vec::with_capacity(
+                                    left_state.transitions.len() + right_state.transitions.len(),
+                                );
+                                let mut left_iter = left_state.transitions.iter().peekable();
+                                let mut right_iter = right_state.transitions.iter().peekable();
+                                loop {
+                                    let label = match (left_iter.peek(), right_iter.peek()) {
+                                        (Some((left_label, _)), Some((right_label, _))) => {
+                                            Some((**left_label).min(**right_label))
+                                        }
+                                        (Some((left_label, _)), None) => Some(**left_label),
+                                        (None, Some((right_label, _))) => Some(**right_label),
+                                        (None, None) => None,
+                                    };
+                                    let Some(label) = label else { break };
+                                    debug_assert_ne!(label, DEFAULT_LABEL);
+                                    let left_edge = if left_iter
+                                        .peek()
+                                        .is_some_and(|(candidate, _)| **candidate == label)
+                                    {
+                                        left_iter.next().map(|(_, edge)| edge)
+                                    } else {
+                                        None
+                                    };
+                                    let right_edge = if right_iter
+                                        .peek()
+                                        .is_some_and(|(candidate, _)| **candidate == label)
+                                    {
+                                        right_iter.next().map(|(_, edge)| edge)
+                                    } else {
+                                        None
+                                    };
+
+                                    let mut targets = TargetContribs::new();
+                                    if let Some((target, transition_weight)) = left_edge {
+                                        let next_weight = intersection(
+                                            local_ops,
+                                            left_path,
+                                            transition_weight,
+                                        );
+                                        if !next_weight.is_empty() {
+                                            targets.push((*target, next_weight));
+                                        }
+                                    }
+                                    if let Some((target, transition_weight)) = right_edge {
+                                        let next_weight = intersection(
+                                            local_ops,
+                                            right_path,
+                                            transition_weight,
+                                        );
+                                        if !next_weight.is_empty() {
+                                            targets.push((*target, next_weight));
+                                        }
+                                    }
+                                    if !targets.is_empty() {
+                                        transitions.push(RawFallbackPairTransition { label, targets });
+                                    }
+                                }
+                                RawFallbackPairRow {
+                                    from_state,
+                                    final_weights,
+                                    transitions,
+                                }
+                            },
+                        )
+                        .collect::<Vec<_>>();
+
+                    let union_started = fallback_profile.then(Instant::now);
+                    let mut unique_unions =
+                        FxHashMap::<(usize, usize), (Weight, Weight)>::default();
+                    let mut register_union = |left: &Weight, right: &Weight| {
+                        if left.is_full()
+                            || right.is_full()
+                            || left.is_empty()
+                            || right.is_empty()
+                            || left.ptr_key() == right.ptr_key()
+                        {
+                            return;
+                        }
+                        let (key, swapped) =
+                            ParallelFallbackWeightOps::ordered_key(left, right);
+                        unique_unions.entry(key).or_insert_with(|| {
+                            if swapped {
+                                (right.clone(), left.clone())
+                            } else {
+                                (left.clone(), right.clone())
+                            }
+                        });
+                    };
+                    for row in &raw_rows {
+                        if let [left, right] = row.final_weights.as_slice() {
+                            register_union(left, right);
+                        }
+                        for transition in &row.transitions {
+                            if let [(.., left), (.., right)] = transition.targets.as_slice() {
+                                register_union(left, right);
+                            }
+                        }
+                    }
+                    fallback_pair_deferred_union_unique += unique_unions.len();
+                    let resolved_unions = unique_unions
+                        .into_par_iter()
+                        .map(|(key, (left, right))| (key, left.union(&right)))
+                        .collect::<FxHashMap<_, _>>();
+                    if let Some(started) = union_started {
+                        fallback_pair_deferred_union_compute_ms += elapsed_ms(started);
+                    }
+                    let resolve_union = |left: &Weight, right: &Weight| -> Weight {
+                        if left.is_full() || right.is_full() {
+                            return Weight::all();
+                        }
+                        if left.is_empty() {
+                            return right.clone();
+                        }
+                        if right.is_empty() {
+                            return left.clone();
+                        }
+                        if left.ptr_key() == right.ptr_key() {
+                            return left.clone();
+                        }
+                        let (key, _) = ParallelFallbackWeightOps::ordered_key(left, right);
+                        resolved_unions
+                            .get(&key)
+                            .expect("deferred fallback union was not resolved")
+                            .clone()
+                    };
+                    raw_rows
+                        .into_par_iter()
+                        .map(|row| {
+                            let union_calls = usize::from(row.final_weights.len() == 2)
+                                + row
+                                    .transitions
+                                    .iter()
+                                    .filter(|transition| transition.targets.len() == 2)
+                                    .count();
+                            let final_weight = match row.final_weights.as_slice() {
+                                [] => None,
+                                [weight] => Some(weight.clone()),
+                                [left, right] => Some(resolve_union(left, right)),
+                                _ => unreachable!("fallback pair row has at most two finals"),
+                            };
+                            let transitions = row
+                                .transitions
+                                .into_iter()
+                                .map(|transition| {
+                                    let mut targets = transition.targets;
+                                    let edge_weight = match targets.as_slice() {
+                                        [(_, weight)] => weight.clone(),
+                                        [(_, left), (_, right)] => resolve_union(left, right),
+                                        _ => unreachable!("fallback pair transition has one or two targets"),
+                                    };
+                                    if targets.len() == 2 {
+                                        if targets[0].0 == targets[1].0 {
+                                            let target = targets[0].0;
+                                            targets.clear();
+                                            targets.push((target, edge_weight.clone()));
+                                        } else if targets[0].0 > targets[1].0 {
+                                            targets.swap(0, 1);
+                                        }
+                                    }
+                                    PreparedFallbackPairTransition {
+                                        label: transition.label,
+                                        targets,
+                                        edge_weight,
+                                    }
+                                })
+                                .collect();
+                            PreparedFallbackPairRow {
+                                from_state: row.from_state,
+                                final_weight,
+                                transitions,
+                                union_calls,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else if cache_pair_component_rows {
+                    let component_rows = &pair_component_rows;
+                    eligible
+                        .into_par_iter()
+                        .map_init(
+                            ParallelFallbackLocalWeightOps::default,
+                            |local_ops, (from_state, subset_entries)| {
+                                debug_assert_eq!(subset_entries.len(), 2);
+                                let union_calls = 0usize;
+                                let left_key =
+                                    (subset_entries[0].0, subset_entries[0].1.ptr_key());
+                                let right_key =
+                                    (subset_entries[1].0, subset_entries[1].1.ptr_key());
+                                let left = component_rows
+                                    .get(&left_key)
+                                    .expect("left fallback component row was precomputed");
+                                let right = component_rows
+                                    .get(&right_key)
+                                    .expect("right fallback component row was precomputed");
+
+                                let final_weight = match (&left.final_weight, &right.final_weight) {
+                                    (None, None) => None,
+                                    (Some(weight), None) | (None, Some(weight)) => Some(weight.clone()),
+                                    (Some(left), Some(right)) => Some(local_ops.union(
+                                        weight_ops,
+                                        local_pair_front_cache,
+                                        left,
+                                        right,
+                                    )),
+                                };
+
+                                let mut transitions = Vec::with_capacity(
+                                    left.transitions.len() + right.transitions.len(),
+                                );
+                                let mut left_iter = left.transitions.iter().peekable();
+                                let mut right_iter = right.transitions.iter().peekable();
+                                loop {
+                                    let label = match (left_iter.peek(), right_iter.peek()) {
+                                        (Some((left_label, _, _)), Some((right_label, _, _))) => {
+                                            Some((*left_label).min(*right_label))
+                                        }
+                                        (Some((left_label, _, _)), None) => Some(*left_label),
+                                        (None, Some((right_label, _, _))) => Some(*right_label),
+                                        (None, None) => None,
+                                    };
+                                    let Some(label) = label else { break };
+                                    let left_edge = if left_iter
+                                        .peek()
+                                        .is_some_and(|(candidate, _, _)| *candidate == label)
+                                    {
+                                        left_iter.next()
+                                    } else {
+                                        None
+                                    };
+                                    let right_edge = if right_iter
+                                        .peek()
+                                        .is_some_and(|(candidate, _, _)| *candidate == label)
+                                    {
+                                        right_iter.next()
+                                    } else {
+                                        None
+                                    };
+
+                                    let mut targets = TargetContribs::new();
+                                    if let Some((_, target, weight)) = left_edge {
+                                        targets.push((*target, weight.clone()));
+                                    }
+                                    if let Some((_, target, weight)) = right_edge {
+                                        if let Some((_, existing)) = targets
+                                            .iter_mut()
+                                            .find(|(existing_target, _)| existing_target == target)
+                                        {
+                                            *existing = local_ops.union(
+                                                weight_ops,
+                                                local_pair_front_cache,
+                                                existing,
+                                                weight,
+                                            );
+                                        } else {
+                                            targets.push((*target, weight.clone()));
+                                        }
+                                    }
+                                    if targets.len() > 1 {
+                                        targets.sort_unstable_by_key(|(target, _)| *target);
+                                    }
+                                    let edge_weight = if targets.len() == 1 {
+                                        targets[0].1.clone()
+                                    } else {
+                                        local_ops.union(
+                                            weight_ops,
+                                            local_pair_front_cache,
+                                            &targets[0].1,
+                                            &targets[1].1,
+                                        )
+                                    };
+                                    transitions.push(PreparedFallbackPairTransition {
+                                        label,
+                                        targets,
+                                        edge_weight,
+                                    });
+                                }
+                                PreparedFallbackPairRow {
+                                    from_state,
+                                    final_weight,
+                                    transitions,
+                                    union_calls: 0,
+                                }
+                            },
+                        )
+                        .collect::<Vec<_>>()
+                } else {
+eligible
+                    .into_par_iter()
+                    .map_init(
+                        ParallelFallbackLocalWeightOps::default,
+                        |local_ops, (from_state, subset_entries)| {
+                            debug_assert_eq!(subset_entries.len(), 2);
+                            let (left_id, left_path) = &subset_entries[0];
+                            let (right_id, right_path) = &subset_entries[1];
+                            let left_state = &dwa.states()[*left_id as usize];
+                            let right_state = &dwa.states()[*right_id as usize];
+                            let mut union_calls = 0usize;
+                            let intersection =
+                                |local_ops: &mut ParallelFallbackLocalWeightOps,
+                                 left: &Weight,
+                                 right: &Weight| {
+                                if !precompute_pair_intersections {
+                                    return local_ops.intersection(
+                                        weight_ops,
+                                        local_pair_front_cache,
+                                        left,
+                                        right,
+                                    );
+                                }
+                                if left.is_empty() || right.is_empty() {
+                                    return Weight::empty();
+                                }
+                                if left.ptr_key() == right.ptr_key() {
+                                    return left.clone();
+                                }
+                                if left.is_full() {
+                                    return right.clone();
+                                }
+                                if right.is_full() {
+                                    return left.clone();
+                                }
+                                let (key, _) = ParallelFallbackWeightOps::ordered_key(left, right);
+                                frozen_intersections
+                                    .get(&key)
+                                    .expect("fallback pair intersection was precomputed")
+                                    .result
+                                    .clone()
+                            };
+
+                            let mut final_weight = Weight::empty();
+                            if let Some(source_final) = left_state.final_weight.as_ref() {
+                                let contribution =
+                                    intersection(local_ops, left_path, source_final);
+                                if !contribution.is_empty() {
+                                    final_weight = contribution;
+                                }
+                            }
+                            if let Some(source_final) = right_state.final_weight.as_ref() {
+                                let contribution =
+                                    intersection(local_ops, right_path, source_final);
+                                if !contribution.is_empty() {
+                                    final_weight = if final_weight.is_empty() {
+                                        contribution
+                                    } else {
+                                        { union_calls += 1; local_ops.union(weight_ops, local_pair_front_cache, &final_weight, &contribution) }
+                                    };
+                                }
+                            }
+
+                            let mut transitions = Vec::with_capacity(
+                                left_state.transitions.len() + right_state.transitions.len(),
+                            );
+                            let mut left_iter = left_state.transitions.iter().peekable();
+                            let mut right_iter = right_state.transitions.iter().peekable();
+                            loop {
+                                let label = match (left_iter.peek(), right_iter.peek()) {
+                                    (Some((left_label, _)), Some((right_label, _))) => {
+                                        Some((**left_label).min(**right_label))
+                                    }
+                                    (Some((left_label, _)), None) => Some(**left_label),
+                                    (None, Some((right_label, _))) => Some(**right_label),
+                                    (None, None) => None,
+                                };
+                                let Some(label) = label else { break };
+                                debug_assert_ne!(label, DEFAULT_LABEL);
+
+                                let left_edge = if left_iter
+                                    .peek()
+                                    .is_some_and(|(candidate, _)| **candidate == label)
+                                {
+                                    left_iter.next().map(|(_, edge)| edge)
+                                } else {
+                                    None
+                                };
+                                let right_edge = if right_iter
+                                    .peek()
+                                    .is_some_and(|(candidate, _)| **candidate == label)
+                                {
+                                    right_iter.next().map(|(_, edge)| edge)
+                                } else {
+                                    None
+                                };
+
+                                let mut targets = TargetContribs::new();
+                                if let Some((target, transition_weight)) = left_edge {
+                                    let next_weight = intersection(
+                                        local_ops,
+                                        left_path,
+                                        transition_weight,
+                                    );
+                                    if !next_weight.is_empty() {
+                                        targets.push((*target, next_weight));
+                                    }
+                                }
+                                if let Some((target, transition_weight)) = right_edge {
+                                    let next_weight = intersection(
+                                        local_ops,
+                                        right_path,
+                                        transition_weight,
+                                    );
+                                    if !next_weight.is_empty() {
+                                        if let Some((_, existing)) = targets
+                                            .iter_mut()
+                                            .find(|(existing_target, _)| existing_target == target)
+                                        {
+                                            union_calls += 1;
+                                            *existing = local_ops.union(weight_ops, local_pair_front_cache, existing, &next_weight);
+                                        } else {
+                                            targets.push((*target, next_weight));
+                                        }
+                                    }
+                                }
+                                if targets.is_empty() {
+                                    continue;
+                                }
+                                if targets.len() > 1 {
+                                    targets.sort_unstable_by_key(|(target, _)| *target);
+                                }
+                                let edge_weight = if targets.len() == 1 {
+                                    targets[0].1.clone()
+                                } else {
+                                    { union_calls += 1; local_ops.union(weight_ops, local_pair_front_cache, &targets[0].1, &targets[1].1) }
+                                };
+                                if !edge_weight.is_empty() {
+                                    transitions.push(PreparedFallbackPairTransition {
+                                        label,
+                                        targets,
+                                        edge_weight,
+                                    });
+                                }
+                            }
+                            PreparedFallbackPairRow {
+                                from_state,
+                                final_weight: (!final_weight.is_empty()).then_some(final_weight),
+                                transitions,
+                                union_calls,
+                            }
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                };
+                if fallback_profile {
+                    fallback_pair_union_calls += prepared
+                        .iter()
+                        .map(|row| row.union_calls)
+                        .sum::<usize>();
+                }
+                if let Some(started) = started {
+                    fallback_pair_prepare_ms += elapsed_ms(started);
+                }
+                prepared_pair_rows.extend(prepared);
+            }
+        }
+
+        if let Some(prepared) = prepared_pair_rows.pop_front() {
+            let started = fallback_profile.then(Instant::now);
+            fallback_pair_apply_rows += 1;
+            if let Some(final_weight) = prepared.final_weight {
+                result.set_final_weight(prepared.from_state, final_weight);
+            }
+            for transition in prepared.transitions {
+                let to_state = if let [(only_state, _)] = transition.targets.as_slice() {
+                    let scheduled = fixed_singleton_scheduled
+                        .as_mut()
+                        .expect("parallel fallback pair path requires fixed singleton IDs");
+                    if !scheduled[*only_state as usize] {
+                        scheduled[*only_state as usize] = true;
+                        worklist.push_back((
+                            *only_state,
+                            vec![(*only_state, normalized_singleton_weight.clone())],
+                        ));
+                    }
+                    *only_state
+                } else {
+                    debug_assert_eq!(transition.targets.len(), 2);
+                    key_buf.clear();
+                    key_buf.extend(
+                        transition
+                            .targets
+                            .iter()
+                            .map(|(state_id, weight)| (*state_id, weight.ptr_key())),
+                    );
+                    if let Some(existing) = subset_map.get(&key_buf).copied() {
+                        existing
+                    } else {
+                        let new_state = result.add_state();
+                        subset_map.insert(key_buf.clone(), new_state);
+                        worklist.push_back((
+                            new_state,
+                            transition.targets.iter().cloned().collect(),
+                        ));
+                        new_state
+                    }
+                };
+                result.add_transition(
+                    prepared.from_state,
+                    transition.label,
+                    to_state,
+                    transition.edge_weight,
+                );
+            }
+            if let Some(started) = started {
+                fallback_pair_apply_ms += elapsed_ms(started);
+            }
             continue;
         }
 
@@ -3331,6 +4580,8 @@ fn determinize_parser_dwa_with_fallbacks_impl(
             .pop_front()
             .or_else(|| worklist.pop_front())
             .expect("fallback determinizer work queues unexpectedly empty");
+        let serial_started = fallback_profile.then(Instant::now);
+        fallback_serial_rows += 1;
         dense_default_all_raw_targets.clear();
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
@@ -3368,6 +4619,7 @@ fn determinize_parser_dwa_with_fallbacks_impl(
             && let Some(state) = dwa.states().get(*dwa_state_id as usize)
             && !state.transitions.contains_key(&DEFAULT_LABEL)
         {
+            fallback_serial_singleton_rows += 1;
             // Preserve the already-sorted row allocation and rewrite only its
             // targets/weights. This avoids millions of individual BTreeMap
             // insertions in the dominant singleton fallback path.
@@ -3421,9 +4673,20 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                 rewritten.remove(&label);
             }
             result.states_mut()[from_state as usize].transitions = rewritten;
+            if let Some(started) = serial_started {
+                fallback_serial_ms += elapsed_ms(started);
+            }
             continue;
         }
 
+        fallback_generic_rows += 1;
+        fallback_generic_subset_entries += subset_entries.len();
+        fallback_generic_subset_max = fallback_generic_subset_max.max(subset_entries.len());
+        fallback_generic_default_components += subset_entries
+            .iter()
+            .filter(|(state_id, _)| dwa.states()[*state_id as usize].transitions.contains_key(&DEFAULT_LABEL))
+            .count();
+        let generic_scan_started = fallback_profile.then(Instant::now);
         for (dwa_state_id, path_weight) in &subset_entries {
             let state = &dwa.states()[*dwa_state_id as usize];
 
@@ -3552,13 +4815,19 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         if let (Some(detail), Some(started_at)) = (detail.as_mut(), scan_started) {
             detail.intersection_scan_ms += elapsed_ms(started_at);
         }
+        if let Some(started) = generic_scan_started {
+            fallback_generic_scan_ms += elapsed_ms(started);
+        }
 
-        let label_started = detail.as_ref().map(|_| Instant::now());
+        let label_started = (detail.is_some() || fallback_profile).then(Instant::now);
         let mut process_label = |label: i32, mut contribs: TargetContribs| {
             if contribs.is_empty() {
                 return;
             }
 
+            fallback_generic_labels += 1;
+            fallback_generic_label_contribs += contribs.len();
+            fallback_generic_label_contrib_max = fallback_generic_label_contrib_max.max(contribs.len());
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
 
@@ -3663,18 +4932,64 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         for (label, contribs) in sparse_raw_targets.drain() {
             process_label(label, contribs);
         }
-        if let (Some(detail), Some(started_at)) = (detail.as_mut(), label_started) {
-            detail.label_processing_ms += elapsed_ms(started_at);
+        if let Some(started_at) = label_started {
+            let ms = elapsed_ms(started_at);
+            if let Some(detail) = detail.as_mut() {
+                detail.label_processing_ms += ms;
+            }
+            if fallback_profile {
+                fallback_generic_label_ms += ms;
+            }
+        }
+        if let Some(started) = serial_started {
+            fallback_serial_ms += elapsed_ms(started);
         }
     }
 
     if let Some(started) = fallback_started {
         eprintln!(
-            "[glrmask/profile][fallback_fast] input_states={} output_states={} parallel_waves={} parallel_rows={} total_ms={:.3}",
+            "[glrmask/profile][fallback_fast] input_states={} output_states={} parallel_waves={} parallel_rows={} prepare_ms={:.3} apply_rows={} apply_ms={:.3} pair_prepare_rows={} pair_prepare_ms={:.3} pair_component_refs={} pair_unique_components={} pair_component_rows_computed={} pair_component_cache_entries={} pair_component_compute_ms={:.3} pair_intersection_collect_ms={:.3} pair_intersection_compute_ms={:.3} pair_apply_rows={} pair_apply_ms={:.3} pair_intersection_cache_entries={} pair_precomputed_intersections={} pair_union_calls={} pair_deferred_union_unique={} pair_deferred_union_ms={:.3} pair_union_cache_entries={} serial_rows={} serial_ms={:.3} serial_singletons={} generic_rows={} generic_subset_entries={} generic_subset_max={} generic_default_components={} generic_scan_ms={:.3} generic_labels={} generic_label_contribs={} generic_label_contrib_max={} generic_label_ms={:.3} intersection_cache_entries={} total_ms={:.3}",
             dwa.states().len(),
             result.states().len(),
             fallback_parallel_waves,
             fallback_parallel_rows,
+            fallback_prepare_ms,
+            fallback_apply_rows,
+            fallback_apply_ms,
+            fallback_pair_prepare_rows,
+            fallback_pair_prepare_ms,
+            fallback_pair_component_refs,
+            fallback_pair_component_keys.as_ref().map_or(0, FxHashSet::len),
+            fallback_pair_component_rows_computed,
+            pair_component_rows.len(),
+            fallback_pair_component_compute_ms,
+            fallback_pair_intersection_collect_ms,
+            fallback_pair_intersection_compute_ms,
+            fallback_pair_apply_rows,
+            fallback_pair_apply_ms,
+            parallel_pair_weight_ops
+                .as_ref()
+                .map_or(0, ParallelFallbackWeightOps::intersection_entry_count),
+            precomputed_pair_intersections.len(),
+            fallback_pair_union_calls,
+            fallback_pair_deferred_union_unique,
+            fallback_pair_deferred_union_compute_ms,
+            parallel_pair_weight_ops
+                .as_ref()
+                .map_or(0, ParallelFallbackWeightOps::union_entry_count),
+            fallback_serial_rows,
+            fallback_serial_ms,
+            fallback_serial_singleton_rows,
+            fallback_generic_rows,
+            fallback_generic_subset_entries,
+            fallback_generic_subset_max,
+            fallback_generic_default_components,
+            fallback_generic_scan_ms,
+            fallback_generic_labels,
+            fallback_generic_label_contribs,
+            fallback_generic_label_contrib_max,
+            fallback_generic_label_ms,
+            intersection_cache.intersection_entry_count(),
             elapsed_ms(started),
         );
     }
@@ -3920,6 +5235,7 @@ fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) 
             edge_weights.len(),
         );
     }
+
     if parallel {
         use rayon::prelude::*;
 
@@ -3930,31 +5246,56 @@ fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) 
                 .unwrap_or(16_384)
             && std::env::var_os("GLRMASK_DISABLE_FINAL_SUBTRACTION_GLOBAL_CACHE").is_none();
         if global_pair_cache {
-            // The same edge/final weight pair recurs across many states. Build
-            // the exact difference once per live pointer pair, in parallel, then
-            // make the multi-million-edge rewrite a lookup-only pass. All operand
-            // Arcs remain live for this scope, so pointer identity is stable.
-            let mut unique_pairs =
-                FxHashMap::<(usize, usize), (Weight, Weight)>::default();
-            for state in dwa.states() {
-                let Some(final_weight) = state.final_weight.as_ref() else {
-                    continue;
-                };
-                if final_weight.is_empty() {
-                    continue;
-                }
-                for (_, edge_weight) in state.transitions.values() {
-                    unique_pairs
-                        .entry((edge_weight.ptr_key(), final_weight.ptr_key()))
-                        .or_insert_with(|| (edge_weight.clone(), final_weight.clone()));
-                }
-            }
+            // The same edge/final-weight pair recurs heavily on large parser
+            // DWAs. Deduplicate pointer-canonical live pairs in parallel, compute
+            // each exact difference once, then make the edge rewrite lookup-only.
+            let collect_started_at = Instant::now();
+            let unique_pairs = dwa
+                .states()
+                .par_iter()
+                .fold(
+                    FxHashMap::<(usize, usize), (Weight, Weight)>::default,
+                    |mut local, state| {
+                        let Some(final_weight) = state.final_weight.as_ref() else {
+                            return local;
+                        };
+                        if final_weight.is_empty() {
+                            return local;
+                        }
+                        let final_key = final_weight.ptr_key();
+                        for (_, edge_weight) in state.transitions.values() {
+                            local
+                                .entry((edge_weight.ptr_key(), final_key))
+                                .or_insert_with(|| (edge_weight.clone(), final_weight.clone()));
+                        }
+                        local
+                    },
+                )
+                .reduce(
+                    FxHashMap::<(usize, usize), (Weight, Weight)>::default,
+                    |mut left, mut right| {
+                        if left.len() < right.len() {
+                            std::mem::swap(&mut left, &mut right);
+                        }
+                        for (key, operands) in right {
+                            left.entry(key).or_insert(operands);
+                        }
+                        left
+                    },
+                );
+            let unique_pair_count = unique_pairs.len();
+            let collect_ms = collect_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let difference_started_at = Instant::now();
             let differences = unique_pairs
                 .into_par_iter()
                 .map(|(key, (edge_weight, final_weight))| {
-                    (key, edge_weight.difference(&final_weight))
+                    (key, edge_weight.difference_streaming_uncached(&final_weight))
                 })
                 .collect::<FxHashMap<_, _>>();
+            let difference_ms = difference_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let rewrite_started_at = Instant::now();
             dwa.states_mut().par_iter_mut().for_each(|state| {
                 let Some(final_weight) = state.final_weight.as_ref() else {
                     return;
@@ -3974,6 +5315,17 @@ fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) 
                     !weight.is_empty()
                 });
             });
+            let rewrite_ms = rewrite_started_at.elapsed().as_secs_f64() * 1000.0;
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][final_subtraction_global] unique_pairs={} collect_ms={:.3} difference_ms={:.3} rewrite_ms={:.3} total_ms={:.3}",
+                    unique_pair_count,
+                    collect_ms,
+                    difference_ms,
+                    rewrite_ms,
+                    collect_ms + difference_ms + rewrite_ms,
+                );
+            }
             return;
         }
 
@@ -4542,6 +5894,36 @@ fn build_parser_nwa_from_terminal_dwa(
         "missing parser-DWA start continuation state",
     );
     arena.set_start_states(parser_start_states);
+    if std::env::var_os("GLRMASK_PROFILE_PARSER_NWA_START").is_some() {
+        let mut epsilon_edges = 0usize;
+        let mut labeled_edges = 0usize;
+        let mut epsilon_targets = FxHashSet::<u32>::default();
+        let mut labeled_targets = FxHashSet::<u32>::default();
+        let mut finals = 0usize;
+        for &start in arena.start_states() {
+            let state = &arena.states()[start as usize];
+            epsilon_edges += state.epsilons.len();
+            labeled_edges += state.transitions.values().map(Vec::len).sum::<usize>();
+            epsilon_targets.extend(state.epsilons.iter().map(|(target, _)| *target));
+            labeled_targets.extend(
+                state
+                    .transitions
+                    .values()
+                    .flat_map(|targets| targets.iter().map(|(target, _)| *target)),
+            );
+            finals += usize::from(state.final_weight.as_ref().is_some_and(|w| !w.is_empty()));
+        }
+        eprintln!(
+            "[glrmask/profile][parser_nwa_start] states={} start_states={} start_finals={} epsilon_edges={} epsilon_targets={} labeled_edges={} labeled_targets={}",
+            arena.states().len(),
+            arena.start_states().len(),
+            finals,
+            epsilon_edges,
+            epsilon_targets.len(),
+            labeled_edges,
+            labeled_targets.len(),
+        );
+    }
     let compose_state_ms = elapsed_ms(graph_started_at);
 
     if compose_detail_enabled {
@@ -4590,6 +5972,682 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
+
+
+fn build_parser_dwa_support_stage_from_nwa(
+    mut parser_nwa: NWA,
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+    collapse_immediate_acceptance: bool,
+) -> ParserDwaSupportStage {
+    let started_at = Instant::now();
+    let num_parser_states = table.num_states;
+    let input_states = parser_nwa.num_states();
+    let input_transitions = parser_nwa.num_transitions();
+
+    let resolve_started_at = Instant::now();
+    resolve_negative_codes_in_nwa(
+        &mut parser_nwa,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    let resolve_ms = elapsed_ms(resolve_started_at);
+
+    let support_started_at = Instant::now();
+    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
+    let support_ms = elapsed_ms(support_started_at);
+    let mut dwa = determinized.dwa;
+
+    let collapse_started_at = Instant::now();
+    let collapsed = if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(&mut dwa, terminal_dwa, grammar, table)
+    } else {
+        0
+    };
+    let collapse_ms = elapsed_ms(collapse_started_at);
+
+    let possible_started_at = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        &parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    let possible_ms = elapsed_ms(possible_started_at);
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_support_from_nwa] parser_nwa_states={} parser_nwa_transitions={} support_states={} support_transitions={} resolve_negative_ms={:.3} support_determinize_ms={:.3} immediate_rewrites={} immediate_ms={:.3} possible_ms={:.3} total_ms={:.3}",
+            input_states,
+            input_transitions,
+            dwa.num_states(),
+            dwa.num_transitions(),
+            resolve_ms,
+            support_ms,
+            collapsed,
+            collapse_ms,
+            possible_ms,
+            elapsed_ms(started_at),
+        );
+    }
+
+    ParserDwaSupportStage {
+        dwa,
+        possible_by_state,
+    }
+}
+
+fn extract_parser_nwa_start_epsilon_part(
+    source: &NWA,
+    selected_root_targets: &FxHashSet<u32>,
+    keep_start_final: bool,
+) -> NWA {
+    let start = source.start_states()[0];
+    let mut live = vec![false; source.states().len()];
+    live[start as usize] = true;
+    let mut queue = VecDeque::<u32>::new();
+    for (target, weight) in &source.states()[start as usize].epsilons {
+        if !weight.is_empty() && selected_root_targets.contains(target) && !live[*target as usize] {
+            live[*target as usize] = true;
+            queue.push_back(*target);
+        }
+    }
+    while let Some(state_id) = queue.pop_front() {
+        let state = &source.states()[state_id as usize];
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() && !live[*target as usize] {
+                live[*target as usize] = true;
+                queue.push_back(*target);
+            }
+        }
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if !weight.is_empty() && !live[*target as usize] {
+                    live[*target as usize] = true;
+                    queue.push_back(*target);
+                }
+            }
+        }
+    }
+
+    let mut remap = vec![u32::MAX; source.states().len()];
+    let mut states = Vec::with_capacity(live.iter().filter(|&&is_live| is_live).count());
+    for (old_id, &is_live) in live.iter().enumerate() {
+        if is_live {
+            remap[old_id] = states.len() as u32;
+            states.push(source.states()[old_id].clone());
+        }
+    }
+    for (old_id, &is_live) in live.iter().enumerate() {
+        if !is_live {
+            continue;
+        }
+        let new_id = remap[old_id] as usize;
+        let state = &mut states[new_id];
+        if old_id == start as usize {
+            state.epsilons.retain(|(target, weight)| {
+                !weight.is_empty() && selected_root_targets.contains(target)
+            });
+            if !keep_start_final {
+                state.final_weight = None;
+            }
+        } else {
+            state.epsilons.retain(|(target, weight)| !weight.is_empty() && live[*target as usize]);
+        }
+        for (target, _) in &mut state.epsilons {
+            *target = remap[*target as usize];
+        }
+        for targets in state.transitions.values_mut() {
+            targets.retain(|(target, weight)| !weight.is_empty() && live[*target as usize]);
+            for (target, _) in targets {
+                *target = remap[*target as usize];
+            }
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+    }
+    NWA::from_parts(states, vec![remap[start as usize]])
+}
+
+fn split_parser_nwa_start_epsilons(source: &NWA) -> Option<(NWA, NWA)> {
+    if source.start_states().len() != 1 {
+        return None;
+    }
+    let start = source.start_states()[0];
+    let start_state = source.states().get(start as usize)?;
+    if !start_state.transitions.is_empty() {
+        return None;
+    }
+    let mut targets = start_state
+        .epsilons
+        .iter()
+        .filter(|(_, weight)| !weight.is_empty())
+        .map(|(target, _)| *target)
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.len() < 2 || targets.contains(&start) {
+        return None;
+    }
+
+    let simple_partition =
+        std::env::var_os("GLRMASK_EXPERIMENTAL_NWA_ROOT_SPLIT_SIMPLE").is_some();
+    let mut left = FxHashSet::<u32>::default();
+    let mut right = FxHashSet::<u32>::default();
+    let mut costs = [0usize; 2];
+    if simple_partition {
+        for (index, target) in targets.into_iter().enumerate() {
+            if index % 2 == 0 {
+                left.insert(target);
+                costs[0] += 1;
+            } else {
+                right.insert(target);
+                costs[1] += 1;
+            }
+        }
+    } else {
+        // Estimate each root alternative by its reachable NWA footprint. This is
+        // deliberately graph-structural: the expensive range algebra is measured
+        // later by the support determinizer, while this partition primarily needs
+        // to balance the two independent fixed points.
+        let mut groups = targets
+            .into_iter()
+            .map(|target| {
+                let mut seen = vec![false; source.states().len()];
+                let mut queue = VecDeque::from([target]);
+                seen[target as usize] = true;
+                let mut states = 0usize;
+                let mut edges = 0usize;
+                while let Some(state_id) = queue.pop_front() {
+                    states += 1;
+                    let state = &source.states()[state_id as usize];
+                    edges += state.epsilons.len();
+                    edges += state.transitions.values().map(Vec::len).sum::<usize>();
+                    for (next, weight) in &state.epsilons {
+                        if !weight.is_empty() && !seen[*next as usize] {
+                            seen[*next as usize] = true;
+                            queue.push_back(*next);
+                        }
+                    }
+                    for outgoing in state.transitions.values() {
+                        for (next, weight) in outgoing {
+                            if !weight.is_empty() && !seen[*next as usize] {
+                                seen[*next as usize] = true;
+                                queue.push_back(*next);
+                            }
+                        }
+                    }
+                }
+                (states.saturating_add(edges), target)
+            })
+            .collect::<Vec<_>>();
+        groups.sort_unstable_by(|left, right| right.cmp(left));
+        for (cost, target) in groups {
+            let side = usize::from(costs[1] < costs[0]);
+            costs[side] = costs[side].saturating_add(cost);
+            if side == 0 {
+                left.insert(target);
+            } else {
+                right.insert(target);
+            }
+        }
+    }
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    let left_nwa = extract_parser_nwa_start_epsilon_part(source, &left, true);
+    let right_nwa = extract_parser_nwa_start_epsilon_part(source, &right, false);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_nwa_root_split] root_targets={} estimated_cost_left={} estimated_cost_right={} left_states={} left_transitions={} right_states={} right_transitions={}",
+            left.len() + right.len(),
+            costs[0],
+            costs[1],
+            left_nwa.num_states(),
+            left_nwa.num_transitions(),
+            right_nwa.num_states(),
+            right_nwa.num_transitions(),
+        );
+    }
+    Some((left_nwa, right_nwa))
+}
+
+pub fn build_parser_dwa_support_stage_nwa_root_split(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    terminal_dwa: &TerminalAutomaton,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+) -> Option<ParserDwaSupportStage> {
+    let started_at = Instant::now();
+    let build_started_at = Instant::now();
+    let (parser_nwa, profile) =
+        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates, table)?;
+    let build_ms = elapsed_ms(build_started_at);
+    let monolithic_shape = (parser_nwa.num_states(), parser_nwa.num_transitions());
+    let split_started_at = Instant::now();
+    let (left_nwa, right_nwa) = split_parser_nwa_start_epsilons(&parser_nwa)?;
+    let split_ms = elapsed_ms(split_started_at);
+    let left_shape = (left_nwa.num_states(), left_nwa.num_transitions());
+    let right_shape = (right_nwa.num_states(), right_nwa.num_transitions());
+    let branches_started_at = Instant::now();
+    let (left, right) = rayon::join(
+        || {
+            build_parser_dwa_support_stage_from_nwa(
+                left_nwa,
+                terminal_dwa,
+                grammar,
+                table,
+                collapse_immediate_acceptance,
+            )
+        },
+        || {
+            build_parser_dwa_support_stage_from_nwa(
+                right_nwa,
+                terminal_dwa,
+                grammar,
+                table,
+                collapse_immediate_acceptance,
+            )
+        },
+    );
+    let branches_ms = elapsed_ms(branches_started_at);
+    let input_shapes = [
+        (left.num_states(), left.num_transitions()),
+        (right.num_states(), right.num_transitions()),
+    ];
+    let merge_started_at = Instant::now();
+    let merged = merge_two_parser_dwa_support_stages(left, right, table.num_states);
+    let merge_ms = elapsed_ms(merge_started_at);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_nwa_root_split_result] monolithic_nwa_states={} monolithic_nwa_transitions={} left_nwa_states={} left_nwa_transitions={} right_nwa_states={} right_nwa_transitions={} support_inputs={:?} support_states={} support_transitions={} state_prep_ms={:.3} compose_state_ms={:.3} build_ms={:.3} split_ms={:.3} branches_ms={:.3} merge_ms={:.3} total_ms={:.3}",
+            monolithic_shape.0,
+            monolithic_shape.1,
+            left_shape.0,
+            left_shape.1,
+            right_shape.0,
+            right_shape.1,
+            input_shapes,
+            merged.num_states(),
+            merged.num_transitions(),
+            profile.state_prep_ms,
+            profile.compose_state_ms,
+            build_ms,
+            split_ms,
+            branches_ms,
+            merge_ms,
+            elapsed_ms(started_at),
+        );
+    }
+    Some(merged)
+}
+
+pub fn build_parser_dwa_support_stage(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    terminal_dwa: &TerminalAutomaton,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+) -> Option<ParserDwaSupportStage> {
+    let started_at = Instant::now();
+    let num_parser_states = table.num_states;
+    let (mut parser_nwa, parser_nwa_profile) =
+        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates, table)?;
+
+    let resolve_started_at = Instant::now();
+    resolve_negative_codes_in_nwa(
+        &mut parser_nwa,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    let resolve_ms = elapsed_ms(resolve_started_at);
+
+    let support_started_at = Instant::now();
+    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
+    let support_ms = elapsed_ms(support_started_at);
+    let mut dwa = determinized.dwa;
+
+    let collapse_started_at = Instant::now();
+    let collapsed = if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(&mut dwa, terminal_dwa, grammar, table)
+    } else {
+        0
+    };
+    let collapse_ms = elapsed_ms(collapse_started_at);
+
+    let possible_started_at = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        &parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    let possible_ms = elapsed_ms(possible_started_at);
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_support_stage] terminal_states={} parser_nwa_states={} support_states={} support_transitions={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} immediate_rewrites={} immediate_ms={:.3} possible_ms={:.3} total_ms={:.3}",
+            terminal_dwa.num_states(),
+            parser_nwa.num_states(),
+            dwa.num_states(),
+            dwa.num_transitions(),
+            parser_nwa_profile.state_prep_ms,
+            parser_nwa_profile.compose_state_ms,
+            parser_nwa_profile.parser_nwa_build_ms,
+            resolve_ms,
+            support_ms,
+            collapsed,
+            collapse_ms,
+            possible_ms,
+            elapsed_ms(started_at),
+        );
+    }
+
+    Some(ParserDwaSupportStage {
+        dwa,
+        possible_by_state,
+    })
+}
+
+
+#[derive(Hash, PartialEq, Eq)]
+struct ParserDwaSupportStageSignature {
+    possible: PossibleOutgoingIds,
+    final_weight: Option<usize>,
+    transitions: Vec<(i32, usize, usize)>,
+}
+
+pub fn exact_quotient_parser_dwa_support_stage(
+    stage: ParserDwaSupportStage,
+) -> ParserDwaSupportStage {
+    fn visit(state: usize, dwa: &DWA, seen: &mut [bool], order: &mut Vec<usize>) {
+        if seen[state] {
+            return;
+        }
+        seen[state] = true;
+        for (target, weight) in dwa.states()[state].transitions.values() {
+            let target = *target as usize;
+            if !weight.is_empty() && target < dwa.states().len() {
+                visit(target, dwa, seen, order);
+            }
+        }
+        order.push(state);
+    }
+
+    let started_at = Instant::now();
+    if stage.dwa.states().is_empty() || !stage.dwa.is_acyclic() {
+        return stage;
+    }
+    let input_states = stage.dwa.num_states();
+    let input_transitions = stage.dwa.num_transitions();
+    let mut seen = vec![false; stage.dwa.states().len()];
+    let mut order = Vec::with_capacity(stage.dwa.states().len());
+    visit(
+        stage.dwa.start_state() as usize,
+        &stage.dwa,
+        &mut seen,
+        &mut order,
+    );
+
+    let empty_possible = PossibleOutgoingIds::Empty;
+    let possible_for = |state_id: usize| {
+        stage
+            .possible_by_state
+            .get(state_id)
+            .unwrap_or(&empty_possible)
+    };
+    let mut class_of = vec![usize::MAX; stage.dwa.states().len()];
+    let mut signature_to_class =
+        FxHashMap::<ParserDwaSupportStageSignature, usize>::default();
+    let mut representatives = Vec::<usize>::new();
+    for &state_id in &order {
+        let state = &stage.dwa.states()[state_id];
+        let signature = ParserDwaSupportStageSignature {
+            possible: possible_for(state_id).clone(),
+            final_weight: state.final_weight.as_ref().map(Weight::ptr_key),
+            transitions: state
+                .transitions
+                .iter()
+                .filter_map(|(&label, (target, weight))| {
+                    (!weight.is_empty()).then_some((
+                        label,
+                        class_of[*target as usize],
+                        weight.ptr_key(),
+                    ))
+                })
+                .collect(),
+        };
+        let class = if let Some(&class) = signature_to_class.get(&signature) {
+            class
+        } else {
+            let class = representatives.len();
+            signature_to_class.insert(signature, class);
+            representatives.push(state_id);
+            class
+        };
+        class_of[state_id] = class;
+    }
+
+    let mut states = vec![DWAState::default(); representatives.len()];
+    let mut possible_by_state = Vec::with_capacity(representatives.len());
+    for (class, &representative) in representatives.iter().enumerate() {
+        let source = &stage.dwa.states()[representative];
+        states[class].final_weight = source.final_weight.clone();
+        states[class].transitions = source
+            .transitions
+            .iter()
+            .filter_map(|(&label, (target, weight))| {
+                (!weight.is_empty()).then_some((
+                    label,
+                    (class_of[*target as usize] as u32, weight.clone()),
+                ))
+            })
+            .collect();
+        possible_by_state.push(possible_for(representative).clone());
+    }
+    let dwa = DWA::from_parts(
+        states,
+        class_of[stage.dwa.start_state() as usize] as u32,
+    );
+    if std::env::var_os("GLRMASK_VALIDATE_SUPPORT_STAGE_QUOTIENT").is_some() {
+        let difference = find_difference(&dwa, &stage.dwa)
+            .expect("support-stage quotient validation requires acyclic DWAs");
+        assert!(
+            difference.is_none(),
+            "support-stage quotient changes DWA language on labels {difference:?}",
+        );
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_support_stage_quotient] input_states={} input_transitions={} reachable_states={} output_states={} output_transitions={} total_ms={:.3}",
+            input_states,
+            input_transitions,
+            order.len(),
+            dwa.num_states(),
+            dwa.num_transitions(),
+            elapsed_ms(started_at),
+        );
+    }
+    ParserDwaSupportStage {
+        dwa,
+        possible_by_state,
+    }
+}
+
+pub fn merge_two_parser_dwa_support_stages(
+    left: ParserDwaSupportStage,
+    right: ParserDwaSupportStage,
+    num_parser_states: u32,
+) -> ParserDwaSupportStage {
+    let started_at = Instant::now();
+    let left_possible = left.possible_by_state;
+    let right_possible = right.possible_by_state;
+    let (dwa, origins) =
+        glrmask_dwa_merge::__private::merge::union_two_parser_dwas_direct_with_origins(
+            left.dwa,
+            right.dwa,
+        );
+    assert_eq!(
+        dwa.num_states() as usize,
+        origins.len(),
+        "direct support-stage union origin map must align with output states",
+    );
+    let possible_by_state = origins
+        .into_iter()
+        .map(|origin| match origin {
+            glrmask_dwa_merge::__private::merge::DirectTwoUnionOrigin::Left(state) => {
+                left_possible
+                    .get(state as usize)
+                    .cloned()
+                    .unwrap_or(PossibleOutgoingIds::Empty)
+            }
+            glrmask_dwa_merge::__private::merge::DirectTwoUnionOrigin::Right(state) => {
+                right_possible
+                    .get(state as usize)
+                    .cloned()
+                    .unwrap_or(PossibleOutgoingIds::Empty)
+            }
+            glrmask_dwa_merge::__private::merge::DirectTwoUnionOrigin::Pair(left, right) => {
+                union_possible_outgoing_ids(
+                    left_possible.get(left as usize),
+                    right_possible.get(right as usize),
+                    num_parser_states,
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_support_stage_merge] states={} transitions={} total_ms={:.3}",
+            dwa.num_states(),
+            dwa.num_transitions(),
+            elapsed_ms(started_at),
+        );
+    }
+    ParserDwaSupportStage {
+        dwa,
+        possible_by_state,
+    }
+}
+
+fn finalize_parser_dwa_support_stage_impl(
+    mut stage: ParserDwaSupportStage,
+    num_parser_states: u32,
+    collapse_final_leaves: bool,
+    apply_defaults: bool,
+) -> DWA {
+    let total_started_at = Instant::now();
+    let validation_reference = std::env::var_os("GLRMASK_VALIDATE_SUPPORT_STAGE_FINALIZE")
+        .is_some()
+        .then(|| stage.dwa.clone());
+
+    let default_started_at = Instant::now();
+    if apply_defaults
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_SKIP_SUPPORT_STAGE_DEFAULT_OPT").is_none()
+    {
+        optimize_parser_dwa_defaults(
+            &mut stage.dwa,
+            &stage.possible_by_state,
+            num_parser_states,
+        );
+    }
+    let default_ms = elapsed_ms(default_started_at);
+
+    let subtract_started_at = Instant::now();
+    if std::env::var_os("GLRMASK_EXPERIMENTAL_SKIP_SUPPORT_STAGE_SUBTRACT").is_none() {
+        subtract_final_weights_from_outgoing_dwa(&mut stage.dwa);
+    }
+    let subtract_ms = elapsed_ms(subtract_started_at);
+
+    let fallback_started_at = Instant::now();
+    let mut dwa = if std::env::var_os("GLRMASK_EXPERIMENTAL_SKIP_SUPPORT_STAGE_FALLBACK").is_some() {
+        stage.dwa
+    } else {
+        let mut dwa = determinize_parser_dwa_with_fallbacks(
+            &stage.dwa,
+            &stage.possible_by_state,
+            num_parser_states,
+        );
+        if collapse_final_leaves {
+            dwa = collapse_final_leaf_targets(dwa);
+        }
+        dwa
+    };
+    let fallback_ms = elapsed_ms(fallback_started_at);
+
+    let pre_minimize_states = dwa.num_states() as usize;
+    let pre_minimize_transitions = dwa.num_transitions();
+    let minimize_skipped =
+        should_skip_parser_dwa_minimization(pre_minimize_states, pre_minimize_transitions);
+    let minimize_started_at = Instant::now();
+    if !minimize_skipped {
+        dwa = minimize(&dwa);
+    }
+    let minimize_ms = elapsed_ms(minimize_started_at);
+
+    if let Some(reference) = validation_reference {
+        let difference = find_difference(&dwa, &reference)
+            .expect("support-stage finalization validation requires comparable DWAs");
+        assert!(
+            difference.is_none(),
+            "support-stage finalization changes DWA language on labels {difference:?}",
+        );
+    }
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_support_stage_finalize] pre_minimize_states={} pre_minimize_transitions={} output_states={} output_transitions={} default_ms={:.3} subtract_ms={:.3} fallback_ms={:.3} minimize_skipped={} minimize_ms={:.3} total_ms={:.3}",
+            pre_minimize_states,
+            pre_minimize_transitions,
+            dwa.num_states(),
+            dwa.num_transitions(),
+            default_ms,
+            subtract_ms,
+            fallback_ms,
+            minimize_skipped,
+            minimize_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
+    dwa
+}
+
+
+pub fn optimize_parser_dwa_support_stage_defaults(
+    mut stage: ParserDwaSupportStage,
+    num_parser_states: u32,
+) -> ParserDwaSupportStage {
+    optimize_parser_dwa_defaults(
+        &mut stage.dwa,
+        &stage.possible_by_state,
+        num_parser_states,
+    );
+    stage
+}
+
+pub fn finalize_parser_dwa_support_stage_after_defaults(
+    stage: ParserDwaSupportStage,
+    num_parser_states: u32,
+    collapse_final_leaves: bool,
+) -> DWA {
+    finalize_parser_dwa_support_stage_impl(
+        stage,
+        num_parser_states,
+        collapse_final_leaves,
+        false,
+    )
+}
+
+pub fn finalize_parser_dwa_support_stage(
+    stage: ParserDwaSupportStage,
+    num_parser_states: u32,
+    collapse_final_leaves: bool,
+) -> DWA {
+    finalize_parser_dwa_support_stage_impl(
+        stage,
+        num_parser_states,
+        collapse_final_leaves,
+        true,
+    )
+}
+
 pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -4606,6 +6664,25 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
         let stats = terminal_dwa.stats();
         (stats.transitions, stats.interned_ranges)
+    } else {
+        (0, 0)
+    };
+    let (terminal_dwa_root_transitions, terminal_dwa_root_targets) = if profiling_enabled {
+        match terminal_dwa {
+            TerminalAutomaton::Dwa(dwa) => {
+                let start = &dwa.states()[dwa.start_state() as usize];
+                (
+                    start.transitions.len(),
+                    start
+                        .transitions
+                        .values()
+                        .map(|(target, _)| *target)
+                        .collect::<FxHashSet<_>>()
+                        .len(),
+                )
+            }
+            _ => (0, 0),
+        }
     } else {
         (0, 0)
     };
@@ -4839,10 +6916,12 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if profiling_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} terminal_dwa_root_transitions={} terminal_dwa_root_targets={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             terminal_dwa.num_states(),
             terminal_dwa_transition_count,
             terminal_dwa_interned_ranges,
+            terminal_dwa_root_transitions,
+            terminal_dwa_root_targets,
             parser_nwa.states().len(),
             parser_nwa.start_states().len(),
             pre_minimize_state_count,

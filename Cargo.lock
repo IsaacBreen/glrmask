@@ -482,11 +482,13 @@ dependencies = [
 name = "glrmask-dwa-merge"
 version = "0.1.1"
 dependencies = [
+ "dashmap",
  "glrmask-artifact",
  "glrmask-glr",
  "glrmask-weight",
  "glrmask-weighted-automata",
  "range-set-blaze",
+ "rayon",
  "rustc-hash 1.1.0",
  "smallvec",
 ]
@@ -566,6 +568,7 @@ dependencies = [
 name = "glrmask-parser-dwa"
 version = "0.1.1"
 dependencies = [
+ "dashmap",
  "glrmask-artifact",
  "glrmask-dwa-merge",
  "glrmask-finite-automata",

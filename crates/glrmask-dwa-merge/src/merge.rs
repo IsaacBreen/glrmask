@@ -5,11 +5,14 @@
 //! via composite-key refinement.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
+use dashmap::DashMap;
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 
 use crate::automata::weighted::determinize::determinize;
@@ -811,11 +814,7 @@ struct ExactWeightedStateSignature {
 /// Merge only states with byte-for-byte identical weighted behavior modulo
 /// already-merged children. This is linear-ish hash-consing for an acyclic DWA,
 /// not the compatibility search performed by the full weighted minimizer.
-fn exact_quotient_acyclic_dwa(dwa: DWA) -> DWA {
-    if dwa.states().is_empty() || !dwa.is_acyclic() {
-        return dwa;
-    }
-
+fn exact_quotient_acyclic_dwa_serial_impl(dwa: &DWA) -> (DWA, usize) {
     fn visit(state: usize, dwa: &DWA, seen: &mut [bool], order: &mut Vec<usize>) {
         if seen[state] {
             return;
@@ -832,7 +831,7 @@ fn exact_quotient_acyclic_dwa(dwa: DWA) -> DWA {
 
     let mut seen = vec![false; dwa.states().len()];
     let mut order = Vec::with_capacity(dwa.states().len());
-    visit(dwa.start_state() as usize, &dwa, &mut seen, &mut order);
+    visit(dwa.start_state() as usize, dwa, &mut seen, &mut order);
 
     let mut class_of = vec![usize::MAX; dwa.states().len()];
     let mut signature_to_class = FxHashMap::<ExactWeightedStateSignature, usize>::default();
@@ -879,7 +878,359 @@ fn exact_quotient_acyclic_dwa(dwa: DWA) -> DWA {
             })
             .collect();
     }
-    DWA::from_parts(states, class_of[dwa.start_state() as usize] as u32)
+    (
+        DWA::from_parts(states, class_of[dwa.start_state() as usize] as u32),
+        order.len(),
+    )
+}
+
+
+fn exact_quotient_acyclic_dwa_hashed_impl(dwa: &DWA) -> (DWA, usize, f64, f64, f64) {
+    fn visit(state: usize, dwa: &DWA, seen: &mut [bool], order: &mut Vec<usize>) {
+        if seen[state] {
+            return;
+        }
+        seen[state] = true;
+        for (target, weight) in dwa.states()[state].transitions.values() {
+            let target = *target as usize;
+            if !weight.is_empty() && target < dwa.states().len() {
+                visit(target, dwa, seen, order);
+            }
+        }
+        order.push(state);
+    }
+
+    #[inline]
+    fn same_exact_behavior(
+        left_id: usize,
+        right_id: usize,
+        dwa: &DWA,
+        class_of: &[usize],
+    ) -> bool {
+        let left = &dwa.states()[left_id];
+        let right = &dwa.states()[right_id];
+        if left.final_weight.as_ref().map(Weight::ptr_key)
+            != right.final_weight.as_ref().map(Weight::ptr_key)
+        {
+            return false;
+        }
+        let mut left_edges = left
+            .transitions
+            .iter()
+            .filter(|(_, (_, weight))| !weight.is_empty());
+        let mut right_edges = right
+            .transitions
+            .iter()
+            .filter(|(_, (_, weight))| !weight.is_empty());
+        loop {
+            match (left_edges.next(), right_edges.next()) {
+                (None, None) => return true,
+                (Some(_), None) | (None, Some(_)) => return false,
+                (Some((&left_label, (left_target, left_weight))),
+                 Some((&right_label, (right_target, right_weight)))) => {
+                    if left_label != right_label
+                        || class_of[*left_target as usize] != class_of[*right_target as usize]
+                        || left_weight.ptr_key() != right_weight.ptr_key()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    let graph_started_at = Instant::now();
+    let mut seen = vec![false; dwa.states().len()];
+    let mut order = Vec::with_capacity(dwa.states().len());
+    visit(dwa.start_state() as usize, dwa, &mut seen, &mut order);
+    let graph_ms = graph_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let classify_started_at = Instant::now();
+    let mut class_of = vec![usize::MAX; dwa.states().len()];
+    let mut hash_to_representatives =
+        FxHashMap::<u64, SmallVec<[(usize, usize); 2]>>::default();
+    let mut representatives = Vec::<usize>::new();
+    for &state_id in &order {
+        let state = &dwa.states()[state_id];
+        let mut hasher = FxHasher::default();
+        hasher.write_usize(
+            state
+                .final_weight
+                .as_ref()
+                .map(Weight::ptr_key)
+                .unwrap_or(usize::MAX),
+        );
+        for (&label, (target, weight)) in &state.transitions {
+            if weight.is_empty() {
+                continue;
+            }
+            hasher.write_i32(label);
+            hasher.write_usize(class_of[*target as usize]);
+            hasher.write_usize(weight.ptr_key());
+        }
+        let fingerprint = hasher.finish();
+        let mut existing_class = None;
+        if let Some(candidates) = hash_to_representatives.get(&fingerprint) {
+            for &(representative, class) in candidates {
+                if same_exact_behavior(state_id, representative, dwa, &class_of) {
+                    existing_class = Some(class);
+                    break;
+                }
+            }
+        }
+        let class = if let Some(class) = existing_class {
+            class
+        } else {
+            let class = representatives.len();
+            representatives.push(state_id);
+            hash_to_representatives
+                .entry(fingerprint)
+                .or_default()
+                .push((state_id, class));
+            class
+        };
+        class_of[state_id] = class;
+    }
+    let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let reconstruct_started_at = Instant::now();
+    let mut states = vec![DWAState::default(); representatives.len()];
+    if std::env::var_os("GLRMASK_EXPERIMENTAL_PARALLEL_EXACT_QUOTIENT_RECONSTRUCT").is_some()
+        && rayon::current_num_threads() > 1
+    {
+        states
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(class, output)| {
+                let source = &dwa.states()[representatives[class]];
+                output.final_weight = source.final_weight.clone();
+                output.transitions = source
+                    .transitions
+                    .iter()
+                    .filter_map(|(&label, (target, weight))| {
+                        (!weight.is_empty()).then_some((
+                            label,
+                            (class_of[*target as usize] as u32, weight.clone()),
+                        ))
+                    })
+                    .collect();
+            });
+    } else {
+        for (class, &representative) in representatives.iter().enumerate() {
+            let source = &dwa.states()[representative];
+            states[class].final_weight = source.final_weight.clone();
+            states[class].transitions = source
+                .transitions
+                .iter()
+                .filter_map(|(&label, (target, weight))| {
+                    (!weight.is_empty()).then_some((
+                        label,
+                        (class_of[*target as usize] as u32, weight.clone()),
+                    ))
+                })
+                .collect();
+        }
+    }
+    let reconstruct_ms = reconstruct_started_at.elapsed().as_secs_f64() * 1000.0;
+    (
+        DWA::from_parts(states, class_of[dwa.start_state() as usize] as u32),
+        order.len(),
+        graph_ms,
+        classify_ms,
+        reconstruct_ms,
+    )
+}
+
+fn exact_quotient_acyclic_dwa_parallel_impl(
+    dwa: &DWA,
+) -> (DWA, usize, f64, f64, f64) {
+    fn visit_height(
+        state: usize,
+        dwa: &DWA,
+        seen: &mut [bool],
+        heights: &mut [usize],
+        order: &mut Vec<usize>,
+    ) -> usize {
+        if seen[state] {
+            return heights[state];
+        }
+        seen[state] = true;
+        let mut height = 0usize;
+        for (target, weight) in dwa.states()[state].transitions.values() {
+            let target = *target as usize;
+            if weight.is_empty() || target >= dwa.states().len() {
+                continue;
+            }
+            let target_height = visit_height(target, dwa, seen, heights, order);
+            height = height.max(target_height + 1);
+        }
+        heights[state] = height;
+        order.push(state);
+        height
+    }
+
+    let graph_started_at = Instant::now();
+    let mut seen = vec![false; dwa.states().len()];
+    let mut heights = vec![0usize; dwa.states().len()];
+    let mut order = Vec::with_capacity(dwa.states().len());
+    let max_height = visit_height(
+        dwa.start_state() as usize,
+        dwa,
+        &mut seen,
+        &mut heights,
+        &mut order,
+    );
+    let mut buckets = (0..=max_height).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+    for &state_id in &order {
+        buckets[heights[state_id]].push(state_id);
+    }
+    let graph_ms = graph_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let signature_started_at = Instant::now();
+    let mut class_of = vec![usize::MAX; dwa.states().len()];
+    let mut signature_to_class = FxHashMap::<ExactWeightedStateSignature, usize>::default();
+    let mut representatives = Vec::<usize>::new();
+    for bucket in buckets {
+        let signatures = bucket
+            .into_par_iter()
+            .map(|state_id| {
+                let state = &dwa.states()[state_id];
+                let signature = ExactWeightedStateSignature {
+                    final_weight: state.final_weight.as_ref().map(Weight::ptr_key),
+                    transitions: state
+                        .transitions
+                        .iter()
+                        .filter_map(|(&label, (target, weight))| {
+                            (!weight.is_empty()).then_some((
+                                label,
+                                class_of[*target as usize],
+                                weight.ptr_key(),
+                            ))
+                        })
+                        .collect(),
+                };
+                (state_id, signature)
+            })
+            .collect::<Vec<_>>();
+        // Indexed Rayon collection preserves bucket order. Keep interning serial
+        // so class IDs and representative choice are deterministic.
+        for (state_id, signature) in signatures {
+            let class = if let Some(&class) = signature_to_class.get(&signature) {
+                class
+            } else {
+                let class = representatives.len();
+                signature_to_class.insert(signature, class);
+                representatives.push(state_id);
+                class
+            };
+            class_of[state_id] = class;
+        }
+    }
+    let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let reconstruct_started_at = Instant::now();
+    let mut states = vec![DWAState::default(); representatives.len()];
+    states
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(class, output)| {
+            let source = &dwa.states()[representatives[class]];
+            output.final_weight = source.final_weight.clone();
+            output.transitions = source
+                .transitions
+                .iter()
+                .filter_map(|(&label, (target, weight))| {
+                    (!weight.is_empty()).then_some((
+                        label,
+                        (class_of[*target as usize] as u32, weight.clone()),
+                    ))
+                })
+                .collect();
+        });
+    let reconstruct_ms = reconstruct_started_at.elapsed().as_secs_f64() * 1000.0;
+    (
+        DWA::from_parts(states, class_of[dwa.start_state() as usize] as u32),
+        order.len(),
+        graph_ms,
+        signature_ms,
+        reconstruct_ms,
+    )
+}
+
+/// Merge only states with byte-for-byte identical weighted behavior modulo
+/// already-merged children. This is linear-ish hash-consing for an acyclic DWA,
+/// not the compatibility search performed by the full weighted minimizer.
+pub fn exact_quotient_acyclic_dwa(dwa: DWA) -> DWA {
+    let total_started_at = Instant::now();
+    let input_states = dwa.num_states();
+    let input_transitions = dwa.num_transitions();
+    if dwa.states().is_empty() || !dwa.is_acyclic() {
+        return dwa;
+    }
+    let use_hashed = std::env::var_os("GLRMASK_EXPERIMENTAL_HASH_EXACT_QUOTIENT").is_some();
+    let use_parallel = !use_hashed
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_PARALLEL_EXACT_QUOTIENT").is_some()
+        && rayon::current_num_threads() > 1
+        && dwa.states().len() >= 16_384;
+    let (output, reachable_states, graph_ms, signature_ms, reconstruct_ms) = if use_hashed {
+        let (output, reachable, graph_ms, classify_ms, reconstruct_ms) =
+            exact_quotient_acyclic_dwa_hashed_impl(&dwa);
+        if std::env::var_os("GLRMASK_VALIDATE_HASH_EXACT_QUOTIENT").is_some() {
+            let (reference, _) = exact_quotient_acyclic_dwa_serial_impl(&dwa);
+            let difference = find_difference(&output, &reference)
+                .expect("hashed exact quotient validation requires acyclic DWAs");
+            assert!(
+                difference.is_none(),
+                "hashed exact quotient differs from serial quotient on labels {difference:?}",
+            );
+            assert_eq!(output.num_states(), reference.num_states());
+        }
+        (output, reachable, graph_ms, classify_ms, reconstruct_ms)
+    } else if use_parallel {
+        let (output, reachable, graph_ms, signature_ms, reconstruct_ms) =
+            exact_quotient_acyclic_dwa_parallel_impl(&dwa);
+        if std::env::var_os("GLRMASK_VALIDATE_PARALLEL_EXACT_QUOTIENT").is_some() {
+            let (reference, _) = exact_quotient_acyclic_dwa_serial_impl(&dwa);
+            let difference = find_difference(&output, &reference)
+                .expect("parallel exact quotient validation requires acyclic DWAs");
+            assert!(
+                difference.is_none(),
+                "parallel exact quotient differs from serial quotient on labels {difference:?}",
+            );
+            assert_eq!(
+                output.num_states(),
+                reference.num_states(),
+                "parallel exact quotient changed exact class count",
+            );
+        }
+        (output, reachable, graph_ms, signature_ms, reconstruct_ms)
+    } else {
+        let serial_started_at = Instant::now();
+        let (output, reachable) = exact_quotient_acyclic_dwa_serial_impl(&dwa);
+        (
+            output,
+            reachable,
+            0.0,
+            serial_started_at.elapsed().as_secs_f64() * 1000.0,
+            0.0,
+        )
+    };
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][exact_acyclic_quotient] mode={} input_states={} input_transitions={} reachable_states={} output_states={} output_transitions={} graph_ms={:.3} signature_ms={:.3} reconstruct_ms={:.3} total_ms={:.3}",
+            if use_hashed { "hashed" } else if use_parallel { "parallel" } else { "serial" },
+            input_states,
+            input_transitions,
+            reachable_states,
+            output.num_states(),
+            output.num_transitions(),
+            graph_ms,
+            signature_ms,
+            reconstruct_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    output
 }
 
 /// Fold a depth-one parser language into another deterministic parser DWA.
@@ -947,6 +1298,146 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
 }
 
 
+#[derive(Clone)]
+struct DirectTwoCachedWeightOp {
+    // Keep both operands alive for the lifetime of the direct union so pointer
+    // keys cannot be recycled while the concurrent cache still contains them.
+    _left: Weight,
+    _right: Weight,
+    result: Weight,
+}
+
+type DirectTwoWeightOpDashMap = DashMap<
+    (usize, usize),
+    DirectTwoCachedWeightOp,
+    BuildHasherDefault<FxHasher>,
+>;
+
+struct DirectTwoParallelWeightOps {
+    intersections: DirectTwoWeightOpDashMap,
+    unions: DirectTwoWeightOpDashMap,
+}
+
+impl DirectTwoParallelWeightOps {
+    fn new(preallocate: bool) -> Self {
+        let make_map = |capacity: usize| {
+            if preallocate {
+                DirectTwoWeightOpDashMap::with_capacity_and_hasher(
+                    capacity,
+                    BuildHasherDefault::<FxHasher>::default(),
+                )
+            } else {
+                DirectTwoWeightOpDashMap::with_hasher(BuildHasherDefault::<FxHasher>::default())
+            }
+        };
+        Self {
+            intersections: make_map(65_536),
+            unions: make_map(16_384),
+        }
+    }
+
+    #[inline]
+    fn ordered_key(left: &Weight, right: &Weight) -> ((usize, usize), bool) {
+        let left_key = left.ptr_key();
+        let right_key = right.ptr_key();
+        if left_key <= right_key {
+            ((left_key, right_key), false)
+        } else {
+            ((right_key, left_key), true)
+        }
+    }
+
+    #[inline]
+    fn intersection(&self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_empty() || right.is_empty() {
+            return Weight::empty();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        if left.is_full() {
+            return right.clone();
+        }
+        if right.is_full() {
+            return left.clone();
+        }
+        let (key, swapped) = Self::ordered_key(left, right);
+        if let Some(existing) = self.intersections.get(&key) {
+            return existing.result.clone();
+        }
+        let result = left.intersection(right);
+        let (ordered_left, ordered_right) = if swapped {
+            (right.clone(), left.clone())
+        } else {
+            (left.clone(), right.clone())
+        };
+        self.intersections
+            .entry(key)
+            .or_insert_with(|| DirectTwoCachedWeightOp {
+                _left: ordered_left,
+                _right: ordered_right,
+                result: result.clone(),
+            })
+            .result
+            .clone()
+    }
+
+    #[inline]
+    fn union(&self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_full() || right.is_full() {
+            return Weight::all();
+        }
+        if left.is_empty() {
+            return right.clone();
+        }
+        if right.is_empty() {
+            return left.clone();
+        }
+        if left.ptr_key() == right.ptr_key() {
+            return left.clone();
+        }
+        let (key, swapped) = Self::ordered_key(left, right);
+        if let Some(existing) = self.unions.get(&key) {
+            return existing.result.clone();
+        }
+        let result = left.union(right);
+        let (ordered_left, ordered_right) = if swapped {
+            (right.clone(), left.clone())
+        } else {
+            (left.clone(), right.clone())
+        };
+        self.unions
+            .entry(key)
+            .or_insert_with(|| DirectTwoCachedWeightOp {
+                _left: ordered_left,
+                _right: ordered_right,
+                result: result.clone(),
+            })
+            .result
+            .clone()
+    }
+}
+
+#[derive(Clone)]
+enum DirectTwoRawTarget {
+    Left(u32),
+    Right(u32),
+    Pair {
+        left_state: u32,
+        right_state: u32,
+        left_weight: Weight,
+        right_weight: Weight,
+    },
+}
+
+struct DirectTwoRawRow {
+    out_state: u32,
+    final_weight: Option<Weight>,
+    transitions: Vec<(i32, DirectTwoRawTarget, Weight)>,
+    intersection_calls: usize,
+    union_calls: usize,
+}
+
 /// Exact weighted union specialized for two deterministic, epsilon-free DWAs.
 ///
 /// A singleton determinized subset `(q, w)` is normalized by its incoming edge
@@ -955,8 +1446,19 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
 /// only states where both inputs remain simultaneously live. This is the same
 /// weighted subset construction as the generic NWA determinizer, specialized to
 /// the invariant that a subset contains at most one state from each input.
-fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
-    type PairKey = (u32, u32, Weight, Weight);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectTwoUnionOrigin {
+    Left(u32),
+    Right(u32),
+    Pair(u32, u32),
+}
+
+pub fn union_two_parser_dwas_direct_with_origins(
+    mut left: DWA,
+    mut right: DWA,
+) -> (DWA, Vec<DirectTwoUnionOrigin>) {
+    let total_started_at = Instant::now();
+    type PairKey = (u32, u32, usize, usize);
 
     fn intern_pair(
         left_state: u32,
@@ -966,13 +1468,14 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
         source_state_count: u32,
         pair_states: &mut Vec<DWAState>,
         pairs: &mut FxHashMap<PairKey, u32>,
+        weight_keepalive: &mut Vec<(Weight, Weight)>,
         worklist: &mut VecDeque<(u32, u32, u32, Weight, Weight)>,
     ) -> u32 {
         let key = (
             left_state,
             right_state,
-            left_weight.clone(),
-            right_weight.clone(),
+            left_weight.ptr_key(),
+            right_weight.ptr_key(),
         );
         if let Some(&state) = pairs.get(&key) {
             return state;
@@ -980,6 +1483,7 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
         let state = source_state_count + pair_states.len() as u32;
         pair_states.push(DWAState::default());
         pairs.insert(key, state);
+        weight_keepalive.push((left_weight.clone(), right_weight.clone()));
         worklist.push_back((
             state,
             left_state,
@@ -996,9 +1500,14 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     let mut right_states = std::mem::take(right.states_mut());
     let right_offset = left_states.len() as u32;
     let source_state_count = right_offset + right_states.len() as u32;
+    let smaller_source = left_states.len().min(right_states.len());
+    let larger_source = left_states.len().max(right_states.len());
+    let asymmetric_sources =
+        smaller_source <= 4_096 && larger_source >= smaller_source.saturating_mul(8);
     let mut pair_states = Vec::<DWAState>::new();
 
     let mut pairs = FxHashMap::<PairKey, u32>::default();
+    let mut weight_keepalive = Vec::<(Weight, Weight)>::new();
     let mut worklist = VecDeque::<(u32, u32, u32, Weight, Weight)>::new();
     let start = intern_pair(
         left_start,
@@ -1008,10 +1517,231 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
         source_state_count,
         &mut pair_states,
         &mut pairs,
+        &mut weight_keepalive,
         &mut worklist,
     );
     let mut weight_ops = ScopedWeightOpCache::default();
+    let mut pair_intersection_calls = 0usize;
+    let mut pair_union_calls = 0usize;
 
+    let parallel_pair_expand = std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARALLEL").is_none()
+        && rayon::current_num_threads() > 1;
+    if parallel_pair_expand {
+        use rayon::prelude::*;
+        let parallel_weight_ops = DirectTwoParallelWeightOps::new(asymmetric_sources);
+        let wave_cap = std::env::var("GLRMASK_DIRECT_TWO_PARALLEL_WAVE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(16_384);
+        while !worklist.is_empty() {
+            let wave_len = worklist.len().min(wave_cap);
+            let wave = worklist.drain(..wave_len).collect::<Vec<_>>();
+            let raw_rows = wave
+                .into_par_iter()
+                .map(|(out_state, left_id, right_id, left_residual, right_residual)| {
+                    let left_state = &left_states[left_id as usize];
+                    let right_state = &right_states[right_id as usize];
+                    let mut final_weight = None;
+                    let mut intersection_calls = 0usize;
+                    let mut union_calls = 0usize;
+
+                    if let Some(source_final) = &left_state.final_weight {
+                        intersection_calls += 1;
+                        let contribution =
+                            parallel_weight_ops.intersection(&left_residual, source_final);
+                        if !contribution.is_empty() {
+                            final_weight = Some(contribution);
+                        }
+                    }
+                    if let Some(source_final) = &right_state.final_weight {
+                        intersection_calls += 1;
+                        let contribution =
+                            parallel_weight_ops.intersection(&right_residual, source_final);
+                        if !contribution.is_empty() {
+                            final_weight = Some(match final_weight.take() {
+                                Some(existing) => {
+                                    union_calls += 1;
+                                    parallel_weight_ops.union(&existing, &contribution)
+                                }
+                                None => contribution,
+                            });
+                        }
+                    }
+
+                    let mut transitions = Vec::with_capacity(
+                        left_state.transitions.len() + right_state.transitions.len(),
+                    );
+                    let mut left_transitions = left_state.transitions.iter().peekable();
+                    let mut right_transitions = right_state.transitions.iter().peekable();
+                    loop {
+                        let label = match (left_transitions.peek(), right_transitions.peek()) {
+                            (Some((left_label, _)), Some((right_label, _))) => {
+                                Some((**left_label).min(**right_label))
+                            }
+                            (Some((left_label, _)), None) => Some(**left_label),
+                            (None, Some((right_label, _))) => Some(**right_label),
+                            (None, None) => None,
+                        };
+                        let Some(label) = label else { break };
+
+                        let left_edge = if left_transitions
+                            .peek()
+                            .is_some_and(|(candidate, _)| **candidate == label)
+                        {
+                            left_transitions.next().map(|(_, edge)| edge)
+                        } else {
+                            None
+                        };
+                        let right_edge = if right_transitions
+                            .peek()
+                            .is_some_and(|(candidate, _)| **candidate == label)
+                        {
+                            right_transitions.next().map(|(_, edge)| edge)
+                        } else {
+                            None
+                        };
+
+                        let left_contribution = left_edge.and_then(|(target, weight)| {
+                            intersection_calls += 1;
+                            let contribution =
+                                parallel_weight_ops.intersection(&left_residual, weight);
+                            (!contribution.is_empty()).then_some((*target, contribution))
+                        });
+                        let right_contribution = right_edge.and_then(|(target, weight)| {
+                            intersection_calls += 1;
+                            let contribution =
+                                parallel_weight_ops.intersection(&right_residual, weight);
+                            (!contribution.is_empty()).then_some((*target, contribution))
+                        });
+
+                        let transition = match (left_contribution, right_contribution) {
+                            (None, None) => None,
+                            (Some((target, weight)), None) => {
+                                Some((DirectTwoRawTarget::Left(target), weight))
+                            }
+                            (None, Some((target, weight))) => {
+                                Some((DirectTwoRawTarget::Right(target), weight))
+                            }
+                            (
+                                Some((left_target, left_weight)),
+                                Some((right_target, right_weight)),
+                            ) => {
+                                union_calls += 1;
+                                let edge_weight =
+                                    parallel_weight_ops.union(&left_weight, &right_weight);
+                                Some((
+                                    DirectTwoRawTarget::Pair {
+                                        left_state: left_target,
+                                        right_state: right_target,
+                                        left_weight,
+                                        right_weight,
+                                    },
+                                    edge_weight,
+                                ))
+                            }
+                        };
+                        if let Some((target, weight)) = transition {
+                            transitions.push((label, target, weight));
+                        }
+                    }
+
+                    DirectTwoRawRow {
+                        out_state,
+                        final_weight,
+                        transitions,
+                        intersection_calls,
+                        union_calls,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            // Preserve the serial BFS's deterministic discovery order: rows are
+            // resolved in wave order and transitions remain label-sorted.
+            if asymmetric_sources {
+                for row in raw_rows {
+                    pair_intersection_calls += row.intersection_calls;
+                    pair_union_calls += row.union_calls;
+                    let final_weight = row.final_weight;
+                    // Raw transitions are already label-sorted. Constructing the
+                    // BTreeMap from sorted input avoids a logarithmic insertion per
+                    // edge on the highly asymmetric final L1+L2P union.
+                    let transitions = row
+                        .transitions
+                        .into_iter()
+                        .map(|(label, target, weight)| {
+                            let target = match target {
+                                DirectTwoRawTarget::Left(target) => target,
+                                DirectTwoRawTarget::Right(target) => right_offset + target,
+                                DirectTwoRawTarget::Pair {
+                                    left_state,
+                                    right_state,
+                                    left_weight,
+                                    right_weight,
+                                } => intern_pair(
+                                    left_state,
+                                    right_state,
+                                    left_weight,
+                                    right_weight,
+                                    source_state_count,
+                                    &mut pair_states,
+                                    &mut pairs,
+                                    &mut weight_keepalive,
+                                    &mut worklist,
+                                ),
+                            };
+                            (label, (target, weight))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    pair_states[(row.out_state - source_state_count) as usize] = DWAState {
+                        transitions,
+                        final_weight,
+                    };
+                }
+            } else {
+                for row in raw_rows {
+                    pair_intersection_calls += row.intersection_calls;
+                    pair_union_calls += row.union_calls;
+                    let mut output = DWAState::default();
+                    output.final_weight = row.final_weight;
+                    for (label, target, weight) in row.transitions {
+                        let target = match target {
+                            DirectTwoRawTarget::Left(target) => target,
+                            DirectTwoRawTarget::Right(target) => right_offset + target,
+                            DirectTwoRawTarget::Pair {
+                                left_state,
+                                right_state,
+                                left_weight,
+                                right_weight,
+                            } => intern_pair(
+                                left_state,
+                                right_state,
+                                left_weight,
+                                right_weight,
+                                source_state_count,
+                                &mut pair_states,
+                                &mut pairs,
+                                &mut weight_keepalive,
+                                &mut worklist,
+                            ),
+                        };
+                        output.transitions.insert(label, (target, weight));
+                    }
+                    pair_states[(row.out_state - source_state_count) as usize] = output;
+                }
+            }
+        }
+        // Expose the concurrent-cache cardinalities through the existing profile
+        // counters below. The serial ScopedWeightOpCache is intentionally unused
+        // on this path.
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][direct_two_parallel_cache] intersections={} unions={}",
+                parallel_weight_ops.intersections.len(),
+                parallel_weight_ops.unions.len(),
+            );
+        }
+    } else {
     while let Some((out_state, left_id, right_id, left_residual, right_residual)) =
         worklist.pop_front()
     {
@@ -1020,16 +1750,21 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
         let mut output = DWAState::default();
 
         if let Some(final_weight) = &left_state.final_weight {
+            pair_intersection_calls += 1;
             let contribution = weight_ops.intersection(&left_residual, final_weight);
             if !contribution.is_empty() {
                 output.final_weight = Some(contribution);
             }
         }
         if let Some(final_weight) = &right_state.final_weight {
+            pair_intersection_calls += 1;
             let contribution = weight_ops.intersection(&right_residual, final_weight);
             if !contribution.is_empty() {
                 output.final_weight = Some(match output.final_weight.take() {
-                    Some(existing) => weight_ops.union(&existing, &contribution),
+                    Some(existing) => {
+                        pair_union_calls += 1;
+                        weight_ops.union(&existing, &contribution)
+                    },
                     None => contribution,
                 });
             }
@@ -1066,10 +1801,12 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
             };
 
             let left_contribution = left_edge.and_then(|(target, weight)| {
+                pair_intersection_calls += 1;
                 let contribution = weight_ops.intersection(&left_residual, weight);
                 (!contribution.is_empty()).then_some((*target, contribution))
             });
             let right_contribution = right_edge.and_then(|(target, weight)| {
+                pair_intersection_calls += 1;
                 let contribution = weight_ops.intersection(&right_residual, weight);
                 (!contribution.is_empty()).then_some((*target, contribution))
             });
@@ -1079,6 +1816,7 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
                 (Some((target, weight)), None) => Some((target, weight)),
                 (None, Some((target, weight))) => Some((right_offset + target, weight)),
                 (Some((left_target, left_weight)), Some((right_target, right_weight))) => {
+                    pair_union_calls += 1;
                     let edge_weight = weight_ops.union(&left_weight, &right_weight);
                     let target = intern_pair(
                         left_target,
@@ -1088,6 +1826,7 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
                         source_state_count,
                         &mut pair_states,
                         &mut pairs,
+                        &mut weight_keepalive,
                         &mut worklist,
                     );
                     Some((target, edge_weight))
@@ -1099,7 +1838,27 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
         }
         pair_states[(out_state - source_state_count) as usize] = output;
     }
+    }
 
+    let pair_build_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    let pair_state_count = pair_states.len();
+    let mut origins = Vec::<DirectTwoUnionOrigin>::with_capacity(
+        source_state_count as usize + pair_state_count,
+    );
+    origins.extend((0..right_offset).map(DirectTwoUnionOrigin::Left));
+    origins.extend(
+        (0..(source_state_count - right_offset)).map(DirectTwoUnionOrigin::Right),
+    );
+    let mut pair_origins = vec![None; pair_state_count];
+    for ((left_state, right_state, _, _), &state_id) in &pairs {
+        pair_origins[(state_id - source_state_count) as usize] =
+            Some(DirectTwoUnionOrigin::Pair(*left_state, *right_state));
+    }
+    origins.extend(
+        pair_origins
+            .into_iter()
+            .map(|origin| origin.expect("every direct-two pair state has an origin")),
+    );
     // Move source rows into the union with stable singleton IDs. Only right-side
     // source targets need the fixed offset; left-side IDs already match.
     for state in &mut right_states {
@@ -1112,8 +1871,29 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     states.extend(right_states);
     states.extend(pair_states);
 
+    if std::env::var_os("GLRMASK_EXPERIMENTAL_DIRECT_TWO_SKIP_COMPACT").is_some() {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][direct_two_union_detail] left_source_states={} right_source_states={} pair_states={} precompact_states={} precompact_transitions={} intersection_calls={} intersection_cache_entries={} union_calls={} union_cache_entries={} pair_build_ms={:.3} skip_compact=true total_ms={:.3}",
+                right_offset,
+                source_state_count - right_offset,
+                pair_state_count,
+                states.len(),
+                states.iter().map(|state| state.transitions.len()).sum::<usize>(),
+                pair_intersection_calls,
+                if parallel_pair_expand { 0 } else { weight_ops.intersection_entry_count() },
+                pair_union_calls,
+                if parallel_pair_expand { 0 } else { weight_ops.union_entry_count() },
+                pair_build_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return (DWA::from_parts(states, start), origins);
+    }
+
     // Not every copied singleton row is reachable from the paired start. Compact
     // by moving the live rows; no BTreeMap/Weight cloning is needed.
+    let compact_started_at = Instant::now();
     let mut reachable = vec![false; states.len()];
     let mut reachable_queue = VecDeque::new();
     reachable[start as usize] = true;
@@ -1138,7 +1918,8 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     }
     let new_start = remap[start as usize];
     let mut compact = Vec::with_capacity(next_state as usize);
-    for (state_id, mut state) in states.into_iter().enumerate() {
+    let mut compact_origins = Vec::with_capacity(next_state as usize);
+    for (state_id, (mut state, origin)) in states.into_iter().zip(origins).enumerate() {
         if !reachable[state_id] {
             continue;
         }
@@ -1148,9 +1929,32 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
             *target = mapped;
         }
         compact.push(state);
+        compact_origins.push(origin);
     }
 
-    DWA::from_parts(compact, new_start)
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][direct_two_union_detail] left_source_states={} right_source_states={} pair_states={} precompact_states={} output_states={} output_transitions={} intersection_calls={} intersection_cache_entries={} union_calls={} union_cache_entries={} pair_build_ms={:.3} compact_ms={:.3} total_ms={:.3}",
+            right_offset,
+            source_state_count - right_offset,
+            pair_state_count,
+            reachable.len(),
+            compact.len(),
+            compact.iter().map(|state| state.transitions.len()).sum::<usize>(),
+            pair_intersection_calls,
+            if parallel_pair_expand { 0 } else { weight_ops.intersection_entry_count() },
+            pair_union_calls,
+            if parallel_pair_expand { 0 } else { weight_ops.union_entry_count() },
+            pair_build_ms,
+            compact_started_at.elapsed().as_secs_f64() * 1000.0,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    (DWA::from_parts(compact, new_start), compact_origins)
+}
+
+fn union_two_parser_dwas_direct(left: DWA, right: DWA) -> DWA {
+    union_two_parser_dwas_direct_with_origins(left, right).0
 }
 
 /// Merge parser-family DWAs without paying for an unnecessary second global
@@ -1202,7 +2006,7 @@ pub fn merge_mapped_parser_dwas(
         let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
         let (dwas, common_id_map) = reconciled.into_parts();
 
-        if std::env::var_os("GLRMASK_EXPERIMENTAL_DIRECT_TWO_PARSER_UNION").is_some() {
+        if std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARSER_UNION").is_none() {
             let reference = if std::env::var_os("GLRMASK_VALIDATE_DIRECT_TWO_PARSER_UNION").is_some() {
                 let mut reference_nwa = NWA::new(
                     common_id_map.num_tsids(),

@@ -1,10 +1,11 @@
 use crate::automata::lexer::Lexer;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
@@ -31,6 +32,7 @@ use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -63,7 +65,10 @@ use crate::compiler::stages::mapped_artifact::{
     count_interned_ranges_for_weights,
 };
 use crate::compiler::stages::parser_dwa::{
-    build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
+    build_parser_dwa_from_terminal_dwa_with_precomputed_templates, build_parser_dwa_support_stage,
+    ParserDwaSupportStage, build_parser_dwa_support_stage_nwa_root_split,
+    finalize_parser_dwa_support_stage, finalize_parser_dwa_support_stage_after_defaults,
+    merge_two_parser_dwa_support_stages, optimize_parser_dwa_support_stage_defaults,
     try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
     try_build_immediate_terminal_completion_weights,
 };
@@ -200,10 +205,9 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             _ => DwaPossibleMatchesMode::TerminalReconcile,
         },
         Err(_) => {
-            // PM compaction remains available via `GLRMASK_DWA_PM_MODE=terminal_compact`,
-            // `parser_pm_compact`, and `both`, but it is not the default because large
-            // schemas can pay substantial compile time for small artifact-size wins.
-            DwaPossibleMatchesMode::ParserReconcile
+            // Compact reconciled terminal coordinates before parser-DWA construction.
+            // Explicit GLRMASK_DWA_PM_MODE values still override this default.
+            DwaPossibleMatchesMode::TerminalReconcileAndPreParserCompact
         }
     }
 }
@@ -2112,6 +2116,599 @@ struct CompileDagResult {
     prebuilt_token_mask_caches: Option<(InternalIdMap, crate::runtime::TokenMaskCachePrebuild)>,
 }
 
+
+fn trim_terminal_dwa_to_reachable(mut dwa: DWA) -> DWA {
+    let start = dwa.start_state() as usize;
+    let old_states = std::mem::take(dwa.states_mut());
+    if old_states.is_empty() || start >= old_states.len() {
+        return DWA::new(0, 0);
+    }
+    let mut reachable = vec![false; old_states.len()];
+    let mut queue = VecDeque::from([start as u32]);
+    reachable[start] = true;
+    while let Some(state_id) = queue.pop_front() {
+        for (target, _) in old_states[state_id as usize].transitions.values() {
+            let target = *target as usize;
+            if target < old_states.len() && !reachable[target] {
+                reachable[target] = true;
+                queue.push_back(target as u32);
+            }
+        }
+    }
+    let mut remap = vec![u32::MAX; old_states.len()];
+    let mut next = 0u32;
+    for (state_id, live) in reachable.iter().copied().enumerate() {
+        if live {
+            remap[state_id] = next;
+            next += 1;
+        }
+    }
+    let new_start = remap[start];
+    let mut states = Vec::with_capacity(next as usize);
+    for (state_id, mut state) in old_states.into_iter().enumerate() {
+        if !reachable[state_id] {
+            continue;
+        }
+        state.transitions.retain(|_, (target, _)| {
+            let mapped = remap.get(*target as usize).copied().unwrap_or(u32::MAX);
+            if mapped == u32::MAX {
+                false
+            } else {
+                *target = mapped;
+                true
+            }
+        });
+        states.push(state);
+    }
+    DWA::from_parts(states, new_start)
+}
+
+fn reachable_terminal_dwa_cost(dwa: &DWA, root: u32) -> usize {
+    let states = dwa.states();
+    if root as usize >= states.len() {
+        return 0;
+    }
+    let mut seen = vec![false; states.len()];
+    let mut queue = VecDeque::from([root]);
+    seen[root as usize] = true;
+    let mut cost = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &states[state_id as usize];
+        // Transitions dominate parser-NWA construction; count states too so a
+        // long sparse suffix is not treated as free.
+        cost += 1 + state.transitions.len();
+        for (target, _) in state.transitions.values() {
+            let target = *target as usize;
+            if target < states.len() && !seen[target] {
+                seen[target] = true;
+                queue.push_back(target as u32);
+            }
+        }
+    }
+    cost
+}
+
+/// Exact decomposition of a deterministic terminal DWA by whole start-target
+/// groups. Every non-empty word takes exactly one start transition, and every
+/// start target is assigned to exactly one half. The empty-word final weight,
+/// if present, is retained only on the left half. Each clone is then trimmed so
+/// downstream parser construction sees only the component it can reach.
+fn split_terminal_dwa_root_target_parts(
+    terminal: &TerminalAutomaton,
+    num_parts: usize,
+) -> Option<Vec<TerminalAutomaton>> {
+    if num_parts < 2 {
+        return None;
+    }
+    let TerminalAutomaton::Dwa(source) = terminal else {
+        return None;
+    };
+    let start = source.start_state();
+    let start_state = source.states().get(start as usize)?;
+    let mut labels_by_target = BTreeMap::<u32, Vec<i32>>::new();
+    for (&label, (target, weight)) in &start_state.transitions {
+        if !weight.is_empty() {
+            labels_by_target.entry(*target).or_default().push(label);
+        }
+    }
+    if labels_by_target.len() < num_parts || labels_by_target.contains_key(&start) {
+        return None;
+    }
+
+    let mut groups = labels_by_target
+        .into_iter()
+        .map(|(target, labels)| (reachable_terminal_dwa_cost(source, target), target, labels))
+        .collect::<Vec<_>>();
+    groups.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut bins = (0..num_parts)
+        .map(|_| (0usize, BTreeSet::<u32>::new()))
+        .collect::<Vec<_>>();
+    for (cost, target, _) in &groups {
+        let bin_index = bins
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, (bin_cost, _))| (*bin_cost, *index))
+            .map(|(index, _)| index)
+            .unwrap();
+        bins[bin_index].0 += *cost;
+        bins[bin_index].1.insert(*target);
+    }
+    if bins.iter().any(|(_, targets)| targets.is_empty()) {
+        return None;
+    }
+
+    if num_parts == 2 && !env_flag_enabled("GLRMASK_DISABLE_L2P_SPLIT_FOOTPRINT_LAYOUT") {
+        let targets = groups.iter().map(|(_, target, _)| *target).collect::<Vec<_>>();
+        let root_label_counts = groups
+            .iter()
+            .map(|(_, _, labels)| labels.len())
+            .collect::<Vec<_>>();
+        let mut footprints = Vec::<Vec<bool>>::with_capacity(targets.len());
+        for &target in &targets {
+            let mut seen = vec![false; source.states().len()];
+            let mut queue = VecDeque::from([target]);
+            if (target as usize) < seen.len() {
+                seen[target as usize] = true;
+            }
+            while let Some(state_id) = queue.pop_front() {
+                for (next, weight) in source.states()[state_id as usize].transitions.values() {
+                    let next = *next as usize;
+                    if !weight.is_empty() && next < seen.len() && !seen[next] {
+                        seen[next] = true;
+                        queue.push_back(next as u32);
+                    }
+                }
+            }
+            footprints.push(seen);
+        }
+
+        let range_divisor = std::env::var("GLRMASK_L2P_SPLIT_RANGE_DIVISOR")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .or(Some(8));
+        let range_units = |complexity: usize| -> usize {
+            match range_divisor {
+                Some(divisor) => complexity.saturating_add(divisor - 1) / divisor,
+                None => 0,
+            }
+        };
+        let state_range_units = source
+            .states()
+            .iter()
+            .map(|state| {
+                range_units(
+                    state
+                        .final_weight
+                        .as_ref()
+                        .map_or(0, Weight::operation_range_complexity)
+                        .saturating_add(
+                            state
+                                .transitions
+                                .values()
+                                .map(|(_, weight)| weight.operation_range_complexity())
+                                .sum::<usize>(),
+                        ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let root_range_units = groups
+            .iter()
+            .map(|(_, _, labels)| {
+                range_units(
+                    labels
+                        .iter()
+                        .filter_map(|label| start_state.transitions.get(label))
+                        .map(|(_, weight)| weight.operation_range_complexity())
+                        .sum::<usize>(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let max_weight = std::env::var("GLRMASK_L2P_SPLIT_FOOTPRINT_MAX_WEIGHT")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(2);
+        let evaluate = |assignment: &[bool]| -> (usize, usize, usize, usize) {
+            let mut live = [vec![false; source.states().len()], vec![false; source.states().len()]];
+            let mut root_labels = [0usize; 2];
+            let mut root_ranges = [0usize; 2];
+            for (index, &right) in assignment.iter().enumerate() {
+                let bin = usize::from(right);
+                root_labels[bin] += root_label_counts[index];
+                root_ranges[bin] += root_range_units[index];
+                for (state_id, &reachable) in footprints[index].iter().enumerate() {
+                    live[bin][state_id] |= reachable;
+                }
+            }
+            let mut costs = [
+                1usize + root_labels[0] + root_ranges[0],
+                1usize + root_labels[1] + root_ranges[1],
+            ];
+            for bin in 0..2 {
+                for (state_id, &reachable) in live[bin].iter().enumerate() {
+                    if reachable && state_id != start as usize {
+                        let state = &source.states()[state_id];
+                        costs[bin] += 1 + state.transitions.len() + state_range_units[state_id];
+                    }
+                }
+            }
+            let max_cost = costs[0].max(costs[1]);
+            let total_cost = costs[0] + costs[1];
+            // Critical path dominates, but duplicated graph work still affects
+            // support union/finalization. Four-to-one is an empirical compromise.
+            let score = max_cost
+                .saturating_mul(max_weight)
+                .saturating_add(total_cost);
+            (score, max_cost, total_cost, costs[0])
+        };
+
+        let mut assignment = targets
+            .iter()
+            .map(|target| bins[1].1.contains(target))
+            .collect::<Vec<_>>();
+        let before = evaluate(&assignment);
+        loop {
+            let current = evaluate(&assignment);
+            let mut best = current;
+            let mut best_move = None::<(usize, Option<usize>)>;
+            // Single-target moves.
+            for index in 0..assignment.len() {
+                let right_count = assignment.iter().filter(|&&right| right).count();
+                if (assignment[index] && right_count == 1)
+                    || (!assignment[index] && right_count + 1 == assignment.len())
+                {
+                    continue;
+                }
+                assignment[index] = !assignment[index];
+                let candidate = evaluate(&assignment);
+                assignment[index] = !assignment[index];
+                if candidate < best {
+                    best = candidate;
+                    best_move = Some((index, None));
+                }
+            }
+            // Cross-bin swaps can escape the common balanced local minimum.
+            for left in 0..assignment.len() {
+                for right in (left + 1)..assignment.len() {
+                    if assignment[left] == assignment[right] {
+                        continue;
+                    }
+                    assignment[left] = !assignment[left];
+                    assignment[right] = !assignment[right];
+                    let candidate = evaluate(&assignment);
+                    assignment[left] = !assignment[left];
+                    assignment[right] = !assignment[right];
+                    if candidate < best {
+                        best = candidate;
+                        best_move = Some((left, Some(right)));
+                    }
+                }
+            }
+            let Some((first, second)) = best_move else {
+                break;
+            };
+            assignment[first] = !assignment[first];
+            if let Some(second) = second {
+                assignment[second] = !assignment[second];
+            }
+        }
+        let after = evaluate(&assignment);
+        bins[0].0 = 0;
+        bins[0].1.clear();
+        bins[1].0 = 0;
+        bins[1].1.clear();
+        for (index, &target) in targets.iter().enumerate() {
+            let bin = usize::from(assignment[index]);
+            bins[bin].1.insert(target);
+            bins[bin].0 += groups[index].0;
+        }
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l2p_split_footprint_layout] range_divisor={:?} before_score={} before_max={} before_total={} after_score={} after_max={} after_total={} left_cost={} right_cost={}",
+                range_divisor,
+                before.0,
+                before.1,
+                before.2,
+                after.0,
+                after.1,
+                after.2,
+                after.3,
+                after.2.saturating_sub(after.3),
+            );
+        }
+    }
+
+    let mut parts = Vec::with_capacity(num_parts);
+    for (part_index, (_, targets)) in bins.iter().enumerate() {
+        let mut part = source.clone();
+        part.states_mut()[start as usize]
+            .transitions
+            .retain(|_, (target, _)| targets.contains(target));
+        // Preserve empty-word acceptance exactly once across the union.
+        if part_index != 0 {
+            part.states_mut()[start as usize].final_weight = None;
+        }
+        parts.push(TerminalAutomaton::Dwa(trim_terminal_dwa_to_reachable(part)));
+    }
+    if compile_profile_enabled() {
+        let costs = bins.iter().map(|(cost, _)| *cost).collect::<Vec<_>>();
+        let shapes = parts
+            .iter()
+            .map(|part| (part.num_states(), part.stats().transitions))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/profile][l2p_root_split] groups={} parts={} estimated_costs={:?} shapes={:?}",
+            groups.len(),
+            num_parts,
+            costs,
+            shapes,
+        );
+    }
+    Some(parts)
+}
+
+fn build_split_support_stage(
+    parts: Vec<TerminalAutomaton>,
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+) -> Option<ParserDwaSupportStage> {
+    let stages = parts
+        .into_par_iter()
+        .map(|terminal| {
+            build_parser_dwa_support_stage(
+                table,
+                grammar,
+                &terminal,
+                templates,
+                collapse_immediate_acceptance,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut stages = stages.into_iter().collect::<Option<Vec<_>>>()?;
+    let input_shapes = stages
+        .iter()
+        .map(|stage| (stage.num_states(), stage.num_transitions()))
+        .collect::<Vec<_>>();
+    let merge_started_at = Instant::now();
+    let merged_stage = match stages.len() {
+        2 => {
+            let right = stages.pop().unwrap();
+            let left = stages.pop().unwrap();
+            merge_two_parser_dwa_support_stages(left, right, table.num_states)
+        }
+        3 => {
+            stages.sort_unstable_by_key(|stage| stage.num_states());
+            let c = stages.pop().unwrap();
+            let b = stages.pop().unwrap();
+            let a = stages.pop().unwrap();
+            let ab = merge_two_parser_dwa_support_stages(a, b, table.num_states);
+            merge_two_parser_dwa_support_stages(ab, c, table.num_states)
+        }
+        4 => {
+            let d = stages.pop().unwrap();
+            let c = stages.pop().unwrap();
+            let b = stages.pop().unwrap();
+            let a = stages.pop().unwrap();
+            let (ab, cd) = rayon::join(
+                || merge_two_parser_dwa_support_stages(a, b, table.num_states),
+                || merge_two_parser_dwa_support_stages(c, d, table.num_states),
+            );
+            merge_two_parser_dwa_support_stages(ab, cd, table.num_states)
+        }
+        _ => {
+            let mut iter = stages.into_iter();
+            let mut merged = iter.next()?;
+            for stage in iter {
+                merged = merge_two_parser_dwa_support_stages(merged, stage, table.num_states);
+            }
+            merged
+        }
+    };
+    let merged_shape = (merged_stage.num_states(), merged_stage.num_transitions());
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_support_split_stage] parts={} input_shapes={:?} merged_support_states={} merged_support_transitions={} merge_ms={:.3}",
+            input_shapes.len(),
+            input_shapes,
+            merged_shape.0,
+            merged_shape.1,
+            merge_ms,
+        );
+    }
+    Some(merged_stage)
+}
+
+fn build_split_support_parser_dwa(
+    parts: Vec<TerminalAutomaton>,
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+) -> Option<DWA> {
+    let total_started_at = Instant::now();
+    let merged_stage = build_split_support_stage(
+        parts,
+        table,
+        grammar,
+        templates,
+        collapse_immediate_acceptance,
+    )?;
+    let merged_shape = (merged_stage.num_states(), merged_stage.num_transitions());
+    let finalize_started_at = Instant::now();
+    let output = finalize_parser_dwa_support_stage(
+        merged_stage,
+        table.num_states,
+        collapse_immediate_acceptance,
+    );
+    let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_support_split_result] merged_support_states={} merged_support_transitions={} output_states={} output_transitions={} finalize_ms={:.3} total_ms={:.3}",
+            merged_shape.0,
+            merged_shape.1,
+            output.num_states(),
+            output.num_transitions(),
+            finalize_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(output)
+}
+
+
+fn try_build_combined_l1_l2p_support_parser_dwa(
+    terminal_dwas: &TerminalDwaFamilies,
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+    final_id_map: Option<&std::sync::OnceLock<InternalIdMap>>,
+) -> Option<MappedArtifact<DWA>> {
+    let total_started_at = Instant::now();
+    if terminal_dwas.special.is_some() {
+        return None;
+    }
+    let l1 = terminal_dwas.l1.as_ref()?.clone();
+    let l2p = terminal_dwas.l2p.as_ref()?.clone();
+    let common_map = final_id_map
+        .and_then(std::sync::OnceLock::get)
+        .cloned()
+        .unwrap_or_else(|| common_terminal_family_id_map(terminal_dwas));
+
+    let reconcile_started_at = Instant::now();
+    let (l1, l2p) = rayon::join(
+        || l1.remap_into_existing_common(&common_map),
+        || l2p.remap_into_existing_common(&common_map),
+    );
+    let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let split_parts = std::env::var("GLRMASK_L2P_SUPPORT_SPLIT_PARTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|parts| matches!(parts, 2 | 3 | 4))
+        .unwrap_or(2);
+    let l2p_parts = split_terminal_dwa_root_target_parts(l2p.artifact(), split_parts)?;
+
+    let build_started_at = Instant::now();
+    let (l1_stage, l2p_stage) = rayon::join(
+        || {
+            build_parser_dwa_support_stage(
+                table,
+                grammar,
+                l1.artifact(),
+                templates,
+                collapse_immediate_acceptance,
+            )
+        },
+        || {
+            build_split_support_stage(
+                l2p_parts,
+                table,
+                grammar,
+                templates,
+                collapse_immediate_acceptance,
+            )
+        },
+    );
+    let mut l1_stage = l1_stage?;
+    let mut l2p_stage = l2p_stage?;
+    let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
+    let input_shapes = [
+        (l1_stage.num_states(), l1_stage.num_transitions()),
+        (l2p_stage.num_states(), l2p_stage.num_transitions()),
+    ];
+    let distributivity_reference =
+        env_flag_enabled("GLRMASK_VALIDATE_COMBINED_SUPPORT_DISTRIBUTIVITY")
+            .then(|| (l1_stage.clone(), l2p_stage.clone()));
+    let local_defaults =
+        env_flag_enabled("GLRMASK_EXPERIMENTAL_COMBINED_L1_L2P_LOCAL_DEFAULTS");
+    let local_defaults_started_at = Instant::now();
+    if local_defaults {
+        (l1_stage, l2p_stage) = rayon::join(
+            || optimize_parser_dwa_support_stage_defaults(l1_stage, table.num_states),
+            || optimize_parser_dwa_support_stage_defaults(l2p_stage, table.num_states),
+        );
+    }
+    let local_defaults_ms = local_defaults_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let merge_started_at = Instant::now();
+    let combined_stage = merge_two_parser_dwa_support_stages(l2p_stage, l1_stage, table.num_states);
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    let combined_support_shape = (
+        combined_stage.num_states(),
+        combined_stage.num_transitions(),
+    );
+
+    let finalize_started_at = Instant::now();
+    let output = if local_defaults {
+        finalize_parser_dwa_support_stage_after_defaults(
+            combined_stage,
+            table.num_states,
+            collapse_immediate_acceptance,
+        )
+    } else {
+        finalize_parser_dwa_support_stage(
+            combined_stage,
+            table.num_states,
+            collapse_immediate_acceptance,
+        )
+    };
+    let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if let Some((l1_reference_stage, l2p_reference_stage)) = distributivity_reference {
+        let (l1_reference, l2p_reference) = rayon::join(
+            || {
+                finalize_parser_dwa_support_stage(
+                    l1_reference_stage,
+                    table.num_states,
+                    collapse_immediate_acceptance,
+                )
+            },
+            || {
+                finalize_parser_dwa_support_stage(
+                    l2p_reference_stage,
+                    table.num_states,
+                    collapse_immediate_acceptance,
+                )
+            },
+        );
+        let reference =
+            glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct_with_origins(
+                l2p_reference,
+                l1_reference,
+            )
+            .0;
+        let difference = find_difference(&output, &reference)
+            .expect("combined support distributivity validation requires comparable DWAs");
+        assert!(
+            difference.is_none(),
+            "combined support finalization is non-distributive on labels {difference:?}",
+        );
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][combined_l1_l2p_support] reconcile_ms={:.3} input_shapes={:?} local_defaults_ms={:.3} combined_support_states={} combined_support_transitions={} build_ms={:.3} merge_ms={:.3} finalize_ms={:.3} output_states={} output_transitions={} total_ms={:.3}",
+            reconcile_ms,
+            input_shapes,
+            local_defaults_ms,
+            combined_support_shape.0,
+            combined_support_shape.1,
+            build_ms,
+            merge_ms,
+            finalize_ms,
+            output.num_states(),
+            output.num_transitions(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(MappedArtifact::new(output, common_map))
+}
+
 fn build_parser_dwa_for_terminal_family(
     family_name: &str,
     family: Option<&MappedArtifact<TerminalAutomaton>>,
@@ -2123,15 +2720,9 @@ fn build_parser_dwa_for_terminal_family(
 ) -> Option<MappedArtifact<DWA>> {
     let family = family?;
     let internal_ids = family.id_map().clone();
-
     let mut minimized_terminal_family = None::<TerminalAutomaton>;
     if family_name == "l2p" && cfg!(target_os = "windows") {
         let stats = family.artifact().stats();
-        // On Windows, a moderately sized and sparse merged L2P family can be
-        // much cheaper to minimize once here than to carry through the parser
-        // product.  Dense families pay too much in the determinization step,
-        // while small parser tables do not have enough downstream work to
-        // amortize it.  Keep the gate deliberately narrow.
         let should_preminimize = stats.states >= 45
             && stats.states <= 69
             && stats.transitions >= 1200
@@ -2179,22 +2770,130 @@ fn build_parser_dwa_for_terminal_family(
     let family_automaton = minimized_terminal_family
         .as_ref()
         .unwrap_or_else(|| family.artifact());
-    let (parser_dwa, immediate_fast_path) =
+    let (mut parser_dwa, immediate_fast_path) =
         if let Some(parser_dwa) = try_build_immediate_parser_dwa(family_automaton, grammar, table) {
             (parser_dwa, true)
+        } else if family_name == "l2p"
+            && env_flag_enabled("GLRMASK_EXPERIMENTAL_L2P_NWA_ROOT_SPLIT_SUPPORT_JOIN")
+        {
+            let split_started_at = Instant::now();
+            if let Some(stage) = build_parser_dwa_support_stage_nwa_root_split(
+                table,
+                grammar,
+                family_automaton,
+                templates,
+                collapse_immediate_acceptance,
+            ) {
+                let merged = finalize_parser_dwa_support_stage(
+                    stage,
+                    table.num_states,
+                    collapse_immediate_acceptance,
+                );
+                if env_flag_enabled("GLRMASK_VALIDATE_L2P_NWA_ROOT_SPLIT_SUPPORT_JOIN") {
+                    let reference = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                        table,
+                        grammar,
+                        family_automaton,
+                        templates,
+                        vocab,
+                        &internal_ids,
+                        collapse_immediate_acceptance,
+                    );
+                    let difference = find_difference(&merged, &reference)
+                        .expect("L2P NWA-root support-stage split validation requires comparable parser DWAs");
+                    assert!(
+                        difference.is_none(),
+                        "L2P NWA-root support-stage split differs from monolithic parser DWA on labels {difference:?}",
+                    );
+                }
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l2p_nwa_root_split_pipeline] output_states={} output_transitions={} total_ms={:.3}",
+                        merged.num_states(),
+                        merged.num_transitions(),
+                        split_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                (merged, false)
+            } else {
+                (
+                    build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                        table,
+                        grammar,
+                        family_automaton,
+                        templates,
+                        vocab,
+                        &internal_ids,
+                        collapse_immediate_acceptance,
+                    ),
+                    false,
+                )
+            }
         } else {
-            (
-                build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            let split_parts = std::env::var("GLRMASK_L2P_SUPPORT_SPLIT_PARTS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|parts| matches!(parts, 2 | 3 | 4))
+                .unwrap_or(2);
+            let split = (family_name == "l2p"
+                && !env_flag_enabled("GLRMASK_DISABLE_L2P_ROOT_SPLIT_SUPPORT_JOIN"))
+                .then(|| split_terminal_dwa_root_target_parts(family_automaton, split_parts))
+                .flatten();
+            if let Some(parts) = split {
+                let merged = build_split_support_parser_dwa(
+                    parts,
                     table,
                     grammar,
-                    family_automaton,
                     templates,
-                    vocab,
-                    &internal_ids,
                     collapse_immediate_acceptance,
-                ),
-                false,
-            )
+                );
+                if let Some(merged) = merged {
+                    if env_flag_enabled("GLRMASK_VALIDATE_L2P_ROOT_SPLIT_SUPPORT_JOIN") {
+                        let reference = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                            table,
+                            grammar,
+                            family_automaton,
+                            templates,
+                            vocab,
+                            &internal_ids,
+                            collapse_immediate_acceptance,
+                        );
+                        let difference = find_difference(&merged, &reference)
+                            .expect("L2P support-stage split validation requires comparable parser DWAs");
+                        assert!(
+                            difference.is_none(),
+                            "L2P support-stage split differs from monolithic parser DWA on labels {difference:?}",
+                        );
+                    }
+                    (merged, false)
+                } else {
+                    (
+                        build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                            table,
+                            grammar,
+                            family_automaton,
+                            templates,
+                            vocab,
+                            &internal_ids,
+                            collapse_immediate_acceptance,
+                        ),
+                        false,
+                    )
+                }
+            } else {
+                (
+                    build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                        table,
+                        grammar,
+                        family_automaton,
+                        templates,
+                        vocab,
+                        &internal_ids,
+                        collapse_immediate_acceptance,
+                    ),
+                    false,
+                )
+            }
         };
     if family_name == "l1"
         && family.artifact().num_states() == 2
@@ -2215,14 +2914,52 @@ fn build_parser_dwa_for_terminal_family(
             .as_ref()
             .is_some_and(|weight| !weight.is_empty()));
     }
+    let quotient_family = std::env::var("GLRMASK_EXPERIMENTAL_PARSER_FAMILY_QUOTIENT")
+        .ok()
+        .is_some_and(|value| {
+            value == family_name || value.eq_ignore_ascii_case("all")
+        });
+    if quotient_family {
+        let before = (parser_dwa.num_states(), parser_dwa.num_transitions());
+        let started_at = Instant::now();
+        parser_dwa = glrmask_parser_dwa::__private::merge::exact_quotient_acyclic_dwa(parser_dwa);
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_family_quotient] family={} before_states={} before_transitions={} after_states={} after_transitions={} total_ms={:.3}",
+                family_name,
+                before.0,
+                before.1,
+                parser_dwa.num_states(),
+                parser_dwa.num_transitions(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
     if compile_profile_enabled() {
         let terminal_stats = family.artifact().stats();
         let parser_stats = parser_dwa.stats();
+        let (root_transitions, root_targets) = match family.artifact() {
+            TerminalAutomaton::Dwa(dwa) => {
+                let start = &dwa.states()[dwa.start_state() as usize];
+                (
+                    start.transitions.len(),
+                    start
+                        .transitions
+                        .values()
+                        .map(|(target, _)| *target)
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                )
+            }
+            _ => (0, 0),
+        };
         eprintln!(
-            "[glrmask/profile][parser_dwa_family] family={} terminal_states={} terminal_transitions={} parser_states={} parser_transitions={} immediate_fast_path={}",
+            "[glrmask/profile][parser_dwa_family] family={} terminal_states={} terminal_transitions={} root_transitions={} root_targets={} parser_states={} parser_transitions={} immediate_fast_path={}",
             family_name,
             terminal_stats.states,
             terminal_stats.transitions,
+            root_transitions,
+            root_targets,
             parser_stats.states,
             parser_stats.transitions,
             immediate_fast_path,
@@ -2414,6 +3151,83 @@ fn build_and_merge_parser_dwa_families(
             terminal_dwas.special.is_some(),
             use_direct_special_parts,
             "direct-regular special-token family must have an exact direct acceptance path",
+        );
+    }
+
+    if env_flag_enabled("GLRMASK_EXPERIMENTAL_COMBINED_L1_L2P_SUPPORT")
+        && !use_direct_l1_parts
+        && !use_direct_l2p_parts
+        && !use_direct_special_parts
+        && terminal_dwas.special.is_none()
+        && let Some(combined) = try_build_combined_l1_l2p_support_parser_dwa(
+            terminal_dwas,
+            table,
+            grammar,
+            &templates,
+            collapse_immediate_acceptance,
+            final_id_map,
+        )
+    {
+        if env_flag_enabled("GLRMASK_VALIDATE_COMBINED_L1_L2P_SUPPORT") {
+            let (l1_reference, l2p_reference) = rayon::join(
+                || {
+                    build_parser_dwa_for_terminal_family(
+                        "l1",
+                        terminal_dwas.l1.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                },
+                || {
+                    build_parser_dwa_for_terminal_family(
+                        "l2p",
+                        terminal_dwas.l2p.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                },
+            );
+            let reference_inputs = l1_reference
+                .into_iter()
+                .chain(l2p_reference)
+                .collect::<Vec<_>>();
+            let (reference, top_accept) =
+                glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas_with_top_accept(
+                    reference_inputs,
+                    tokenizer.num_states() as usize,
+                    terminal_dwas
+                        .max_original_token_id()
+                        .unwrap_or_else(|| vocab.max_token_id())
+                        .max(vocab.max_token_id()),
+                );
+            assert!(
+                top_accept.is_empty(),
+                "combined support validation expected ordinary parser-DWA union",
+            );
+            let difference = find_difference(combined.artifact(), reference.artifact())
+                .expect("combined L1/L2P support validation requires comparable parser DWAs");
+            assert!(
+                difference.is_none(),
+                "combined L1/L2P support differs from ordinary parser merge on labels {difference:?}",
+            );
+        }
+        let (dwa, id_map) = combined.into_parts();
+        return MappedArtifact::new(
+            (
+                dwa,
+                ParserTopAccept {
+                    combined: BTreeMap::new(),
+                    parts: BTreeMap::new(),
+                    direct_l1_complete_by_terminal: BTreeMap::new(),
+                },
+            ),
+            id_map,
         );
     }
 

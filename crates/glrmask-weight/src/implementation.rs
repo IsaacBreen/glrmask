@@ -188,6 +188,10 @@ impl ScopedWeightOpCache {
         value
     }
 
+    pub fn union_entry_count(&self) -> usize {
+        self.union_entries.len()
+    }
+
     pub fn intersection_entry_count(&self) -> usize {
         self.intersection_entries.len()
     }
@@ -2019,6 +2023,83 @@ where
     builder.finish()
 }
 
+fn difference_weights_streaming(left: &Weight, right: &Weight) -> Weight {
+    let mut right_iter = right.0.range_values().peekable();
+    let mut builder = CompactRangeBuilder::new();
+    let mut changed = false;
+
+    for (left_range, left_tokens) in left.0.range_values() {
+        let left_start = *left_range.start();
+        let left_end = *left_range.end();
+        let mut cursor = left_start;
+        let mut left_exhausted = false;
+
+        loop {
+            while right_iter
+                .peek()
+                .is_some_and(|(right_range, _)| *right_range.end() < cursor)
+            {
+                right_iter.next();
+            }
+
+            let Some((right_range, right_tokens)) = right_iter.peek() else {
+                break;
+            };
+            let right_start = *right_range.start();
+            let right_end = *right_range.end();
+            if right_start > left_end {
+                break;
+            }
+
+            if cursor < right_start {
+                let prefix_end = left_end.min(right_start - 1);
+                builder.push(cursor, prefix_end, Arc::clone(left_tokens));
+                if prefix_end == left_end {
+                    left_exhausted = true;
+                    break;
+                }
+                cursor = right_start;
+            }
+
+            let overlap_start = cursor.max(right_start);
+            let overlap_end = left_end.min(right_end);
+            if overlap_start <= overlap_end {
+                match shared_token_difference(left_tokens, right_tokens) {
+                    Some(tokens) => {
+                        if !Arc::ptr_eq(&tokens, left_tokens) {
+                            changed = true;
+                        }
+                        builder.push(overlap_start, overlap_end, tokens);
+                    }
+                    None => {
+                        changed = true;
+                        builder.flush();
+                    }
+                }
+            }
+
+            if overlap_end == right_end {
+                right_iter.next();
+            }
+            if overlap_end == left_end {
+                left_exhausted = true;
+                break;
+            }
+            cursor = overlap_end + 1;
+        }
+
+        if !left_exhausted && cursor <= left_end {
+            builder.push(cursor, left_end, Arc::clone(left_tokens));
+        }
+    }
+
+    if changed {
+        builder.finish()
+    } else {
+        left.clone()
+    }
+}
+
 fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
     let mut left_iter = left.0.range_values();
     let mut right_iter = right.0.range_values();
@@ -2708,6 +2789,21 @@ impl Weight {
         self.0.range_values_len()
     }
 
+    /// Structural work proxy for binary weight algebra: number of outer TSID
+    /// ranges plus the token ranges stored in each corresponding value. This
+    /// intentionally measures representation fragmentation, not set cardinality.
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn operation_range_complexity(&self) -> usize {
+        if self.is_full() {
+            return 1;
+        }
+        self.0
+            .range_values()
+            .map(|(_, tokens)| 1usize + tokens.ranges().count())
+            .sum()
+    }
+
     /// Return the set of TSID ranges covered by this weight, ignoring token
     /// subranges. `None` denotes the mathematical full weight, whose TSID
     /// coverage may overlap any finite TSID set.
@@ -2962,6 +3058,24 @@ impl Weight {
 
     fn difference_uncached(&self, other: &Self) -> Self {
         combine_compact_entries(self, other, difference_token_sets)
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn difference_streaming_uncached(&self, other: &Self) -> Self {
+        if self.is_empty() || other.is_full() {
+            return Self::empty();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Self::empty();
+        }
+        if self.is_full() {
+            return Self::all();
+        }
+        difference_weights_streaming(self, other)
     }
 
     pub fn complement(&self) -> Self {
@@ -3698,6 +3812,74 @@ mod tests {
         let actual =
             base.with_sparse_tsid_range_overrides_intersection(&range_overrides, &domain);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn streaming_difference_matches_generic_difference() {
+        fn assert_matches(left: &Weight, right: &Weight) {
+            clear_weight_op_caches();
+            let generic = left.difference_uncached(right);
+            clear_weight_op_caches();
+            let streaming = difference_weights_streaming(left, right);
+            assert_eq!(streaming, generic, "left={left} right={right}");
+        }
+
+        let empty = Weight::empty();
+        let all = Weight::all();
+        let simple = Weight::from_per_tsid_token_sets([
+            (1, RangeSetBlaze::from_iter([1..=5, 9..=12])),
+            (2, RangeSetBlaze::from_iter([20..=30])),
+            (5, RangeSetBlaze::from_iter([3..=8])),
+        ]);
+        let overlap = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([1..=99])),
+            (1, RangeSetBlaze::from_iter([3..=10])),
+            (2, RangeSetBlaze::from_iter([0..=21, 29..=40])),
+            (4, RangeSetBlaze::from_iter([1..=2])),
+            (5, RangeSetBlaze::from_iter([6..=20])),
+        ]);
+        assert_matches(&empty, &simple);
+        assert_matches(&simple, &empty);
+        assert_matches(&simple, &simple);
+        assert_matches(&simple, &all);
+        assert_matches(&simple, &overlap);
+
+        for case in 0..96u32 {
+            let left = Weight::from_per_tsid_token_sets((0..128u32).filter_map(|tsid| {
+                if (tsid * 13 + case * 7) % 6 == 0 {
+                    return None;
+                }
+                let tokens = match (tsid * 5 + case * 3) % 8 {
+                    0 => RangeSetBlaze::from_iter([0..=7, 40..=49]),
+                    1 => RangeSetBlaze::from_iter([4..=18]),
+                    2 => RangeSetBlaze::from_iter([16..=31]),
+                    3 => RangeSetBlaze::from_iter([8..=12, 28..=44]),
+                    4 => RangeSetBlaze::from_iter([35..=58]),
+                    5 => RangeSetBlaze::from_iter([52..=70]),
+                    6 => RangeSetBlaze::from_iter([2..=5, 73..=91]),
+                    _ => RangeSetBlaze::from_iter([24..=29, 60..=67]),
+                };
+                Some((tsid, tokens))
+            }));
+            let right = Weight::from_per_tsid_token_sets((0..128u32).filter_map(|tsid| {
+                if (tsid * 17 + case * 11) % 5 == 0 {
+                    return None;
+                }
+                let tokens = match (tsid * 3 + case * 5) % 9 {
+                    0 => RangeSetBlaze::from_iter([0..=10, 42..=54]),
+                    1 => RangeSetBlaze::from_iter([5..=14]),
+                    2 => RangeSetBlaze::from_iter([18..=27]),
+                    3 => RangeSetBlaze::from_iter([7..=15, 30..=39]),
+                    4 => RangeSetBlaze::from_iter([32..=48]),
+                    5 => RangeSetBlaze::from_iter([48..=63]),
+                    6 => RangeSetBlaze::from_iter([64..=80]),
+                    7 => RangeSetBlaze::from_iter([1..=4, 76..=94]),
+                    _ => RangeSetBlaze::from_iter([22..=26, 55..=66]),
+                };
+                Some((tsid, tokens))
+            }));
+            assert_matches(&left, &right);
+        }
     }
 
     #[test]

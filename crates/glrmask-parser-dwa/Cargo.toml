@@ -11,6 +11,7 @@ default = []
 internal-api = []
 
 [dependencies]
+dashmap = "6"
 glrmask-artifact = { version = "=0.1.1", path = "../glrmask-artifact", features = ["internal-api"] }
 glrmask-dwa-merge = { version = "=0.1.1", path = "../glrmask-dwa-merge", features = ["internal-api"] }
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }

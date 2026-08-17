@@ -878,6 +878,27 @@ fn compute_cancellations_range_serial_inner(
     let mut subset_memo = SubsetMemo::default();
     let use_dead_task_fast_path =
         state_count as usize >= DEAD_CANCELLATION_FAST_PATH_MIN_STATES;
+    let suppress_initial_dead_tasks = use_dead_task_fast_path
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_CANCELLATION_SUPPRESS_INITIAL_DEAD").is_some();
+    let suppress_static_dead_tasks = use_dead_task_fast_path
+        && std::env::var_os("GLRMASK_EXPERIMENTAL_CANCELLATION_SUPPRESS_STATIC_DEAD").is_some();
+    let static_actionable = suppress_static_dead_tasks.then(|| {
+        nwa.states()
+            .iter()
+            .map(|state| {
+                !state.epsilons.is_empty()
+                    || state.transitions.contains_key(&DEFAULT_LABEL)
+                    || state.transitions.range(0..).next().is_some()
+            })
+            .collect::<Vec<_>>()
+    });
+    let profile_serial_detail =
+        std::env::var_os("GLRMASK_PROFILE_CANCELLATION_SERIAL_DETAIL").is_some();
+    let mut worklist_pops = 0usize;
+    let mut dead_task_skips = 0usize;
+    let mut dead_task_static_empty = 0usize;
+    let mut dead_task_label_miss = 0usize;
+    let mut missing_query_skips = 0usize;
 
     for source_state in range {
         if source_state >= state_count {
@@ -892,19 +913,49 @@ fn compute_cancellations_range_serial_inner(
                     continue;
                 }
 
-                queue_query_weight(
-                    &mut query_weights,
-                    &mut worklist,
-                    *target_state,
-                    source_state,
-                    positive_label,
-                    weight.clone(),
-                );
+                if let Some(static_actionable) = static_actionable.as_ref() {
+                    let changed = record_query_weight(
+                        &mut query_weights,
+                        *target_state,
+                        (source_state, positive_label),
+                        weight.clone(),
+                    );
+                    if changed && static_actionable[*target_state as usize] {
+                        worklist.push_back((*target_state, source_state, positive_label));
+                    }
+                } else if suppress_initial_dead_tasks {
+                    let changed = record_query_weight(
+                        &mut query_weights,
+                        *target_state,
+                        (source_state, positive_label),
+                        weight.clone(),
+                    );
+                    if changed {
+                        let target = &nwa.states()[*target_state as usize];
+                        let actionable = target.transitions.contains_key(&positive_label)
+                            || target.transitions.contains_key(&DEFAULT_LABEL)
+                            || !target.epsilons.is_empty();
+                        if actionable {
+                            worklist.push_back((*target_state, source_state, positive_label));
+                        }
+                    }
+                } else {
+                    queue_query_weight(
+                        &mut query_weights,
+                        &mut worklist,
+                        *target_state,
+                        source_state,
+                        positive_label,
+                        weight.clone(),
+                    );
+                }
             }
         }
     }
 
+    let initial_worklist_len = worklist.len();
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
+        worklist_pops += 1;
         let state = &nwa.states()[current_state as usize];
         let local_derived = &derived_epsilons[current_state as usize];
         let foreign_derived_at_state =
@@ -919,6 +970,13 @@ fn compute_cancellations_range_serial_inner(
             && default_targets.is_none()
             && state.epsilons.is_empty()
         {
+            dead_task_skips += 1;
+            let has_any_nonnegative = state.transitions.range(0..).next().is_some();
+            if has_any_nonnegative {
+                dead_task_label_miss += 1;
+            } else {
+                dead_task_static_empty += 1;
+            }
             continue;
         }
 
@@ -926,6 +984,7 @@ fn compute_cancellations_range_serial_inner(
             .get(&(source_state, positive_label))
             .cloned()
         else {
+            missing_query_skips += 1;
             continue;
         };
         let query_single = query_weight_to_current.single_compact_entry_parts();
@@ -1003,6 +1062,41 @@ fn compute_cancellations_range_serial_inner(
         }
     }
 
+    if profile_serial_detail {
+        let subset_entries = subset_memo.len();
+        let subset_true = subset_memo.values().filter(|&&value| value).count();
+        let query_states_nonempty = query_weights.iter().filter(|entries| !entries.is_empty()).count();
+        let query_entries = query_weights.iter().map(SmallQueryWeights::len).sum::<usize>();
+        let derived_states_nonempty = derived_epsilons
+            .iter()
+            .filter(|entries| !entries.is_empty())
+            .count();
+        let derived_entries = derived_epsilons
+            .iter()
+            .map(|entries| match entries {
+                SmallTargetWeights::Empty => 0,
+                SmallTargetWeights::One(_, _) => 1,
+                SmallTargetWeights::Many(entries) => entries.len(),
+            })
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][cancellation_serial] states={} initial_worklist={} worklist_pops={} dead_task_skips={} dead_static_empty={} dead_label_miss={} missing_query_skips={} query_states={} query_entries={} derived_states={} derived_entries={} subset_pairs={} subset_true={} subset_false={}",
+            state_count,
+            initial_worklist_len,
+            worklist_pops,
+            dead_task_skips,
+            dead_task_static_empty,
+            dead_task_label_miss,
+            missing_query_skips,
+            query_states_nonempty,
+            query_entries,
+            derived_states_nonempty,
+            derived_entries,
+            subset_entries,
+            subset_true,
+            subset_entries - subset_true,
+        );
+    }
     collect_non_empty_derived_epsilons(derived_epsilons)
 }
 
