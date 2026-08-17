@@ -729,43 +729,14 @@ impl DWA {
             state_row_ids.push(row_id);
         }
 
-        let mut ts_ptr_to_idx: FxHashMap<usize, u32> = FxHashMap::default();
-        ts_ptr_to_idx.reserve(32_768);
-        let mut token_set_pool: Vec<Arc<RangeSetBlaze<u32>>> = Vec::new();
-        let mut intern_token_set = |ts: &Arc<RangeSetBlaze<u32>>| -> u32 {
-            let ptr = Arc::as_ptr(ts) as usize;
-            *ts_ptr_to_idx.entry(ptr).or_insert_with(|| {
-                let idx = token_set_pool.len() as u32;
-                token_set_pool.push(ts.clone());
-                idx
-            })
-        };
-
         let mut w_ptr_to_idx: FxHashMap<usize, u32> = FxHashMap::default();
         w_ptr_to_idx.reserve(32_768);
-        let mut weight_pool: Vec<WeightPoolEntry> = Vec::new();
+        let mut weight_refs = Vec::<Weight>::new();
         let mut intern_weight = |w: &Weight| -> u32 {
             let ptr = w.ptr_key();
             *w_ptr_to_idx.entry(ptr).or_insert_with(|| {
-                let idx = weight_pool.len() as u32;
-                if w.is_full() {
-                    weight_pool.push(WeightPoolEntry {
-                        all: true,
-                        entries: Vec::new(),
-                    });
-                } else {
-                    let entries = w
-                        .raw_range_values()
-                        .map(|(range, tokens)| {
-                            let ts_idx = intern_token_set(tokens);
-                            (*range.start(), *range.end(), ts_idx)
-                        })
-                        .collect();
-                    weight_pool.push(WeightPoolEntry {
-                        all: false,
-                        entries,
-                    });
-                }
+                let idx = weight_refs.len() as u32;
+                weight_refs.push(w.clone());
                 idx
             })
         };
@@ -786,6 +757,74 @@ impl DWA {
             .zip(state_row_ids)
             .map(|(state, row)| (row, state.final_weight.as_ref().map(&mut intern_weight)))
             .collect::<Vec<_>>();
+
+        // Weight IDs above are assigned in stable first-encounter order. Walk
+        // the unique Weight maps in parallel, then assign token-set IDs in that
+        // same Weight/range order. This keeps the wire representation exactly
+        // deterministic while avoiding a serial chase through tens of thousands
+        // of scattered RangeMapBlaze allocations on first save after compile.
+        struct RawWeightPoolEntry {
+            all: bool,
+            entries: Vec<(u32, u32, Arc<RangeSetBlaze<u32>>)>,
+        }
+        let materialize_weight = |weight: &Weight| RawWeightPoolEntry {
+            all: weight.is_full(),
+            entries: if weight.is_full() {
+                Vec::new()
+            } else {
+                weight
+                    .raw_range_values()
+                    .map(|(range, tokens)| {
+                        (*range.start(), *range.end(), Arc::clone(tokens))
+                    })
+                    .collect()
+            },
+        };
+        let raw_weight_pool = if weight_refs.len() >= 1_024 && rayon::current_num_threads() > 1 {
+            weight_refs
+                .par_iter()
+                .map(materialize_weight)
+                .collect::<Vec<_>>()
+        } else {
+            weight_refs
+                .iter()
+                .map(materialize_weight)
+                .collect::<Vec<_>>()
+        };
+
+        let mut ts_ptr_to_idx: FxHashMap<usize, u32> = FxHashMap::default();
+        ts_ptr_to_idx.reserve(32_768);
+        let mut token_set_pool: Vec<Arc<RangeSetBlaze<u32>>> = Vec::new();
+        let mut weight_pool = Vec::<WeightPoolEntry>::with_capacity(raw_weight_pool.len());
+        for raw in raw_weight_pool {
+            if raw.all {
+                weight_pool.push(WeightPoolEntry {
+                    all: true,
+                    entries: Vec::new(),
+                });
+                continue;
+            }
+            let entries = raw
+                .entries
+                .into_iter()
+                .map(|(start, end, tokens)| {
+                    let ptr = Arc::as_ptr(&tokens) as usize;
+                    let token_set = if let Some(&existing) = ts_ptr_to_idx.get(&ptr) {
+                        existing
+                    } else {
+                        let idx = token_set_pool.len() as u32;
+                        ts_ptr_to_idx.insert(ptr, idx);
+                        token_set_pool.push(tokens);
+                        idx
+                    };
+                    (start, end, token_set)
+                })
+                .collect();
+            weight_pool.push(WeightPoolEntry {
+                all: false,
+                entries,
+            });
+        }
 
         (
             token_set_pool,
