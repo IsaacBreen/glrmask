@@ -1649,7 +1649,7 @@ pub fn union_two_parser_dwas_direct_with_origins(
                     DirectTwoRawRow {
                         out_state,
                         final_weight,
-                        transitions,
+                        transitions: transitions.into(),
                         intersection_calls,
                         union_calls,
                     }
@@ -1694,7 +1694,7 @@ pub fn union_two_parser_dwas_direct_with_origins(
                         })
                         .collect::<BTreeMap<_, _>>();
                     pair_states[(row.out_state - source_state_count) as usize] = DWAState {
-                        transitions,
+                        transitions: transitions.into(),
                         final_weight,
                     };
                 }

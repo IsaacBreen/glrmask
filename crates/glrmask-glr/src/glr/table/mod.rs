@@ -126,6 +126,234 @@ pub struct GLRTable {
     pub direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
 }
 
+/// Version-scoped artifact serialization for GLR tables.
+///
+/// Historical constraint formats delegate to the ordinary derived GLRTable
+/// serde unchanged. New sectioned artifacts can replace the in-core table with
+/// a one-byte placeholder and serialize the real table independently using a
+/// compact representation of the `advance` relation.
+pub mod artifact_serde {
+    use std::cell::Cell;
+
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    thread_local! {
+        static EXTERNAL_TABLE_SERDE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn set_external_serde(enabled: bool) -> bool {
+        EXTERNAL_TABLE_SERDE.with(|mode| mode.replace(enabled))
+    }
+
+    fn external_serde_enabled() -> bool {
+        EXTERNAL_TABLE_SERDE.with(Cell::get)
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct CompactAdvance {
+        bit_len: u32,
+        row_ids: Vec<u32>,
+        unique_rows: Vec<Vec<u32>>,
+    }
+
+    impl CompactAdvance {
+        fn from_rows(rows: &[BitSet]) -> Self {
+            let bit_len = rows.first().map_or(0usize, BitSet::len);
+            debug_assert!(rows.iter().all(|row| row.len() == bit_len));
+            let mut row_ids = Vec::with_capacity(rows.len());
+            let mut unique_rows = Vec::<Vec<u32>>::new();
+            let mut by_row = FxHashMap::<BitSet, u32>::default();
+            for row in rows {
+                if let Some(&id) = by_row.get(row) {
+                    row_ids.push(id);
+                    continue;
+                }
+                let id = unique_rows.len() as u32;
+                unique_rows.push(row.iter_ones().map(|terminal| terminal as u32).collect());
+                by_row.insert(row.clone(), id);
+                row_ids.push(id);
+            }
+            Self {
+                bit_len: u32::try_from(bit_len).expect("GLR advance bitset width should fit u32"),
+                row_ids,
+                unique_rows,
+            }
+        }
+
+        fn into_rows(self, num_terminals: u32) -> Result<Vec<BitSet>, String> {
+            if self.bit_len < num_terminals {
+                return Err(format!(
+                    "compact GLR advance width {} is smaller than {num_terminals} terminals",
+                    self.bit_len,
+                ));
+            }
+            let mut unique = Vec::with_capacity(self.unique_rows.len());
+            for terminals in self.unique_rows {
+                let mut row = BitSet::new(self.bit_len as usize);
+                for terminal in terminals {
+                    if terminal >= self.bit_len {
+                        return Err(format!(
+                            "compact GLR advance terminal {terminal} is out of range for width {}",
+                            self.bit_len,
+                        ));
+                    }
+                    row.set(terminal as usize);
+                }
+                unique.push(row);
+            }
+            self.row_ids
+                .into_iter()
+                .map(|row| {
+                    unique
+                        .get(row as usize)
+                        .cloned()
+                        .ok_or_else(|| "invalid compact GLR advance row id".to_owned())
+                })
+                .collect()
+        }
+    }
+
+    #[derive(Serialize)]
+    struct CompactTableRef<'a> {
+        action: &'a [ActionRow],
+        goto: &'a [GotoRow],
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        rules: &'a [Rule],
+        nonterminal_display_names: &'a [String],
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        advance: CompactAdvance,
+        forwarded_shifts: &'a FxHashSet<(u32, TerminalID)>,
+        control_terminals: &'a BTreeSet<TerminalID>,
+        skip_terminals: &'a BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: &'a [DirectRegularWideFrontierDescriptor],
+    }
+
+    #[derive(Deserialize)]
+    struct CompactTable {
+        action: Vec<ActionRow>,
+        goto: Vec<GotoRow>,
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        rules: Vec<Rule>,
+        nonterminal_display_names: Vec<String>,
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        advance: CompactAdvance,
+        forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+        control_terminals: BTreeSet<TerminalID>,
+        skip_terminals: BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
+    }
+
+    fn placeholder() -> GLRTable {
+        GLRTable {
+            action: Vec::new(),
+            goto: Vec::new(),
+            num_states: 0,
+            num_terminals: 0,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::default(),
+            admission_policy: AdmissionPolicy::default(),
+            advance: Vec::new(),
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            control_terminals: BTreeSet::new(),
+            skip_terminals: BTreeSet::new(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+        }
+    }
+
+    pub fn serialize<S>(table: &GLRTable, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if external_serde_enabled() {
+            return 0u8.serialize(serializer);
+        }
+        table.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<GLRTable, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if external_serde_enabled() {
+            let marker = u8::deserialize(deserializer)?;
+            if marker != 0 {
+                return Err(serde::de::Error::custom("invalid external GLR table placeholder"));
+            }
+            return Ok(placeholder());
+        }
+        GLRTable::deserialize(deserializer)
+    }
+
+    pub fn to_compact_bytes(table: &GLRTable) -> Vec<u8> {
+        bincode::serialize(&CompactTableRef {
+            action: &table.action,
+            goto: &table.goto,
+            num_states: table.num_states,
+            num_terminals: table.num_terminals,
+            num_rules: table.num_rules,
+            rules: &table.rules,
+            nonterminal_display_names: &table.nonterminal_display_names,
+            construction: table.construction,
+            admission_policy: table.admission_policy,
+            advance: CompactAdvance::from_rows(&table.advance),
+            forwarded_shifts: &table.forwarded_shifts,
+            control_terminals: &table.control_terminals,
+            skip_terminals: &table.skip_terminals,
+            direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+        })
+        .expect("compact GLR table serialization should succeed")
+    }
+
+    pub fn from_compact_bytes(input: &[u8]) -> Result<GLRTable, String> {
+        let artifact: CompactTable = bincode::deserialize(input).map_err(|err| err.to_string())?;
+        let row_count_valid = |len: usize| len == 0 || len == artifact.num_states as usize;
+        if !row_count_valid(artifact.action.len()) || !row_count_valid(artifact.goto.len()) {
+            return Err(format!(
+                "compact GLR table row count does not match num_states: action={} goto={} num_states={}",
+                artifact.action.len(),
+                artifact.goto.len(),
+                artifact.num_states,
+            ));
+        }
+        if artifact.rules.len() != artifact.num_rules as usize {
+            return Err("compact GLR table rule count does not match num_rules".to_owned());
+        }
+        let advance = artifact.advance.into_rows(artifact.num_terminals)?;
+        if !advance.is_empty() && advance.len() != artifact.num_states as usize {
+            return Err("compact GLR advance row count does not match num_states".to_owned());
+        }
+        Ok(GLRTable {
+            action: artifact.action,
+            goto: artifact.goto,
+            num_states: artifact.num_states,
+            num_terminals: artifact.num_terminals,
+            num_rules: artifact.num_rules,
+            rules: artifact.rules,
+            nonterminal_display_names: artifact.nonterminal_display_names,
+            construction: artifact.construction,
+            admission_policy: artifact.admission_policy,
+            advance,
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: artifact.forwarded_shifts,
+            control_terminals: artifact.control_terminals,
+            skip_terminals: artifact.skip_terminals,
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: artifact.direct_regular_wide_frontiers,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DirectRegularWideFrontierDescriptor {
     pub source_state: u32,

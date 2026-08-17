@@ -6576,6 +6576,11 @@ fn finalize_parser_dwa_support_stage_impl(
     let pre_minimize_transitions = dwa.num_transitions();
     let minimize_skipped =
         should_skip_parser_dwa_minimization(pre_minimize_states, pre_minimize_transitions);
+    let exact_dedup_started_at = Instant::now();
+    if minimize_skipped {
+        dwa = dwa.merge_exact_duplicate_states_owned();
+    }
+    let exact_dedup_ms = elapsed_ms(exact_dedup_started_at);
     let minimize_started_at = Instant::now();
     if !minimize_skipped {
         dwa = minimize(&dwa);
@@ -6593,7 +6598,7 @@ fn finalize_parser_dwa_support_stage_impl(
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][parser_support_stage_finalize] pre_minimize_states={} pre_minimize_transitions={} output_states={} output_transitions={} default_ms={:.3} subtract_ms={:.3} fallback_ms={:.3} minimize_skipped={} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_support_stage_finalize] pre_minimize_states={} pre_minimize_transitions={} output_states={} output_transitions={} default_ms={:.3} subtract_ms={:.3} fallback_ms={:.3} minimize_skipped={} exact_dedup_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             pre_minimize_states,
             pre_minimize_transitions,
             dwa.num_states(),
@@ -6602,6 +6607,7 @@ fn finalize_parser_dwa_support_stage_impl(
             subtract_ms,
             fallback_ms,
             minimize_skipped,
+            exact_dedup_ms,
             minimize_ms,
             elapsed_ms(total_started_at),
         );
@@ -6892,13 +6898,19 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         pre_minimize_state_count,
         pre_minimize_transition_count,
     );
-    let (minimized, minimize_ms, post_minimize_state_count, post_minimize_transition_count) =
+    let (minimized, exact_dedup_ms, minimize_ms, post_minimize_state_count, post_minimize_transition_count) =
         if minimize_skipped {
+            let exact_dedup_started_at = Instant::now();
+            let deduplicated = parser_dwa_pre_minimize.merge_exact_duplicate_states_owned();
+            let exact_dedup_ms = elapsed_ms(exact_dedup_started_at);
+            let post_minimize_state_count = deduplicated.states().len();
+            let post_minimize_transition_count = deduplicated.num_transitions();
             (
-                parser_dwa_pre_minimize,
+                deduplicated,
+                exact_dedup_ms,
                 0.0,
-                pre_minimize_state_count,
-                pre_minimize_transition_count,
+                post_minimize_state_count,
+                post_minimize_transition_count,
             )
         } else {
             let minimize_started_at = Instant::now();
@@ -6908,6 +6920,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             let post_minimize_transition_count = minimized.num_transitions();
             (
                 minimized,
+                0.0,
                 minimize_ms,
                 post_minimize_state_count,
                 post_minimize_transition_count,
@@ -6916,7 +6929,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if profiling_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} terminal_dwa_root_transitions={} terminal_dwa_root_targets={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} terminal_dwa_root_transitions={} terminal_dwa_root_targets={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} exact_dedup_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             terminal_dwa.num_states(),
             terminal_dwa_transition_count,
             terminal_dwa_interned_ranges,
@@ -6940,6 +6953,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             default_opt_ms,
             subtract_final_ms,
             fallback_determinize_ms,
+            exact_dedup_ms,
             minimize_ms,
             elapsed_ms(total_started_at),
         );

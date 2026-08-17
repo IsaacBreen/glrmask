@@ -50,9 +50,10 @@ struct DirectSparseWeightBufCaches {
 
 /// Finalization-local view of the parser-DWA token sets.  The final and
 /// transition cache builders share it so finalization traverses the DWA once.
-struct WeightTokenSetInventory<'a> {
-    final_sets: Vec<(usize, &'a Arc<RangeSetBlaze<u32>>)>,
-    transition_sets: FxHashMap<usize, &'a RangeSetBlaze<u32>>,
+struct WeightTokenSetInventory {
+    final_sets: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
+    transition_sets: FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    transition_word_spans: Option<FxHashMap<usize, u32>>,
 }
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
@@ -2279,6 +2280,8 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
+        let mut packed_weight_token_sets =
+            crate::automata::weighted::dwa::take_packed_decode_token_set_inventory();
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.table.rebuild_unconditional_advance_rows();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -2361,7 +2364,13 @@ impl Constraint {
         let dynamic_vocab_reused = false;
         let dynamic_vocab_ms = 0.0;
         let token_mask_caches_prebuilt = self.token_mask_caches_ready();
-        let mut prebuilt_internal_token_buf_masks = token_mask_caches_prebuilt
+        // v13+ cache artifacts can persist the portable per-internal-token
+        // output fragments without persisting every derived aggregate cache.
+        // Reuse those fragments independently; the remaining derived caches
+        // are still rebuilt unless their own readiness invariant is satisfied.
+        let internal_token_buf_masks_prebuilt =
+            self.internal_token_buf_masks.len() == self.internal_token_to_tokens.len();
+        let mut prebuilt_internal_token_buf_masks = internal_token_buf_masks_prebuilt
             .then(|| std::mem::take(&mut self.internal_token_buf_masks));
         let primary_started_at = profile.then(std::time::Instant::now);
         let mut prebuilt_tokenizer_fast_transitions =
@@ -2390,7 +2399,8 @@ impl Constraint {
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
             };
             let started = profile.then(std::time::Instant::now);
-            let weight_token_sets = self.weight_token_set_inventory();
+            let weight_token_sets = self
+                .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
             let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                 &weight_token_sets.final_sets,
                 &internal_token_buf_masks,
@@ -2470,7 +2480,8 @@ impl Constraint {
                         })
                     };
                     let started = profile.then(std::time::Instant::now);
-                    let weight_token_sets = self.weight_token_set_inventory();
+                    let weight_token_sets = self
+                        .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
                     let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                         &weight_token_sets.final_sets,
                         &internal_token_buf_masks,
@@ -3000,7 +3011,6 @@ impl Constraint {
                 .last()
                 .copied()
                 .unwrap_or_default()
-                .saturating_add(1)
                 .saturating_add(mask_work);
             prefix.push(next);
         }
@@ -3018,11 +3028,40 @@ impl Constraint {
             if start >= end_exclusive {
                 continue;
             }
-            work = work.saturating_add(
-                work_prefix[end_exclusive].saturating_sub(work_prefix[start]),
-            );
+            work = work
+                .saturating_add((end_exclusive - start) as u64)
+                .saturating_add(
+                    work_prefix[end_exclusive].saturating_sub(work_prefix[start]),
+                );
         }
         work
+    }
+
+    fn direct_sparse_expanded_work_at_most(
+        tokens: &RangeSetBlaze<u32>,
+        work_prefix: &[u64],
+        limit: u64,
+    ) -> Option<u64> {
+        let n_internal = work_prefix.len().saturating_sub(1);
+        let mut work = 0u64;
+        for range in tokens.ranges() {
+            let start = (*range.start() as usize).min(n_internal);
+            let end_exclusive = (*range.end() as usize)
+                .saturating_add(1)
+                .min(n_internal);
+            if start >= end_exclusive {
+                continue;
+            }
+            work = work
+                .saturating_add((end_exclusive - start) as u64)
+                .saturating_add(
+                    work_prefix[end_exclusive].saturating_sub(work_prefix[start]),
+                );
+            if work > limit {
+                return None;
+            }
+        }
+        Some(work)
     }
 
     #[inline(always)]
@@ -3154,19 +3193,24 @@ impl Constraint {
         true
     }
 
-    fn weight_token_set_inventory(&self) -> WeightTokenSetInventory<'_> {
+    fn weight_token_set_inventory_with_packed(
+        &self,
+        packed: Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
+    ) -> WeightTokenSetInventory {
         #[derive(Default)]
-        struct InventoryBatch<'a> {
-            final_sets: FxHashMap<usize, &'a Arc<RangeSetBlaze<u32>>>,
-            transition_sets: FxHashMap<usize, &'a RangeSetBlaze<u32>>,
+        struct InventoryBatch {
+            final_sets: FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
+            transition_sets: FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
         }
 
-        impl<'a> InventoryBatch<'a> {
-            fn add_state(&mut self, state: &'a crate::automata::weighted::dwa::DWAState) {
+        impl InventoryBatch {
+            fn add_state(&mut self, state: &crate::automata::weighted::dwa::DWAState) {
                 for (_, weight) in state.transitions.values() {
                     for (_tsid_range, token_set) in weight.raw_range_values() {
                         let key = Arc::as_ptr(token_set) as usize;
-                        self.transition_sets.entry(key).or_insert(token_set.as_ref());
+                        self.transition_sets
+                            .entry(key)
+                            .or_insert_with(|| Arc::clone(token_set));
                     }
                 }
                 let Some(final_weight) = &state.final_weight else {
@@ -3177,7 +3221,9 @@ impl Constraint {
                 }
                 for (_tsid_range, token_set) in final_weight.raw_range_values() {
                     let key = Arc::as_ptr(token_set) as usize;
-                    self.final_sets.entry(key).or_insert(token_set);
+                    self.final_sets
+                        .entry(key)
+                        .or_insert_with(|| Arc::clone(token_set));
                 }
             }
 
@@ -3187,26 +3233,35 @@ impl Constraint {
             }
         }
 
-        let mut inventory = if rayon::current_num_threads() > 1
-            && self.parser_dwa.states().len() >= 4_096
-        {
-            self.parser_dwa
-                .states()
-                .par_iter()
-                .fold(InventoryBatch::default, |mut batch, state| {
-                    batch.add_state(state);
-                    batch
-                })
-                .reduce(InventoryBatch::default, |mut left, right| {
-                    left.merge_from(right);
-                    left
-                })
+        let (mut inventory, transition_word_spans) = if let Some(packed) = packed {
+            (
+                InventoryBatch {
+                    final_sets: packed.final_sets,
+                    transition_sets: packed.transition_sets,
+                },
+                Some(packed.transition_word_spans),
+            )
+        } else if rayon::current_num_threads() > 1 && self.parser_dwa.states().len() >= 4_096 {
+            (
+                self.parser_dwa
+                    .states()
+                    .par_iter()
+                    .fold(InventoryBatch::default, |mut batch, state| {
+                        batch.add_state(state);
+                        batch
+                    })
+                    .reduce(InventoryBatch::default, |mut left, right| {
+                        left.merge_from(right);
+                        left
+                    }),
+                None,
+            )
         } else {
             let mut batch = InventoryBatch::default();
             for state in self.parser_dwa.states() {
                 batch.add_state(state);
             }
-            batch
+            (batch, None)
         };
 
         for final_weight in self.parser_top_accept.values() {
@@ -3215,7 +3270,10 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                inventory.final_sets.entry(key).or_insert(token_set);
+                inventory
+                    .final_sets
+                    .entry(key)
+                    .or_insert_with(|| Arc::clone(token_set));
             }
         }
 
@@ -3225,7 +3283,10 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                inventory.final_sets.entry(key).or_insert(token_set);
+                inventory
+                    .final_sets
+                    .entry(key)
+                    .or_insert_with(|| Arc::clone(token_set));
             }
         }
 
@@ -3235,14 +3296,22 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                inventory.final_sets.entry(key).or_insert(token_set);
+                inventory
+                    .final_sets
+                    .entry(key)
+                    .or_insert_with(|| Arc::clone(token_set));
             }
         }
 
         WeightTokenSetInventory {
             final_sets: inventory.final_sets.into_iter().collect(),
             transition_sets: inventory.transition_sets,
+            transition_word_spans,
         }
+    }
+
+    fn weight_token_set_inventory(&self) -> WeightTokenSetInventory {
+        self.weight_token_set_inventory_with_packed(None)
     }
 
     /// Classify final-weight token sets for the direct runtime-intersection
@@ -3253,9 +3322,11 @@ impl Constraint {
     /// set extremely expensive to replay into the original-token mask.
     fn compute_direct_sparse_weight_token_buf_masks(
         &self,
-        final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
+        final_token_sets: &[(usize, Arc<RangeSetBlaze<u32>>) ],
         internal_token_buf_masks: &[InternalTokenBufMasks],
     ) -> DirectSparseWeightBufCaches {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let total_started = profile.then(std::time::Instant::now);
         let buf_words = self.mask_len();
         let direct_sparse = buf_words != 0
             && buf_words <= u16::MAX as usize
@@ -3263,7 +3334,11 @@ impl Constraint {
             && self.final_mask_mapping.internal_len() == 0;
         let direct_token_limit = ((buf_words / 2).min(2048)) as u64;
         let direct_work_limit = direct_token_limit;
+        let prefix_started = profile.then(std::time::Instant::now);
         let work_prefix = Self::direct_sparse_work_prefix(internal_token_buf_masks, buf_words);
+        let prefix_ms = prefix_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let classify_started = profile.then(std::time::Instant::now);
 
         #[derive(Default)]
         struct SparseBatch {
@@ -3283,21 +3358,29 @@ impl Constraint {
         }
 
         let build_one = |batch: &mut SparseBatch,
-                         &(key, token_set): &(usize, &Arc<RangeSetBlaze<u32>>)| {
+                         (key, token_set): &(usize, Arc<RangeSetBlaze<u32>>)| {
             if direct_sparse
                 && Self::token_set_cardinality_at_most(token_set.as_ref(), direct_token_limit)
             {
                 batch.small_cardinality += 1;
-                let expanded_work =
-                    Self::direct_sparse_expanded_work(token_set.as_ref(), &work_prefix);
-                batch.expanded_work_max = batch.expanded_work_max.max(expanded_work);
-                if expanded_work <= direct_work_limit {
-                    batch.eligible.push(key);
+                if let Some(expanded_work) = Self::direct_sparse_expanded_work_at_most(
+                    token_set.as_ref(),
+                    &work_prefix,
+                    direct_work_limit,
+                ) {
+                    batch.expanded_work_max = batch.expanded_work_max.max(expanded_work);
+                    batch.eligible.push(*key);
                 } else {
-                    batch.fallback.push((key, Arc::clone(token_set)));
+                    // Profiling only needs to indicate that at least one set
+                    // exceeded the cap; avoid rescanning just to recover the
+                    // exact over-limit total.
+                    batch.expanded_work_max = batch
+                        .expanded_work_max
+                        .max(direct_work_limit.saturating_add(1));
+                    batch.fallback.push((*key, Arc::clone(token_set)));
                 }
             } else {
-                batch.fallback.push((key, Arc::clone(token_set)));
+                batch.fallback.push((*key, Arc::clone(token_set)));
             }
         };
 
@@ -3319,10 +3402,16 @@ impl Constraint {
                     left
                 })
         };
+        let classify_ms = classify_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
+            let total_ranges = final_token_sets
+                .iter()
+                .map(|(_, tokens)| tokens.ranges().len())
+                .sum::<usize>();
             let cardinality_fallback_sets = batch
                 .eligible
                 .len()
@@ -3332,13 +3421,17 @@ impl Constraint {
                 .small_cardinality
                 .saturating_sub(batch.eligible.len());
             eprintln!(
-                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={} cardinality_fallback_sets={} expanded_work_fallback_sets={} expanded_work_max={}",
+                "[glrmask/profile][runtime_direct_sparse] final_sets={} total_ranges={} direct_sets={} fallback_sets={} cardinality_fallback_sets={} expanded_work_fallback_sets={} expanded_work_max={} prefix_ms={:.3} classify_ms={:.3} total_ms={:.3}",
                 batch.eligible.len() + batch.fallback.len(),
+                total_ranges,
                 batch.eligible.len(),
                 batch.fallback.len(),
                 cardinality_fallback_sets,
                 expanded_work_fallback_sets,
                 batch.expanded_work_max,
+                prefix_ms,
+                classify_ms,
+                total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
             );
         }
         DirectSparseWeightBufCaches {
@@ -3572,11 +3665,44 @@ impl Constraint {
                     .map(|(&label, (target, weight))| (label, (*target, weight.clone()))),
             )
         };
-        if rayon::current_num_threads() == 1 {
-            self.parser_dwa.states().iter().map(build).collect()
-        } else {
-            self.parser_dwa.states().par_iter().map(build).collect()
+        if !self.parser_dwa.has_shared_transition_rows()
+            || std::env::var_os("GLRMASK_EXPERIMENTAL_DISABLE_SHARED_FAST_DWA_ROWS").is_some()
+        {
+            let rows = if rayon::current_num_threads() == 1 {
+                self.parser_dwa.states().iter().map(build).collect()
+            } else {
+                self.parser_dwa.states().par_iter().map(build).collect()
+            };
+            return FastDwaTransitions::direct(rows);
         }
+
+        let mut row_by_ptr = FxHashMap::<usize, u32>::default();
+        let mut representative_states = Vec::<usize>::new();
+        let mut state_rows = Vec::<u32>::with_capacity(self.parser_dwa.states().len());
+        for (state_index, state) in self.parser_dwa.states().iter().enumerate() {
+            let key = state.transitions.ptr_key();
+            let row = if let Some(&row) = row_by_ptr.get(&key) {
+                row
+            } else {
+                let row = representative_states.len() as u32;
+                row_by_ptr.insert(key, row);
+                representative_states.push(state_index);
+                row
+            };
+            state_rows.push(row);
+        }
+        let rows = if rayon::current_num_threads() == 1 {
+            representative_states
+                .iter()
+                .map(|&state| build(&self.parser_dwa.states()[state]))
+                .collect()
+        } else {
+            representative_states
+                .par_iter()
+                .map(|&state| build(&self.parser_dwa.states()[state]))
+                .collect()
+        };
+        FastDwaTransitions::shared(rows, state_rows)
     }
 
     fn indexed_dag_dense_mask_for_tokens(
@@ -3723,12 +3849,13 @@ impl Constraint {
     // transition sets and for residual final sets that need contained-mask IO.
     const DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS: usize = 16;
 
-    fn token_set_dense_word_span_count(
+    fn token_set_dense_word_spans_at_least(
         tokens: &RangeSetBlaze<u32>,
         dense_word_count: usize,
-    ) -> usize {
-        if dense_word_count == 0 {
-            return 0;
+        threshold: usize,
+    ) -> bool {
+        if dense_word_count == 0 || threshold == 0 {
+            return threshold == 0;
         }
         let max_token = dense_word_count.saturating_mul(64).saturating_sub(1);
         let mut count = 0usize;
@@ -3739,8 +3866,11 @@ impl Constraint {
             }
             let end = (*range.end() as usize).min(max_token);
             count = count.saturating_add(end / 64 - start / 64 + 1);
+            if count >= threshold {
+                return true;
+            }
         }
-        count
+        false
     }
 
     fn compute_dense_token_masks(&self) -> (usize, DenseWeightMaskCache) {
@@ -3754,33 +3884,60 @@ impl Constraint {
     fn compute_dense_token_masks_excluding_direct_final(
         &self,
         direct_final_sets: &DirectSparseWeightTokenSetCache,
-        inventory: WeightTokenSetInventory<'_>,
+        inventory: WeightTokenSetInventory,
     ) -> (usize, DenseWeightMaskCache) {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let total_started = profile.then(std::time::Instant::now);
         let internal_token_dense_words = self.internal_token_to_tokens.len().div_ceil(64);
         if internal_token_dense_words == 0 {
             return (0, DenseWeightMaskCache::default());
         }
 
-        let mut unique_sets = inventory.transition_sets;
+        let classify_started = profile.then(std::time::Instant::now);
+        let WeightTokenSetInventory {
+            final_sets,
+            transition_sets: mut unique_sets,
+            transition_word_spans,
+        } = inventory;
         let mut residual_final_sets: DirectSparseWeightTokenSetCache = Default::default();
-        for (key, token_set) in inventory.final_sets {
+        for (key, token_set) in final_sets {
             if !direct_final_sets.contains(&key) {
                 // These sets may need the contained-output cache, which
                 // requires their dense form regardless of range width.
                 residual_final_sets.insert(key);
-                unique_sets.entry(key).or_insert(token_set.as_ref());
+                unique_sets.entry(key).or_insert(token_set);
             }
         }
 
         unique_sets.retain(|key, token_set| {
             residual_final_sets.contains(key)
-                || Self::token_set_dense_word_span_count(token_set, internal_token_dense_words)
-                    >= Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS
+                || transition_word_spans
+                    .as_ref()
+                    .and_then(|spans| spans.get(key))
+                    .map_or_else(
+                        || {
+                            Self::token_set_dense_word_spans_at_least(
+                                token_set,
+                                internal_token_dense_words,
+                                Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS,
+                            )
+                        },
+                        |&spans| {
+                            spans as usize >= Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS
+                        },
+                    )
         });
-        let build = |(key, token_set): (usize, &RangeSetBlaze<u32>)| {
+        let classify_ms = classify_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let build_started = profile.then(std::time::Instant::now);
+        let dense_set_count = unique_sets.len();
+        let build = |(key, token_set): (usize, Arc<RangeSetBlaze<u32>>)| {
             (
                 key,
-                Self::dense_words_from_internal_set_with_words(token_set, internal_token_dense_words),
+                Self::dense_words_from_internal_set_with_words(
+                    token_set.as_ref(),
+                    internal_token_dense_words,
+                ),
             )
         };
         let dense_masks: DenseWeightMaskCache = if rayon::current_num_threads() == 1 {
@@ -3788,6 +3945,16 @@ impl Constraint {
         } else {
             unique_sets.into_par_iter().map(build).collect()
         };
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][dense_weight_masks] sets={} words_per_set={} classify_ms={:.3} build_ms={:.3} total_ms={:.3}",
+                dense_set_count,
+                internal_token_dense_words,
+                classify_ms,
+                build_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         (internal_token_dense_words, dense_masks)
     }
