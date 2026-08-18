@@ -10,6 +10,7 @@ use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted_u32::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
@@ -1827,6 +1828,8 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// ordinary flattened parser artifact remains the serialization fallback.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+    #[serde(skip, default)]
+    pub(crate) segmented_boundary_parser: Option<Box<SegmentedBoundaryParser>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1835,6 +1838,13 @@ pub(crate) struct SegmentedParserComponent {
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
     pub(crate) global_to_local_parser_state: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SegmentedBoundaryParser {
+    pub(crate) parser_nwa: NWA,
+    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
+    pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
 
 /// Fully compiled, immutable grammar constraint.

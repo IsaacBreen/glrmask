@@ -314,7 +314,14 @@ fn build_characterization_index(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> CharacterizationIndex {
-    let mut action_states_by_terminal = vec![Vec::new(); grammar.num_terminals as usize];
+    build_characterization_index_for_terminal_count(table, grammar.num_terminals)
+}
+
+fn build_characterization_index_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+) -> CharacterizationIndex {
+    let mut action_states_by_terminal = vec![Vec::new(); num_terminals as usize];
     for (state, row) in table.action.iter().enumerate() {
         for (terminal, _) in row.iter() {
             if let Some(states) = action_states_by_terminal.get_mut(terminal as usize) {
@@ -330,7 +337,7 @@ fn build_characterization_index(
         "action states should be sorted and deduplicated by construction"
     );
 
-    let mut forwarded_only_states_by_terminal = vec![Vec::new(); grammar.num_terminals as usize];
+    let mut forwarded_only_states_by_terminal = vec![Vec::new(); num_terminals as usize];
     for &(state, terminal) in &table.forwarded_shifts {
         if state >= table.num_states || table.action(state, terminal).is_some() {
             continue;
@@ -1070,12 +1077,31 @@ pub fn characterize_terminal_action_state_seeds(
     grammar: &AnalyzedGrammar,
     action_states_by_terminal: &[Vec<u32>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    characterize_terminal_action_state_seeds_for_terminal_count(
+        table,
+        grammar.num_terminals,
+        action_states_by_terminal,
+    )
+}
+
+/// Count-only form of [`characterize_terminal_action_state_seeds`].
+///
+/// Seeded composition characterizations derive all stack/reduction behavior
+/// from the already-built GLR table. They need the analyzed grammar only to
+/// size the terminal-indexed seed rows. Keeping that dependency explicit lets
+/// compiled-subgrammar composition avoid recomputing nullable/FIRST/FOLLOW
+/// solely to characterize a small additive splice delta.
+pub fn characterize_terminal_action_state_seeds_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    action_states_by_terminal: &[Vec<u32>],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
     assert_eq!(
         action_states_by_terminal.len(),
-        grammar.num_terminals as usize,
+        num_terminals as usize,
         "seeded template action-state rows must cover the terminal domain",
     );
-    let mut index = build_characterization_index(table, grammar);
+    let mut index = build_characterization_index_for_terminal_count(table, num_terminals);
     index.action_states_by_terminal = action_states_by_terminal.to_vec();
     action_states_by_terminal
         .par_iter()
@@ -1101,9 +1127,24 @@ pub fn characterize_terminal_nt_predecessor_seeds(
     grammar: &AnalyzedGrammar,
     seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+        table,
+        grammar.num_terminals,
+        seeds_by_terminal,
+    )
+}
+
+/// Count-only form of [`characterize_terminal_nt_predecessor_seeds`]. See the
+/// action-seed counterpart for why no nullable/FIRST/FOLLOW information is
+/// needed after the composed GLR table exists.
+pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
     assert_eq!(
         seeds_by_terminal.len(),
-        grammar.num_terminals as usize,
+        num_terminals as usize,
         "seeded template relation must cover the merged terminal domain",
     );
 

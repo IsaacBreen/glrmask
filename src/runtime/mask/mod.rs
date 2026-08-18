@@ -2368,12 +2368,197 @@ impl<'a> ConstraintState<'a> {
             }
             component_times.push(component_started_at.map_or(0, elapsed_ns));
         }
+        let boundary_started_at = profile.then(Instant::now);
+        if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
+            && !self.or_segmented_boundary_parser_mask(boundary, buf)
+        {
+            return false;
+        }
+        let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
         if let Some(started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} total_ns={}",
+                "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
                 overlay.segmented_parser_components.len(),
+                boundary_ns,
                 elapsed_ns(started_at),
             );
+        }
+        true
+    }
+
+    /// Evaluate the private-coordinate boundary parser NWA directly over the
+    /// current composed parser GSS.  This is the nondeterministic counterpart
+    /// of flattening the boundary parser into the global parser DWA: epsilon
+    /// closure carries weighted NWA alternatives, and an explicit parser-state
+    /// row shadows DEFAULT exactly as it does in the deterministic runtime.
+    fn or_segmented_boundary_parser_mask(
+        &self,
+        boundary: &crate::runtime::SegmentedBoundaryParser,
+        buf: &mut [u32],
+    ) -> bool {
+        fn union_into(
+            map: &mut FxHashMap<u32, Weight>,
+            state: u32,
+            add: Weight,
+            ops: &mut crate::ds::weight::ScopedWeightOpCache,
+        ) -> bool {
+            if add.is_empty() {
+                return false;
+            }
+            match map.get(&state) {
+                Some(existing) => {
+                    let merged = ops.union(existing, &add);
+                    if merged == *existing {
+                        false
+                    } else {
+                        map.insert(state, merged);
+                        true
+                    }
+                }
+                None => {
+                    map.insert(state, add);
+                    true
+                }
+            }
+        }
+
+        fn epsilon_close(
+            nwa: &crate::automata::weighted_u32::nwa::NWA,
+            active: &mut FxHashMap<u32, Weight>,
+            ops: &mut crate::ds::weight::ScopedWeightOpCache,
+        ) {
+            let mut queue = std::collections::VecDeque::from_iter(active.keys().copied());
+            while let Some(source) = queue.pop_front() {
+                let Some(source_weight) = active.get(&source).cloned() else {
+                    continue;
+                };
+                let Some(state) = nwa.states().get(source as usize) else {
+                    continue;
+                };
+                for (target, edge_weight) in &state.epsilons {
+                    let contribution = ops.intersection(&source_weight, edge_weight);
+                    if union_into(active, *target, contribution, ops) {
+                        queue.push_back(*target);
+                    }
+                }
+            }
+        }
+
+        fn accepted_for_stack(
+            nwa: &crate::automata::weighted_u32::nwa::NWA,
+            top_first: &[u32],
+        ) -> Weight {
+            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
+            let mut active = FxHashMap::<u32, Weight>::default();
+            for &start in nwa.start_states() {
+                union_into(&mut active, start, Weight::all(), &mut ops);
+            }
+            epsilon_close(nwa, &mut active, &mut ops);
+
+            let mut accepted = Weight::empty();
+            let accumulate_finals = |active: &FxHashMap<u32, Weight>,
+                                     accepted: &mut Weight,
+                                     ops: &mut crate::ds::weight::ScopedWeightOpCache| {
+                for (&state_id, path_weight) in active {
+                    let Some(final_weight) = nwa
+                        .states()
+                        .get(state_id as usize)
+                        .and_then(|state| state.final_weight.as_ref())
+                    else {
+                        continue;
+                    };
+                    let contribution = ops.intersection(path_weight, final_weight);
+                    if !contribution.is_empty() {
+                        *accepted = ops.union(accepted, &contribution);
+                    }
+                }
+            };
+            accumulate_finals(&active, &mut accepted, &mut ops);
+
+            for &parser_state in top_first {
+                let label = encode_positive_label(parser_state);
+                let mut next = FxHashMap::<u32, Weight>::default();
+                for (&source, path_weight) in &active {
+                    let Some(state) = nwa.states().get(source as usize) else {
+                        continue;
+                    };
+                    let Some(targets) = state
+                        .transitions
+                        .get(&label)
+                        .or_else(|| state.transitions.get(&DEFAULT_LABEL))
+                    else {
+                        continue;
+                    };
+                    for (target, edge_weight) in targets {
+                        let contribution = ops.intersection(path_weight, edge_weight);
+                        union_into(&mut next, *target, contribution, &mut ops);
+                    }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                epsilon_close(nwa, &mut next, &mut ops);
+                active = next;
+                accumulate_finals(&active, &mut accepted, &mut ops);
+            }
+            accepted
+        }
+
+        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
+            let word = token as usize / 64;
+            let bit = token % 64;
+            acc.0.iter().any(|(_, dense)| {
+                dense.get(word)
+                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
+            })
+        }
+
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let boundary_tsid = boundary
+                .tokenizer_state_to_tsid
+                .get(global_tokenizer_state as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if boundary_tsid == u32::MAX {
+                continue;
+            }
+            let mut complete = true;
+            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                let Some(allowed) =
+                    self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
+                else {
+                    return;
+                };
+                let accepted = accepted_for_stack(&boundary.parser_nwa, top_first);
+                let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
+                    return;
+                };
+                for range in tokens.ranges() {
+                    for internal_token in range {
+                        let Some(originals) = boundary
+                            .internal_token_to_originals
+                            .get(internal_token as usize)
+                        else {
+                            complete = false;
+                            return;
+                        };
+                        for &original in originals {
+                            let outer_internal = self
+                                .constraint
+                                .original_token_to_internal
+                                .get(original as usize)
+                                .copied()
+                                .unwrap_or(u32::MAX);
+                            if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
+                                set_original_mask_bit(buf, original);
+                            }
+                        }
+                    }
+                }
+            });
+            if !traversal_complete || !complete {
+                return false;
+            }
         }
         true
     }

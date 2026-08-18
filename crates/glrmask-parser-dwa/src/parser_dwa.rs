@@ -468,12 +468,12 @@ fn parser_dwa_compose_detail_enabled() -> bool {
 
 fn group_terminal_edges_by_target(
     terminal_automaton: &TerminalAutomaton,
-    grammar: &AnalyzedGrammar,
+    num_terminals: u32,
     state_id: u32,
 ) -> BTreeMap<u32, TerminalBundle> {
     let mut bundles_by_target = BTreeMap::<u32, TerminalBundle>::new();
     let mut add = |target: u32, label: i32, weight: &Weight| {
-        if label < 0 || label as u32 >= grammar.num_terminals || weight.is_empty() {
+        if label < 0 || label as u32 >= num_terminals || weight.is_empty() {
             return;
         }
         bundles_by_target
@@ -576,7 +576,7 @@ fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates
 
 fn build_state_summaries(
     terminal_automaton: &TerminalAutomaton,
-    grammar: &AnalyzedGrammar,
+    num_terminals: u32,
     templates: &Templates,
 ) -> StateSummaries {
     let state_count = terminal_automaton.num_states();
@@ -586,7 +586,7 @@ fn build_state_summaries(
 
     for state_id in 0..state_count {
         let bundles_by_target =
-            group_terminal_edges_by_target(terminal_automaton, grammar, state_id as u32);
+            group_terminal_edges_by_target(terminal_automaton, num_terminals, state_id as u32);
         let mut branches = Vec::with_capacity(bundles_by_target.len());
         for (target, bundle) in bundles_by_target {
             let signature = bundle_signature(&bundle);
@@ -670,7 +670,11 @@ fn immediate_completion_weights_by_terminal(
     let mut complete_by_terminal = BTreeMap::<TerminalID, Weight>::new();
     for start_state in terminal_automaton.start_states() {
         for (target, bundle) in
-            group_terminal_edges_by_target(terminal_automaton, grammar, start_state)
+            group_terminal_edges_by_target(
+                terminal_automaton,
+                grammar.num_terminals,
+                start_state,
+            )
         {
             let Some(target_final) = terminal_state_final_weight(terminal_automaton, target as usize)
             else {
@@ -942,7 +946,11 @@ pub fn try_build_direct_regular_parser_top_accept_parts(
     // Match terminal-automaton labelled edges with sparse parser-NFA edges.
     for terminal_state in 0..terminal_state_count {
         for (target, bundle) in
-            group_terminal_edges_by_target(terminal_automaton, grammar, terminal_state as u32)
+            group_terminal_edges_by_target(
+                terminal_automaton,
+                grammar.num_terminals,
+                terminal_state as u32,
+            )
         {
             if target as usize >= terminal_state_count {
                 return None;
@@ -1078,7 +1086,11 @@ fn try_build_direct_regular_parser_top_accept_parts_table_product_reference(
         }
 
         for (target, bundle) in
-            group_terminal_edges_by_target(terminal_automaton, grammar, terminal_state as u32)
+            group_terminal_edges_by_target(
+                terminal_automaton,
+                grammar.num_terminals,
+                terminal_state as u32,
+            )
         {
             if target as usize >= terminal_state_count {
                 return None;
@@ -4262,9 +4274,23 @@ fn build_parser_nwa_from_terminal_dwa(
     templates: &Templates,
     table: &GLRTable,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
+    build_parser_nwa_from_terminal_dwa_for_terminal_count(
+        terminal_dwa,
+        grammar.num_terminals,
+        templates,
+        table,
+    )
+}
+
+fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
+    terminal_dwa: &TerminalAutomaton,
+    num_terminals: u32,
+    templates: &Templates,
+    table: &GLRTable,
+) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
-    let summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    let summaries = build_state_summaries(terminal_dwa, num_terminals, templates);
     let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
@@ -4613,6 +4639,26 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
 ) -> Option<NWA> {
     build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates, table)
         .map(|(nwa, _)| nwa)
+}
+
+/// Count-only parser-NWA construction for callers which already own the GLR
+/// table and precomputed terminal templates. The parser-NWA composition itself
+/// consults the analyzed grammar only to reject terminal labels outside the
+/// grammar terminal domain; all stack behavior comes from `templates` and
+/// `table`.
+pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
+    terminal_dwa: &TerminalAutomaton,
+    num_terminals: u32,
+    templates: &Templates,
+    table: &GLRTable,
+) -> Option<NWA> {
+    build_parser_nwa_from_terminal_dwa_for_terminal_count(
+        terminal_dwa,
+        num_terminals,
+        templates,
+        table,
+    )
+    .map(|(nwa, _)| nwa)
 }
 
 // Exact compile-time parser-stack domain algebra used by the compiled-subgrammar linker.
