@@ -39,6 +39,7 @@ use crate::compiler::stages::equiv_types::{
     InternalIdMap, ManyToOneIdMap, MappedArtifact,
 };
 use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::vocab_tokens_with_adjacent_pairs;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::{
     LazyBooleanParserDomains, SharedBooleanParserDomains, build_boolean_terminal_bundle_nwa,
@@ -999,10 +1000,9 @@ struct BoundaryTokenNodeKey {
     /// parent continuation (or a scoped ignore terminal).
     seeded: bool,
     /// Whether two concrete parser-visible terminals on this path witness an
-    /// a concrete component switch.  This is independently
-    /// sufficient boundary evidence; either a seed or a component switch is sufficient lexical boundary evidence;
-    /// the LR table later decides exact parser legality.
-    component_switch_witnessed: bool,
+    /// actual boundary interface pair. This is independently sufficient
+    /// boundary evidence; the LR table later decides the full parser language.
+    interface_witnessed: bool,
     /// False only for the arbitrary-residual first fragment. Once any
     /// terminal commits, subsequent fragments start from lexer reset.
     started: bool,
@@ -1436,13 +1436,99 @@ fn visible_boundary_interface_pairs(
     pairs
 }
 
+
+/// Extend grammar-derived boundary adjacency through parser-visible terminals
+/// whose LR action preserves stack depth. These terminals need not occur in a
+/// grammar RHS (scoped trivia is inserted directly into LR rows), so FIRST /
+/// FOLLOW alone cannot see them.
+///
+/// For an actual interface pair `a -> b`, if a stack-neutral terminal `n` can
+/// be consumed at a parser top from which `b` is admissible (or can replace the
+/// top with a state from which `b` is admissible), then the concrete lexical
+/// boundary may be `a -> n -> b`. Record exactly those two adjacencies.
+/// `n` is deliberately *not* promoted to a global boundary seed: its relevance
+/// is contextual to this interface, and arbitrary residual starts inside `n`
+/// are recovered from the left-hand side of the resulting `(n, b)` pair.
+fn extend_boundary_interfaces_through_stack_neutral_lr_actions(
+    table: &crate::compiler::glr::table::GLRTable,
+    base_pairs: &BTreeSet<(u32, u32)>,
+) -> BTreeSet<(u32, u32)> {
+    let mut pairs = base_pairs.clone();
+    if table.skip_terminals.is_empty() || base_pairs.is_empty() {
+        return pairs;
+    }
+
+    let target_is_admissible = |state: u32, terminal: u32| {
+        table
+            .advance
+            .get(state as usize)
+            .is_some_and(|row| row.contains(terminal as usize))
+            || table
+                .action
+                .get(state as usize)
+                .and_then(|row| row.get(&terminal))
+                .is_some()
+    };
+
+    for &(left, right) in base_pairs {
+        for &neutral in &table.skip_terminals {
+            let mut bridges = false;
+            for (state, row) in table.action.iter().enumerate() {
+                let state = state as u32;
+                let Some(action) = row.get(&neutral) else {
+                    continue;
+                };
+                match action {
+                    Action::Skip => {
+                        bridges |= target_is_admissible(state, right);
+                    }
+                    Action::Shift(target, true) => {
+                        bridges |= target_is_admissible(*target, right);
+                    }
+                    Action::ReplaceShifts(targets) => {
+                        bridges |= targets
+                            .iter()
+                            .copied()
+                            .any(|target| target_is_admissible(target, right));
+                    }
+                    Action::StackShifts(shifts)
+                        if shifts
+                            .iter()
+                            .all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
+                    {
+                        bridges |= shifts.iter().any(|shift| {
+                            target_is_admissible(shift.pushes[0], right)
+                        });
+                    }
+                    Action::Split {
+                        shift: Some((target, true)),
+                        reduces,
+                        accept: false,
+                    } if reduces.is_empty() => {
+                        bridges |= target_is_admissible(*target, right);
+                    }
+                    _ => {}
+                }
+                if bridges {
+                    break;
+                }
+            }
+            if bridges {
+                pairs.insert((left, neutral));
+                pairs.insert((neutral, right));
+            }
+        }
+    }
+    pairs
+}
+
 fn transition_boundary_key(
     key: BoundaryTokenNodeKey,
     terminal: u32,
     next_offset: usize,
     seed_terminals: &[bool],
     globally_erased_terminals: &BitSet,
-    terminal_components: &[usize],
+    interface_pairs: &BTreeSet<(u32, u32)>,
 ) -> Option<BoundaryTokenNodeKey> {
     if globally_erased_terminals.contains(terminal as usize) {
         return Some(BoundaryTokenNodeKey {
@@ -1452,9 +1538,8 @@ fn transition_boundary_key(
         });
     }
 
-    let switched_component = key.last_terminal != u32::MAX
-        && terminal_components.get(key.last_terminal as usize)
-            != terminal_components.get(terminal as usize);
+    let interface_witnessed = key.last_terminal != u32::MAX
+        && interface_pairs.contains(&(key.last_terminal, terminal));
     Some(BoundaryTokenNodeKey {
         offset: next_offset,
         last_terminal: terminal,
@@ -1463,7 +1548,7 @@ fn transition_boundary_key(
                 .get(terminal as usize)
                 .copied()
                 .unwrap_or(false),
-        component_switch_witnessed: key.component_switch_witnessed || switched_component,
+        interface_witnessed: key.interface_witnessed || interface_witnessed,
         started: true,
     })
 }
@@ -1474,7 +1559,8 @@ fn build_boundary_token_graph(
     reset_scans: &[&ResidualScanResult],
     seed_terminals: &[bool],
     globally_erased_terminals: &BitSet,
-    terminal_components: &[usize],
+    interface_pairs: &BTreeSet<(u32, u32)>,
+    initial_interface_witnessed: bool,
 ) -> Option<(Vec<BoundaryTokenNode>, Vec<bool>, Vec<bool>)> {
     let mut nodes = Vec::<BoundaryTokenNode>::new();
     let mut node_ids = FxHashMap::<BoundaryTokenNodeKey, usize>::default();
@@ -1483,7 +1569,7 @@ fn build_boundary_token_graph(
         offset: 0,
         last_terminal: u32::MAX,
         seeded: false,
-        component_switch_witnessed: false,
+        interface_witnessed: initial_interface_witnessed,
         started: false,
     };
     nodes.push(BoundaryTokenNode {
@@ -1519,7 +1605,7 @@ fn build_boundary_token_graph(
                 next_offset,
                 seed_terminals,
                 globally_erased_terminals,
-                terminal_components,
+                interface_pairs,
             ) else {
                 continue;
             };
@@ -1527,7 +1613,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.component_switch_witnessed);
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -1551,7 +1637,7 @@ fn build_boundary_token_graph(
                 bytes.len(),
                 seed_terminals,
                 globally_erased_terminals,
-                terminal_components,
+                interface_pairs,
             ) else {
                 continue;
             };
@@ -1559,7 +1645,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.component_switch_witnessed);
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -2001,21 +2087,19 @@ fn boundary_token_prefilter(
 /// This is deliberately terminal-generic. Scoped IGNORE participates only
 /// because it is a visible terminal in `relevant_terminals`; globally erased
 /// IGNORE is excluded by the caller and remains lexical epsilon.
-fn boundary_visible_residual_starts_by_token(
+fn boundary_visible_residual_starts_by_first_byte(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
-    vocab: &Vocab,
-    candidate_tokens: &BTreeSet<u32>,
     relevant_terminals: &BitSet,
-) -> BTreeMap<u32, Vec<u32>> {
+) -> Vec<Vec<u32>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
     debug_assert_eq!(components.len(), terminal_offsets.len());
 
     // Necessary first-byte filter: if the epsilon closure of a residual raw
     // state has no transition on the model token's first byte, that token
-    // cannot begin from that state. Build the inverse once so the filter is
-    // terminal-generic and independent of vocabulary size.
+    // cannot begin from that state. The inverse is useful both for selecting
+    // candidate vocabulary tokens and for recovering their exact raw starts.
     let mut starts_by_first_byte = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index];
@@ -2053,10 +2137,8 @@ fn boundary_visible_residual_starts_by_token(
                     bytes.insert(byte);
                 }
             }
-            for byte in 0u16..=255 {
-                if bytes.contains(byte as u8) {
-                    starts_by_first_byte[byte as usize].push(global_state);
-                }
+            for byte in bytes.iter() {
+                starts_by_first_byte[byte as usize].push(global_state);
             }
         }
     }
@@ -2064,7 +2146,14 @@ fn boundary_visible_residual_starts_by_token(
         starts.sort_unstable();
         starts.dedup();
     }
+    starts_by_first_byte
+}
 
+fn boundary_visible_residual_starts_by_token(
+    vocab: &Vocab,
+    candidate_tokens: &BTreeSet<u32>,
+    starts_by_first_byte: &[Vec<u32>],
+) -> BTreeMap<u32, Vec<u32>> {
     candidate_tokens
         .iter()
         .filter_map(|&token| {
@@ -2077,6 +2166,135 @@ fn boundary_visible_residual_starts_by_token(
         .collect()
 }
 
+
+/// Necessary byte-level filter for a visible terminal interface realized inside
+/// one model token. If terminal `a` is followed by terminal `b`, then at the
+/// split where `a` finishes and `b` begins the token contains an adjacent byte
+/// pair `(last(a), first(b))`. This says nothing about parser legality by itself;
+/// it only supplies cheap candidate tokens for the exact graph below.
+fn boundary_interface_adjacent_pair_candidates(
+    vocab: &Vocab,
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    interface_pairs: &BTreeSet<(u32, u32)>,
+) -> Vec<u32> {
+    let num_terminals = components
+        .iter()
+        .zip(terminal_offsets.iter().copied())
+        .map(|(component, offset)| offset + component.tokenizer.num_terminals())
+        .max()
+        .unwrap_or(0) as usize;
+    let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index] as usize;
+        for local_terminal in 0..component.tokenizer.num_terminals() as usize {
+            summaries[terminal_offset + local_terminal] = Some(
+                component
+                    .tokenizer
+                    .terminal_expr(local_terminal as u32)
+                    .map(expr_byte_summary)
+                    .unwrap_or(ExprByteSummary {
+                        nullable: false,
+                        first: U8Set::all(),
+                        last: U8Set::all(),
+                        reachable: U8Set::all(),
+                    }),
+            );
+        }
+    }
+
+    let mut allowed_pairs = [U8Set::empty(); 256];
+    for &(left, right) in interface_pairs {
+        let Some(left) = summaries.get(left as usize).and_then(|summary| *summary) else {
+            continue;
+        };
+        let Some(right) = summaries.get(right as usize).and_then(|summary| *summary) else {
+            continue;
+        };
+        for last in left.last.iter() {
+            allowed_pairs[last as usize] |= right.first;
+        }
+    }
+    vocab_tokens_with_adjacent_pairs(vocab, &allowed_pairs)
+}
+
+
+
+fn boundary_possible_match_tokens_for_terminals(
+    vocab: &Vocab,
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    terminals: &BitSet,
+) -> Vec<u32> {
+    let mut tokens = BTreeSet::new();
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index];
+        for local_terminal in 0..component.tokenizer.num_terminals() {
+            let global_terminal = terminal_offset + local_terminal;
+            if !terminals.contains(global_terminal as usize) {
+                continue;
+            }
+            let Some(weight) = component.possible_matches.get(&local_terminal) else {
+                continue;
+            };
+            for (_, _, internal_tokens) in weight.range_entries() {
+                for internal_token in internal_tokens.iter() {
+                    if component.internal_token_to_tokens.is_empty() {
+                        if vocab
+                            .entries_map()
+                            .get(&internal_token)
+                            .is_some_and(|bytes| bytes.len() >= 2)
+                        {
+                            tokens.insert(internal_token);
+                        }
+                    } else if let Some(originals) =
+                        component.internal_token_to_tokens.get(internal_token as usize)
+                    {
+                        tokens.extend(originals.iter().copied().filter(|token| {
+                            vocab
+                                .entries_map()
+                                .get(token)
+                                .is_some_and(|bytes| bytes.len() >= 2)
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    tokens.into_iter().collect()
+}
+
+fn boundary_context_residual_states(
+    components: &[&Constraint],
+    tokenizer_state_offsets: &[u32],
+    terminal_offsets: &[u32],
+    context_terminals: &BitSet,
+) -> FxHashSet<u32> {
+    let mut states = FxHashSet::default();
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index];
+        let state_offset = tokenizer_state_offsets[component_index];
+        for local_terminal in 0..component.tokenizer.num_terminals() {
+            let global_terminal = terminal_offset + local_terminal;
+            if !context_terminals.contains(global_terminal as usize) {
+                continue;
+            }
+            let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
+                continue;
+            };
+            for &local_state in live_states {
+                if local_state == component.tokenizer.start_state() {
+                    continue;
+                }
+                if let Some(global_state) = state_offset.checked_add(local_state) {
+                    states.insert(global_state);
+                }
+            }
+        }
+    }
+    states
+}
+
 fn discover_boundary_token_paths(
     vocab: &Vocab,
     components: &[&Constraint],
@@ -2085,6 +2303,7 @@ fn discover_boundary_token_paths(
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
     interface_pairs: &BTreeSet<(u32, u32)>,
+    context_terminals: &BitSet,
 ) -> BoundaryTokenDiscovery {
     let num_terminals = components
         .iter()
@@ -2092,15 +2311,6 @@ fn discover_boundary_token_paths(
         .map(|(component, offset)| offset + component.tokenizer.num_terminals())
         .max()
         .unwrap_or(0) as usize;
-    let mut terminal_components = vec![0usize; num_terminals];
-    for (component_index, component) in components.iter().enumerate() {
-        let offset = terminal_offsets[component_index] as usize;
-        for local in 0..component.tokenizer.num_terminals() as usize {
-            if let Some(owner) = terminal_components.get_mut(offset + local) {
-                *owner = component_index;
-            }
-        }
-    }
     let reset_starts = composite_reset_states(components, tokenizer_state_offsets);
     let reset_live_bytes = component_reset_live_bytes(components);
     let mut residual_start_terminals = BitSet::new(num_terminals);
@@ -2114,6 +2324,21 @@ fn discover_boundary_token_paths(
             residual_start_terminals.set(left as usize);
         }
     }
+    // Only parser-visible stack-neutral terminals need an explicit carry bit
+    // across model-token boundaries. Ordinary component terminals keep their
+    // parser support through the transported component DWA; the neutral LR
+    // terminals are newly state-dependent behavior in the composed table.
+    for terminal in context_terminals.iter() {
+        if !ignore_terminals.contains(terminal) {
+            residual_start_terminals.set(terminal);
+        }
+    }
+    let boundary_context_states = boundary_context_residual_states(
+        components,
+        tokenizer_state_offsets,
+        terminal_offsets,
+        context_terminals,
+    );
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let all_multi_byte_entries = vocab
         .entries_map()
@@ -2121,6 +2346,12 @@ fn discover_boundary_token_paths(
         .filter(|(_, bytes)| bytes.len() >= 2)
         .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
         .collect::<Vec<_>>();
+    let residual_starts_by_first_byte = boundary_visible_residual_starts_by_first_byte(
+        components,
+        tokenizer_state_offsets,
+        terminal_offsets,
+        &residual_start_terminals,
+    );
     let suffix_cache_started_at = Instant::now();
     let reset_suffix_cache = if std::env::var_os("GLRMASK_COMPOSE_DISABLE_SUFFIX_CACHE")
         .is_some()
@@ -2152,7 +2383,7 @@ fn discover_boundary_token_paths(
     };
     let suffix_cache_ms = suffix_cache_started_at.elapsed().as_secs_f64() * 1000.0;
     let prefilter_started_at = Instant::now();
-    let prefilter = if use_prefilter {
+    let mut prefilter = if use_prefilter {
         if let Some(cache) = reset_suffix_cache.as_ref() {
             all_multi_byte_entries
                 .iter()
@@ -2186,13 +2417,32 @@ fn discover_boundary_token_paths(
             .map(|&(token_id, _)| token_id)
             .collect::<BTreeSet<_>>()
     };
+    let interface_pair_candidates = if use_prefilter {
+        boundary_interface_adjacent_pair_candidates(
+            vocab,
+            components,
+            terminal_offsets,
+            interface_pairs,
+        )
+    } else {
+        Vec::new()
+    };
+    prefilter.extend(interface_pair_candidates.iter().copied());
+    let context_residual_candidates = if use_prefilter {
+        boundary_possible_match_tokens_for_terminals(
+            vocab,
+            components,
+            terminal_offsets,
+            context_terminals,
+        )
+    } else {
+        Vec::new()
+    };
+    prefilter.extend(context_residual_candidates.iter().copied());
     let extra_residual_starts = boundary_visible_residual_starts_by_token(
-        components,
-        tokenizer_state_offsets,
-        terminal_offsets,
         vocab,
         &prefilter,
-        &residual_start_terminals,
+        &residual_starts_by_first_byte,
     );
     let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
     let multi_byte_entries = all_multi_byte_entries
@@ -2266,33 +2516,51 @@ fn discover_boundary_token_paths(
             let mut local_terminals = FxHashSet::<u32>::default();
             let mut local_witnesses = Vec::new();
             for (arbitrary_scan, start_states) in scan_groups {
-                let Some((nodes, good, accepting)) = build_boundary_token_graph(
-                    bytes,
-                    &arbitrary_scan,
-                    &reset_scans,
-                    seed_terminals,
-                    ignore_terminals,
-                    &terminal_components,
-                ) else {
-                    continue;
-                };
-                for (source, node) in nodes.iter().enumerate() {
-                    if !good[source] {
-                        continue;
-                    }
-                    for edge in &node.outgoing {
-                        if good[edge.target] {
-                            local_terminals.insert(edge.terminal);
-                        }
+                let mut ordinary_starts = Vec::new();
+                let mut contextual_starts = Vec::new();
+                for start_state in start_states {
+                    if boundary_context_states.contains(&start_state) {
+                        contextual_starts.push(start_state);
+                    } else {
+                        ordinary_starts.push(start_state);
                     }
                 }
-                local_witnesses.push(BoundaryTokenWitness {
-                    token_id,
-                    start_states,
-                    nodes,
-                    good,
-                    accepting,
-                });
+                for (start_states, initial_interface_witnessed) in [
+                    (ordinary_starts, false),
+                    (contextual_starts, true),
+                ] {
+                    if start_states.is_empty() {
+                        continue;
+                    }
+                    let Some((nodes, good, accepting)) = build_boundary_token_graph(
+                        bytes,
+                        &arbitrary_scan,
+                        &reset_scans,
+                        seed_terminals,
+                        ignore_terminals,
+                        interface_pairs,
+                        initial_interface_witnessed,
+                    ) else {
+                        continue;
+                    };
+                    for (source, node) in nodes.iter().enumerate() {
+                        if !good[source] {
+                            continue;
+                        }
+                        for edge in &node.outgoing {
+                            if good[edge.target] {
+                                local_terminals.insert(edge.terminal);
+                            }
+                        }
+                    }
+                    local_witnesses.push(BoundaryTokenWitness {
+                        token_id,
+                        start_states,
+                        nodes,
+                        good,
+                        accepting,
+                    });
+                }
             }
             (!local_witnesses.is_empty())
                 .then_some((token_id, local_terminals, local_witnesses))
@@ -2329,8 +2597,10 @@ fn discover_boundary_token_paths(
             max_candidate_starts.load(Ordering::Relaxed),
         );
         eprintln!(
-            "[glrmask/profile][constraint_boundary_prefilter] enabled={} candidates={} scanned={} exact={} missing={} prefilter_ms={prefilter_ms:.3} missing_ids={:?}",
+            "[glrmask/profile][constraint_boundary_prefilter] enabled={} interface_pair_candidates={} context_residual_candidates={} candidates={} scanned={} exact={} missing={} prefilter_ms={prefilter_ms:.3} missing_ids={:?}",
             use_prefilter,
+            interface_pair_candidates.len(),
+            context_residual_candidates.len(),
             prefilter.len(),
             multi_byte_entries.len(),
             exact.len(),
@@ -8605,21 +8875,46 @@ fn build_boundary_repair(
             }
         }
     }
-    for ignore_terminal in ignore_terminals.scoped.iter() {
-        if let Some(slot) = seed_terminals.get_mut(ignore_terminal) {
-            *slot = true;
-        }
-    }
-    let interface_pairs = visible_boundary_interface_pairs(
+    let base_interface_pairs = visible_boundary_interface_pairs(
         &analyzed,
         &composed_table.boundary_nonterminals,
         &composed_table.control_terminals,
     );
+    let interface_pairs = extend_boundary_interfaces_through_stack_neutral_lr_actions(
+        &composed_table.table,
+        &base_interface_pairs,
+    );
+    let mut boundary_context_terminals = BitSet::new(seed_terminals.len());
+    for &terminal in &composed_table.table.skip_terminals {
+        let participates = seed_terminals
+            .get(terminal as usize)
+            .copied()
+            .unwrap_or(false)
+            || interface_pairs
+                .iter()
+                .any(|&(left, right)| left == terminal || right == terminal);
+        if participates {
+            boundary_context_terminals.set(terminal as usize);
+        }
+    }
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_interface_pairs] pairs={}",
+            "[glrmask/profile][constraint_boundary_interface_pairs] base_pairs={} extended_pairs={} stack_neutral_terminals={}",
+            base_interface_pairs.len(),
             interface_pairs.len(),
+            composed_table.table.skip_terminals.len(),
         );
+    }
+    // LR-inserted stack-neutral terminals are not global boundary-discovery
+    // seeds: that would make every token containing trivia look like a boundary
+    // token. They still need their ordinary one-terminal language compiled so a
+    // token consisting solely of such a terminal receives the LR `Skip` /
+    // state-refining template. Keep that support set separate from FIRST/FOLLOW.
+    let mut one_terminal_support_terminals = seed_terminals.clone();
+    for &terminal in &composed_table.table.skip_terminals {
+        if let Some(selected) = one_terminal_support_terminals.get_mut(terminal as usize) {
+            *selected = true;
+        }
     }
     // Lexical discovery does not impose grammar-RHS follow legality. The
     // composed LR table is the authority for parser-visible terminal sequences,
@@ -8653,6 +8948,7 @@ fn build_boundary_repair(
                             &seed_terminals,
                             &ignore_terminals.global,
                             &interface_pairs,
+                            &boundary_context_terminals,
                         );
                         (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
                     },
@@ -8663,7 +8959,7 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             &composed_table.terminal_offsets,
                             vocab,
-                            &seed_terminals,
+                            &one_terminal_support_terminals,
                         );
                         if std::env::var_os(
                             "GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW",
@@ -8681,7 +8977,7 @@ fn build_boundary_repair(
                             collect_one_byte_seed_relations(
                                 tokenizer,
                                 vocab,
-                                &seed_terminals,
+                                &one_terminal_support_terminals,
                                 &all_states,
                                 &mut reference,
                             );
@@ -8700,7 +8996,7 @@ fn build_boundary_repair(
             },
         );
     let discovered_boundary_terminals = boundary_paths.terminals.clone();
-    let mut active_terminals = seed_terminals.clone();
+    let mut active_terminals = one_terminal_support_terminals.clone();
     for terminal in discovered_boundary_terminals.iter() {
         active_terminals[terminal] = true;
     }
@@ -8746,26 +9042,25 @@ fn build_boundary_repair(
         return Ok(None);
     }
     if compose_profile_enabled() {
-        let selected = active_terminals
-            .iter()
-            .enumerate()
-            .filter_map(|(terminal, &active)| {
-                active.then(|| {
-                    format!(
-                        "{}:{}",
-                        terminal,
-                        analyzed.terminal_display_name(terminal as u32),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
+        let selected_count = active_terminals.iter().filter(|&&active| active).count();
         eprintln!(
-            "[glrmask/profile][constraint_boundary_terminals] begin={} discovered={} boundary_tokens={} selected={:?}",
+            "[glrmask/profile][constraint_boundary_terminals] begin={} one_terminal_support={} discovered={} boundary_tokens={} active={}",
             seed_terminals.iter().filter(|&&selected| selected).count(),
+            one_terminal_support_terminals.iter().filter(|&&selected| selected).count(),
             discovered_boundary_terminals.count_ones(),
             boundary_paths.token_ids.len(),
-            selected,
+            selected_count,
         );
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE_VERBOSE").is_some() {
+            let selected = active_terminals
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, &active)| {
+                    active.then(|| format!("{}:{}", terminal, analyzed.terminal_display_name(terminal as u32)))
+                })
+                .collect::<Vec<_>>();
+            eprintln!("[glrmask/profile][constraint_boundary_terminal_names] selected={selected:?}");
+        }
     }
 
     let selected_original_tokens = seed_relations
