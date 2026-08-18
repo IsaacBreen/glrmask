@@ -18670,11 +18670,25 @@ mod tests {
                 fast_transport_started.elapsed().as_secs_f64() * 1000.0;
             let fast_patch_assembly_started = Instant::now();
             let mut fast_patched_characterizations = BTreeMap::new();
+            let mut fast_characterization_cache_hits = 0usize;
             for (&terminal, delta) in &direct_symbolic {
-                let mut patched = core_characterizations
-                    .get(&terminal)
-                    .expect("changed parent terminal has cached characterization source")
+                let mut patched = core
+                    .composition_parser_characterizations_by_terminal
+                    .get(terminal as usize)
+                    .and_then(Option::as_ref)
+                    .unwrap_or_else(|| {
+                        core_characterizations
+                            .get(&terminal)
+                            .expect("changed parent terminal has characterization source")
+                    })
                     .clone();
+                if core
+                    .composition_parser_characterizations_by_terminal
+                    .get(terminal as usize)
+                    .is_some_and(Option::is_some)
+                {
+                    fast_characterization_cache_hits += 1;
+                }
                 patched.escapes.extend(delta.escapes.iter().cloned());
                 patched.reduces.extend(delta.reduces.iter().cloned());
                 patched.nt_escapes.extend(delta.nt_escapes.iter().cloned());
@@ -18734,10 +18748,11 @@ mod tests {
                 .expect("fast ideal templates should induce a parser NWA");
             let fast_nwa_ms = fast_nwa_started.elapsed().as_secs_f64() * 1000.0;
             eprintln!(
-                "MINBOUND OUTER_IDEAL_FAST_TEMPLATE_NWA active={} reused={} patched={} transport_ms={fast_transport_ms:.3} patch_assembly_ms={fast_patch_assembly_ms:.3} patch_compile_ms={fast_patch_compile_ms:.3} skeleton_ms={fast_skeleton_ms:.3} validate_ms={fast_validate_ms:.3} mismatches={} nwa_states={} nwa_transitions={} nwa_ms={fast_nwa_ms:.3} counted_total_ms={:.3} total_with_validation_ms={:.3}",
+                "MINBOUND OUTER_IDEAL_FAST_TEMPLATE_NWA active={} reused={} patched={} characterization_cache_hits={} transport_ms={fast_transport_ms:.3} patch_assembly_ms={fast_patch_assembly_ms:.3} patch_compile_ms={fast_patch_compile_ms:.3} skeleton_ms={fast_skeleton_ms:.3} validate_ms={fast_validate_ms:.3} mismatches={} nwa_states={} nwa_transitions={} nwa_ms={fast_nwa_ms:.3} counted_total_ms={:.3} total_with_validation_ms={:.3}",
                 tight_active_terminals,
                 reuse_selected.iter().filter(|&&selected| selected).count(),
                 fast_patched_characterizations.len(),
+                fast_characterization_cache_hits,
                 fast_template_mismatches.len(),
                 fast_parser_nwa.states().len(),
                 fast_parser_nwa.states().iter().map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>()).sum::<usize>(),
