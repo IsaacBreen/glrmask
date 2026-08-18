@@ -8382,34 +8382,51 @@ fn try_build_cached_composition_templates(
         }
     }
 
-    let mut dfas = rebuild_transported_component_templates(
+    let dfas = rebuild_transported_component_templates(
         composed_table,
         components,
         &reuse_selected,
     );
     let patched_templates = Templates::from_characterizations(&patched_characterizations);
-    dfas.extend(patched_templates.by_terminal);
 
     // If transport could not represent an otherwise unchanged child template,
     // characterize only that terminal in the composed table.
     for (terminal, &active) in selected.iter().enumerate() {
-        if active && !changed_parent[terminal] && !dfas.contains_key(&(terminal as u32)) {
+        if active
+            && !changed_parent[terminal]
+            && !dfas.contains_key(&(terminal as u32))
+        {
             fresh_selected[terminal] = true;
         }
     }
-    if fresh_selected.iter().any(|&fresh| fresh) {
+    let fresh_templates = if fresh_selected.iter().any(|&fresh| fresh) {
         let fresh_characterizations =
             characterize_selected_terminals(&composed_table.table, analyzed, &fresh_selected);
-        let fresh_templates = Templates::from_characterizations(&fresh_characterizations);
-        dfas.extend(fresh_templates.by_terminal);
-    }
+        Templates::from_characterizations(&fresh_characterizations)
+    } else {
+        Templates::default()
+    };
     if selected.iter().enumerate().any(|(terminal, &active)| {
-        active && !dfas.contains_key(&(terminal as u32))
+        active
+            && !dfas.contains_key(&(terminal as u32))
+            && !patched_templates.by_terminal.contains_key(&(terminal as u32))
+            && !fresh_templates.by_terminal.contains_key(&(terminal as u32))
     }) {
         return None;
     }
 
-    let templates = Templates::from_terminal_dfas(dfas);
+    // Reused DFAs need an NWA skeleton once. Newly compiled patched/fresh
+    // templates already carry their exact skeletons, so preserve them instead
+    // of rebuilding those skeletons from the DFA a second time.
+    let mut templates = Templates::from_terminal_dfas(dfas);
+    templates.by_terminal.extend(patched_templates.by_terminal);
+    templates
+        .by_terminal_nwa
+        .extend(patched_templates.by_terminal_nwa);
+    templates.by_terminal.extend(fresh_templates.by_terminal);
+    templates
+        .by_terminal_nwa
+        .extend(fresh_templates.by_terminal_nwa);
     let split_templates = templates
         .by_terminal
         .par_iter()
