@@ -2934,6 +2934,185 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std:
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+    /// Remap every stack value while pruning any path containing a value for
+    /// which `map` returns `None`.
+    ///
+    /// Unlike `remap_top_values`, this transforms the full shared stack DAG.
+    /// Upper/lower node memoization preserves sharing, so callers can project a
+    /// composed LR-state GSS into one component's local LR coordinate without
+    /// enumerating represented stacks.  When several source values map to the
+    /// same destination, their sublanguages are merged exactly.
+    pub fn filter_map_values<U, F>(&self, mut map: F) -> LeveledGSS<U, A>
+    where
+        U: Clone + Eq + Hash,
+        F: FnMut(&T) -> Option<U>,
+    {
+        fn map_value<T, U, F>(
+            value: &T,
+            value_memo: &mut StdHashMap<T, Option<U>>,
+            map: &mut F,
+        ) -> Option<U>
+        where
+            T: Clone + Eq + Hash,
+            U: Clone,
+            F: FnMut(&T) -> Option<U>,
+        {
+            if let Some(mapped) = value_memo.get(value) {
+                return mapped.clone();
+            }
+            let mapped = map(value);
+            value_memo.insert(value.clone(), mapped.clone());
+            mapped
+        }
+
+        fn transform_lower<T, U, F>(
+            node: &Arc<Lower<T>>,
+            value_memo: &mut StdHashMap<T, Option<U>>,
+            lower_memo: &mut StdHashMap<usize, Option<Arc<Lower<U>>>>,
+            map: &mut F,
+        ) -> Option<Arc<Lower<U>>>
+        where
+            T: Clone + Eq + Hash,
+            U: Clone + Eq + Hash,
+            F: FnMut(&T) -> Option<U>,
+        {
+            let key = lower_node_id(node);
+            if let Some(cached) = lower_memo.get(&key) {
+                return cached.clone();
+            }
+
+            let result = match &**node {
+                Lower::Segment(segment) => {
+                    let mut mapped_values = Vec::with_capacity(segment.values.len());
+                    for value in segment.values.iter() {
+                        let Some(mapped) = map_value(value, value_memo, map) else {
+                            lower_memo.insert(key, None);
+                            return None;
+                        };
+                        mapped_values.push(mapped);
+                    }
+                    let Some(next) = transform_lower(
+                        &segment.next,
+                        value_memo,
+                        lower_memo,
+                        map,
+                    ) else {
+                        lower_memo.insert(key, None);
+                        return None;
+                    };
+                    Some(new_segment(SV::from_vec(mapped_values), next))
+                }
+                Lower::General {
+                    children, empty, ..
+                } => {
+                    let mut mapped_children = Children::<U, Lower<U>>::new();
+                    for (value, kids) in children.iter() {
+                        let Some(mapped_value) = map_value(value, value_memo, map) else {
+                            continue;
+                        };
+                        for child in kids.values() {
+                            let Some(mapped_child) = transform_lower(
+                                child,
+                                value_memo,
+                                lower_memo,
+                                map,
+                            ) else {
+                                continue;
+                            };
+                            insert_lower_child_shared(
+                                &mut mapped_children,
+                                mapped_value.clone(),
+                                mapped_child.max_depth(),
+                                mapped_child,
+                            );
+                        }
+                    }
+                    if mapped_children.is_empty() && !*empty {
+                        None
+                    } else {
+                        Some(new_lower_precanonicalized(mapped_children, *empty))
+                    }
+                }
+            };
+            lower_memo.insert(key, result.clone());
+            result
+        }
+
+        fn transform_upper<T, U, A, F>(
+            node: &Arc<Upper<T, A>>,
+            value_memo: &mut StdHashMap<T, Option<U>>,
+            lower_memo: &mut StdHashMap<usize, Option<Arc<Lower<U>>>>,
+            upper_memo: &mut StdHashMap<usize, Option<Arc<Upper<U, A>>>>,
+            map: &mut F,
+        ) -> Option<Arc<Upper<U, A>>>
+        where
+            T: Clone + Eq + Hash,
+            U: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            F: FnMut(&T) -> Option<U>,
+        {
+            let key = Arc::as_ptr(node) as usize;
+            if let Some(cached) = upper_memo.get(&key) {
+                return cached.clone();
+            }
+            let result = match &**node {
+                Upper::Interface(interface) => transform_lower(
+                    &interface.inner,
+                    value_memo,
+                    lower_memo,
+                    map,
+                )
+                .map(|lower| try_promote(&new_interface(lower, interface.acc.clone()))),
+                Upper::Branch(branch) => {
+                    let mut mapped_children = Children::<U, Upper<U, A>>::new();
+                    for (value, kids) in branch.children.iter() {
+                        let Some(mapped_value) = map_value(value, value_memo, map) else {
+                            continue;
+                        };
+                        for child in kids.values() {
+                            let Some(mapped_child) = transform_upper(
+                                child,
+                                value_memo,
+                                lower_memo,
+                                upper_memo,
+                                map,
+                            ) else {
+                                continue;
+                            };
+                            insert_upper_child_shared(
+                                &mut mapped_children,
+                                mapped_value.clone(),
+                                mapped_child,
+                            );
+                        }
+                    }
+                    if mapped_children.is_empty() && branch.empty.is_none() {
+                        None
+                    } else {
+                        Some(try_promote(&new_branch(
+                            mapped_children,
+                            branch.empty.clone(),
+                        )))
+                    }
+                }
+            };
+            upper_memo.insert(key, result.clone());
+            result
+        }
+
+        let mut value_memo = StdHashMap::new();
+        let mut lower_memo = StdHashMap::new();
+        let mut upper_memo = StdHashMap::new();
+        transform_upper(
+            &self.inner,
+            &mut value_memo,
+            &mut lower_memo,
+            &mut upper_memo,
+            &mut map,
+        )
+        .map_or_else(LeveledGSS::empty, |inner| LeveledGSS { inner })
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -6919,6 +7098,49 @@ mod tests {
         fn merge(&self, other: &Self) -> Self {
             Self(self.0.max(other.0))
         }
+    }
+
+    #[test]
+    fn filter_map_values_remaps_entire_stack_and_prunes_unmapped_paths() {
+        let source = LeveledGSS::from_stacks(&[
+            (vec![1_u32, 2, 3], TestAcc(1)),
+            (vec![1, 4, 3], TestAcc(2)),
+            (vec![7, 8], TestAcc(3)),
+        ]);
+        let mapped = source.filter_map_values(|value| match value {
+            1 => Some(11_u32),
+            2 => Some(12),
+            3 => Some(13),
+            4 => None,
+            7 => Some(17),
+            8 => Some(18),
+            _ => None,
+        });
+        let mut actual = mapped.to_stacks(16).expect("small mapped GSS should enumerate");
+        actual.sort();
+        let mut expected = vec![
+            (vec![11_u32, 12, 13], TestAcc(1)),
+            (vec![17, 18], TestAcc(3)),
+        ];
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn filter_map_values_merges_paths_that_map_to_same_stack() {
+        let source = LeveledGSS::from_stacks(&[
+            (vec![1_u32, 3], TestAcc(1)),
+            (vec![2_u32, 3], TestAcc(9)),
+        ]);
+        let mapped = source.filter_map_values(|value| match value {
+            1 | 2 => Some(10_u32),
+            3 => Some(30),
+            _ => None,
+        });
+        assert_eq!(
+            mapped.to_stacks(4),
+            Some(vec![(vec![10_u32, 30], TestAcc(9))]),
+        );
     }
 
     #[test]
