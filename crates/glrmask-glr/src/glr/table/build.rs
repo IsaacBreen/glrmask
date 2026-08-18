@@ -66,10 +66,25 @@ fn selected_glr_table_construction(
     grammar: &AnalyzedGrammar,
     default: GlrTableConstruction,
 ) -> GlrTableConstruction {
+    const LEGACY_LALR_RULE_THRESHOLD: usize = 40_000;
+    const LEGACY_LALR_MAX_TERMINALS: u32 = 512;
     if let Some(explicit) = glr_table_construction_override() {
         return explicit;
     }
-    if default == GlrTableConstruction::ExperimentalCoreMerged
+    if default == GlrTableConstruction::LegacyRowBisim
+        && grammar.rules.len() >= LEGACY_LALR_RULE_THRESHOLD
+        && grammar.num_terminals <= LEGACY_LALR_MAX_TERMINALS
+    {
+        // Static JSON imports historically request LegacyRowBisim, while the
+        // reduced-latency/dynamic JSON path already uses LALR. At very large
+        // lowered rule counts with a small terminal alphabet, constructing the
+        // canonical LR(1) graph only to quotient it back down dominates compile
+        // time. Use the same exact, conflict-preserving LALR construction as
+        // the dynamic path for this rare tail shape. Large-terminal grammars
+        // stay on LegacyRowBisim: their canonical LR(1) graph can already be
+        // cheap, while LALR may enlarge the downstream parser-DWA workload.
+        GlrTableConstruction::Lalr
+    } else if default == GlrTableConstruction::ExperimentalCoreMerged
         && is_large_left_linear_grammar(grammar)
     {
         GlrTableConstruction::LegacyRowBisim
@@ -3942,6 +3957,50 @@ mod tests {
     }
 
     #[test]
+    fn very_large_legacy_grammar_prefers_lalr() {
+        let rules = (0..40_000)
+            .map(|_| Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            })
+            .collect();
+        let grammar = AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules,
+            start: 0,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"x".to_vec(),
+            }],
+            ..GrammarDef::default()
+        });
+        assert_eq!(
+            selected_glr_table_construction(
+                &grammar,
+                GlrTableConstruction::LegacyRowBisim,
+            ),
+            GlrTableConstruction::Lalr,
+        );
+
+        let many_terminals = analyzed(
+            (0..40_000)
+                .map(|_| Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                })
+                .collect(),
+            0,
+            513,
+        );
+        assert_eq!(
+            selected_glr_table_construction(
+                &many_terminals,
+                GlrTableConstruction::LegacyRowBisim,
+            ),
+            GlrTableConstruction::LegacyRowBisim,
+        );
+    }
+
+    #[test]
     fn pushdown_grammar_keeps_core_merged_default() {
         let grammar = multi_lookahead_grammar();
         assert_eq!(
@@ -3982,6 +4041,51 @@ mod tests {
 
         assert_eq!(table.construction, GlrTableConstruction::Lalr);
         assert!(table.has_ambiguity(), "expected GLR split from LALR merge");
+    }
+
+    #[test]
+    fn lalr_conflict_preserves_legacy_recognition_on_bounded_prefixes() {
+        let grammar = mysterious_conflict_grammar();
+        let legacy = build_table_with_default_construction(
+            &grammar,
+            GlrTableConstruction::LegacyRowBisim,
+        );
+        let lalr = build_lalr_table(&grammar);
+        let start = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        let mut queue = VecDeque::from([(Vec::<u32>::new(), start.clone(), start)]);
+        let mut visited = 0usize;
+
+        while let Some((prefix, left, right)) = queue.pop_front() {
+            visited += 1;
+            assert_eq!(
+                stacks_finished(&legacy, &left),
+                stacks_finished(&lalr, &right),
+                "completion mismatch at {prefix:?}",
+            );
+            if prefix.len() == 5 {
+                continue;
+            }
+            for terminal in 0..legacy.num_terminals {
+                assert_eq!(
+                    stack_may_advance_on(&legacy, &left, terminal),
+                    stack_may_advance_on(&lalr, &right, terminal),
+                    "admission mismatch at {prefix:?} on {terminal}",
+                );
+                let left_next = advance_stacks(&legacy, &left, terminal);
+                let right_next = advance_stacks(&lalr, &right, terminal);
+                assert_eq!(
+                    left_next.is_empty(),
+                    right_next.is_empty(),
+                    "recognition mismatch at {prefix:?} on {terminal}",
+                );
+                if !left_next.is_empty() {
+                    let mut next = prefix.clone();
+                    next.push(terminal);
+                    queue.push_back((next, left_next, right_next));
+                }
+            }
+        }
+        assert!(visited > 4);
     }
 
 }
