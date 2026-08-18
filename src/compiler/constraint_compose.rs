@@ -1233,6 +1233,7 @@ type PossibleMatches = BTreeMap<u32, Weight>;
 struct BoundaryRepair {
     parser_dwa: MappedArtifact<DWA>,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     active_terminals: Vec<bool>,
 }
 
@@ -10201,6 +10202,18 @@ fn build_boundary_repair(
         &boundary_paths,
         tokenizer_state_offsets,
     );
+    let mut composition_parser_templates_by_terminal =
+        vec![None; analyzed.num_terminals as usize];
+    for (&terminal, dfa) in &templates.by_terminal {
+        if terminal < analyzed.num_terminals
+            && active_terminals
+                .get(terminal as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            composition_parser_templates_by_terminal[terminal as usize] = Some(dfa.clone());
+        }
+    }
     let terminal_dwa = terminal_dwa?;
     let special_source_state = merged_tokenizer
         .map(Tokenizer::initial_state_id)
@@ -10393,6 +10406,7 @@ fn build_boundary_repair(
     Ok(Some(BoundaryRepair {
         parser_dwa: MappedArtifact::new(parser_dwa, id_map),
         template_dfas_by_terminal,
+        composition_parser_templates_by_terminal,
         active_terminals,
     }))
 }
@@ -11798,11 +11812,13 @@ pub(crate) fn compose_constraints(
                             composed_table.table.num_states,
                         )?,
                         boundary.template_dfas_by_terminal,
+                        boundary.composition_parser_templates_by_terminal,
                     )
                 }
                 None => (
                     parser_artifacts,
                     vec![None; composed_table.table.num_terminals as usize],
+                    Vec::new(),
                 ),
             })
         },
@@ -11816,7 +11832,11 @@ pub(crate) fn compose_constraints(
             started_at.elapsed().as_secs_f64() * 1000.0
         },
     );
-    let (parser_artifacts, template_dfas_by_terminal) = parser_union_result?;
+    let (
+        parser_artifacts,
+        template_dfas_by_terminal,
+        composition_parser_templates_by_terminal,
+    ) = parser_union_result?;
     let parser_artifacts = canonicalize_parser_artifact_ignore(
         parser_artifacts,
         merged_ignores.canonical,
@@ -11840,7 +11860,7 @@ pub(crate) fn compose_constraints(
         merged_ignores.canonical,
         &merged_ignores.aliases,
     );
-    let result = finalize_composed_constraint(
+    let mut result = finalize_composed_constraint(
         composed_table,
         tokenizer,
         tokenizer_state_offsets,
@@ -11859,6 +11879,8 @@ pub(crate) fn compose_constraints(
         components_have_no_runtime_product,
         vocab,
     );
+    result.constraint.composition_parser_templates_by_terminal =
+        composition_parser_templates_by_terminal;
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
@@ -12422,13 +12444,18 @@ pub(crate) fn compose_constraints_owned_parent(
     );
     let id_num_tsids = id_map.num_tsids();
     let id_max_internal_token = id_map.max_internal_token_id();
-    let (boundary_work, template_dfas_by_terminal) = match boundary_repair {
+    let (
+        boundary_work,
+        template_dfas_by_terminal,
+        composition_parser_templates_by_terminal,
+    ) = match boundary_repair {
         Some(boundary) => {
             debug_assert!(boundary.active_terminals.iter().any(|&active| active));
             let (boundary_dwa, boundary_id_map) = boundary.parser_dwa.into_parts();
             (
                 Some((boundary_dwa, boundary_id_map)),
                 boundary.template_dfas_by_terminal,
+                boundary.composition_parser_templates_by_terminal,
             )
         }
         None => {
@@ -12438,7 +12465,7 @@ pub(crate) fn compose_constraints_owned_parent(
                         .to_string(),
                 );
             }
-            (None, vec![None; num_terminals])
+            (None, vec![None; num_terminals], Vec::new())
         }
     };
 
@@ -12486,6 +12513,8 @@ pub(crate) fn compose_constraints_owned_parent(
         true,
         vocab,
     );
+    result.constraint.composition_parser_templates_by_terminal =
+        composition_parser_templates_by_terminal;
 
     let parser_default_domain_labels = parser_default_domains
         .component_domains
