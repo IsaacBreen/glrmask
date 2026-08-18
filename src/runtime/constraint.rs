@@ -4601,6 +4601,53 @@ impl Constraint {
         self.giga_word_group_buf_masks = giga;
     }
 
+    pub(crate) fn rebuild_token_mask_cache_stats(&mut self) {
+        self.word_group_sparse_prefix_entries =
+            Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
+        self.word_group_sparse_total_entries =
+            self.word_group_sparse_masks.iter().map(Vec::len).sum();
+        self.word_group_sparse_max_entries = self
+            .word_group_sparse_masks
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        self.all_tokens_buf_mask = self
+            .word_group_prefix_buf_masks
+            .last()
+            .cloned()
+            .unwrap_or_default();
+
+        let buf_len = self.mask_len();
+        self.total_internal_buf_cost = Self::compute_total_internal_buf_cost(
+            &self.internal_token_buf_offsets,
+            &self.heavy_token_dense_masks,
+            buf_len,
+        );
+        self.heavy_token_indices = self
+            .heavy_token_dense_masks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mask)| mask.is_some().then_some(index))
+            .collect();
+        self.heavy_total_cost = self.heavy_token_indices.len() * buf_len;
+        self.internal_token_buf_op_costs = Self::compute_internal_token_buf_op_costs(
+            &self.internal_token_buf_offsets,
+            &self.heavy_token_dense_masks,
+            buf_len,
+        );
+        self.word_group_buf_op_costs =
+            Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
+        let n_internal = self.internal_token_buf_offsets.len().saturating_sub(1);
+        let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
+        let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
+        self.light_avg_cost_x256 = if n_light > 0 {
+            (light_total * 256) / n_light
+        } else {
+            0
+        };
+    }
+
     /// Flatten all per-token sparse entries into a single contiguous array
     /// with an offset table. Improves cache locality during convert phase.
     fn compute_flat_buf_masks(masks: &[InternalTokenBufMasks]) -> (Box<[(u16, u32)]>, Box<[u32]>) {

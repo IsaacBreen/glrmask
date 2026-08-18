@@ -204,9 +204,42 @@ struct TokenMaskCacheTail {
     word_group_buf_op_costs: Vec<usize>,
 }
 
+#[derive(Serialize)]
+struct TokenMaskCacheIrregularRef<'a> {
+    guarded_shift_index: &'a [rustc_hash::FxHashMap<
+        crate::grammar::flat::TerminalID,
+        crate::compiler::glr::table::GuardedShiftCellIndex,
+    >],
+    seed_terminal_dense: &'a crate::runtime::artifact::SeedTerminalDenseMasks,
+    seed_universe_dense: &'a [u64],
+    quad_group_sparse_masks: &'a [InternalTokenBufMasks],
+    quad_group_dense_masks: &'a [Option<Box<[u32]>>],
+    byte_group_sparse_masks: &'a [InternalTokenBufMasks],
+    byte_group_dense_masks: &'a [Option<Box<[u32]>>],
+}
+
+#[derive(Deserialize)]
+struct TokenMaskCacheIrregular {
+    guarded_shift_index: Vec<rustc_hash::FxHashMap<
+        crate::grammar::flat::TerminalID,
+        crate::compiler::glr::table::GuardedShiftCellIndex,
+    >>,
+    seed_terminal_dense: crate::runtime::artifact::SeedTerminalDenseMasks,
+    seed_universe_dense: Vec<u64>,
+    quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
+    byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
+}
+
 enum TokenMaskCacheArtifact {
     Full {
         tail: TokenMaskCacheTail,
+        word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    },
+    Fast {
+        irregular: TokenMaskCacheIrregular,
+        word_group_sparse_masks: Vec<InternalTokenBufMasks>,
         word_group_prefix_buf_masks: Vec<Box<[u32]>>,
     },
     WordSparse(Vec<InternalTokenBufMasks>),
@@ -341,7 +374,8 @@ fn decode_cache_u32_row(input: &[u8], pos: &mut usize, len: usize) -> Result<Box
 }
 
 fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
-    const MAGIC: &[u8; 4] = b"TMC3";
+    const MAGIC: &[u8; 4] = b"TMC4";
+    const HEADER_LEN: usize = 24;
     const MAX_PREFIX_BYTES: usize = 1024 * 1024;
     const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024;
     if !constraint.token_mask_caches_ready() {
@@ -349,75 +383,90 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     }
     let mask_words = constraint.mask_len();
     let prefix_rows = constraint.word_group_prefix_buf_masks.len();
+    let word_groups = constraint.word_group_sparse_masks.len();
+    let word_entries = constraint
+        .word_group_sparse_masks
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
     let prefix_bytes = prefix_rows
         .saturating_mul(mask_words)
         .saturating_mul(std::mem::size_of::<u32>());
     if prefix_bytes > MAX_PREFIX_BYTES {
         return encode_word_sparse_token_mask_cache(constraint);
     }
-    let mut tail = Vec::with_capacity(320 * 1024);
+    if prefix_rows != word_groups.saturating_add(1)
+        || constraint
+            .word_group_prefix_buf_masks
+            .iter()
+            .any(|row| row.len() != mask_words)
+    {
+        return Vec::new();
+    }
+    let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+    let tail_started = profile.then(std::time::Instant::now);
+    let mut tail = Vec::with_capacity(32 * 1024);
     bincode::serialize_into(
         &mut tail,
-        &TokenMaskCacheTailRef {
+        &TokenMaskCacheIrregularRef {
             guarded_shift_index: &constraint.table.guarded_shift_index,
             seed_terminal_dense: &constraint.seed_terminal_dense,
             seed_universe_dense: &constraint.seed_universe_dense,
-            word_group_sparse_masks: &constraint.word_group_sparse_masks,
-            word_group_sparse_prefix_entries: &constraint.word_group_sparse_prefix_entries,
             quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
             quad_group_dense_masks: &constraint.quad_group_dense_masks,
             byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
             byte_group_dense_masks: &constraint.byte_group_dense_masks,
-            word_group_sparse_total_entries: constraint.word_group_sparse_total_entries,
-            word_group_sparse_max_entries: constraint.word_group_sparse_max_entries,
-            all_tokens_buf_mask: &constraint.all_tokens_buf_mask,
-            total_internal_buf_cost: constraint.total_internal_buf_cost,
-            heavy_token_indices: &constraint.heavy_token_indices,
-            heavy_total_cost: constraint.heavy_total_cost,
-            light_avg_cost_x256: constraint.light_avg_cost_x256,
-            internal_token_buf_op_costs: &constraint.internal_token_buf_op_costs,
-            word_group_buf_op_costs: &constraint.word_group_buf_op_costs,
         },
     )
     .expect("token-mask cache serialization should succeed");
-    if constraint
-        .word_group_prefix_buf_masks
-        .iter()
-        .any(|row| row.len() != mask_words)
-    {
-        return Vec::new();
-    }
-    if 16usize
+    let tail_ms = tail_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
+    let word_entries_bytes = word_entries.saturating_mul(6);
+    let total_len = HEADER_LEN
         .saturating_add(tail.len())
-        .saturating_add(prefix_bytes)
-        > MAX_CACHE_BYTES
-    {
+        .saturating_add(word_offsets_bytes)
+        .saturating_add(word_entries_bytes)
+        .saturating_add(prefix_bytes);
+    if total_len > MAX_CACHE_BYTES {
         return encode_word_sparse_token_mask_cache(constraint);
     }
-    let mut out = Vec::with_capacity(
-        16usize
-            .saturating_add(tail.len())
-            .saturating_add(prefix_rows.saturating_mul(mask_words).saturating_mul(4)),
-    );
+    let prefix_started = profile.then(std::time::Instant::now);
+    let mut out = Vec::with_capacity(total_len);
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(
-        &u32::try_from(tail.len())
-            .expect("token-mask cache tail fits u32")
-            .to_le_bytes(),
-    );
-    out.extend_from_slice(
-        &u32::try_from(mask_words)
-            .expect("token-mask width fits u32")
-            .to_le_bytes(),
-    );
-    out.extend_from_slice(
-        &u32::try_from(prefix_rows)
-            .expect("token-mask prefix row count fits u32")
-            .to_le_bytes(),
-    );
+    for value in [tail.len(), mask_words, word_groups, word_entries, prefix_rows] {
+        out.extend_from_slice(
+            &u32::try_from(value)
+                .expect("token-mask cache dimension fits u32")
+                .to_le_bytes(),
+        );
+    }
     out.extend_from_slice(&tail);
+    let mut end = 0u32;
+    out.extend_from_slice(&end.to_le_bytes());
+    for group in &constraint.word_group_sparse_masks {
+        end = end.saturating_add(group.len() as u32);
+        out.extend_from_slice(&end.to_le_bytes());
+    }
+    for group in &constraint.word_group_sparse_masks {
+        for &(word, bits) in group {
+            out.extend_from_slice(&word.to_le_bytes());
+            out.extend_from_slice(&bits.to_le_bytes());
+        }
+    }
     for row in &constraint.word_group_prefix_buf_masks {
         append_cache_u32s(&mut out, row);
+    }
+    debug_assert_eq!(out.len(), total_len);
+    if let Some(started) = prefix_started {
+        eprintln!(
+            "[glrmask/profile][token_mask_cache_encode] tail_ms={tail_ms:.3} body_ms={:.3} tail_bytes={} word_sparse_bytes={} prefix_bytes={} total_bytes={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            tail.len(),
+            word_offsets_bytes + word_entries_bytes,
+            prefix_bytes,
+            out.len(),
+        );
     }
     out
 }
@@ -427,6 +476,107 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
     const HEADER_LEN: usize = 16;
     if input.starts_with(b"TWS1") {
         return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
+    }
+    if input.starts_with(b"TMC4") {
+        const FAST_HEADER_LEN: usize = 24;
+        if input.len() < FAST_HEADER_LEN {
+            return Err("invalid fast token-mask cache header".to_owned());
+        }
+        let read = |offset: usize| {
+            u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap()) as usize
+        };
+        let tail_len = read(4);
+        let mask_words = read(8);
+        let word_groups = read(12);
+        let word_entries = read(16);
+        let prefix_rows = read(20);
+        if prefix_rows != word_groups.saturating_add(1) {
+            return Err("fast token-mask prefix row count mismatch".to_owned());
+        }
+        let tail_end = FAST_HEADER_LEN
+            .checked_add(tail_len)
+            .ok_or_else(|| "fast token-mask cache tail overflow".to_owned())?;
+        let offsets_bytes = (word_groups + 1)
+            .checked_mul(4)
+            .ok_or_else(|| "fast token-mask sparse offsets overflow".to_owned())?;
+        let entries_bytes = word_entries
+            .checked_mul(6)
+            .ok_or_else(|| "fast token-mask sparse entries overflow".to_owned())?;
+        let prefix_bytes = prefix_rows
+            .checked_mul(mask_words)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| "fast token-mask prefix bytes overflow".to_owned())?;
+        let expected = tail_end
+            .checked_add(offsets_bytes)
+            .and_then(|n| n.checked_add(entries_bytes))
+            .and_then(|n| n.checked_add(prefix_bytes))
+            .ok_or_else(|| "fast token-mask cache length overflow".to_owned())?;
+        if expected != input.len() {
+            return Err("invalid fast token-mask cache length".to_owned());
+        }
+        let offsets_start = tail_end;
+        let entries_start = offsets_start + offsets_bytes;
+        let prefix_start = entries_start + entries_bytes;
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let tail_started = profile.then(std::time::Instant::now);
+        let irregular = bincode::deserialize::<TokenMaskCacheIrregular>(
+            input
+                .get(FAST_HEADER_LEN..tail_end)
+                .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?,
+        )
+        .map_err(|err| err.to_string())?;
+        let tail_ms = tail_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let body_started = profile.then(std::time::Instant::now);
+        let mut offsets = Vec::<u32>::with_capacity(word_groups + 1);
+        for bytes in input[offsets_start..entries_start].chunks_exact(4) {
+            offsets.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        if offsets.first().copied() != Some(0)
+            || offsets.last().copied() != Some(word_entries as u32)
+            || offsets.windows(2).any(|pair| pair[0] > pair[1])
+        {
+            return Err("invalid fast token-mask sparse offsets".to_owned());
+        }
+        let entries = &input[entries_start..prefix_start];
+        let mut word_group_sparse_masks = Vec::with_capacity(word_groups);
+        for group in 0..word_groups {
+            let start = offsets[group] as usize;
+            let end = offsets[group + 1] as usize;
+            let mut decoded = Vec::with_capacity(end - start);
+            for entry in start..end {
+                let pos = entry * 6;
+                let word = u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap());
+                if word as usize >= mask_words {
+                    return Err("fast token-mask sparse word out of range".to_owned());
+                }
+                decoded.push((
+                    word,
+                    u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
+                ));
+            }
+            word_group_sparse_masks.push(decoded);
+        }
+        let mut pos = prefix_start;
+        let mut word_group_prefix_buf_masks = Vec::with_capacity(prefix_rows);
+        for _ in 0..prefix_rows {
+            word_group_prefix_buf_masks.push(decode_cache_u32_row(input, &mut pos, mask_words)?);
+        }
+        debug_assert_eq!(pos, input.len());
+        if let Some(started) = body_started {
+            eprintln!(
+                "[glrmask/profile][token_mask_cache_decode] tail_ms={tail_ms:.3} body_ms={:.3} tail_bytes={} word_sparse_bytes={} prefix_bytes={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                tail_len,
+                offsets_bytes + entries_bytes,
+                prefix_bytes,
+            );
+        }
+        return Ok(TokenMaskCacheArtifact::Fast {
+            irregular,
+            word_group_sparse_masks,
+            word_group_prefix_buf_masks,
+        });
     }
     if input.len() < HEADER_LEN || !input.starts_with(MAGIC) {
         return Err("invalid token-mask cache header".to_owned());
@@ -440,12 +590,17 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
     let tail_end = HEADER_LEN
         .checked_add(tail_len)
         .ok_or_else(|| "token-mask cache tail overflow".to_owned())?;
+    let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+    let tail_started = profile.then(std::time::Instant::now);
     let tail = bincode::deserialize::<TokenMaskCacheTail>(
         input
             .get(HEADER_LEN..tail_end)
             .ok_or_else(|| "truncated token-mask cache tail".to_owned())?,
     )
     .map_err(|err| err.to_string())?;
+    let tail_ms = tail_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let prefix_started = profile.then(std::time::Instant::now);
     let mut pos = tail_end;
     let mut word_group_prefix_buf_masks = Vec::with_capacity(prefix_rows);
     for _ in 0..prefix_rows {
@@ -453,6 +608,14 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
     }
     if pos != input.len() {
         return Err("trailing bytes in token-mask cache".to_owned());
+    }
+    if let Some(started) = prefix_started {
+        eprintln!(
+            "[glrmask/profile][token_mask_cache_decode] tail_ms={tail_ms:.3} prefix_ms={:.3} tail_bytes={} prefix_bytes={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            tail_len,
+            input.len().saturating_sub(tail_end),
+        );
     }
     Ok(TokenMaskCacheArtifact::Full {
         tail,
@@ -464,50 +627,72 @@ fn install_token_mask_cache(
     constraint: &mut Constraint,
     cache: TokenMaskCacheArtifact,
 ) -> Result<(), String> {
-    let TokenMaskCacheArtifact::Full {
-        tail: cache,
-        word_group_prefix_buf_masks,
-    } = cache
-    else {
-        let TokenMaskCacheArtifact::WordSparse(groups) = cache else {
-            unreachable!();
-        };
-        constraint.word_group_sparse_masks = groups;
-        return Ok(());
-    };
-    constraint.table.guarded_shift_index = cache.guarded_shift_index;
-    constraint.seed_terminal_dense = cache.seed_terminal_dense;
-    constraint.seed_universe_dense = cache.seed_universe_dense.into();
-    constraint.word_group_sparse_masks = cache.word_group_sparse_masks;
-    constraint.word_group_prefix_buf_masks = word_group_prefix_buf_masks;
-    constraint.word_group_sparse_prefix_entries = cache.word_group_sparse_prefix_entries;
-    constraint.quad_group_sparse_masks = cache.quad_group_sparse_masks;
-    constraint.quad_group_dense_masks = cache.quad_group_dense_masks;
-    constraint.byte_group_sparse_masks = cache.byte_group_sparse_masks;
-    constraint.byte_group_dense_masks = cache.byte_group_dense_masks;
-    constraint.word_group_sparse_total_entries = cache.word_group_sparse_total_entries;
-    constraint.word_group_sparse_max_entries = cache.word_group_sparse_max_entries;
-    constraint.all_tokens_buf_mask = cache.all_tokens_buf_mask;
-    constraint.total_internal_buf_cost = cache.total_internal_buf_cost;
-    constraint.heavy_token_indices = cache.heavy_token_indices;
-    constraint.heavy_total_cost = cache.heavy_total_cost;
-    constraint.light_avg_cost_x256 = cache.light_avg_cost_x256;
-    constraint.internal_token_buf_op_costs = cache.internal_token_buf_op_costs;
-    constraint.word_group_buf_op_costs = cache.word_group_buf_op_costs;
-    constraint.rebuild_heavy_and_sliding_token_mask_caches();
-    let rebuilt_heavy_indices = constraint
-        .heavy_token_dense_masks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, mask)| mask.is_some().then_some(index))
-        .collect::<Vec<_>>();
-    if rebuilt_heavy_indices != constraint.heavy_token_indices {
-        return Err("token-mask cache heavy-token index mismatch".to_owned());
-    }
-    if constraint.token_mask_caches_ready() {
-        Ok(())
-    } else {
-        Err("token-mask cache section does not match constraint dimensions".to_owned())
+    match cache {
+        TokenMaskCacheArtifact::WordSparse(groups) => {
+            constraint.word_group_sparse_masks = groups;
+            Ok(())
+        }
+        TokenMaskCacheArtifact::Fast {
+            irregular,
+            word_group_sparse_masks,
+            word_group_prefix_buf_masks,
+        } => {
+            constraint.table.guarded_shift_index = irregular.guarded_shift_index;
+            constraint.seed_terminal_dense = irregular.seed_terminal_dense;
+            constraint.seed_universe_dense = irregular.seed_universe_dense.into();
+            constraint.word_group_sparse_masks = word_group_sparse_masks;
+            constraint.word_group_prefix_buf_masks = word_group_prefix_buf_masks;
+            constraint.quad_group_sparse_masks = irregular.quad_group_sparse_masks;
+            constraint.quad_group_dense_masks = irregular.quad_group_dense_masks;
+            constraint.byte_group_sparse_masks = irregular.byte_group_sparse_masks;
+            constraint.byte_group_dense_masks = irregular.byte_group_dense_masks;
+            constraint.rebuild_heavy_and_sliding_token_mask_caches();
+            constraint.rebuild_token_mask_cache_stats();
+            if constraint.token_mask_caches_ready() {
+                Ok(())
+            } else {
+                Err("fast token-mask cache section does not match constraint dimensions".to_owned())
+            }
+        }
+        TokenMaskCacheArtifact::Full {
+            tail: cache,
+            word_group_prefix_buf_masks,
+        } => {
+            constraint.table.guarded_shift_index = cache.guarded_shift_index;
+            constraint.seed_terminal_dense = cache.seed_terminal_dense;
+            constraint.seed_universe_dense = cache.seed_universe_dense.into();
+            constraint.word_group_sparse_masks = cache.word_group_sparse_masks;
+            constraint.word_group_prefix_buf_masks = word_group_prefix_buf_masks;
+            constraint.word_group_sparse_prefix_entries = cache.word_group_sparse_prefix_entries;
+            constraint.quad_group_sparse_masks = cache.quad_group_sparse_masks;
+            constraint.quad_group_dense_masks = cache.quad_group_dense_masks;
+            constraint.byte_group_sparse_masks = cache.byte_group_sparse_masks;
+            constraint.byte_group_dense_masks = cache.byte_group_dense_masks;
+            constraint.word_group_sparse_total_entries = cache.word_group_sparse_total_entries;
+            constraint.word_group_sparse_max_entries = cache.word_group_sparse_max_entries;
+            constraint.all_tokens_buf_mask = cache.all_tokens_buf_mask;
+            constraint.total_internal_buf_cost = cache.total_internal_buf_cost;
+            constraint.heavy_token_indices = cache.heavy_token_indices;
+            constraint.heavy_total_cost = cache.heavy_total_cost;
+            constraint.light_avg_cost_x256 = cache.light_avg_cost_x256;
+            constraint.internal_token_buf_op_costs = cache.internal_token_buf_op_costs;
+            constraint.word_group_buf_op_costs = cache.word_group_buf_op_costs;
+            constraint.rebuild_heavy_and_sliding_token_mask_caches();
+            let rebuilt_heavy_indices = constraint
+                .heavy_token_dense_masks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mask)| mask.is_some().then_some(index))
+                .collect::<Vec<_>>();
+            if rebuilt_heavy_indices != constraint.heavy_token_indices {
+                return Err("token-mask cache heavy-token index mismatch".to_owned());
+            }
+            if constraint.token_mask_caches_ready() {
+                Ok(())
+            } else {
+                Err("token-mask cache section does not match constraint dimensions".to_owned())
+            }
+        }
     }
 }
 
@@ -1141,6 +1326,19 @@ impl Constraint {
             );
         }
         let total_started = profile.then(std::time::Instant::now);
+        const PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES: usize = 1024 * 1024;
+        let packed_dwa_wire_len = self
+            .packed_parser_dwa
+            .as_ref()
+            .and_then(|packed| packed.fast_wire_len());
+        let parallel_assembly_candidate = self.packed_parser_dwa.is_none()
+            || packed_dwa_wire_len
+                .is_some_and(|len| len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES);
+        const DIRECT_TOKENIZER_MIN_BYTES: usize = 400 * 1024;
+        let direct_tokenizer_len = parallel_assembly_candidate
+            .then(|| crate::automata::lexer::tokenizer::artifact_serde::fast_len(&self.tokenizer))
+            .flatten()
+            .filter(|&len| len >= DIRECT_TOKENIZER_MIN_BYTES);
         let ((token_bytes, (original_token_map, (tokenizer, internal_token_buf_masks))), ((weight_pool, core), (dwa, table, runtime, token_mask_cache))) = rayon::join(
             || rayon::join(
                 || {
@@ -1173,14 +1371,18 @@ impl Constraint {
                     || rayon::join(
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(
-                                &self.tokenizer,
-                            );
+                            let bytes = if direct_tokenizer_len.is_some() {
+                                Vec::new()
+                            } else {
+                                crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(
+                                    &self.tokenizer,
+                                )
+                            };
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=tokenizer ms={:.3} bytes={}",
                                     started.elapsed().as_secs_f64() * 1000.0,
-                                    bytes.len(),
+                                    direct_tokenizer_len.unwrap_or(bytes.len()),
                                 );
                             }
                             bytes
@@ -1409,6 +1611,22 @@ impl Constraint {
             .as_ref()
             .and_then(|packed| packed.fast_wire_len())
             .unwrap_or(dwa.len());
+        // For ordinary constraints, materializing the small packed-DWA section
+        // is much cheaper than serially copying the entire multi-megabyte
+        // artifact after every independent serializer has finished.  Once all
+        // sections are ordinary byte slices, copy them into disjoint final
+        // ranges in parallel. Large JS-like DWAs keep direct emission below to
+        // avoid creating a second 10+ MiB DWA buffer.
+        let packed_dwa_for_parallel = self
+            .packed_parser_dwa
+            .as_ref()
+            .filter(|_| dwa_wire_len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES)
+            .map(|packed| packed.fast_wire_bytes());
+        let parallel_dwa = packed_dwa_for_parallel
+            .as_deref()
+            .or_else(|| self.packed_parser_dwa.is_none().then_some(dwa.as_slice()));
+        let tokenizer_wire_len = direct_tokenizer_len.unwrap_or(tokenizer.len());
+        let assemble_started = profile.then(std::time::Instant::now);
         let payload_len = V19_SECTION_HEADER_LEN
             + weight_pool.len()
             + dwa_wire_len
@@ -1417,9 +1635,136 @@ impl Constraint {
             + runtime.len()
             + token_bytes.len()
             + original_token_map.len()
-            + tokenizer.len()
+            + tokenizer_wire_len
             + internal_token_buf_masks.len()
             + token_mask_cache.len();
+        if let Some(dwa_bytes) = parallel_dwa {
+            debug_assert_eq!(dwa_bytes.len(), dwa_wire_len);
+            let total_len = CONSTRAINT_HEADER_LEN + payload_len;
+            let mut bytes = Vec::<u8>::with_capacity(total_len);
+            // SAFETY: every byte in the allocation is initialized below before
+            // the Vec is observed or returned. The section destinations are
+            // disjoint slices split from this one allocation and are each
+            // written exactly once.
+            unsafe {
+                bytes.set_len(total_len);
+            }
+            let header_len = CONSTRAINT_HEADER_LEN + V19_SECTION_HEADER_LEN;
+            let (header, mut body) = bytes.split_at_mut(header_len);
+            let mut pos = 0usize;
+            header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
+            pos += CONSTRAINT_MAGIC.len();
+            header[pos..pos + 2].copy_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
+            pos += 2;
+            header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
+            pos += 8;
+            header[pos..pos + V19_SECTION_MAGIC.len()].copy_from_slice(&V19_SECTION_MAGIC);
+            pos += V19_SECTION_MAGIC.len();
+            for len in [
+                weight_pool.len(),
+                dwa_bytes.len(),
+                table.len(),
+                core.len(),
+                runtime.len(),
+                token_bytes.len(),
+                original_token_map.len(),
+                tokenizer_wire_len,
+                internal_token_buf_masks.len(),
+                token_mask_cache.len(),
+            ] {
+                header[pos..pos + 8].copy_from_slice(&(len as u64).to_le_bytes());
+                pos += 8;
+            }
+            debug_assert_eq!(pos, header.len());
+
+            let mut copy_jobs = Vec::<(&mut [u8], &[u8])>::with_capacity(10);
+            let mut direct_tokenizer_destination = None;
+            let sources: [&[u8]; 10] = [
+                weight_pool.as_slice(),
+                dwa_bytes,
+                table.as_slice(),
+                core.as_slice(),
+                runtime.as_slice(),
+                token_bytes.as_slice(),
+                original_token_map.as_slice(),
+                tokenizer.as_slice(),
+                internal_token_buf_masks.as_slice(),
+                token_mask_cache.as_slice(),
+            ];
+            for (index, len) in [
+                weight_pool.len(),
+                dwa_bytes.len(),
+                table.len(),
+                core.len(),
+                runtime.len(),
+                token_bytes.len(),
+                original_token_map.len(),
+                tokenizer_wire_len,
+                internal_token_buf_masks.len(),
+                token_mask_cache.len(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (section, rest) = body.split_at_mut(len);
+                if index == 7 && direct_tokenizer_len.is_some() {
+                    direct_tokenizer_destination = Some(section);
+                } else {
+                    copy_jobs.push((section, sources[index]));
+                }
+                body = rest;
+            }
+            debug_assert!(body.is_empty());
+            if rayon::current_num_threads() > 1 {
+                rayon::scope(|scope| {
+                    for (destination, source) in copy_jobs {
+                        scope.spawn(move |_| destination.copy_from_slice(source));
+                    }
+                    if let Some(destination) = direct_tokenizer_destination {
+                        scope.spawn(|_| {
+                            let started = profile.then(std::time::Instant::now);
+                            crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes(
+                                &self.tokenizer,
+                                destination,
+                            )
+                            .expect("precomputed fast tokenizer layout should match final section");
+                            if let Some(started) = started {
+                                eprintln!(
+                                    "[glrmask/profile][constraint_save_section] name=tokenizer_direct ms={:.3} bytes={}",
+                                    started.elapsed().as_secs_f64() * 1000.0,
+                                    destination.len(),
+                                );
+                            }
+                        });
+                    }
+                });
+            } else {
+                for (destination, source) in copy_jobs {
+                    destination.copy_from_slice(source);
+                }
+                if let Some(destination) = direct_tokenizer_destination {
+                    crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes(
+                        &self.tokenizer,
+                        destination,
+                    )
+                    .expect("precomputed fast tokenizer layout should match final section");
+                }
+            }
+            if let Some(started) = assemble_started {
+                eprintln!(
+                    "[glrmask/profile][constraint_save_assemble] ms={:.3} mode=parallel",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            if let Some(started) = total_started {
+                eprintln!(
+                    "[glrmask/profile][constraint_save] total_ms={:.3} bytes={}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    bytes.len(),
+                );
+            }
+            return bytes;
+        }
         let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload_len);
         bytes.extend_from_slice(&CONSTRAINT_MAGIC);
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
@@ -1434,7 +1779,7 @@ impl Constraint {
         bytes.extend_from_slice(&(runtime.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(token_bytes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(original_token_map.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(tokenizer.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(tokenizer_wire_len as u64).to_le_bytes());
         bytes.extend_from_slice(&(internal_token_buf_masks.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(token_mask_cache.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&weight_pool);
@@ -1461,12 +1806,22 @@ impl Constraint {
         bytes.extend_from_slice(&runtime);
         bytes.extend_from_slice(token_bytes.as_slice());
         bytes.extend_from_slice(&original_token_map);
-        bytes.extend_from_slice(&tokenizer);
+        if direct_tokenizer_len.is_some() {
+            unreachable!("direct tokenizer encoding requires the parallel assembly path");
+        } else {
+            bytes.extend_from_slice(&tokenizer);
+        }
         bytes.extend_from_slice(&internal_token_buf_masks);
         bytes.extend_from_slice(&token_mask_cache);
         let payload_len = bytes.len() - CONSTRAINT_HEADER_LEN;
         bytes[payload_len_offset..payload_len_offset + 8]
             .copy_from_slice(&(payload_len as u64).to_le_bytes());
+        if let Some(started) = assemble_started {
+            eprintln!(
+                "[glrmask/profile][constraint_save_assemble] ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         if let Some(started) = total_started {
             eprintln!(
                 "[glrmask/profile][constraint_save] total_ms={:.3} bytes={}",
@@ -1757,8 +2112,29 @@ impl Constraint {
                                 return Ok(None);
                             };
                             let started = profile.then(std::time::Instant::now);
-                            let result = crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes(section)
-                                .map(Some);
+                            let result = if uses_external_runtime_sections(version) {
+                                let backing = current_backing.as_ref().ok_or_else(|| {
+                                    "current tokenizer has no artifact backing".to_owned()
+                                })?;
+                                let base = backing.as_ptr() as usize;
+                                let section_start = (section.as_ptr() as usize)
+                                    .checked_sub(base)
+                                    .ok_or_else(|| {
+                                        "tokenizer section does not belong to artifact backing"
+                                            .to_owned()
+                                    })?;
+                                crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes_backed(
+                                    section,
+                                    std::sync::Arc::clone(backing),
+                                    section_start,
+                                )
+                                .map(Some)
+                            } else {
+                                crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes(
+                                    section,
+                                )
+                                .map(Some)
+                            };
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_section] name=tokenizer ms={:.3}",

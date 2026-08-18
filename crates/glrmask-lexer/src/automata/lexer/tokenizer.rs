@@ -120,28 +120,131 @@ pub struct Tokenizer {
 #[derive(Debug, Clone)]
 pub struct PackedRuntimeTransitions {
     byte_offsets: Arc<[u32]>,
-    bytes: Arc<[u8]>,
-    target_offsets: Arc<[u32]>,
-    targets: Arc<[u32]>,
+    bytes: PackedRuntimeBytes,
+    targets: PackedRuntimeTargets,
+}
+
+#[derive(Debug, Clone)]
+enum PackedRuntimeBytes {
+    Owned(Arc<[u8]>),
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl PackedRuntimeBytes {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(values) => values,
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PackedRuntimeTargets {
+    U16(Arc<[u16]>),
+    U32(Arc<[u32]>),
+    BackedU16 {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+    BackedU32 {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum PackedRuntimeTargetSlice<'a> {
+    U16(&'a [u16]),
+    U32(&'a [u32]),
+    BackedU16(&'a [u8]),
+    BackedU32(&'a [u8]),
+}
+
+impl PackedRuntimeTargetSlice<'_> {
+    #[inline]
+    fn len(self) -> usize {
+        match self {
+            Self::U16(values) => values.len(),
+            Self::U32(values) => values.len(),
+            Self::BackedU16(bytes) => bytes.len() / 2,
+            Self::BackedU32(bytes) => bytes.len() / 4,
+        }
+    }
+
+    #[inline]
+    fn get(self, index: usize) -> Option<u32> {
+        match self {
+            Self::U16(values) => values.get(index).map(|&value| value as u32),
+            Self::U32(values) => values.get(index).copied(),
+            Self::BackedU16(bytes) => {
+                let start = index.checked_mul(2)?;
+                let pair = bytes.get(start..start + 2)?;
+                Some(u16::from_le_bytes([pair[0], pair[1]]) as u32)
+            }
+            Self::BackedU32(bytes) => {
+                let start = index.checked_mul(4)?;
+                let word = bytes.get(start..start + 4)?;
+                Some(u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            }
+        }
+    }
 }
 
 impl PackedRuntimeTransitions {
     #[inline]
-    fn row(&self, state: u32) -> Option<(&[u8], &[u32])> {
+    fn row(&self, state: u32) -> Option<(&[u8], PackedRuntimeTargetSlice<'_>)> {
         let state = state as usize;
         let byte_start = *self.byte_offsets.get(state)? as usize;
         let byte_end = *self.byte_offsets.get(state + 1)? as usize;
-        let bytes = self.bytes.get(byte_start..byte_end)?;
-        let target_start = *self.target_offsets.get(state)? as usize;
-        let target_end = *self.target_offsets.get(state + 1)? as usize;
-        let targets = self.targets.get(target_start..target_end)?;
+        let bytes = self.bytes.as_slice().get(byte_start..byte_end)?;
+        let targets = match &self.targets {
+            PackedRuntimeTargets::U16(values) => {
+                PackedRuntimeTargetSlice::U16(values.get(byte_start..byte_end)?)
+            }
+            PackedRuntimeTargets::U32(values) => {
+                PackedRuntimeTargetSlice::U32(values.get(byte_start..byte_end)?)
+            }
+            PackedRuntimeTargets::BackedU16 {
+                backing,
+                start,
+                len,
+            } => {
+                let all = backing.get(*start..*start + *len * 2)?;
+                PackedRuntimeTargetSlice::BackedU16(
+                    all.get(byte_start * 2..byte_end * 2)?,
+                )
+            }
+            PackedRuntimeTargets::BackedU32 {
+                backing,
+                start,
+                len,
+            } => {
+                let all = backing.get(*start..*start + *len * 4)?;
+                PackedRuntimeTargetSlice::BackedU32(
+                    all.get(byte_start * 4..byte_end * 4)?,
+                )
+            }
+        };
         (bytes.len() == targets.len()).then_some((bytes, targets))
     }
 
     #[inline]
     fn transition(&self, state: u32, byte: u8) -> Option<u32> {
         let (bytes, targets) = self.row(state)?;
-        bytes.binary_search(&byte).ok().map(|index| targets[index])
+        let index = bytes.binary_search(&byte).ok()?;
+        targets.get(index)
     }
 
     #[inline]
@@ -338,20 +441,21 @@ pub mod artifact_serde {
         })
     }
 
-    /// Runtime-native current-format tokenizer wire. Unlike the older packed
-    /// serializer this does no row hashing and no per-row varint target
-    /// encoding: the compiler already owns the exact DFA, so save is a linear
-    /// fixed-width copy and load reconstructs the existing packed runtime
-    /// transition sidecar directly.
-    pub fn to_fast_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
-        const MAGIC: &[u8; 4] = b"TKF1";
-        let materialized;
-        let dfa = if tokenizer.compressed_transition_segments.is_empty() {
-            &tokenizer.dfa
-        } else {
-            materialized = tokenizer.materialized_dfa();
-            &materialized
-        };
+    #[derive(Clone, Copy)]
+    struct FastLayout {
+        state_count: usize,
+        transition_count: usize,
+        epsilon_count: usize,
+        finalizer_count: usize,
+        future_count: usize,
+        terminal_count: usize,
+        state_id_width: usize,
+        terminal_id_width: usize,
+        len: usize,
+    }
+
+    fn fast_layout(tokenizer: &Tokenizer, dfa: &DFA) -> FastLayout {
+        const HEADER_LEN: usize = 32;
         let states = dfa.states();
         let state_count = states.len();
         let transition_count = states.iter().map(|state| state.transitions.len()).sum::<usize>();
@@ -365,102 +469,229 @@ pub mod artifact_serde {
             .map(|state| state.possible_future_group_ids.iter().count())
             .sum::<usize>();
         let terminal_count = tokenizer.num_terminals as usize;
+        let state_id_width = if state_count <= u16::MAX as usize + 1 {
+            2usize
+        } else {
+            4usize
+        };
+        let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 {
+            2usize
+        } else {
+            4usize
+        };
         let offsets_bytes = (state_count + 1) * 4;
-        let len = 28usize
+        let len = HEADER_LEN
             + terminal_count * 32
             + offsets_bytes + transition_count
-            + transition_count * 4
-            + offsets_bytes + epsilon_count * 4
-            + offsets_bytes + finalizer_count * 4
-            + offsets_bytes + future_count * 4;
-        let mut out = Vec::with_capacity(len);
-        out.extend_from_slice(MAGIC);
+            + transition_count * state_id_width
+            + offsets_bytes + epsilon_count * state_id_width
+            + offsets_bytes + finalizer_count * terminal_id_width
+            + offsets_bytes + future_count * terminal_id_width;
+        FastLayout {
+            state_count,
+            transition_count,
+            epsilon_count,
+            finalizer_count,
+            future_count,
+            terminal_count,
+            state_id_width,
+            terminal_id_width,
+            len,
+        }
+    }
+
+    /// Exact TKF2 wire length without constructing the wire buffer. Returns
+    /// `None` only for the uncommon compressed-segment representation, whose
+    /// exact static wire requires materializing those segments first.
+    pub fn fast_len(tokenizer: &Tokenizer) -> Option<usize> {
+        tokenizer
+            .compressed_transition_segments
+            .is_empty()
+            .then(|| fast_layout(tokenizer, &tokenizer.dfa).len)
+    }
+
+    fn write_fast_bytes_for_dfa(
+        tokenizer: &Tokenizer,
+        dfa: &DFA,
+        out: &mut [u8],
+    ) -> Result<(), String> {
+        let layout = fast_layout(tokenizer, dfa);
+        if out.len() != layout.len {
+            return Err(format!(
+                "fast tokenizer output has length {}, expected {}",
+                out.len(), layout.len
+            ));
+        }
+        let states = dfa.states();
+        let mut pos = 0usize;
+        let put = |out: &mut [u8], pos: &mut usize, bytes: &[u8]| {
+            let end = *pos + bytes.len();
+            out[*pos..end].copy_from_slice(bytes);
+            *pos = end;
+        };
+        let put_u32 = |out: &mut [u8], pos: &mut usize, value: u32| {
+            put(out, pos, &value.to_le_bytes());
+        };
+        let put_id = |out: &mut [u8], pos: &mut usize, value: u32, width: usize| match width {
+            2 => put(out, pos, &(value as u16).to_le_bytes()),
+            4 => put(out, pos, &value.to_le_bytes()),
+            _ => unreachable!(),
+        };
+        let put_offsets =
+            |out: &mut [u8], pos: &mut usize, lengths: &mut dyn Iterator<Item = usize>| {
+                let mut end = 0u32;
+                put_u32(out, pos, end);
+                for len in lengths {
+                    end = end.saturating_add(len as u32);
+                    put_u32(out, pos, end);
+                }
+            };
+
+        put(out, &mut pos, b"TKF2");
         for value in [
             tokenizer.num_terminals,
-            state_count as u32,
-            transition_count as u32,
-            epsilon_count as u32,
-            finalizer_count as u32,
-            future_count as u32,
+            layout.state_count as u32,
+            layout.transition_count as u32,
+            layout.epsilon_count as u32,
+            layout.finalizer_count as u32,
+            layout.future_count as u32,
         ] {
-            out.extend_from_slice(&value.to_le_bytes());
+            put_u32(out, &mut pos, value);
         }
-        for terminal in 0..terminal_count {
+        put(
+            out,
+            &mut pos,
+            &[layout.state_id_width as u8, layout.terminal_id_width as u8, 0, 0],
+        );
+        for terminal in 0..layout.terminal_count {
             for word in dfa.group_id_to_u8set(terminal as u32).to_words() {
-                out.extend_from_slice(&word.to_le_bytes());
+                put(out, &mut pos, &word.to_le_bytes());
             }
         }
-
-        let mut end = 0u32;
-        out.extend_from_slice(&end.to_le_bytes());
+        put_offsets(
+            out,
+            &mut pos,
+            &mut states.iter().map(|state| state.transitions.len()),
+        );
         for state in states {
-            end += state.transitions.len() as u32;
-            out.extend_from_slice(&end.to_le_bytes());
-        }
-        for state in states {
-            out.extend(state.transitions.iter().map(|(byte, _)| byte));
+            for (byte, _) in state.transitions.iter() {
+                out[pos] = byte;
+                pos += 1;
+            }
         }
         for state in states {
             for &target in state.transitions.values() {
-                out.extend_from_slice(&target.to_le_bytes());
+                debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
+                put_id(out, &mut pos, target, layout.state_id_width);
             }
         }
+        put_offsets(
+            out,
+            &mut pos,
+            &mut states.iter().map(|state| state.epsilon_transitions.len()),
+        );
+        for state in states {
+            for &target in &state.epsilon_transitions {
+                debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
+                put_id(out, &mut pos, target, layout.state_id_width);
+            }
+        }
+        put_offsets(
+            out,
+            &mut pos,
+            &mut states.iter().map(|state| state.finalizers.iter().count()),
+        );
+        for state in states {
+            for terminal in state.finalizers.iter() {
+                let terminal = terminal as u32;
+                debug_assert!(layout.terminal_id_width == 4 || terminal <= u16::MAX as u32);
+                put_id(out, &mut pos, terminal, layout.terminal_id_width);
+            }
+        }
+        put_offsets(
+            out,
+            &mut pos,
+            &mut states
+                .iter()
+                .map(|state| state.possible_future_group_ids.iter().count()),
+        );
+        for state in states {
+            for terminal in state.possible_future_group_ids.iter() {
+                let terminal = terminal as u32;
+                debug_assert!(layout.terminal_id_width == 4 || terminal <= u16::MAX as u32);
+                put_id(out, &mut pos, terminal, layout.terminal_id_width);
+            }
+        }
+        debug_assert_eq!(pos, out.len());
+        Ok(())
+    }
 
-        let append_offsets_and_values = |out: &mut Vec<u8>, lengths: Vec<usize>, values: Vec<u32>| {
-            let mut end = 0u32;
-            out.extend_from_slice(&end.to_le_bytes());
-            for len in lengths {
-                end += len as u32;
-                out.extend_from_slice(&end.to_le_bytes());
-            }
-            for value in values {
-                out.extend_from_slice(&value.to_le_bytes());
-            }
+    /// Write TKF2 directly into an exactly-sized destination. Used by the
+    /// constraint serializer to overlap tokenizer encoding with independent
+    /// final-section copies.
+    pub fn write_fast_bytes(tokenizer: &Tokenizer, out: &mut [u8]) -> Result<(), String> {
+        if !tokenizer.compressed_transition_segments.is_empty() {
+            return Err("direct fast tokenizer write requires materialized transitions".to_owned());
+        }
+        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, out)
+    }
+
+    /// Runtime-native current-format tokenizer wire. Unlike the older packed
+    /// serializer this does no row hashing and no per-row varint target
+    /// encoding: the compiler already owns the exact DFA, so save is a linear
+    /// fixed-width copy and load reconstructs the existing packed runtime
+    /// transition sidecar directly.
+    pub fn to_fast_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
+        let materialized;
+        let dfa = if tokenizer.compressed_transition_segments.is_empty() {
+            &tokenizer.dfa
+        } else {
+            materialized = tokenizer.materialized_dfa();
+            &materialized
         };
-        append_offsets_and_values(
-            &mut out,
-            states.iter().map(|state| state.epsilon_transitions.len()).collect(),
-            states
-                .iter()
-                .flat_map(|state| state.epsilon_transitions.iter().copied())
-                .collect(),
-        );
-        append_offsets_and_values(
-            &mut out,
-            states
-                .iter()
-                .map(|state| state.finalizers.iter().count())
-                .collect(),
-            states
-                .iter()
-                .flat_map(|state| state.finalizers.iter().map(|terminal| terminal as u32))
-                .collect(),
-        );
-        append_offsets_and_values(
-            &mut out,
-            states
-                .iter()
-                .map(|state| state.possible_future_group_ids.iter().count())
-                .collect(),
-            states
-                .iter()
-                .flat_map(|state| {
-                    state
-                        .possible_future_group_ids
-                        .iter()
-                        .map(|terminal| terminal as u32)
-                })
-                .collect(),
-        );
-        debug_assert_eq!(out.len(), len);
+        let len = fast_layout(tokenizer, dfa).len;
+        let mut out = Vec::<u8>::with_capacity(len);
+        unsafe {
+            out.set_len(len);
+        }
+        write_fast_bytes_for_dfa(tokenizer, dfa, &mut out)
+            .expect("exact fast tokenizer layout should always write successfully");
         out
     }
 
     pub fn from_fast_bytes(input: &[u8]) -> Result<Tokenizer, String> {
-        const MAGIC: &[u8; 4] = b"TKF1";
+        from_fast_bytes_impl(input, None)
+    }
+
+    /// Decode a current tokenizer section while retaining transition payloads
+    /// directly in the owned constraint artifact. The caller must supply the
+    /// exact byte offset of `input` inside `backing`; this is validated before
+    /// any backed view is installed.
+    pub fn from_fast_bytes_backed(
+        input: &[u8],
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+    ) -> Result<Tokenizer, String> {
+        let section_end = section_start
+            .checked_add(input.len())
+            .ok_or_else(|| "fast tokenizer backing range overflow".to_owned())?;
+        let backed = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "fast tokenizer section is outside artifact backing".to_owned())?;
+        if backed.as_ptr() != input.as_ptr() || backed.len() != input.len() {
+            return Err("fast tokenizer section does not match artifact backing".to_owned());
+        }
+        from_fast_bytes_impl(input, Some((backing, section_start)))
+    }
+
+    fn from_fast_bytes_impl(
+        input: &[u8],
+        backing: Option<(Arc<Vec<u8>>, usize)>,
+    ) -> Result<Tokenizer, String> {
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
-        if input.len() < 28 || !input.starts_with(MAGIC) {
+        let tkf2 = input.starts_with(b"TKF2");
+        if input.len() < 28 || (!tkf2 && !input.starts_with(b"TKF1")) {
             return Err("invalid fast tokenizer header".to_owned());
         }
         let mut pos = 4usize;
@@ -479,6 +710,35 @@ pub mod artifact_serde {
         if state_count == 0 {
             return Err("fast tokenizer has no states".to_owned());
         }
+        let (state_id_width, terminal_id_width) = if tkf2 {
+            let state_width = *input
+                .get(pos)
+                .ok_or_else(|| "truncated fast tokenizer state-id width".to_owned())?
+                as usize;
+            let terminal_width = *input
+                .get(pos + 1)
+                .ok_or_else(|| "truncated fast tokenizer terminal-id width".to_owned())?
+                as usize;
+            let reserved = input
+                .get(pos + 2..pos + 4)
+                .ok_or_else(|| "truncated fast tokenizer width header".to_owned())?;
+            pos += 4;
+            if !matches!(state_width, 2 | 4)
+                || !matches!(terminal_width, 2 | 4)
+                || reserved != [0, 0]
+            {
+                return Err("invalid fast tokenizer id widths".to_owned());
+            }
+            if state_width == 2 && state_count > u16::MAX as usize + 1 {
+                return Err("fast tokenizer u16 state ids cannot address all states".to_owned());
+            }
+            if terminal_width == 2 && num_terminals as usize > u16::MAX as usize + 1 {
+                return Err("fast tokenizer u16 terminal ids cannot address all terminals".to_owned());
+            }
+            (state_width, terminal_width)
+        } else {
+            (4usize, 4usize)
+        };
         let dfa_alloc_started = profile.then(std::time::Instant::now);
         let mut group_id_to_u8set = Vec::with_capacity(num_terminals as usize);
         for _ in 0..num_terminals as usize {
@@ -509,6 +769,47 @@ pub mod artifact_serde {
             *pos = end;
             Ok(out)
         };
+        let read_u16_vec = |input: &[u8], pos: &mut usize, count: usize| -> Result<Vec<u16>, String> {
+            let bytes_len = count
+                .checked_mul(2)
+                .ok_or_else(|| "fast tokenizer u16 vector overflow".to_owned())?;
+            let end = pos
+                .checked_add(bytes_len)
+                .ok_or_else(|| "fast tokenizer offset overflow".to_owned())?;
+            let bytes = input
+                .get(*pos..end)
+                .ok_or_else(|| "truncated fast tokenizer u16 vector".to_owned())?;
+            let mut out = Vec::<u16>::with_capacity(count);
+            if cfg!(target_endian = "little") {
+                unsafe {
+                    out.set_len(count);
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        out.as_mut_ptr().cast::<u8>(),
+                        bytes_len,
+                    );
+                }
+            } else {
+                out.extend(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|b| u16::from_le_bytes(b.try_into().unwrap())),
+                );
+            }
+            *pos = end;
+            Ok(out)
+        };
+        let read_ids_as_u32 =
+            |input: &[u8], pos: &mut usize, count: usize, width: usize| -> Result<Vec<u32>, String> {
+                match width {
+                    2 => Ok(read_u16_vec(input, pos, count)?
+                        .into_iter()
+                        .map(u32::from)
+                        .collect()),
+                    4 => read_u32_vec(input, pos, count),
+                    _ => Err("invalid fast tokenizer id width".to_owned()),
+                }
+            };
         let transitions_started = profile.then(std::time::Instant::now);
         let transition_offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
         if transition_offsets.first().copied() != Some(0)
@@ -517,21 +818,97 @@ pub mod artifact_serde {
         {
             return Err("invalid fast tokenizer transition offsets".to_owned());
         }
-        let transition_bytes_end = pos.checked_add(transition_count).ok_or_else(|| "fast tokenizer offset overflow".to_owned())?;
-        let transition_bytes = input
+        let transition_bytes_start = pos;
+        let transition_bytes_end = pos
+            .checked_add(transition_count)
+            .ok_or_else(|| "fast tokenizer offset overflow".to_owned())?;
+        let transition_bytes_slice = input
             .get(pos..transition_bytes_end)
-            .ok_or_else(|| "truncated fast tokenizer transition bytes".to_owned())?
-            .to_vec();
+            .ok_or_else(|| "truncated fast tokenizer transition bytes".to_owned())?;
+        let transition_bytes = if let Some((artifact, section_start)) = &backing {
+            PackedRuntimeBytes::Backed {
+                backing: Arc::clone(artifact),
+                start: section_start + transition_bytes_start,
+                len: transition_count,
+            }
+        } else {
+            PackedRuntimeBytes::Owned(Arc::from(transition_bytes_slice))
+        };
         pos = transition_bytes_end;
-        let transition_targets = read_u32_vec(input, &mut pos, transition_count)?;
-        if transition_targets.iter().any(|&target| target as usize >= state_count) {
-            return Err("fast tokenizer transition target out of range".to_owned());
-        }
+        let transition_targets = match state_id_width {
+            2 => {
+                let bytes_len = transition_count
+                    .checked_mul(2)
+                    .ok_or_else(|| "fast tokenizer target vector overflow".to_owned())?;
+                let start = pos;
+                let end = pos
+                    .checked_add(bytes_len)
+                    .ok_or_else(|| "fast tokenizer target offset overflow".to_owned())?;
+                let bytes = input
+                    .get(start..end)
+                    .ok_or_else(|| "truncated fast tokenizer targets".to_owned())?;
+                if bytes.chunks_exact(2).any(|word| {
+                    u16::from_le_bytes([word[0], word[1]]) as usize >= state_count
+                }) {
+                    return Err("fast tokenizer transition target out of range".to_owned());
+                }
+                pos = end;
+                if let Some((artifact, section_start)) = &backing {
+                    PackedRuntimeTargets::BackedU16 {
+                        backing: Arc::clone(artifact),
+                        start: section_start + start,
+                        len: transition_count,
+                    }
+                } else {
+                    let mut targets = Vec::with_capacity(transition_count);
+                    targets.extend(
+                        bytes
+                            .chunks_exact(2)
+                            .map(|word| u16::from_le_bytes([word[0], word[1]])),
+                    );
+                    PackedRuntimeTargets::U16(Arc::from(targets.into_boxed_slice()))
+                }
+            }
+            4 => {
+                let bytes_len = transition_count
+                    .checked_mul(4)
+                    .ok_or_else(|| "fast tokenizer target vector overflow".to_owned())?;
+                let start = pos;
+                let end = pos
+                    .checked_add(bytes_len)
+                    .ok_or_else(|| "fast tokenizer target offset overflow".to_owned())?;
+                let bytes = input
+                    .get(start..end)
+                    .ok_or_else(|| "truncated fast tokenizer targets".to_owned())?;
+                if bytes.chunks_exact(4).any(|word| {
+                    u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize
+                        >= state_count
+                }) {
+                    return Err("fast tokenizer transition target out of range".to_owned());
+                }
+                pos = end;
+                if let Some((artifact, section_start)) = &backing {
+                    PackedRuntimeTargets::BackedU32 {
+                        backing: Arc::clone(artifact),
+                        start: section_start + start,
+                        len: transition_count,
+                    }
+                } else {
+                    let mut targets = Vec::with_capacity(transition_count);
+                    targets.extend(bytes.chunks_exact(4).map(|word| {
+                        u32::from_le_bytes([word[0], word[1], word[2], word[3]])
+                    }));
+                    PackedRuntimeTargets::U32(Arc::from(targets.into_boxed_slice()))
+                }
+            }
+            _ => return Err("invalid fast tokenizer state-id width".to_owned()),
+        };
         let transitions_ms = transitions_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let metadata_wire_started = profile.then(std::time::Instant::now);
-        let mut read_state_values = |count: usize| -> Result<(Vec<u32>, Vec<u32>), String> {
+        let mut read_state_values =
+            |count: usize, width: usize| -> Result<(Vec<u32>, Vec<u32>), String> {
             let offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
             if offsets.first().copied() != Some(0)
                 || offsets.last().copied() != Some(count as u32)
@@ -539,12 +916,13 @@ pub mod artifact_serde {
             {
                 return Err("invalid fast tokenizer metadata offsets".to_owned());
             }
-            let values = read_u32_vec(input, &mut pos, count)?;
+            let values = read_ids_as_u32(input, &mut pos, count, width)?;
             Ok((offsets, values))
         };
-        let (epsilon_offsets, epsilon_targets) = read_state_values(epsilon_count)?;
-        let (finalizer_offsets, finalizers) = read_state_values(finalizer_count)?;
-        let (future_offsets, futures) = read_state_values(future_count)?;
+        let (epsilon_offsets, epsilon_targets) = read_state_values(epsilon_count, state_id_width)?;
+        let (finalizer_offsets, finalizers) =
+            read_state_values(finalizer_count, terminal_id_width)?;
+        let (future_offsets, futures) = read_state_values(future_count, terminal_id_width)?;
         let metadata_wire_ms = metadata_wire_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if pos != input.len() {
@@ -588,10 +966,9 @@ pub mod artifact_serde {
             dfa,
             num_terminals,
             packed_runtime_transitions: Some(Arc::new(PackedRuntimeTransitions {
-                byte_offsets: Arc::from(transition_offsets.clone().into_boxed_slice()),
-                bytes: Arc::from(transition_bytes.into_boxed_slice()),
-                target_offsets: Arc::from(transition_offsets.into_boxed_slice()),
-                targets: Arc::from(transition_targets.into_boxed_slice()),
+                byte_offsets: Arc::from(transition_offsets.into_boxed_slice()),
+                bytes: transition_bytes,
+                targets: transition_targets,
             })),
             compressed_transition_segments: Arc::from([]),
             exprs: None,
@@ -1383,9 +1760,8 @@ mod packed_artifact_serde {
         }
         let packed_runtime_transitions = Arc::new(PackedRuntimeTransitions {
             byte_offsets: Arc::from(runtime_byte_offsets.into_boxed_slice()),
-            bytes: Arc::from(runtime_bytes.into_boxed_slice()),
-            target_offsets: Arc::from(runtime_target_offsets.into_boxed_slice()),
-            targets: Arc::from(runtime_targets.into_boxed_slice()),
+            bytes: PackedRuntimeBytes::Owned(Arc::from(runtime_bytes.into_boxed_slice())),
+            targets: PackedRuntimeTargets::U32(Arc::from(runtime_targets.into_boxed_slice())),
         });
         let dfa_ms = dfa_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
@@ -1516,7 +1892,7 @@ enum TokenizerTransitionsIterInner<'a> {
     Dense(crate::ds::char_transitions::CharTransitionsIter<'a, u32>),
     Packed {
         bytes: &'a [u8],
-        targets: &'a [u32],
+        targets: PackedRuntimeTargetSlice<'a>,
         next: usize,
     },
     Compressed {
@@ -1546,7 +1922,7 @@ impl Iterator for TokenizerTransitionsIter<'_> {
             } => {
                 let index = *next;
                 let byte = *bytes.get(index)?;
-                let target = *targets.get(index)?;
+                let target = targets.get(index)?;
                 *next += 1;
                 Some((byte, target))
             }
@@ -2732,7 +3108,15 @@ impl Tokenizer {
                         bytes
                             .iter()
                             .copied()
-                            .zip(targets.iter().copied())
+                            .enumerate()
+                            .map(|(index, byte)| {
+                                (
+                                    byte,
+                                    targets
+                                        .get(index)
+                                        .expect("packed tokenizer row lengths were validated"),
+                                )
+                            })
                             .collect(),
                     );
                 }
