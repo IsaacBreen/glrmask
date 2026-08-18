@@ -7321,30 +7321,30 @@ fn rebuild_transported_component_templates(
         if !selected.iter().any(|&value| value) {
             continue;
         }
-        let cache_covers_selection = component.composition_parser_templates_by_terminal.len()
-            == component.table.num_terminals as usize
-            && selected.iter().enumerate().all(|(local, &is_selected)| {
-                !is_selected
-                    || component.composition_parser_templates_by_terminal[local].is_some()
-            });
-        if cache_covers_selection {
-            for (local_terminal, &is_selected) in selected.iter().enumerate() {
-                if !is_selected {
-                    continue;
-                }
-                let old_template = component.composition_parser_templates_by_terminal
-                    [local_terminal]
-                    .as_ref()
-                    .expect("selected composition parser template cache entry exists")
-                    .clone();
-                let global_terminal = terminal_offset + local_terminal as u32;
-                if let Some(transported) = transport_composition_template_dfa(
-                    old_template,
-                    &composed_table.state_relations[component_index],
-                ) {
-                    result.insert(global_terminal, transported);
-                }
+        let mut missing = vec![false; selected.len()];
+        for (local_terminal, &is_selected) in selected.iter().enumerate() {
+            if !is_selected {
+                continue;
             }
+            let cached = component
+                .composition_parser_templates_by_terminal
+                .get(local_terminal)
+                .and_then(Option::as_ref);
+            let Some(cached) = cached else {
+                missing[local_terminal] = true;
+                continue;
+            };
+            let global_terminal = terminal_offset + local_terminal as u32;
+            if let Some(transported) = transport_composition_template_dfa(
+                cached.clone(),
+                &composed_table.state_relations[component_index],
+            ) {
+                result.insert(global_terminal, transported);
+            } else {
+                missing[local_terminal] = true;
+            }
+        }
+        if !missing.iter().any(|&value| value) {
             continue;
         }
         let Some(augmented_start) = component.table.rules.first().map(|rule| rule.lhs) else {
@@ -7357,7 +7357,7 @@ fn rebuild_transported_component_templates(
             component.table.nonterminal_display_names.clone(),
             augmented_start,
         );
-        let characterizations = characterize_selected_terminals(&component.table, &analyzed, &selected);
+        let characterizations = characterize_selected_terminals(&component.table, &analyzed, &missing);
         let templates = Templates::from_characterizations(&characterizations);
         for (local_terminal, old_template) in templates.by_terminal {
             let global_terminal = terminal_offset + local_terminal;
