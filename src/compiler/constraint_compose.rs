@@ -8234,21 +8234,52 @@ fn build_composition_templates(
 /// states and new boundary-nonterminal goto predecessors are additive and can
 /// therefore be characterized independently, unioned into the cached parent
 /// characterization, and recompiled only for genuinely changed terminals.
-fn try_build_cached_composition_templates(
+struct CachedCompositionTemplatePlan {
+    reused_dfas: BTreeMap<u32, UnweightedDfa>,
+    patched_characterizations: BTreeMap<
+        u32,
+        crate::compiler::stages::templates::characterize::TerminalCharacterization,
+    >,
+    fresh_characterizations: BTreeMap<
+        u32,
+        crate::compiler::stages::templates::characterize::TerminalCharacterization,
+    >,
+    num_terminals: usize,
+}
+
+impl CachedCompositionTemplatePlan {
+    fn materialize(self) -> Templates {
+        let mut templates = Templates::from_terminal_dfas(self.reused_dfas);
+        let patched = Templates::from_characterizations(&self.patched_characterizations);
+        templates.by_terminal.extend(patched.by_terminal);
+        templates.by_terminal_nwa.extend(patched.by_terminal_nwa);
+        let fresh = Templates::from_characterizations(&self.fresh_characterizations);
+        templates.by_terminal.extend(fresh.by_terminal);
+        templates.by_terminal_nwa.extend(fresh.by_terminal_nwa);
+        templates
+    }
+
+    fn raw_template_cache(templates: &Templates, num_terminals: usize) -> Vec<Option<UnweightedDfa>> {
+        let mut raw = vec![None; num_terminals];
+        for (&terminal, dfa) in &templates.by_terminal {
+            if let Some(slot) = raw.get_mut(terminal as usize) {
+                *slot = Some(dfa.clone());
+            }
+        }
+        raw
+    }
+}
+
+fn try_prepare_cached_composition_template_plan(
     composed_table: &ComposedTable,
     components: &[&Constraint],
     analyzed: &AnalyzedGrammar,
     selected: &[bool],
     scoped_ignore_terminals: &BitSet,
-) -> Option<(
-    Templates,
-    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
-    f64,
-)> {
+) -> Option<CachedCompositionTemplatePlan> {
     if std::env::var_os("GLRMASK_DISABLE_CACHED_BOUNDARY_TEMPLATES").is_some() {
         return None;
     }
-    let started_at = Instant::now();
     let parent = *components.first()?;
     let parent_relation = composed_table.state_relations.first()?;
     if parent_relation
@@ -8280,15 +8311,9 @@ fn try_build_cached_composition_templates(
             .composition_parser_characterizations_by_terminal
             .get(terminal as usize)
             .and_then(Option::as_ref)?;
-
-        // Existing parent states must retain exactly their old behavior.  The
-        // fast path handles additive effects only; any rewrite falls back.
         for state in 0..parent.table.num_states {
             if composed_table.table.action(state, terminal) != parent.table.action(state, terminal)
-                || composed_table
-                    .table
-                    .forwarded_shifts
-                    .contains(&(state, terminal))
+                || composed_table.table.forwarded_shifts.contains(&(state, terminal))
                     != parent.table.forwarded_shifts.contains(&(state, terminal))
             {
                 return None;
@@ -8296,12 +8321,7 @@ fn try_build_cached_composition_templates(
         }
         for state in parent.table.num_states..composed_table.table.num_states {
             let action = composed_table.table.action(state, terminal);
-            let forwarded = composed_table
-                .table
-                .forwarded_shifts
-                .contains(&(state, terminal));
-            // The seeded characterization helper is action-driven; a new
-            // forwarded-only observation needs the generic fallback.
+            let forwarded = composed_table.table.forwarded_shifts.contains(&(state, terminal));
             if forwarded && action.is_none() {
                 return None;
             }
@@ -8310,7 +8330,6 @@ fn try_build_cached_composition_templates(
             }
         }
     }
-
     let action_deltas = crate::compiler::stages::templates::characterize::
         characterize_terminal_action_state_seeds(&composed_table.table, analyzed, &action_seeds);
 
@@ -8393,8 +8412,6 @@ fn try_build_cached_composition_templates(
             reuse_selected[terminal] = false;
         }
     }
-    // Scoped child ignores and internal control terminals are not ordinary
-    // transported child behavior; characterize them in composed coordinates.
     let mut fresh_selected = vec![false; selected.len()];
     for terminal in scoped_ignore_terminals.iter() {
         if terminal < selected.len() && selected[terminal] {
@@ -8409,68 +8426,76 @@ fn try_build_cached_composition_templates(
         }
     }
 
-    let dfas = rebuild_transported_component_templates(
+    let reused_dfas = rebuild_transported_component_templates(
         composed_table,
         components,
         &reuse_selected,
     );
-    let patched_templates = Templates::from_characterizations(&patched_characterizations);
-
-    // If transport could not represent an otherwise unchanged child template,
-    // characterize only that terminal in the composed table.
     for (terminal, &active) in selected.iter().enumerate() {
         if active
             && !changed_parent[terminal]
-            && !dfas.contains_key(&(terminal as u32))
+            && !reused_dfas.contains_key(&(terminal as u32))
         {
             fresh_selected[terminal] = true;
         }
     }
-    let fresh_templates = if fresh_selected.iter().any(|&fresh| fresh) {
-        let fresh_characterizations =
-            characterize_selected_terminals(&composed_table.table, analyzed, &fresh_selected);
-        Templates::from_characterizations(&fresh_characterizations)
+    let fresh_characterizations = if fresh_selected.iter().any(|&fresh| fresh) {
+        characterize_selected_terminals(&composed_table.table, analyzed, &fresh_selected)
     } else {
-        Templates::default()
+        BTreeMap::new()
     };
     if selected.iter().enumerate().any(|(terminal, &active)| {
         active
-            && !dfas.contains_key(&(terminal as u32))
-            && !patched_templates.by_terminal.contains_key(&(terminal as u32))
-            && !fresh_templates.by_terminal.contains_key(&(terminal as u32))
+            && !reused_dfas.contains_key(&(terminal as u32))
+            && !patched_characterizations.contains_key(&(terminal as u32))
+            && !fresh_characterizations.contains_key(&(terminal as u32))
     }) {
         return None;
     }
 
-    // Reused DFAs need an NWA skeleton once. Newly compiled patched/fresh
-    // templates already carry their exact skeletons, so preserve them instead
-    // of rebuilding those skeletons from the DFA a second time.
-    let mut templates = Templates::from_terminal_dfas(dfas);
-    templates.by_terminal.extend(patched_templates.by_terminal);
-    templates
-        .by_terminal_nwa
-        .extend(patched_templates.by_terminal_nwa);
-    templates.by_terminal.extend(fresh_templates.by_terminal);
-    templates
-        .by_terminal_nwa
-        .extend(fresh_templates.by_terminal_nwa);
-    let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
-    if !defer_boundary_commit_templates() {
-        let split_templates = templates
-            .by_terminal
-            .par_iter()
-            .filter_map(|(&terminal, dfa)| {
-                let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                try_split_commit_template_dfas(&commit_dfa)
-                    .map(|split| (terminal, Arc::new(split)))
-            })
-            .collect::<Vec<_>>();
-        for (terminal, split) in split_templates {
-            if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-                *slot = Some(split);
-            }
-        }
-    }
+    Some(CachedCompositionTemplatePlan {
+        reused_dfas,
+        patched_characterizations,
+        fresh_characterizations,
+        num_terminals: analyzed.num_terminals as usize,
+    })
+}
+
+fn try_build_cached_composition_templates(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    analyzed: &AnalyzedGrammar,
+    selected: &[bool],
+    scoped_ignore_terminals: &BitSet,
+) -> Option<(
+    Templates,
+    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    f64,
+)> {
+    let started_at = Instant::now();
+    let plan = try_prepare_cached_composition_template_plan(
+        composed_table,
+        components,
+        analyzed,
+        selected,
+        scoped_ignore_terminals,
+    )?;
+    let changed_parent = plan.patched_characterizations.len();
+    let fresh = plan.fresh_characterizations.len();
+    let reused = plan.reused_dfas.len();
+    debug_assert_eq!(plan.num_terminals, analyzed.num_terminals as usize);
+
+    let templates = plan.materialize();
+    let raw_templates = CachedCompositionTemplatePlan::raw_template_cache(
+        &templates,
+        analyzed.num_terminals as usize,
+    );
+    let template_dfas_by_terminal = if defer_boundary_commit_templates() {
+        vec![None; analyzed.num_terminals as usize]
+    } else {
+        build_commit_templates_from_raw_templates(&raw_templates)
+    };
+
     if std::env::var_os("GLRMASK_VALIDATE_CACHED_BOUNDARY_TEMPLATES").is_some() {
         let (reference, _, _) =
             build_composition_templates(&composed_table.table, analyzed, selected);
@@ -8501,17 +8526,17 @@ fn try_build_cached_composition_templates(
     let total_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_cached_composition_templates] selected={} changed_parent={} fresh={} raw_templates={} commit_templates={} total_ms={total_ms:.3}",
+            "[glrmask/profile][constraint_cached_composition_templates] selected={} reused={} changed_parent={} fresh={} raw_templates={} commit_templates={} total_ms={total_ms:.3}",
             selected.iter().filter(|&&value| value).count(),
-            changed_parent.iter().filter(|&&value| value).count(),
-            fresh_selected.iter().filter(|&&value| value).count(),
+            reused,
+            changed_parent,
+            fresh,
             templates.by_terminal.len(),
             template_dfas_by_terminal.iter().flatten().count(),
         );
     }
     Some((templates, template_dfas_by_terminal, total_ms))
 }
-
 
 /// Exact weighted determinization of shared lazy parser-stack predicates.
 ///
@@ -18554,6 +18579,52 @@ mod tests {
                 &tight_selected,
                 &tight_templates,
                 concrete_grammar.num_terminals,
+            );
+            let deferred_plan_started = Instant::now();
+            let deferred_plan = try_prepare_cached_composition_template_plan(
+                &composed_table,
+                &tight_delta_components,
+                &concrete_grammar,
+                &tight_selected,
+                &merged_ignores.scoped,
+            )
+            .expect("ideal selected10 boundary should admit cached-template plan");
+            let deferred_plan_ms = deferred_plan_started.elapsed().as_secs_f64() * 1000.0;
+            let deferred_reused = deferred_plan.reused_dfas.len();
+            let deferred_patched = deferred_plan.patched_characterizations.len();
+            let deferred_fresh = deferred_plan.fresh_characterizations.len();
+            let deferred_materialize_started = Instant::now();
+            let deferred_templates = deferred_plan.materialize();
+            let deferred_materialize_ms =
+                deferred_materialize_started.elapsed().as_secs_f64() * 1000.0;
+            let mut deferred_mismatches = Vec::new();
+            for (terminal, &active) in tight_selected.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let terminal = terminal as u32;
+                let candidate = deferred_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .expect("deferred ideal template plan covers active terminal");
+                let reference = tight_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .expect("full ideal template reference covers active terminal");
+                if !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(candidate, reference))
+                    || !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(reference, candidate))
+                {
+                    deferred_mismatches.push(terminal);
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_DEFERRED_TEMPLATE_PLAN active={} reused={} patched={} fresh={} prep_ms={deferred_plan_ms:.3} materialize_ms={deferred_materialize_ms:.3} mismatches={} mismatch_ids={:?}",
+                tight_active_terminals,
+                deferred_reused,
+                deferred_patched,
+                deferred_fresh,
+                deferred_mismatches.len(),
+                deferred_mismatches,
             );
             if std::env::var_os("GLRMASK_EXPERIMENT_CACHED_BOUNDARY_TEMPLATES").is_some() {
                 let cached_production_started = Instant::now();
