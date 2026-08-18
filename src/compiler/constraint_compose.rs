@@ -5925,6 +5925,49 @@ fn prepare_unmapped_component_parser_artifacts(
         .collect()
 }
 
+fn prepare_unmapped_component_parser_automata(
+    components: &[ParserDwaComponent<'_>],
+    default_domains: &[Option<ParserDefaultDomain>],
+    strip_scoped_ignore_identity: bool,
+) -> Result<Vec<NWA>, String> {
+    if components.len() != default_domains.len() {
+        return Err("component/parser default-domain count mismatch".into());
+    }
+    components
+        .par_iter()
+        .copied()
+        .zip(default_domains.par_iter())
+        .map(|(component, default_domain)| {
+            let mut automaton = component_parser_nwa(&component, default_domain.as_ref())?;
+            if strip_scoped_ignore_identity {
+                let ignore_weight = component
+                    .constraint
+                    .ignore_terminal
+                    .and_then(|ignore| component.constraint.possible_matches.get(&ignore));
+                strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
+            }
+            Ok(automaton)
+        })
+        .collect()
+}
+
+fn prepare_unmapped_component_possible_matches(
+    components: &[ParserDwaComponent<'_>],
+    terminal_offsets: &[u32],
+) -> Result<Vec<PossibleMatches>, String> {
+    if components.len() != terminal_offsets.len() {
+        return Err("component/parser terminal-offset count mismatch".into());
+    }
+    components
+        .par_iter()
+        .copied()
+        .zip(terminal_offsets.par_iter().copied())
+        .map(|(component, terminal_offset)| {
+            component_possible_matches(&component, terminal_offset)
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct BoundaryRefinementPlan {
     common_map: InternalIdMap,
@@ -5934,12 +5977,8 @@ struct BoundaryRefinementPlan {
 }
 
 struct PreparedOwnedComponentArtifacts {
-    automata: Vec<NWA>,
-    /// Per-automaton maps into `id_map`. Parser weights deliberately remain in
-    /// their cached component-local coordinates until the final
-    /// component+boundary union consumes them. This keeps component linking a
-    /// structural operation; only the tiny PossibleMatches table is eagerly
-    /// published in the final coordinate space.
+    /// Per-component maps into `id_map`. Parser automata are materialized only
+    /// at the final parser-union boundary.
     automata_maps: Vec<DirectComponentCoordinateMaps>,
     possible_matches: PossibleMatches,
     id_map: InternalIdMap,
@@ -5949,24 +5988,23 @@ struct PreparedOwnedComponentArtifacts {
 }
 
 fn prepare_deferred_component_artifacts(
-    artifacts: Vec<UnmappedComponentParserArtifact>,
+    possible_matches_by_component: Vec<PossibleMatches>,
     component_maps: Vec<DirectComponentCoordinateMaps>,
     base_to_common_tokens: Option<&[Vec<u32>]>,
     common_tsid_count: usize,
-) -> Result<(Vec<NWA>, Vec<DirectComponentCoordinateMaps>, PossibleMatches, f64), String> {
-    if artifacts.len() != component_maps.len() {
+) -> Result<(Vec<DirectComponentCoordinateMaps>, PossibleMatches, f64), String> {
+    if possible_matches_by_component.len() != component_maps.len() {
         return Err("component artifact/map count mismatch".into());
     }
     let started_at = Instant::now();
-    let prepared = artifacts
+    let prepared = possible_matches_by_component
         .into_par_iter()
         .zip(component_maps.into_par_iter())
-        .map(|(artifact, mut maps)| {
+        .map(|(mut possible_matches, mut maps)| {
             if let Some(base_to_common) = base_to_common_tokens {
                 maps.local_to_global_tokens =
                     compose_local_id_map(&maps.local_to_global_tokens, base_to_common);
             }
-            let mut possible_matches = artifact.possible_matches;
             let mut weights = possible_matches.weight_refs_mut();
             remap_weights_with_maps(
                 &mut weights,
@@ -5975,14 +6013,12 @@ fn prepare_deferred_component_artifacts(
                 common_tsid_count,
             );
             drop(weights);
-            Ok::<_, String>((artifact.automaton, maps, possible_matches))
+            Ok::<_, String>((maps, possible_matches))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut automata = Vec::with_capacity(prepared.len());
     let mut maps = Vec::with_capacity(prepared.len());
     let mut possible_matches = PossibleMatches::new();
-    for (automaton, map, component_possible_matches) in prepared {
-        automata.push(automaton);
+    for (map, component_possible_matches) in prepared {
         maps.push(map);
         for (terminal, weight) in component_possible_matches {
             possible_matches
@@ -5992,7 +6028,6 @@ fn prepare_deferred_component_artifacts(
         }
     }
     Ok((
-        automata,
         maps,
         possible_matches,
         started_at.elapsed().as_secs_f64() * 1000.0,
@@ -12129,7 +12164,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let preparation_started_at = Instant::now();
     let (prepared_components_result, (boundary_result, boundary_ms)) = rayon::join(
             || {
-                let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (unmapped_result, parser_extract_ms))) =
+                let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (possible_matches_result, possible_matches_extract_ms))) =
                     rayon::join(
                         || {
                             let started_at = Instant::now();
@@ -12158,11 +12193,9 @@ pub(crate) fn compose_constraints_owned_parent(
                         },
                         || {
                             let started_at = Instant::now();
-                            let result = prepare_unmapped_component_parser_artifacts(
+                            let result = prepare_unmapped_component_possible_matches(
                                 &parser_components,
                                 &composed_table.terminal_offsets,
-                                &parser_default_domains.component_domains,
-                                !global_ignores,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -12170,7 +12203,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 let state_coordinates = state_result?;
                 if compose_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][constraint_owned_component_coordinates] state_ms={component_state_ms:.3} token_ms={token_coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3}",
+                        "[glrmask/profile][constraint_owned_component_coordinates] state_ms={component_state_ms:.3} token_ms={token_coordinate_ms:.3} possible_matches_ms={possible_matches_extract_ms:.3}",
                     );
                 }
                 let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
@@ -12196,7 +12229,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     }
                     std::thread::yield_now();
                 };
-                let unmapped_components = unmapped_result?;
+                let possible_matches_by_component = possible_matches_result?;
                 let prepared = if let Some(selected_boundary_tokens) = selected_boundary_tokens {
                     let boundary_id_map = boundary_id_map_for_selected_tokens(
                         &component_id_map.tokenizer_states,
@@ -12206,15 +12239,14 @@ pub(crate) fn compose_constraints_owned_parent(
                         .ok_or_else(|| {
                             "component coordinate map does not cover boundary repair".to_string()
                         })?;
-                    let (automata, automata_maps, possible_matches, remap_ms) =
+                    let (automata_maps, possible_matches, remap_ms) =
                         prepare_deferred_component_artifacts(
-                            unmapped_components,
+                            possible_matches_by_component,
                             component_maps,
                             Some(&plan.component_token_map),
                             plan.common_map.num_tsids() as usize,
                         )?;
                     PreparedOwnedComponentArtifacts {
-                        automata,
                         automata_maps,
                         possible_matches,
                         id_map: plan.common_map,
@@ -12223,15 +12255,14 @@ pub(crate) fn compose_constraints_owned_parent(
                         remap_ms,
                     }
                 } else {
-                    let (automata, automata_maps, possible_matches, remap_ms) =
+                    let (automata_maps, possible_matches, remap_ms) =
                         prepare_deferred_component_artifacts(
-                            unmapped_components,
+                            possible_matches_by_component,
                             component_maps,
                             None,
                             component_id_map.num_tsids() as usize,
                         )?;
                     PreparedOwnedComponentArtifacts {
-                        automata,
                         automata_maps,
                         possible_matches,
                         id_map: component_id_map,
@@ -12243,7 +12274,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 Ok::<_, String>((
                     prepared,
                     component_state_ms.max(token_coordinate_ms),
-                    parser_extract_ms,
+                    possible_matches_extract_ms,
                 ))
             },
             || {
@@ -12280,9 +12311,15 @@ pub(crate) fn compose_constraints_owned_parent(
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
         );
-    let (prepared_components, coordinate_ms, parser_extract_ms) = prepared_components_result?;
+    let (prepared_components, coordinate_ms, possible_matches_extract_ms) = prepared_components_result?;
     let boundary_repair = boundary_result?;
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
+    // Coordinate/boundary publication is complete. Release the immutable
+    // parent borrows before consuming the owned-parent tokenizer below;
+    // parser automata are intentionally materialized later, inside the final
+    // parser-union window.
+    drop(parser_components);
+    drop(component_constraints);
 
     let terminal_live_started_at = Instant::now();
     let mut terminal_live_states = merged_terminal_live_states_owned_parent(
@@ -12344,7 +12381,6 @@ pub(crate) fn compose_constraints_owned_parent(
     let num_parser_states = composed_table.table.num_states;
     let num_terminals = composed_table.table.num_terminals as usize;
     let PreparedOwnedComponentArtifacts {
-        automata,
         automata_maps,
         mut possible_matches,
         id_map,
@@ -12379,6 +12415,31 @@ pub(crate) fn compose_constraints_owned_parent(
         }
     };
 
+    let union_started_at = Instant::now();
+    let parser_extract_started_at = Instant::now();
+    let union_component_constraints = std::iter::once(&parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    let union_parser_components = union_component_constraints
+        .iter()
+        .enumerate()
+        .map(|(index, constraint)| ParserDwaComponent {
+            constraint,
+            parser_state_relation: &composed_table.state_relations[index],
+            tokenizer_state_offset: expected_tokenizer_state_offsets[index],
+            terminal_offset: composed_table.terminal_offsets[index],
+            composed_table: Some(&composed_table.table),
+        })
+        .collect::<Vec<_>>();
+    let automata = prepare_unmapped_component_parser_automata(
+        &union_parser_components,
+        &parser_default_domains.component_domains,
+        !global_ignores,
+    )?;
+    let parser_extract_ms = parser_extract_started_at.elapsed().as_secs_f64() * 1000.0;
+    drop(union_parser_components);
+    drop(union_component_constraints);
+
     let mut result = build_composed_constraint_unfinalized(
         composed_table,
         tokenizer,
@@ -12405,7 +12466,6 @@ pub(crate) fn compose_constraints_owned_parent(
         .flatten()
         .flat_map(ParserDefaultDomain::output_labels)
         .collect::<Vec<_>>();
-    let union_started_at = Instant::now();
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
