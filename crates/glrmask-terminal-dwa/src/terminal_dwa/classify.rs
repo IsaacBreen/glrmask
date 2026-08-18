@@ -529,13 +529,16 @@ impl SharedClassifyBytesets {
             for &closure_state in &singleton_closures[state] {
                 let matched_words = tokenizer.matched_terminal_bitset(closure_state).words();
                 let future_words = tokenizer.possible_future_terminals(closure_state).words();
-                debug_assert!(matched_words.len() >= words_per_terminal_set);
-                debug_assert!(future_words.len() >= words_per_terminal_set);
+                // BitSet storage is allowed to omit trailing zero words.  In
+                // particular, loaded/composed tokenizers can have a large global
+                // terminal universe while a given state mentions only low IDs.
+                // Semantically those absent words are zero; do not require the
+                // backing vectors to be padded to `num_terminals`.
                 for word_index in 0..words_per_terminal_set {
-                    let matched_word = matched_words[word_index];
+                    let matched_word = matched_words.get(word_index).copied().unwrap_or(0);
+                    let future_word = future_words.get(word_index).copied().unwrap_or(0);
                     closure_last_words[base + word_index] |= matched_word;
-                    closure_reachable_words[base + word_index] |=
-                        matched_word | future_words[word_index];
+                    closure_reachable_words[base + word_index] |= matched_word | future_word;
                 }
             }
         }
@@ -556,9 +559,10 @@ impl SharedClassifyBytesets {
             }
 
             let future_words = tokenizer.possible_future_terminals(state).words();
-            future_by_state_words[state as usize * words_per_terminal_set
-                ..(state as usize + 1) * words_per_terminal_set]
-                .copy_from_slice(future_words);
+            let future_dst = &mut future_by_state_words[state as usize * words_per_terminal_set
+                ..(state as usize + 1) * words_per_terminal_set];
+            let copy_words = future_words.len().min(future_dst.len());
+            future_dst[..copy_words].copy_from_slice(&future_words[..copy_words]);
             if build_ti_output_index {
                 let future = tokenizer
                     .possible_future_terminals_iter(state)
