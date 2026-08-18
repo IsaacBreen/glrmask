@@ -11814,6 +11814,8 @@ pub(crate) fn compose_constraints_owned_parent(
     let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
+    let skip_boundary_for_floor =
+        std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
     let (prepared_components_result, (boundary_result, boundary_ms)) = rayon::join(
             || {
@@ -11925,6 +11927,10 @@ pub(crate) fn compose_constraints_owned_parent(
                 ))
             },
             || {
+                if skip_boundary_for_floor {
+                    let _ = selected_boundary_tokens_cell.set(Ok(None));
+                    return (Ok(None), 0.0);
+                }
                 let started_at = Instant::now();
                 let result = build_boundary_repair(
                     &composed_table,
