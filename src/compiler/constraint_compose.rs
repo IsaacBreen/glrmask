@@ -12286,6 +12286,7 @@ mod tests {
     };
     use crate::grammar::flat::TerminalID;
     include!("minbound_trigram.rs");
+    include!("minbound_factor.rs");
 
     fn byte_vocab() -> Vocab {
         Vocab::new(
@@ -17205,6 +17206,51 @@ mod tests {
                 concrete_residual.states().iter().flat_map(|state| state.transitions.keys().copied()).filter(|&label| label >= 0).collect::<BTreeSet<_>>().len(),
             );
 
+            let concrete_grammar = AnalyzedGrammar::from_composed_rules(
+                composed_table.table.rules.clone(),
+                composed_table.table.num_terminals,
+                terminal_names.clone(),
+                composed_table.table.nonterminal_display_names.clone(),
+                composed_table
+                    .table
+                    .rules
+                    .first()
+                    .expect("outer composed table has augmented start")
+                    .lhs,
+            );
+
+            // Exact bounded grammar-factor oracle.  Unlike the trigram proxy
+            // below, this recognizes arbitrary-length terminal factors lazily
+            // and is explored only along the finite concrete B-A residual.
+            // Parser controls and scoped/global skip terminals are invisible
+            // grammar symbols for this necessary-condition filter.
+            let mut factor_zero_width = composed_table.table.control_terminals.clone();
+            factor_zero_width.extend(composed_table.table.skip_terminals.iter().copied());
+            factor_zero_width.extend(merged_ignores.scoped.iter().map(|terminal| terminal as u32));
+            let concrete_factor_tight = mb_filter_exact_factor_lazy(
+                &concrete_residual,
+                &concrete_grammar,
+                &factor_zero_width,
+            );
+            acyclic_path_stats(
+                "outer_exact_concrete_B_minus_A_lazy_grammar_factor",
+                &concrete_factor_tight,
+            );
+            residual_diagnostics(
+                "outer_exact_concrete_B_minus_A_lazy_grammar_factor",
+                &concrete_factor_tight,
+                &common_id_map,
+                &terminal_names,
+            );
+            save_terminal_capture(
+                std::path::Path::new(&root)
+                    .join("tdwa_outer_exact_concrete_B_minus_A_lazy_grammar_factor.cap")
+                    .to_str()
+                    .unwrap(),
+                &MappedArtifact::new(concrete_factor_tight.clone(), common_id_map.clone()),
+                &terminal_names,
+            );
+
             let concrete_weight = Weight::union_all(
                 concrete_residual
                     .states()
@@ -17239,18 +17285,6 @@ mod tests {
             // Exact grammar/parser-domain tightening on the concrete terminal labels.
             // Unlike the trigram diagnostic below, this uses the same LR stack-effect
             // templates as boundary parser construction and preserves path distinctions.
-            let concrete_grammar = AnalyzedGrammar::from_composed_rules(
-                composed_table.table.rules.clone(),
-                composed_table.table.num_terminals,
-                terminal_names.clone(),
-                composed_table.table.nonterminal_display_names.clone(),
-                composed_table
-                    .table
-                    .rules
-                    .first()
-                    .expect("outer composed table has augmented start")
-                    .lhs,
-            );
             let mut concrete_selected = vec![false; composed_table.table.num_terminals as usize];
             for state in concrete_residual.states() {
                 for &label in state.transitions.keys() {
