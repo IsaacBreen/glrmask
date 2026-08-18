@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use dashmap::DashMap;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -3992,6 +3992,8 @@ thread_local! {
         RefCell::new(None);
     static POOLED_WEIGHT_SERDE_DECODE: RefCell<Option<Vec<Weight>>> =
         RefCell::new(None);
+    static POOLED_WEIGHT_SERDE_DEFER_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    static POOLED_WEIGHT_SERDE_DEFERRED_IDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Install a pool-index encoder for subsequent `Weight::serialize` calls on
@@ -4027,6 +4029,18 @@ pub fn end_pooled_weight_serde_decode() {
     POOLED_WEIGHT_SERDE_DECODE.with(|slot| {
         slot.borrow_mut().take();
     });
+    POOLED_WEIGHT_SERDE_DEFER_COUNT.with(|slot| slot.set(None));
+}
+
+pub fn begin_pooled_weight_serde_deferred_decode(weight_count: usize) {
+    POOLED_WEIGHT_SERDE_DEFER_COUNT.with(|slot| {
+        assert!(slot.replace(Some(weight_count)).is_none(), "deferred pooled Weight decode context must not nest");
+    });
+    POOLED_WEIGHT_SERDE_DEFERRED_IDS.with(|slot| slot.borrow_mut().clear());
+}
+
+pub fn take_pooled_weight_serde_deferred_ids() -> Vec<u32> {
+    POOLED_WEIGHT_SERDE_DEFERRED_IDS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 fn pooled_weight_serde_encode_index(weight: &Weight) -> Option<u32> {
@@ -4051,6 +4065,18 @@ fn pooled_weight_serde_decode_index(index: u32) -> Option<Weight> {
 
 fn pooled_weight_serde_decode_enabled() -> bool {
     POOLED_WEIGHT_SERDE_DECODE.with(|slot| slot.borrow().is_some())
+        || POOLED_WEIGHT_SERDE_DEFER_COUNT.with(|slot| slot.get().is_some())
+}
+
+fn pooled_weight_serde_deferred_decode_index(index: u32) -> Option<Weight> {
+    let valid = POOLED_WEIGHT_SERDE_DEFER_COUNT.with(|slot| {
+        slot.get().is_some_and(|count| (index as usize) < count)
+    });
+    if !valid {
+        return None;
+    }
+    POOLED_WEIGHT_SERDE_DEFERRED_IDS.with(|slot| slot.borrow_mut().push(index));
+    Some(Weight::empty())
 }
 
 #[inline]
@@ -4116,6 +4142,7 @@ fn pooled_take_var_u64(input: &[u8], pos: &mut usize) -> Result<u64, String> {
 /// Pack a list of already-deduplicated weights into a compact shared
 /// token-set/weight pool. The caller's weight order is preserved exactly so
 /// ordinary Weight fields can serialize as pool indices.
+#[cfg(feature = "internal-api")]
 pub fn pack_pooled_weights(weights: &[Weight]) -> Vec<u8> {
     let mut token_set_by_ptr = FxHashMap::<usize, u32>::default();
     let mut token_sets = Vec::<SharedTokenSet>::new();
@@ -4201,6 +4228,227 @@ pub fn unpack_pooled_weights(input: &[u8]) -> Result<Vec<Weight>, String> {
         return unpack_pooled_weights_v2(input);
     }
     unpack_pooled_weights_v1(input)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeWeightSpan {
+    body_start: u32,
+    body_len: u32,
+    entry_count: u32,
+    full: bool,
+}
+
+#[derive(Debug)]
+pub struct PackedRuntimeWeightPool {
+    wire: Arc<[u8]>,
+    token_spans: Box<[(u32, u32)]>,
+    weight_spans: Box<[PackedRuntimeWeightSpan]>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PackedRuntimePoolTokenSetRef<'a> {
+    id: u32,
+    body: &'a [u8],
+}
+
+impl<'a> PackedRuntimePoolTokenSetRef<'a> {
+    #[inline]
+    pub fn id(self) -> u32 { self.id }
+
+    pub fn for_each_range(self, mut visit: impl FnMut(u32, u32)) {
+        let mut pos = 0usize;
+        let Ok(range_count) = pooled_take_var_u32(self.body, &mut pos) else {
+            return;
+        };
+        let mut previous_end_plus_one = 0u64;
+        for _ in 0..range_count {
+            let Ok(gap) = pooled_take_var_u64(self.body, &mut pos) else {
+                return;
+            };
+            let Some(start64) = previous_end_plus_one.checked_add(gap) else {
+                return;
+            };
+            let Ok(start) = u32::try_from(start64) else {
+                return;
+            };
+            let Ok(len) = pooled_take_var_u32(self.body, &mut pos) else {
+                return;
+            };
+            let Some(end) = start.checked_add(len) else {
+                return;
+            };
+            visit(start, end);
+            previous_end_plus_one = end as u64 + 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PackedRuntimePoolWeightRef<'a> {
+    pool: &'a PackedRuntimeWeightPool,
+    id: u32,
+}
+
+impl<'a> PackedRuntimePoolWeightRef<'a> {
+    #[inline]
+    pub fn id(self) -> u32 { self.id }
+    #[inline]
+    pub fn is_full(self) -> bool { self.pool.weight_spans[self.id as usize].full }
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        let span = self.pool.weight_spans[self.id as usize];
+        !span.full && span.entry_count == 0
+    }
+    pub fn token_set_for_tsid(self, tsid: u32) -> Option<PackedRuntimePoolTokenSetRef<'a>> {
+        let span = self.pool.weight_spans[self.id as usize];
+        if span.full { return None; }
+        let body_start = span.body_start as usize;
+        let body = self.pool.wire.get(body_start..body_start + span.body_len as usize)?;
+        let mut pos = 1usize;
+        let entry_count = pooled_take_var_u32(body, &mut pos).ok()?;
+        let mut previous_end_plus_one = 0u64;
+        for _ in 0..entry_count {
+            let gap = pooled_take_var_u64(body, &mut pos).ok()?;
+            let start = u32::try_from(previous_end_plus_one.checked_add(gap)?).ok()?;
+            let len = pooled_take_var_u32(body, &mut pos).ok()?;
+            let end = start.checked_add(len)?;
+            let token_set = pooled_take_var_u32(body, &mut pos).ok()?;
+            if tsid < start {
+                return None;
+            }
+            if tsid <= end {
+                return self.pool.token_set(token_set);
+            }
+            previous_end_plus_one = end as u64 + 1;
+        }
+        None
+    }
+
+    pub fn entries(self) -> Vec<((u32, u32), PackedRuntimePoolTokenSetRef<'a>)> {
+        let span = self.pool.weight_spans[self.id as usize];
+        if span.full {
+            return Vec::new();
+        }
+        let body_start = span.body_start as usize;
+        let Some(body) = self.pool.wire.get(body_start..body_start + span.body_len as usize) else {
+            return Vec::new();
+        };
+        let mut pos = 1usize;
+        let Ok(entry_count) = pooled_take_var_u32(body, &mut pos) else {
+            return Vec::new();
+        };
+        let mut result = Vec::with_capacity(entry_count as usize);
+        let mut previous_end_plus_one = 0u64;
+        for _ in 0..entry_count {
+            let Ok(gap) = pooled_take_var_u64(body, &mut pos) else { break; };
+            let Some(start64) = previous_end_plus_one.checked_add(gap) else { break; };
+            let Ok(start) = u32::try_from(start64) else { break; };
+            let Ok(len) = pooled_take_var_u32(body, &mut pos) else { break; };
+            let Some(end) = start.checked_add(len) else { break; };
+            let Ok(token_set) = pooled_take_var_u32(body, &mut pos) else { break; };
+            let Some(tokens) = self.pool.token_set(token_set) else { break; };
+            result.push(((start, end), tokens));
+            previous_end_plus_one = end as u64 + 1;
+        }
+        result
+    }
+}
+
+impl PackedRuntimeWeightPool {
+    pub fn peek_weight_count(input: &[u8]) -> Result<usize, String> {
+        if !input.starts_with(b"WPL3") {
+            return Err("packed runtime Weight pool requires WPL3".to_owned());
+        }
+        let mut pos = 4usize;
+        let token_set_count = pooled_take_var_u32(input, &mut pos)? as usize;
+        let _ = pooled_take_length_prefixed_slices(
+            input, &mut pos, token_set_count, "Weight-pool token set"
+        )?;
+        Ok(pooled_take_var_u32(input, &mut pos)? as usize)
+    }
+
+    pub fn from_packed_bytes(input: &[u8]) -> Result<Self, String> {
+        if !input.starts_with(b"WPL3") {
+            return Err("packed runtime Weight pool requires WPL3".to_owned());
+        }
+        let mut pos = 4usize;
+        let token_set_count = pooled_take_var_u32(input, &mut pos)? as usize;
+        let mut token_spans = Vec::<(u32, u32)>::with_capacity(token_set_count);
+        for _ in 0..token_set_count {
+            let len = pooled_take_var_u32(input, &mut pos)? as usize;
+            let start = pos;
+            let end = start.checked_add(len)
+                .ok_or_else(|| "overflowing packed Weight-pool token-set length".to_owned())?;
+            input.get(start..end)
+                .ok_or_else(|| "truncated packed Weight-pool token set".to_owned())?;
+            token_spans.push((
+                u32::try_from(start).map_err(|_| "packed Weight-pool offset exceeds u32".to_owned())?,
+                u32::try_from(len).map_err(|_| "packed Weight-pool length exceeds u32".to_owned())?,
+            ));
+            pos = end;
+        }
+        let weight_count = pooled_take_var_u32(input, &mut pos)? as usize;
+        let mut weight_spans = Vec::<PackedRuntimeWeightSpan>::with_capacity(weight_count);
+        for _ in 0..weight_count {
+            let len = pooled_take_var_u32(input, &mut pos)? as usize;
+            let start = pos;
+            let end = start.checked_add(len)
+                .ok_or_else(|| "overflowing packed Weight-pool weight length".to_owned())?;
+            let body = input.get(start..end)
+                .ok_or_else(|| "truncated packed Weight-pool weight".to_owned())?;
+            let tag = *body.first()
+                .ok_or_else(|| "truncated packed Weight-pool tag".to_owned())?;
+            let (full, entry_count) = match tag {
+                1 => {
+                    if body.len() != 1 {
+                        return Err("trailing bytes in packed full weight".to_owned());
+                    }
+                    (true, 0)
+                }
+                0 => {
+                    let mut body_pos = 1usize;
+                    let count = pooled_take_var_u32(body, &mut body_pos)?;
+                    (false, count)
+                }
+                _ => return Err("invalid packed Weight-pool tag".to_owned()),
+            };
+            weight_spans.push(PackedRuntimeWeightSpan {
+                body_start: u32::try_from(start)
+                    .map_err(|_| "packed Weight-pool offset exceeds u32".to_owned())?,
+                body_len: u32::try_from(len)
+                    .map_err(|_| "packed Weight-pool length exceeds u32".to_owned())?,
+                entry_count,
+                full,
+            });
+            pos = end;
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed Weight pool".to_owned());
+        }
+        Ok(Self {
+            wire: Arc::from(input.to_vec().into_boxed_slice()),
+            token_spans: token_spans.into_boxed_slice(),
+            weight_spans: weight_spans.into_boxed_slice(),
+        })
+    }
+
+    #[inline]
+    pub fn weight_count(&self) -> usize { self.weight_spans.len() }
+
+    #[inline]
+    pub fn weight(&self, id: u32) -> Option<PackedRuntimePoolWeightRef<'_>> {
+        ((id as usize) < self.weight_spans.len()).then_some(PackedRuntimePoolWeightRef { pool: self, id })
+    }
+
+    #[inline]
+    pub fn token_set(&self, id: u32) -> Option<PackedRuntimePoolTokenSetRef<'_>> {
+        let &(start, len) = self.token_spans.get(id as usize)?;
+        let start = start as usize;
+        Some(PackedRuntimePoolTokenSetRef {
+            id,
+            body: self.wire.get(start..start + len as usize)?,
+        })
+    }
 }
 
 fn unpack_pooled_weights_v1(input: &[u8]) -> Result<Vec<Weight>, String> {
@@ -4697,6 +4945,10 @@ impl<'de> Deserialize<'de> for Weight {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         if pooled_weight_serde_decode_enabled() {
             let index = u32::deserialize(deserializer)?;
+            if POOLED_WEIGHT_SERDE_DEFER_COUNT.with(|slot| slot.get().is_some()) {
+                return pooled_weight_serde_deferred_decode_index(index)
+                    .ok_or_else(|| serde::de::Error::custom("invalid deferred pooled Weight index"));
+            }
             return pooled_weight_serde_decode_index(index)
                 .ok_or_else(|| serde::de::Error::custom("invalid pooled Weight index"));
         }

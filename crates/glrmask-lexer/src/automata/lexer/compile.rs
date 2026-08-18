@@ -3808,6 +3808,7 @@ impl Regex {
         Tokenizer {
             dfa: self.dfa,
             num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -11893,6 +11894,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13255,6 +13257,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13298,6 +13301,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13341,6 +13345,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13406,6 +13411,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: exprs.len() as u32,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13546,6 +13552,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13608,6 +13615,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
@@ -13759,6 +13767,7 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),

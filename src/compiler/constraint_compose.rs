@@ -4821,9 +4821,11 @@ fn build_composed_constraint_unfinalized(
     let constraint = Constraint {
         runtime_backend: ConstraintRuntimeBackend::Static,
         parser_dwa,
+        packed_parser_dwa: None,
         parser_top_accept: BTreeMap::new(),
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
+        packed_non_dwa_weights: None,
         direct_regular_wide_frontier_acceptance: Vec::new(),
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
@@ -4857,6 +4859,7 @@ fn build_composed_constraint_unfinalized(
         original_token_to_internal,
         internal_token_to_tokens,
         token_bytes: vocab.entries_arc(),
+        packed_token_bytes: None,
         internal_token_bytes,
         token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
@@ -4900,6 +4903,7 @@ fn build_composed_constraint_unfinalized(
         final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
         parser_state_domain_labels,
         ignore_expr,
+        serialized_artifact_cache: None,
     };
     ConstraintComposition {
         constraint,
@@ -5457,6 +5461,7 @@ pub(crate) fn compose_constraints_owned_parent(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    parent.serialized_artifact_cache = None;
     if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
         || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some()
     {

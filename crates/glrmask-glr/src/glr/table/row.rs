@@ -251,11 +251,38 @@ where
             where
                 A: MapAccess<'de>,
             {
-                let mut row = SparseRow::default();
-                while let Some((key, value)) = map.next_entry()? {
-                    row.insert(key, value);
+                let hint = map.size_hint().unwrap_or(0);
+                if hint > INLINE_ROW_CAPACITY {
+                    let mut entries = FxHashMap::with_capacity_and_hasher(
+                        hint,
+                        Default::default(),
+                    );
+                    while let Some((key, value)) = map.next_entry()? {
+                        entries.insert(key, value);
+                    }
+                    return Ok(SparseRow::Large(entries));
                 }
-                Ok(row)
+
+                let mut entries = SmallVec::<[(K, V); INLINE_ROW_CAPACITY]>::new();
+                while let Some((key, value)) = map.next_entry()? {
+                    // Bincode supplies an exact map length, so this branch is
+                    // normally allocation-free. Keep a correctness fallback
+                    // for formats/deserializers without a useful size hint.
+                    if entries.len() == INLINE_ROW_CAPACITY {
+                        let mut large = FxHashMap::with_capacity_and_hasher(
+                            entries.len().saturating_mul(2).max(16),
+                            Default::default(),
+                        );
+                        large.extend(entries.drain(..));
+                        large.insert(key, value);
+                        while let Some((key, value)) = map.next_entry()? {
+                            large.insert(key, value);
+                        }
+                        return Ok(SparseRow::Large(large));
+                    }
+                    entries.push((key, value));
+                }
+                Ok(SparseRow::Inline(entries))
             }
         }
 

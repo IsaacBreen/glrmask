@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
-use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
@@ -20,6 +20,15 @@ use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use super::mask_mapping::FinalMaskMapping;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
+
+#[derive(Debug)]
+pub(crate) struct PackedNonDwaWeights {
+    pub(crate) pool: Arc<crate::ds::weight::PackedRuntimeWeightPool>,
+    pub(crate) parser_top_accept: BTreeMap<i32, u32>,
+    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<u32>>,
+    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, u32>,
+    pub(crate) possible_matches: BTreeMap<TerminalID, u32>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectRegularWideFrontierAcceptance {
@@ -113,6 +122,7 @@ const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
 pub(crate) enum FastDwaTransitionRow {
     Inline(SmallVec<[(i32, (u32, Weight)); 4]>),
     Hash(FxHashMap<i32, (u32, Weight)>),
+    Packed(DwaTransitionMap),
 }
 
 impl FastDwaTransitionRow {
@@ -127,21 +137,44 @@ impl FastDwaTransitionRow {
         }
     }
 
+    pub(crate) fn from_exact_entries(
+        len: usize,
+        entries: impl IntoIterator<Item = (i32, (u32, Weight))>,
+    ) -> Self {
+        if len <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries.into_iter().collect())
+        } else {
+            let mut map = FxHashMap::default();
+            map.reserve(len);
+            map.extend(entries);
+            Self::Hash(map)
+        }
+    }
+
+    pub(crate) fn from_packed(row: DwaTransitionMap) -> Self {
+        debug_assert!(row.is_packed());
+        Self::Packed(row)
+    }
+
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Inline(entries) => entries.is_empty(),
             Self::Hash(entries) => entries.is_empty(),
+            Self::Packed(row) => row.is_empty(),
         }
     }
 
     #[inline]
-    pub(crate) fn get(&self, label: &i32) -> Option<&(u32, Weight)> {
+    pub(crate) fn get(&self, label: &i32) -> Option<(u32, &Weight)> {
         match self {
             Self::Inline(entries) => entries
                 .iter()
-                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
-            Self::Hash(entries) => entries.get(label),
+                .find_map(|(candidate, (target, weight))| {
+                    (candidate == label).then_some((*target, weight))
+                }),
+            Self::Hash(entries) => entries.get(label).map(|(target, weight)| (*target, weight)),
+            Self::Packed(row) => row.get_entry(label),
         }
     }
 }
@@ -173,6 +206,16 @@ impl FastDwaTransitions {
         match self {
             Self::Direct(rows) => rows.len(),
             Self::Shared { state_rows, .. } => state_rows.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, state: usize) -> Option<&FastDwaTransitionRow> {
+        match self {
+            Self::Direct(rows) => rows.get(state),
+            Self::Shared { rows, state_rows } => state_rows
+                .get(state)
+                .and_then(|&row| rows.get(row as usize)),
         }
     }
 }
@@ -278,6 +321,9 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
     Flat(Arc<[u32]>),
+    /// Runtime tokenizer already owns an allocation-light exact transition
+    /// table; call through instead of rebuilding a second dense table.
+    Fallback(usize),
     Hybrid {
         state_to_dense_row: Vec<u32>,
         dense_rows: Vec<Box<[u32; 256]>>,
@@ -306,6 +352,7 @@ impl FastTokenizerTransitions {
                 .get(state as usize * 256 + byte as usize)
                 .copied()
                 .unwrap_or(u32::MAX),
+            Self::Fallback(_) => tokenizer.get_transition(state, byte),
             Self::Hybrid {
                 state_to_dense_row,
                 dense_rows,
@@ -327,6 +374,7 @@ impl FastTokenizerTransitions {
         match self {
             Self::Dense(rows) => rows.len(),
             Self::Flat(flat) => flat.len() / 256,
+            Self::Fallback(len) => *len,
             Self::Hybrid {
                 state_to_dense_row,
                 ..
@@ -390,6 +438,7 @@ impl FastTokenizerTransitions {
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
+                    Self::Fallback(_) => return None,
                     Self::Hybrid {
                         state_to_dense_row,
                         dense_rows,
@@ -400,6 +449,7 @@ impl FastTokenizerTransitions {
                         return None;
                     }
                     match child {
+                        Self::Fallback(_) => return None,
                         Self::Dense(rows) => {
                             for row in rows {
                                 let dense = dense_rows.len() as u32;
@@ -1979,6 +2029,7 @@ pub(crate) mod original_token_map_artifact_serde {
             return Vec::<u32>::deserialize(deserializer);
         }
         let packed = Vec::<u8>::deserialize(deserializer)?;
+        let packed_len = packed.len();
         unpack(&packed).map_err(serde::de::Error::custom)
     }
 }
@@ -1991,7 +2042,7 @@ pub(crate) mod original_token_map_artifact_serde {
 /// for unusual vocabularies. Deserialization reconstructs the exact historical
 /// in-memory BTreeMap, so compiler/composition/runtime APIs do not change.
 pub(crate) mod token_bytes_artifact_serde {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -2001,10 +2052,128 @@ pub(crate) mod token_bytes_artifact_serde {
 
     thread_local! {
         static PACKED: Cell<bool> = const { Cell::new(false) };
+        static DEFER_UNPACK: Cell<bool> = const { Cell::new(false) };
+        static DEFERRED: RefCell<Option<Arc<PackedTokenBytes>>> = const { RefCell::new(None) };
     }
 
     pub(crate) fn set_packed(enabled: bool) -> bool {
         PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn set_defer_unpack(enabled: bool) -> bool {
+        DEFER_UNPACK.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn take_deferred() -> Option<Arc<PackedTokenBytes>> {
+        DEFERRED.with(|slot| slot.borrow_mut().take())
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct PackedTokenBytes {
+        wire: Arc<[u8]>,
+        spans: Box<[(u32, u32)]>,
+        sparse_ids: Option<Box<[u32]>>,
+    }
+
+    impl PackedTokenBytes {
+        fn parse(wire: Vec<u8>) -> Result<Self, String> {
+            if !wire.starts_with(MAGIC) {
+                return Err("invalid packed token-byte header".to_owned());
+            }
+            let mut pos = MAGIC.len();
+            let sparse = match wire.get(pos).copied() {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err("invalid packed token-byte mode".to_owned()),
+            };
+            pos += 1;
+            let count = take_var_u32(&wire, &mut pos)? as usize;
+            let mut spans = Vec::with_capacity(count);
+            let mut sparse_ids = sparse.then(|| Vec::with_capacity(count));
+            let mut previous_end = 0u64;
+            for dense_id in 0..count {
+                let id = if sparse {
+                    let gap = take_var_u32(&wire, &mut pos)? as u64;
+                    let id = previous_end
+                        .checked_add(gap)
+                        .ok_or_else(|| "overflowing packed token id".to_owned())?;
+                    let id = u32::try_from(id)
+                        .map_err(|_| "overflowing packed token id".to_owned())?;
+                    previous_end = id as u64 + 1;
+                    sparse_ids.as_mut().expect("sparse ids enabled").push(id);
+                    id
+                } else {
+                    u32::try_from(dense_id)
+                        .map_err(|_| "dense packed token id exceeds u32".to_owned())?
+                };
+                let _ = id;
+                let len = take_var_u32(&wire, &mut pos)? as usize;
+                let start = pos;
+                let end = start
+                    .checked_add(len)
+                    .ok_or_else(|| "overflowing packed token-byte length".to_owned())?;
+                if end > wire.len() {
+                    return Err("truncated packed token bytes".to_owned());
+                }
+                spans.push((
+                    u32::try_from(start)
+                        .map_err(|_| "packed token byte offset exceeds u32".to_owned())?,
+                    u32::try_from(len)
+                        .map_err(|_| "packed token byte length exceeds u32".to_owned())?,
+                ));
+                pos = end;
+            }
+            if pos != wire.len() {
+                return Err("trailing bytes in packed token-byte vocabulary".to_owned());
+            }
+            Ok(Self {
+                wire: Arc::from(wire.into_boxed_slice()),
+                spans: spans.into_boxed_slice(),
+                sparse_ids: sparse_ids.map(Vec::into_boxed_slice),
+            })
+        }
+
+        #[inline]
+        pub(crate) fn len(&self) -> usize {
+            self.spans.len()
+        }
+
+        #[inline]
+        pub(crate) fn get(&self, token_id: u32) -> Option<&[u8]> {
+            let index = match &self.sparse_ids {
+                None => usize::try_from(token_id).ok().filter(|&index| index < self.spans.len())?,
+                Some(ids) => ids.binary_search(&token_id).ok()?,
+            };
+            let (start, len) = self.spans[index];
+            let start = start as usize;
+            self.wire.get(start..start + len as usize)
+        }
+
+        pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
+            self.spans.iter().enumerate().map(|(index, &(start, len))| {
+                let token_id = self
+                    .sparse_ids
+                    .as_ref()
+                    .map_or(index as u32, |ids| ids[index]);
+                let start = start as usize;
+                (token_id, &self.wire[start..start + len as usize])
+            })
+        }
+
+        pub(crate) fn max_token_id(&self) -> Option<u32> {
+            match &self.sparse_ids {
+                Some(ids) => ids.last().copied(),
+                None => self.spans.len().checked_sub(1).map(|id| id as u32),
+            }
+        }
+
+        pub(crate) fn materialize(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
+            Arc::new(
+                self.iter()
+                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                    .collect(),
+            )
+        }
     }
 
     #[inline]
@@ -2140,8 +2309,31 @@ pub(crate) mod token_bytes_artifact_serde {
         if !PACKED.with(Cell::get) {
             return Arc::<BTreeMap<u32, Vec<u8>>>::deserialize(deserializer);
         }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total = profile.then(std::time::Instant::now);
+        let packed_started = profile.then(std::time::Instant::now);
         let packed = Vec::<u8>::deserialize(deserializer)?;
-        unpack(&packed).map_err(serde::de::Error::custom)
+        let packed_len = packed.len();
+        let packed_ms = packed_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        let unpack_started = profile.then(std::time::Instant::now);
+        let result = if DEFER_UNPACK.with(Cell::get) {
+            let deferred = PackedTokenBytes::parse(packed)
+                .map(Arc::new)
+                .map_err(serde::de::Error::custom)?;
+            DEFERRED.with(|slot| *slot.borrow_mut() = Some(deferred));
+            Ok(Arc::new(BTreeMap::new()))
+        } else {
+            unpack(&packed).map_err(serde::de::Error::custom)
+        };
+        if let Some(total) = total {
+            eprintln!(
+                "[glrmask/profile][token_bytes_decode] wire_bytes={} vec_ms={packed_ms:.3} unpack_ms={:.3} total_ms={:.3}",
+                packed_len,
+                unpack_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0),
+                total.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
     }
 }
 
@@ -2163,6 +2355,13 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) parser_dwa: DWA,
+    /// Current-format loaded constraints retain the immutable parser DWA in
+    /// its compact canonical pools instead of reconstructing RangeSet/Weight
+    /// objects. Compiler-created and legacy-loaded constraints leave this
+    /// empty and use `parser_dwa` directly.
+    #[serde(skip, default)]
+    pub(crate) packed_parser_dwa:
+        Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -2179,6 +2378,8 @@ pub struct Constraint {
     /// epsilon-closed parser row.
     #[serde(default)]
     pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    #[serde(skip, default)]
+    pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
@@ -2299,6 +2500,12 @@ pub struct Constraint {
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     #[serde(with = "token_bytes_artifact_serde")]
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
+    /// Current sectioned artifacts can retain the packed immutable vocabulary
+    /// directly instead of allocating one BTreeMap node and Vec per model
+    /// token during load. Compiler-created constraints keep `token_bytes`
+    /// materialized and leave this empty.
+    #[serde(skip, default)]
+    pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
@@ -2458,6 +2665,12 @@ pub struct Constraint {
     /// conservatively degrading an identical global ignore into scoped skips.
     #[serde(skip, default)]
     pub(crate) ignore_expr: Option<Expr>,
+    /// Exact current-format artifact backing for an unchanged loaded
+    /// constraint. Runtime cache rebuilds do not alter serialized semantics,
+    /// so resave can return a single bulk copy instead of rediscovering and
+    /// re-encoding the same canonical pools.
+    #[serde(skip, default)]
+    pub(crate) serialized_artifact_cache: Option<Arc<[u8]>>,
 }
 
 

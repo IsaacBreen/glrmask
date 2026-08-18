@@ -55,6 +55,11 @@ impl MatchedTerminalLists {
 pub struct Tokenizer {
     pub(super) dfa: DFA,
     pub(super) num_terminals: u32,
+    /// Current static artifacts may retain their canonical packed transition
+    /// topology directly. The DFA then carries only state metadata/epsilon
+    /// structure; scalar byte lookup and transition iteration use this sidecar.
+    #[serde(default, skip)]
+    pub(super) packed_runtime_transitions: Option<Arc<PackedRuntimeTransitions>>,
     /// Runtime-only exact byte-class transition segments. The historical
     /// serialized tokenizer shape contains only `dfa` and `num_terminals`; the
     /// custom serializer expands these segments into that same DFA wire form.
@@ -98,6 +103,38 @@ pub struct Tokenizer {
     /// vocabulary node or build stage.
     #[serde(default, skip)]
     pub(super) scalar_deterministic_dispatch_cache: OnceLock<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackedRuntimeTransitions {
+    byte_rows: Arc<[Box<[u8]>]>,
+    state_row_ids: Arc<[u32]>,
+    target_offsets: Arc<[u32]>,
+    targets: Arc<[u32]>,
+}
+
+impl PackedRuntimeTransitions {
+    #[inline]
+    fn row(&self, state: u32) -> Option<(&[u8], &[u32])> {
+        let state = state as usize;
+        let row_id = *self.state_row_ids.get(state)? as usize;
+        let bytes = self.byte_rows.get(row_id)?.as_ref();
+        let start = *self.target_offsets.get(state)? as usize;
+        let end = *self.target_offsets.get(state + 1)? as usize;
+        let targets = self.targets.get(start..end)?;
+        (bytes.len() == targets.len()).then_some((bytes, targets))
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> Option<u32> {
+        let (bytes, targets) = self.row(state)?;
+        bytes.binary_search(&byte).ok().map(|index| targets[index])
+    }
+
+    #[inline]
+    fn state_count(&self) -> usize {
+        self.state_row_ids.len()
+    }
 }
 
 pub struct FullTokenizerDeterminization {
@@ -248,6 +285,7 @@ pub mod artifact_serde {
         Ok(Tokenizer {
             dfa: artifact.dfa,
             num_terminals: artifact.num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from(
                 artifact.compressed_transition_segments.into_boxed_slice(),
             ),
@@ -330,6 +368,9 @@ pub mod compact_artifact_serde {
         S: Serializer,
     {
         use serde::ser::Error as _;
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
 
         let state_count = tokenizer.dfa.num_states();
         let mut transition_offsets = Vec::with_capacity(state_count + 1);
@@ -519,6 +560,7 @@ pub mod compact_artifact_serde {
         Ok(Tokenizer {
             dfa,
             num_terminals: artifact.num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from(
                 artifact.compressed_transition_segments.into_boxed_slice(),
             ),
@@ -752,6 +794,9 @@ mod packed_artifact_serde {
     {
         use serde::ser::Error as _;
 
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+
         // Current static artifacts should already have materialized rows, but
         // preserve exact behavior for the uncommon compressed-segment case.
         let materialized;
@@ -815,7 +860,7 @@ mod packed_artifact_serde {
             );
         }
 
-        PackedTokenizerArtifact {
+        let artifact = PackedTokenizerArtifact {
             num_terminals: tokenizer.num_terminals,
             state_count: u32::try_from(state_count).map_err(S::Error::custom)?,
             group_id_to_u8set: (0..dfa.num_groups())
@@ -832,8 +877,18 @@ mod packed_artifact_serde {
             future_offsets,
             futures,
             compressed_transition_segments: Vec::new(),
+        };
+        let result = artifact.serialize(serializer);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][tokenizer_encode] states={} transition_rows={} target_bytes={} ms={:.3}",
+                state_count,
+                artifact.transition_byte_rows.len(),
+                artifact.transition_targets.len(),
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
-        .serialize(serializer)
+        result
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Tokenizer, D::Error>
@@ -842,7 +897,11 @@ mod packed_artifact_serde {
     {
         use serde::de::Error as _;
 
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let artifact_started = profile.then(std::time::Instant::now);
         let artifact = PackedTokenizerArtifact::deserialize(deserializer)?;
+        let artifact_ms = artifact_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
         let state_count = artifact.state_count as usize;
         let terminal_count = artifact.num_terminals as usize;
         if artifact.group_id_to_u8set.len() != terminal_count {
@@ -897,22 +956,32 @@ mod packed_artifact_serde {
         {
             return Err(D::Error::custom("packed tokenizer terminal is out of range"));
         }
+        if artifact
+            .transition_byte_rows
+            .iter()
+            .any(|bytes| bytes.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(D::Error::custom(
+                "packed tokenizer byte row is not sorted unique",
+            ));
+        }
 
-        let decode_state = |state: usize| -> Result<Vec<(u8, u32)>, String> {
+        let decode_state = |state: usize| -> Result<Vec<u32>, String> {
             let byte_row = artifact.transition_byte_row_ids[state] as usize;
             let bytes = artifact
                 .transition_byte_rows
                 .get(byte_row)
                 .ok_or_else(|| "packed tokenizer byte-row id is out of range".to_owned())?;
-            if bytes.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return Err("packed tokenizer byte row is not sorted unique".to_owned());
-            }
             let start = artifact.transition_target_offsets[state] as usize;
             let end = artifact.transition_target_offsets[state + 1] as usize;
-            let targets = decode_targets(&artifact.transition_targets[start..end], bytes.len(), state_count)?;
-            Ok(bytes.iter().copied().zip(targets).collect())
+            decode_targets(
+                &artifact.transition_targets[start..end],
+                bytes.len(),
+                state_count,
+            )
         };
-        let transition_rows = if state_count >= 1024 && rayon::current_num_threads() > 1 {
+        let transitions_started = profile.then(std::time::Instant::now);
+        let decoded_targets = if state_count >= 1024 && rayon::current_num_threads() > 1 {
             (0..state_count)
                 .into_par_iter()
                 .map(decode_state)
@@ -924,14 +993,24 @@ mod packed_artifact_serde {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(D::Error::custom)?
         };
+        let target_count = decoded_targets.iter().map(Vec::len).sum::<usize>();
+        let mut runtime_target_offsets = Vec::with_capacity(state_count + 1);
+        let mut runtime_targets = Vec::with_capacity(target_count);
+        runtime_target_offsets.push(0u32);
+        for targets in decoded_targets {
+            runtime_targets.extend(targets);
+            runtime_target_offsets.push(
+                u32::try_from(runtime_targets.len())
+                    .map_err(|_| D::Error::custom("packed tokenizer runtime target count exceeds u32"))?,
+            );
+        }
+        let transitions_ms = transitions_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
+        let dfa_started = profile.then(std::time::Instant::now);
         let mut dfa = DFA::new(state_count);
         dfa.ensure_group_capacity(terminal_count);
         for (group, set) in artifact.group_id_to_u8set.into_iter().enumerate() {
             dfa.set_group_u8set(group as u32, set);
-        }
-        for (state, transitions) in transition_rows.into_iter().enumerate() {
-            dfa.set_transitions_from_sorted_entries(state as u32, transitions);
         }
         {
             let states = dfa.states_mut();
@@ -951,10 +1030,33 @@ mod packed_artifact_serde {
                 }
             }
         }
+        let packed_runtime_transitions = Arc::new(PackedRuntimeTransitions {
+            byte_rows: Arc::from(
+                artifact
+                    .transition_byte_rows
+                    .into_iter()
+                    .map(Vec::into_boxed_slice)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            state_row_ids: Arc::from(artifact.transition_byte_row_ids.into_boxed_slice()),
+            target_offsets: Arc::from(runtime_target_offsets.into_boxed_slice()),
+            targets: Arc::from(runtime_targets.into_boxed_slice()),
+        });
+        let dfa_ms = dfa_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][tokenizer_decode] states={} artifact_ms={artifact_ms:.3} transitions_ms={transitions_ms:.3} dfa_ms={dfa_ms:.3} total_ms={:.3}",
+                state_count,
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         Ok(Tokenizer {
             dfa,
             num_terminals: artifact.num_terminals,
+            packed_runtime_transitions: Some(packed_runtime_transitions),
             compressed_transition_segments: Arc::from(
                 artifact.compressed_transition_segments.into_boxed_slice(),
             ),
@@ -1068,6 +1170,11 @@ impl CompressedTransitionSegment {
 
 enum TokenizerTransitionsIterInner<'a> {
     Dense(crate::ds::char_transitions::CharTransitionsIter<'a, u32>),
+    Packed {
+        bytes: &'a [u8],
+        targets: &'a [u32],
+        next: usize,
+    },
     Compressed {
         segment: &'a CompressedTransitionSegment,
         state: u32,
@@ -1087,6 +1194,17 @@ impl Iterator for TokenizerTransitionsIter<'_> {
         match &mut self.inner {
             TokenizerTransitionsIterInner::Dense(iter) => {
                 iter.next().map(|(byte, target)| (byte, *target))
+            }
+            TokenizerTransitionsIterInner::Packed {
+                bytes,
+                targets,
+                next,
+            } => {
+                let index = *next;
+                let byte = *bytes.get(index)?;
+                let target = *targets.get(index)?;
+                *next += 1;
+                Some((byte, target))
             }
             TokenizerTransitionsIterInner::Compressed {
                 segment,
@@ -1110,6 +1228,10 @@ impl Iterator for TokenizerTransitionsIter<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.inner {
             TokenizerTransitionsIterInner::Dense(iter) => iter.size_hint(),
+            TokenizerTransitionsIterInner::Packed { bytes, next, .. } => {
+                let count = bytes.len().saturating_sub(*next);
+                (count, Some(count))
+            }
             TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
                 let count = segment.transition_count(*state);
                 (count, Some(count))
@@ -1121,6 +1243,8 @@ impl Iterator for TokenizerTransitionsIter<'_> {
     fn count(self) -> usize {
         match self.inner {
             TokenizerTransitionsIterInner::Dense(iter) => iter.count(),
+            TokenizerTransitionsIterInner::Packed { bytes, next, .. } =>
+                bytes.len().saturating_sub(next),
             TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
                 segment.transition_count(state)
             }
@@ -1676,6 +1800,7 @@ impl Tokenizer {
             tokenizer: Tokenizer {
                 dfa,
                 num_terminals: self.num_terminals,
+                packed_runtime_transitions: None,
                 compressed_transition_segments: Arc::from([]),
                 exprs: self.exprs.clone(),
                 singleton_epsilon_closures: OnceLock::new(),
@@ -1809,6 +1934,7 @@ impl Tokenizer {
             Tokenizer {
                 dfa,
                 num_terminals: self.num_terminals,
+                packed_runtime_transitions: None,
                 compressed_transition_segments: Arc::from([]),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
@@ -1952,6 +2078,7 @@ impl Tokenizer {
         Some(Tokenizer {
             dfa,
             num_terminals: self.num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
@@ -2192,6 +2319,7 @@ impl Tokenizer {
         Self {
             dfa,
             num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
@@ -2216,6 +2344,7 @@ impl Tokenizer {
         Self {
             dfa,
             num_terminals,
+            packed_runtime_transitions: None,
             compressed_transition_segments: Arc::from(compressed_transition_segments),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
@@ -2245,8 +2374,27 @@ impl Tokenizer {
         self.compressed_segment_for_state(state).is_some()
     }
 
+    #[inline]
+    pub fn has_packed_runtime_transitions(&self) -> bool {
+        self.packed_runtime_transitions.is_some()
+    }
+
     fn materialized_dfa(&self) -> DFA {
         let mut dfa = self.dfa.clone();
+        if let Some(packed) = &self.packed_runtime_transitions {
+            for state in 0..packed.state_count() as u32 {
+                if let Some((bytes, targets)) = packed.row(state) {
+                    dfa.set_transitions_from_sorted_entries(
+                        state,
+                        bytes
+                            .iter()
+                            .copied()
+                            .zip(targets.iter().copied())
+                            .collect(),
+                    );
+                }
+            }
+        }
         for segment in self.compressed_transition_segments.iter() {
             for local_state in 0..segment.state_count {
                 let state = segment.state_offset + local_state;
@@ -2921,6 +3069,17 @@ impl Tokenizer {
     }
 
     fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
+        if let Some(packed) = &self.packed_runtime_transitions {
+            if let Some((bytes, targets)) = packed.row(state) {
+                return TokenizerTransitionsIter {
+                    inner: TokenizerTransitionsIterInner::Packed {
+                        bytes,
+                        targets,
+                        next: 0,
+                    },
+                };
+            }
+        }
         if let Some(segment) = self.compressed_segment_for_state(state) {
             return TokenizerTransitionsIter {
                 inner: TokenizerTransitionsIterInner::Compressed {
@@ -3094,6 +3253,9 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        if let Some(packed) = &self.packed_runtime_transitions {
+            return packed.transition(state, byte);
+        }
         self.compressed_segment_for_state(state)
             .map_or_else(|| self.dfa.step(state, byte), |segment| segment.transition(state, byte))
     }

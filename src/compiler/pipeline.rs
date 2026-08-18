@@ -5163,6 +5163,16 @@ fn compile_prepared_with_profile_and_table_construction(
                 direct_l1_complete_by_terminal,
             },
         ) = parser_dwa.into_artifact();
+        let parser_dwa = parser_dwa.share_exact_transition_rows_owned();
+        // Large parser DWAs are much cheaper to serialize and load from the
+        // immutable packed runtime representation. Small/medium schema DWAs are
+        // deliberately left materialized: their first save/load is already only
+        // a few milliseconds, so even small amounts of extra finalization work
+        // would be a bad trade. The gap between the two populations is large in
+        // practice (hundreds of states versus tens of thousands).
+        const PACKED_RUNTIME_DWA_STATE_THRESHOLD: usize = 4_096;
+        let build_packed_parser_dwa =
+            parser_dwa.states().len() >= PACKED_RUNTIME_DWA_STATE_THRESHOLD;
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
             vocab,
@@ -5211,9 +5221,11 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             parser_dwa,
+            packed_parser_dwa: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
+            packed_non_dwa_weights: None,
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -5253,6 +5265,7 @@ fn compile_prepared_with_profile_and_table_construction(
             template_dfas_by_terminal,
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
+            packed_token_bytes: None,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
@@ -5296,7 +5309,25 @@ fn compile_prepared_with_profile_and_table_construction(
             final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
+            serialized_artifact_cache: None,
         };
+        if build_packed_parser_dwa {
+            let packed = crate::automata::weighted::dwa::PackedRuntimeDwa::from_dwa(
+                &constraint.parser_dwa,
+            )
+            .expect("direct packed-runtime DWA construction should succeed");
+            if std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some() {
+                let started_at = Instant::now();
+                let bytes = packed.fast_wire_bytes();
+                eprintln!(
+                    "[glrmask/profile][packed_runtime_dwa_fast_wire] ms={:.3} bytes={}",
+                    elapsed_ms(started_at),
+                    bytes.len(),
+                );
+                std::hint::black_box(bytes);
+            }
+            constraint.packed_parser_dwa = Some(std::sync::Arc::new(packed));
+        }
         if let Some(caches) = prebuilt_token_mask_caches
             && caches.matches_constraint(&constraint)
         {

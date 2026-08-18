@@ -18,10 +18,94 @@ use crate::ds::weight::{
     shared_rangeset_artifact_local, Weight,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
+struct PackedDwaRowPool {
+    labels: Vec<Vec<Label>>,
+    targets: Vec<Vec<u32>>,
+    weight_ids: Vec<Vec<u32>>,
+    weights: Arc<[Weight]>,
+}
+
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct PackedDwaTransitionRow {
+    pool: Arc<PackedDwaRowPool>,
+    label_id: usize,
+    target_id: usize,
+    weight_id: usize,
+    materialized: OnceLock<BTreeMap<Label, (u32, Weight)>>,
+}
+
+impl PackedDwaTransitionRow {
+    fn len(&self) -> usize {
+        self.pool.labels[self.label_id].len()
+    }
+
+    fn materialized(&self) -> &BTreeMap<Label, (u32, Weight)> {
+        self.materialized.get_or_init(|| {
+            let labels = &self.pool.labels[self.label_id];
+            let targets = &self.pool.targets[self.target_id];
+            let weights = &self.pool.weight_ids[self.weight_id];
+            labels
+                .iter()
+                .zip(targets)
+                .zip(weights)
+                .map(|((&label, &target), &weight)| {
+                    (label, (target, self.pool.weights[weight as usize].clone()))
+                })
+                .collect()
+        })
+    }
+}
+
+pub struct DwaTransitionEntries<'a> {
+    inner: DwaTransitionEntriesInner<'a>,
+}
+
+enum DwaTransitionEntriesInner<'a> {
+    Tree(std::collections::btree_map::Iter<'a, Label, (u32, Weight)>),
+    Packed {
+        row: &'a PackedDwaTransitionRow,
+        index: usize,
+    },
+}
+
+impl<'a> Iterator for DwaTransitionEntries<'a> {
+    type Item = (Label, u32, &'a Weight);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            DwaTransitionEntriesInner::Tree(entries) => entries
+                .next()
+                .map(|(&label, (target, weight))| (label, *target, weight)),
+            DwaTransitionEntriesInner::Packed { row, index } => {
+                let labels = &row.pool.labels[row.label_id];
+                let position = *index;
+                let &label = labels.get(position)?;
+                let target = row.pool.targets[row.target_id][position];
+                let weight_id = row.pool.weight_ids[row.weight_id][position] as usize;
+                *index += 1;
+                Some((label, target, &row.pool.weights[weight_id]))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = match &self.inner {
+            DwaTransitionEntriesInner::Tree(entries) => entries.len(),
+            DwaTransitionEntriesInner::Packed { row, index } => row.len() - *index,
+        };
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for DwaTransitionEntries<'_> {}
+
+#[derive(Debug, Clone)]
 pub enum DwaTransitionMap {
     Owned(BTreeMap<Label, (u32, Weight)>),
     Shared(Arc<BTreeMap<Label, (u32, Weight)>>),
+    Packed(Arc<PackedDwaTransitionRow>),
 }
 
 impl Default for DwaTransitionMap {
@@ -39,7 +123,66 @@ impl DwaTransitionMap {
         match self {
             Self::Owned(transitions) => transitions as *const BTreeMap<_, _> as usize,
             Self::Shared(transitions) => Arc::as_ptr(transitions) as usize,
+            Self::Packed(transitions) => Arc::as_ptr(transitions) as usize,
         }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Owned(transitions) => transitions.len(),
+            Self::Shared(transitions) => transitions.len(),
+            Self::Packed(transitions) => transitions.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn is_packed(&self) -> bool {
+        matches!(self, Self::Packed(_))
+    }
+
+    pub fn entries(&self) -> DwaTransitionEntries<'_> {
+        let inner = match self {
+            Self::Owned(transitions) => DwaTransitionEntriesInner::Tree(transitions.iter()),
+            Self::Shared(transitions) => DwaTransitionEntriesInner::Tree(transitions.iter()),
+            Self::Packed(row) => DwaTransitionEntriesInner::Packed { row, index: 0 },
+        };
+        DwaTransitionEntries { inner }
+    }
+
+    #[inline]
+    pub fn get_entry(&self, label: &Label) -> Option<(u32, &Weight)> {
+        match self {
+            Self::Owned(transitions) => transitions
+                .get(label)
+                .map(|(target, weight)| (*target, weight)),
+            Self::Shared(transitions) => transitions
+                .get(label)
+                .map(|(target, weight)| (*target, weight)),
+            Self::Packed(row) => {
+                let labels = &row.pool.labels[row.label_id];
+                let index = labels.binary_search(label).ok()?;
+                let target = row.pool.targets[row.target_id][index];
+                let weight_id = row.pool.weight_ids[row.weight_id][index] as usize;
+                Some((target, &row.pool.weights[weight_id]))
+            }
+        }
+    }
+}
+
+impl PartialEq for DwaTransitionMap {
+    fn eq(&self, other: &Self) -> bool {
+        if let (Self::Packed(left), Self::Packed(right)) = (self, other)
+            && Arc::ptr_eq(left, right)
+        {
+            return true;
+        }
+        self.deref() == other.deref()
     }
 }
 
@@ -50,6 +193,7 @@ impl Deref for DwaTransitionMap {
         match self {
             Self::Owned(transitions) => transitions,
             Self::Shared(transitions) => transitions,
+            Self::Packed(transitions) => transitions.materialized(),
         }
     }
 }
@@ -61,18 +205,21 @@ impl DerefMut for DwaTransitionMap {
         // holds, even if Arc::make_mut could give us unique storage.  Move or
         // clone it into `Owned` explicitly so serializers can continue to use
         // Shared pointer identity without missing equal rows after mutation.
-        if matches!(self, Self::Shared(_)) {
+        if matches!(self, Self::Shared(_) | Self::Packed(_)) {
             let current = std::mem::take(self);
             let owned = match current {
                 Self::Shared(transitions) => Arc::try_unwrap(transitions)
                     .unwrap_or_else(|shared| shared.as_ref().clone()),
-                Self::Owned(_) => unreachable!("checked Shared above"),
+                Self::Packed(transitions) => transitions.materialized().clone(),
+                Self::Owned(_) => unreachable!("checked shared representation above"),
             };
             *self = Self::Owned(owned);
         }
         match self {
             Self::Owned(transitions) => transitions,
-            Self::Shared(_) => unreachable!("Shared row was converted to Owned"),
+            Self::Shared(_) | Self::Packed(_) => {
+                unreachable!("shared row was converted to Owned")
+            }
         }
     }
 }
@@ -138,6 +285,1623 @@ pub struct PackedDwaTokenSetInventory {
     pub transition_sets: FxHashMap<usize, std::sync::Arc<RangeSetBlaze<u32>>>,
     pub final_sets: FxHashMap<usize, std::sync::Arc<RangeSetBlaze<u32>>>,
     pub transition_word_spans: FxHashMap<usize, u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeTokenSetSpan {
+    start: u32,
+    len: u32,
+    word_spans: u32,
+}
+
+#[derive(Debug)]
+struct PackedRuntimeTokenSetChunk {
+    ranges: Box<[[u32; 2]]>,
+    spans: Box<[PackedRuntimeTokenSetSpan]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeTokenSetLocation {
+    chunk: u32,
+    local: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeWeight {
+    geometry: u32,
+    token_ids_start: u32,
+    full: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeRow {
+    labels: u32,
+    targets: u32,
+    weights: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackedRuntimeState {
+    row: u32,
+    final_weight: u32,
+}
+
+#[derive(Debug)]
+struct PackedRuntimeSeqPool<T> {
+    values: Box<[T]>,
+    spans: Box<[(u32, u32)]>,
+}
+
+impl<T> PackedRuntimeSeqPool<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    #[inline]
+    fn get(&self, id: u32) -> Option<&[T]> {
+        let &(start, len) = self.spans.get(id as usize)?;
+        let start = start as usize;
+        self.values.get(start..start + len as usize)
+    }
+}
+
+/// Allocation-light, read-only view of the current packed parser DWA.
+///
+/// This is intentionally separate from the compiler-facing `DWA`: current
+/// artifacts can execute directly from canonical packed pools, while a cold
+/// composition/mutation path may still materialize an ordinary `DWA` later.
+#[derive(Debug)]
+pub struct PackedRuntimeDwa {
+    start_state: u32,
+    token_set_chunks: Box<[PackedRuntimeTokenSetChunk]>,
+    token_set_locations: Box<[PackedRuntimeTokenSetLocation]>,
+    // Freshly compiled constraints already own canonical interned token sets.
+    // Keep those Arcs directly instead of immediately copying millions of
+    // RangeSetBlaze ranges into a second flat slab. Loaded artifacts continue
+    // to use the flat chunk/location representation above.
+    materialized_token_sets: Option<Box<[Arc<RangeSetBlaze<u32>>]>>,
+    materialized_token_word_spans: Option<Box<[u32]>>,
+    // Freshly compiled large DWAs can build these while they already traverse
+    // the canonical RangeSetBlaze token sets for runtime metadata.  This avoids
+    // a second multi-million-range traversal on first save.  Loaded artifacts
+    // do not need the cache because unchanged resave uses the whole-artifact
+    // byte cache.
+    fast_wire_token_chunks: Option<Box<[Box<[u8]>]>>,
+    geometries: Box<[Vec<(u32, u32)>]>,
+    weights: Box<[PackedRuntimeWeight]>,
+    weight_token_ids: Box<[u32]>,
+    label_pool: PackedRuntimeSeqPool<Label>,
+    target_pool: PackedRuntimeSeqPool<u32>,
+    weight_id_pool: PackedRuntimeSeqPool<u32>,
+    rows: Box<[PackedRuntimeRow]>,
+    states: Box<[PackedRuntimeState]>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PackedRuntimeTokenSetRef<'a> {
+    id: u32,
+    storage: PackedRuntimeTokenSetStorageRef<'a>,
+    word_spans: u32,
+}
+
+#[derive(Clone, Copy)]
+enum PackedRuntimeTokenSetStorageRef<'a> {
+    Flat(&'a [[u32; 2]]),
+    Materialized(&'a Arc<RangeSetBlaze<u32>>),
+}
+
+impl<'a> PackedRuntimeTokenSetRef<'a> {
+    #[inline]
+    pub fn id(self) -> u32 {
+        self.id
+    }
+
+    #[inline]
+    pub fn range_count(self) -> usize {
+        match self.storage {
+            PackedRuntimeTokenSetStorageRef::Flat(ranges) => ranges.len(),
+            PackedRuntimeTokenSetStorageRef::Materialized(tokens) => tokens.ranges().len(),
+        }
+    }
+
+    #[inline]
+    pub fn word_spans(self) -> u32 {
+        self.word_spans
+    }
+
+    #[inline]
+    pub fn materialized_arc(self) -> Option<&'a Arc<RangeSetBlaze<u32>>> {
+        match self.storage {
+            PackedRuntimeTokenSetStorageRef::Materialized(tokens) => Some(tokens),
+            PackedRuntimeTokenSetStorageRef::Flat(_) => None,
+        }
+    }
+
+    #[inline]
+    pub fn for_each_range(self, mut f: impl FnMut(u32, u32)) {
+        match self.storage {
+            PackedRuntimeTokenSetStorageRef::Flat(ranges) => {
+                for &[start, end] in ranges {
+                    f(start, end);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::Materialized(tokens) => {
+                for range in tokens.ranges() {
+                    f(*range.start(), *range.end());
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PackedRuntimeWeightRef<'a> {
+    dwa: &'a PackedRuntimeDwa,
+    id: u32,
+}
+
+impl<'a> PackedRuntimeWeightRef<'a> {
+    #[inline]
+    pub fn id(self) -> u32 {
+        self.id
+    }
+
+    #[inline]
+    pub fn is_full(self) -> bool {
+        self.dwa.weights[self.id as usize].full
+    }
+
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        let weight = self.dwa.weights[self.id as usize];
+        !weight.full && self.dwa.geometries[weight.geometry as usize].is_empty()
+    }
+
+    pub fn token_set_for_tsid(self, tsid: u32) -> Option<PackedRuntimeTokenSetRef<'a>> {
+        let weight = self.dwa.weights[self.id as usize];
+        if weight.full {
+            return None;
+        }
+        let geometry = &self.dwa.geometries[weight.geometry as usize];
+        let index = geometry
+            .binary_search_by(|&(start, end)| {
+                if tsid < start {
+                    std::cmp::Ordering::Greater
+                } else if tsid > end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        let token_id = self.dwa.weight_token_ids[weight.token_ids_start as usize + index];
+        self.dwa.token_set(token_id)
+    }
+
+    pub fn entries(
+        self,
+    ) -> impl Iterator<Item = ((u32, u32), PackedRuntimeTokenSetRef<'a>)> + 'a {
+        let weight = self.dwa.weights[self.id as usize];
+        let geometry: &'a [(u32, u32)] = if weight.full {
+            &[]
+        } else {
+            &self.dwa.geometries[weight.geometry as usize]
+        };
+        let ids = &self.dwa.weight_token_ids
+            [weight.token_ids_start as usize..weight.token_ids_start as usize + geometry.len()];
+        geometry.iter().copied().zip(ids.iter().copied()).map(|(range, token_id)| {
+            (
+                range,
+                self.dwa
+                    .token_set(token_id)
+                    .expect("validated packed runtime DWA token-set id"),
+            )
+        })
+    }
+}
+
+impl PackedRuntimeDwa {
+
+    /// Runtime wire format: compress only the enormous token-range
+    /// slab, while keeping the already-flat Weight/row/state arrays in a form
+    /// that can be copied or viewed directly on load.  Token-set chunks are
+    /// encoded independently so the expensive millions-of-ranges pass scales
+    /// across cores without requiring lexicographic set sorting.
+    pub fn fast_wire_bytes(&self) -> Vec<u8> {
+        #[inline]
+        fn put_u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        #[inline]
+        fn put_u32s(out: &mut Vec<u8>, values: &[u32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    put_u32(out, value);
+                }
+            }
+        }
+        #[inline]
+        fn put_i32s(out: &mut Vec<u8>, values: &[i32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+
+        const TOKEN_SET_WIRE_CHUNK: usize = 1024;
+        let token_set_count = self.token_set_count();
+        let uncached_chunk_bodies;
+        let chunk_bodies: &[Box<[u8]>] = if let Some(cached) = &self.fast_wire_token_chunks {
+            cached
+        } else {
+            let chunk_ranges = (0..token_set_count)
+                .step_by(TOKEN_SET_WIRE_CHUNK)
+                .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_set_count)))
+                .collect::<Vec<_>>();
+            let encode_chunk = |&(start_id, end_id): &(usize, usize)| {
+                let mut body = Vec::<u8>::new();
+                put_var_u32(&mut body, (end_id - start_id) as u32);
+                for id in start_id..end_id {
+                    let token_set = self
+                        .token_set(id as u32)
+                        .expect("packed runtime token-set id is valid");
+                    put_var_u32(&mut body, token_set.range_count() as u32);
+                    let mut previous_end_plus_one = 0u64;
+                    token_set.for_each_range(|lo, hi| {
+                        put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
+                        put_var_u32(&mut body, hi - lo);
+                        previous_end_plus_one = hi as u64 + 1;
+                    });
+                }
+                body.into_boxed_slice()
+            };
+            uncached_chunk_bodies = if chunk_ranges.len() >= 4
+                && rayon::current_num_threads() > 1
+            {
+                chunk_ranges
+                    .par_iter()
+                    .map(encode_chunk)
+                    .collect::<Vec<_>>()
+            } else {
+                chunk_ranges
+                    .iter()
+                    .map(encode_chunk)
+                    .collect::<Vec<_>>()
+            };
+            &uncached_chunk_bodies
+        };
+
+        let token_bytes = chunk_bodies.iter().map(|body| body.len()).sum::<usize>();
+        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let approx = 128usize
+            .saturating_add(token_bytes)
+            .saturating_add(chunk_bodies.len().saturating_mul(4))
+            .saturating_add(geometry_range_count.saturating_mul(8))
+            .saturating_add(self.weights.len().saturating_mul(12))
+            .saturating_add(self.weight_token_ids.len().saturating_mul(4))
+            .saturating_add(self.label_pool.values.len().saturating_mul(4))
+            .saturating_add(self.target_pool.values.len().saturating_mul(4))
+            .saturating_add(self.weight_id_pool.values.len().saturating_mul(4))
+            .saturating_add(self.label_pool.spans.len().saturating_mul(24))
+            .saturating_add(self.rows.len().saturating_mul(12))
+            .saturating_add(self.states.len().saturating_mul(8));
+        let mut out = Vec::with_capacity(approx);
+        out.extend_from_slice(b"DWF1");
+        put_u32(&mut out, self.start_state);
+        put_u32(&mut out, chunk_bodies.len() as u32);
+        for body in chunk_bodies {
+            put_u32(&mut out, body.len() as u32);
+            out.extend_from_slice(body);
+        }
+
+        put_u32(&mut out, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u32(&mut out, geometry.len() as u32);
+            for &(start, end) in geometry {
+                put_u32(&mut out, start);
+                put_u32(&mut out, end);
+            }
+        }
+        put_u32(&mut out, self.weights.len() as u32);
+        for weight in self.weights.iter() {
+            put_u32(&mut out, weight.geometry);
+            put_u32(&mut out, weight.token_ids_start);
+            put_u32(&mut out, u32::from(weight.full));
+        }
+        put_u32(&mut out, self.weight_token_ids.len() as u32);
+        put_u32s(&mut out, &self.weight_token_ids);
+
+        put_u32(&mut out, self.label_pool.values.len() as u32);
+        put_i32s(&mut out, &self.label_pool.values);
+        put_u32(&mut out, self.label_pool.spans.len() as u32);
+        for &(start, len) in self.label_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+        put_u32(&mut out, self.target_pool.values.len() as u32);
+        put_u32s(&mut out, &self.target_pool.values);
+        put_u32(&mut out, self.target_pool.spans.len() as u32);
+        for &(start, len) in self.target_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+        put_u32(&mut out, self.weight_id_pool.values.len() as u32);
+        put_u32s(&mut out, &self.weight_id_pool.values);
+        put_u32(&mut out, self.weight_id_pool.spans.len() as u32);
+        for &(start, len) in self.weight_id_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+
+        put_u32(&mut out, self.rows.len() as u32);
+        for row in self.rows.iter() {
+            put_u32(&mut out, row.labels);
+            put_u32(&mut out, row.targets);
+            put_u32(&mut out, row.weights);
+        }
+        put_u32(&mut out, self.states.len() as u32);
+        for state in self.states.iter() {
+            put_u32(&mut out, state.row);
+            put_u32(&mut out, state.final_weight);
+        }
+        out
+    }
+
+    pub fn from_fast_wire_bytes(input: &[u8]) -> Result<Self, String> {
+        #[inline]
+        fn take_fixed_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
+            let end = pos
+                .checked_add(4)
+                .ok_or_else(|| "overflowing fast DWA offset".to_owned())?;
+            let bytes: [u8; 4] = input
+                .get(*pos..end)
+                .ok_or_else(|| "truncated fast DWA u32".to_owned())?
+                .try_into()
+                .expect("four-byte slice");
+            *pos = end;
+            Ok(u32::from_le_bytes(bytes))
+        }
+        fn take_u32_vec(input: &[u8], pos: &mut usize, len: usize) -> Result<Vec<u32>, String> {
+            let byte_len = len
+                .checked_mul(4)
+                .ok_or_else(|| "overflowing fast DWA vector length".to_owned())?;
+            let end = pos
+                .checked_add(byte_len)
+                .ok_or_else(|| "overflowing fast DWA vector offset".to_owned())?;
+            let bytes = input
+                .get(*pos..end)
+                .ok_or_else(|| "truncated fast DWA u32 vector".to_owned())?;
+            *pos = end;
+            if cfg!(target_endian = "little") {
+                let mut out = Vec::<u32>::with_capacity(len);
+                unsafe {
+                    out.set_len(len);
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        out.as_mut_ptr().cast::<u8>(),
+                        byte_len,
+                    );
+                }
+                Ok(out)
+            } else {
+                Ok(bytes
+                    .chunks_exact(4)
+                    .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                    .collect())
+            }
+        }
+        fn take_i32_vec(input: &[u8], pos: &mut usize, len: usize) -> Result<Vec<i32>, String> {
+            let raw = take_u32_vec(input, pos, len)?;
+            Ok(raw.into_iter().map(|value| value as i32).collect())
+        }
+        fn decode_token_chunk(body: &[u8]) -> Result<PackedRuntimeTokenSetChunk, String> {
+            let mut pos = 0usize;
+            let set_count = take_var_u32(body, &mut pos)? as usize;
+            let mut ranges = Vec::<[u32; 2]>::new();
+            let mut spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(set_count);
+            for _ in 0..set_count {
+                let range_count = take_var_u32(body, &mut pos)? as usize;
+                let start_index = u32::try_from(ranges.len())
+                    .map_err(|_| "fast DWA token chunk exceeds u32 offsets".to_owned())?;
+                let mut previous_end_plus_one = 0u64;
+                let mut word_spans = 0u32;
+                for _ in 0..range_count {
+                    let gap = take_var_u64(body, &mut pos)?;
+                    let lo64 = previous_end_plus_one
+                        .checked_add(gap)
+                        .ok_or_else(|| "overflowing fast DWA token range".to_owned())?;
+                    let lo = u32::try_from(lo64)
+                        .map_err(|_| "overflowing fast DWA token start".to_owned())?;
+                    let len = take_var_u32(body, &mut pos)?;
+                    let hi = lo
+                        .checked_add(len)
+                        .ok_or_else(|| "overflowing fast DWA token end".to_owned())?;
+                    ranges.push([lo, hi]);
+                    word_spans = word_spans.saturating_add(hi / 64 - lo / 64 + 1);
+                    previous_end_plus_one = hi as u64 + 1;
+                }
+                spans.push(PackedRuntimeTokenSetSpan {
+                    start: start_index,
+                    len: range_count as u32,
+                    word_spans,
+                });
+            }
+            if pos != body.len() {
+                return Err("trailing bytes in fast DWA token chunk".to_owned());
+            }
+            Ok(PackedRuntimeTokenSetChunk {
+                ranges: ranges.into_boxed_slice(),
+                spans: spans.into_boxed_slice(),
+            })
+        }
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_RUNTIME").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        if !input.starts_with(b"DWF1") {
+            return Err("invalid fast runtime DWA header".to_owned());
+        }
+        let mut pos = 4usize;
+        let start_state = take_fixed_u32(input, &mut pos)?;
+
+        let scan_started = profile.then(std::time::Instant::now);
+        let chunk_count = take_fixed_u32(input, &mut pos)? as usize;
+        let mut chunk_bodies = Vec::<&[u8]>::with_capacity(chunk_count);
+        for _ in 0..chunk_count {
+            let len = take_fixed_u32(input, &mut pos)? as usize;
+            let end = pos
+                .checked_add(len)
+                .ok_or_else(|| "overflowing fast DWA token-chunk length".to_owned())?;
+            let body = input
+                .get(pos..end)
+                .ok_or_else(|| "truncated fast DWA token chunk".to_owned())?;
+            chunk_bodies.push(body);
+            pos = end;
+        }
+        let after_chunks = pos;
+        let decode_tokens = || -> Result<(Vec<PackedRuntimeTokenSetChunk>, f64), String> {
+            let started = profile.then(std::time::Instant::now);
+            let chunks = if chunk_count >= 4 && rayon::current_num_threads() > 1 {
+                chunk_bodies
+                    .par_iter()
+                    .map(|body| decode_token_chunk(body))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                chunk_bodies
+                    .iter()
+                    .map(|body| decode_token_chunk(body))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let ms = started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            Ok((chunks, ms))
+        };
+        let decode_other = || -> Result<_, String> {
+            let started = profile.then(std::time::Instant::now);
+            let mut pos = after_chunks;
+            let geometry_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut geometries = Vec::<Vec<(u32, u32)>>::with_capacity(geometry_count);
+            for _ in 0..geometry_count {
+                let len = take_fixed_u32(input, &mut pos)? as usize;
+                let mut geometry = Vec::with_capacity(len);
+                for _ in 0..len {
+                    geometry.push((
+                        take_fixed_u32(input, &mut pos)?,
+                        take_fixed_u32(input, &mut pos)?,
+                    ));
+                }
+                geometries.push(geometry);
+            }
+
+            let weight_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut weights = Vec::<PackedRuntimeWeight>::with_capacity(weight_count);
+            for _ in 0..weight_count {
+                let geometry = take_fixed_u32(input, &mut pos)?;
+                let token_ids_start = take_fixed_u32(input, &mut pos)?;
+                let full = take_fixed_u32(input, &mut pos)? != 0;
+                if !full && geometry as usize >= geometries.len() {
+                    return Err("invalid fast DWA Weight geometry".to_owned());
+                }
+                weights.push(PackedRuntimeWeight {
+                    geometry,
+                    token_ids_start,
+                    full,
+                });
+            }
+            let weight_token_id_count = take_fixed_u32(input, &mut pos)? as usize;
+            let weight_token_ids = take_u32_vec(input, &mut pos, weight_token_id_count)?;
+
+            let label_value_count = take_fixed_u32(input, &mut pos)? as usize;
+            let label_values = take_i32_vec(input, &mut pos, label_value_count)?;
+            let label_span_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut label_spans = Vec::with_capacity(label_span_count);
+            for _ in 0..label_span_count {
+                label_spans.push((
+                    take_fixed_u32(input, &mut pos)?,
+                    take_fixed_u32(input, &mut pos)?,
+                ));
+            }
+            let target_value_count = take_fixed_u32(input, &mut pos)? as usize;
+            let target_values = take_u32_vec(input, &mut pos, target_value_count)?;
+            let target_span_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut target_spans = Vec::with_capacity(target_span_count);
+            for _ in 0..target_span_count {
+                target_spans.push((
+                    take_fixed_u32(input, &mut pos)?,
+                    take_fixed_u32(input, &mut pos)?,
+                ));
+            }
+            let weight_value_count = take_fixed_u32(input, &mut pos)? as usize;
+            let weight_values = take_u32_vec(input, &mut pos, weight_value_count)?;
+            let weight_span_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut weight_spans = Vec::with_capacity(weight_span_count);
+            for _ in 0..weight_span_count {
+                weight_spans.push((
+                    take_fixed_u32(input, &mut pos)?,
+                    take_fixed_u32(input, &mut pos)?,
+                ));
+            }
+            if label_span_count != target_span_count || label_span_count != weight_span_count {
+                return Err("mismatched fast DWA row-pool spans".to_owned());
+            }
+
+            let row_count = take_fixed_u32(input, &mut pos)? as usize;
+            let mut rows = Vec::<PackedRuntimeRow>::with_capacity(row_count);
+            for _ in 0..row_count {
+                rows.push(PackedRuntimeRow {
+                    labels: take_fixed_u32(input, &mut pos)?,
+                    targets: take_fixed_u32(input, &mut pos)?,
+                    weights: take_fixed_u32(input, &mut pos)?,
+                });
+            }
+            let state_count = take_fixed_u32(input, &mut pos)? as usize;
+            if state_count != 0 && start_state as usize >= state_count {
+                return Err("invalid fast DWA start state".to_owned());
+            }
+            let mut states = Vec::<PackedRuntimeState>::with_capacity(state_count);
+            for _ in 0..state_count {
+                let row = take_fixed_u32(input, &mut pos)?;
+                let final_weight = take_fixed_u32(input, &mut pos)?;
+                if row as usize >= row_count {
+                    return Err("invalid fast DWA state row".to_owned());
+                }
+                if final_weight != u32::MAX && final_weight as usize >= weight_count {
+                    return Err("invalid fast DWA state final Weight".to_owned());
+                }
+                states.push(PackedRuntimeState { row, final_weight });
+            }
+            if pos != input.len() {
+                return Err("trailing bytes in fast runtime DWA".to_owned());
+            }
+            let ms = started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            Ok((
+                geometries,
+                weights,
+                weight_token_ids,
+                label_values,
+                label_spans,
+                target_values,
+                target_spans,
+                weight_values,
+                weight_spans,
+                rows,
+                states,
+                ms,
+            ))
+        };
+        let (token_result, other_result) = if rayon::current_num_threads() > 1 {
+            rayon::join(decode_tokens, decode_other)
+        } else {
+            (decode_tokens(), decode_other())
+        };
+        let (token_set_chunks, token_ms) = token_result?;
+        let (
+            geometries,
+            weights,
+            weight_token_ids,
+            label_values,
+            label_spans,
+            target_values,
+            target_spans,
+            weight_values,
+            weight_spans,
+            rows,
+            states,
+            other_ms,
+        ) = other_result?;
+        let mut token_set_locations = Vec::<PackedRuntimeTokenSetLocation>::new();
+        for (chunk, decoded) in token_set_chunks.iter().enumerate() {
+            token_set_locations.reserve(decoded.spans.len());
+            for local in 0..decoded.spans.len() {
+                token_set_locations.push(PackedRuntimeTokenSetLocation {
+                    chunk: chunk as u32,
+                    local: local as u32,
+                });
+            }
+        }
+        let scan_ms = scan_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_fast_load] token_ms={token_ms:.3} other_ms={other_ms:.3} scan_inclusive_ms={scan_ms:.3} total_ms={:.3} bytes={} states={} token_sets={} token_ranges={} weights={} rows={}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                input.len(),
+                states.len(),
+                token_set_locations.len(),
+                token_set_chunks.iter().map(|chunk| chunk.ranges.len()).sum::<usize>(),
+                weights.len(),
+                rows.len(),
+            );
+        }
+
+        Ok(Self {
+            start_state,
+            token_set_chunks: token_set_chunks.into_boxed_slice(),
+            token_set_locations: token_set_locations.into_boxed_slice(),
+            materialized_token_sets: None,
+            materialized_token_word_spans: None,
+            fast_wire_token_chunks: None,
+            geometries: geometries.into_boxed_slice(),
+            weights: weights.into_boxed_slice(),
+            weight_token_ids: weight_token_ids.into_boxed_slice(),
+            label_pool: PackedRuntimeSeqPool {
+                values: label_values.into_boxed_slice(),
+                spans: label_spans.into_boxed_slice(),
+            },
+            target_pool: PackedRuntimeSeqPool {
+                values: target_values.into_boxed_slice(),
+                spans: target_spans.into_boxed_slice(),
+            },
+            weight_id_pool: PackedRuntimeSeqPool {
+                values: weight_values.into_boxed_slice(),
+                spans: weight_spans.into_boxed_slice(),
+            },
+            rows: rows.into_boxed_slice(),
+            states: states.into_boxed_slice(),
+        })
+    }
+
+    /// Build directly from a finalized DWA whose transition rows have already
+    /// been canonicalized by identity.  This avoids the old temporary
+    /// Vec<Vec<(label,target,weight-id)>> representation and retains canonical
+    /// RangeSetBlaze token-set Arcs instead of copying every range immediately.
+    fn from_shared_dwa_direct(dwa: &DWA) -> Result<Self, String> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_RUNTIME_BUILD").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+
+        let row_classes_started = profile.then(std::time::Instant::now);
+        let mut row_id_by_ptr = FxHashMap::<usize, u32>::default();
+        row_id_by_ptr.reserve(dwa.states.len().min(32_768));
+        let mut representative_states = Vec::<usize>::new();
+        let mut state_row_ids = Vec::<u32>::with_capacity(dwa.states.len());
+        for (state_index, state) in dwa.states.iter().enumerate() {
+            let ptr = state.transitions.ptr_key();
+            let row_id = if let Some(&row_id) = row_id_by_ptr.get(&ptr) {
+                row_id
+            } else {
+                let row_id = representative_states.len() as u32;
+                row_id_by_ptr.insert(ptr, row_id);
+                representative_states.push(state_index);
+                row_id
+            };
+            state_row_ids.push(row_id);
+        }
+        let row_classes_ms = row_classes_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let rows_started = profile.then(std::time::Instant::now);
+        let mut local_weight_by_ptr = FxHashMap::<usize, u32>::default();
+        local_weight_by_ptr.reserve(32_768);
+        let mut weight_refs = Vec::<Weight>::new();
+        let mut intern_weight = |weight: &Weight| -> u32 {
+            let ptr = weight.ptr_key();
+            *local_weight_by_ptr.entry(ptr).or_insert_with(|| {
+                let id = weight_refs.len() as u32;
+                weight_refs.push(weight.clone());
+                id
+            })
+        };
+
+        let total_row_entries = representative_states
+            .iter()
+            .map(|&state_index| dwa.states[state_index].transitions.len())
+            .sum::<usize>();
+        let mut label_values = Vec::<Label>::with_capacity(total_row_entries);
+        let mut target_values = Vec::<u32>::with_capacity(total_row_entries);
+        let mut weight_values = Vec::<u32>::with_capacity(total_row_entries);
+        let mut label_spans = Vec::<(u32, u32)>::with_capacity(representative_states.len());
+        let mut target_spans = Vec::<(u32, u32)>::with_capacity(representative_states.len());
+        let mut weight_spans = Vec::<(u32, u32)>::with_capacity(representative_states.len());
+        let mut rows = Vec::<PackedRuntimeRow>::with_capacity(representative_states.len());
+        for (row_id, &state_index) in representative_states.iter().enumerate() {
+            let row = &dwa.states[state_index].transitions;
+            let start = u32::try_from(label_values.len())
+                .map_err(|_| "packed runtime DWA row pool exceeds u32 offsets".to_owned())?;
+            let len = u32::try_from(row.len())
+                .map_err(|_| "packed runtime DWA row exceeds u32 entries".to_owned())?;
+            for (label, target, weight) in row.entries() {
+                label_values.push(label);
+                target_values.push(target);
+                weight_values.push(intern_weight(weight));
+            }
+            label_spans.push((start, len));
+            target_spans.push((start, len));
+            weight_spans.push((start, len));
+            let id = u32::try_from(row_id)
+                .map_err(|_| "packed runtime DWA has too many rows".to_owned())?;
+            rows.push(PackedRuntimeRow {
+                labels: id,
+                targets: id,
+                weights: id,
+            });
+        }
+        let rows_ms = rows_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let states_started = profile.then(std::time::Instant::now);
+        let mut states = Vec::<PackedRuntimeState>::with_capacity(dwa.states.len());
+        for (state, row) in dwa.states.iter().zip(state_row_ids) {
+            let final_weight = state
+                .final_weight
+                .as_ref()
+                .map(&mut intern_weight)
+                .unwrap_or(u32::MAX);
+            states.push(PackedRuntimeState { row, final_weight });
+        }
+        let states_ms = states_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let weights_started = profile.then(std::time::Instant::now);
+        let token_table_capacity = (weight_refs.len().saturating_mul(4))
+            .max(65_536)
+            .next_power_of_two();
+        let token_table_mask = token_table_capacity - 1;
+        let mut token_keys = vec![0usize; token_table_capacity];
+        let mut token_values = vec![0u32; token_table_capacity];
+        let mut token_sets = Vec::<Arc<RangeSetBlaze<u32>>>::new();
+        let mut geometries = vec![Vec::<(u32, u32)>::new()];
+        let mut geometry_ids = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+        geometry_ids.insert(Vec::new(), 0);
+        let mut weights = Vec::<PackedRuntimeWeight>::with_capacity(weight_refs.len());
+        let mut weight_token_ids = Vec::<u32>::with_capacity(weight_refs.len().saturating_mul(2));
+        for weight in &weight_refs {
+            if weight.is_full() {
+                weights.push(PackedRuntimeWeight {
+                    geometry: 0,
+                    token_ids_start: weight_token_ids.len() as u32,
+                    full: true,
+                });
+                continue;
+            }
+            let token_ids_start = u32::try_from(weight_token_ids.len())
+                .map_err(|_| "packed runtime DWA weight token ids exceed u32 offsets".to_owned())?;
+            let mut geometry = Vec::<(u32, u32)>::new();
+            for (range, tokens) in weight.raw_range_values() {
+                geometry.push((*range.start(), *range.end()));
+                let ptr = Arc::as_ptr(tokens) as usize;
+                let mut slot = ((ptr >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15usize))
+                    & token_table_mask;
+                let token_id = loop {
+                    let key = token_keys[slot];
+                    if key == ptr {
+                        break token_values[slot];
+                    }
+                    if key == 0 {
+                        let id = u32::try_from(token_sets.len())
+                            .map_err(|_| "packed runtime DWA has too many token sets".to_owned())?;
+                        token_keys[slot] = ptr;
+                        token_values[slot] = id;
+                        token_sets.push(Arc::clone(tokens));
+                        break id;
+                    }
+                    slot = (slot + 1) & token_table_mask;
+                };
+                weight_token_ids.push(token_id);
+            }
+            let geometry_id = if let Some(&id) = geometry_ids.get(&geometry) {
+                id
+            } else {
+                let id = u32::try_from(geometries.len())
+                    .map_err(|_| "packed runtime DWA has too many weight geometries".to_owned())?;
+                geometry_ids.insert(geometry.clone(), id);
+                geometries.push(geometry);
+                id
+            };
+            weights.push(PackedRuntimeWeight {
+                geometry: geometry_id,
+                token_ids_start,
+                full: false,
+            });
+        }
+        let weight_pool_ms = weights_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let token_stats_started = profile.then(std::time::Instant::now);
+        // DWF1 groups token sets into independently decodable chunks.  Build
+        // those chunk bodies during the metadata traversal we already need for
+        // compiled runtime masking. RangeSetBlaze exposes ranges_len() in O(1),
+        // so each actual range is visited exactly once here.
+        const TOKEN_SET_WIRE_CHUNK: usize = 1024;
+        struct TokenChunkBuild {
+            body: Box<[u8]>,
+            word_spans: Vec<u32>,
+            range_count: usize,
+        }
+        let chunk_ranges = (0..token_sets.len())
+            .step_by(TOKEN_SET_WIRE_CHUNK)
+            .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_sets.len())))
+            .collect::<Vec<_>>();
+        let build_chunk = |&(start, end): &(usize, usize)| {
+            let mut body = Vec::<u8>::new();
+            put_var_u32(&mut body, (end - start) as u32);
+            let mut spans = Vec::<u32>::with_capacity(end - start);
+            let mut chunk_range_count = 0usize;
+            for tokens in &token_sets[start..end] {
+                let range_count = tokens.ranges_len();
+                put_var_u32(&mut body, range_count as u32);
+                chunk_range_count += range_count;
+                let mut word_spans = 0u32;
+                let mut previous_end_plus_one = 0u64;
+                for token_range in tokens.ranges() {
+                    let lo = *token_range.start();
+                    let hi = *token_range.end();
+                    word_spans = word_spans.saturating_add(hi / 64 - lo / 64 + 1);
+                    put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
+                    put_var_u32(&mut body, hi - lo);
+                    previous_end_plus_one = hi as u64 + 1;
+                }
+                spans.push(word_spans);
+            }
+            TokenChunkBuild {
+                body: body.into_boxed_slice(),
+                word_spans: spans,
+                range_count: chunk_range_count,
+            }
+        };
+        let token_chunks = if chunk_ranges.len() >= 4 && rayon::current_num_threads() > 1 {
+            chunk_ranges.par_iter().map(build_chunk).collect::<Vec<_>>()
+        } else {
+            chunk_ranges.iter().map(build_chunk).collect::<Vec<_>>()
+        };
+        let token_range_count = token_chunks.iter().map(|chunk| chunk.range_count).sum::<usize>();
+        let token_word_spans = token_chunks
+            .iter()
+            .flat_map(|chunk| chunk.word_spans.iter().copied())
+            .collect::<Vec<_>>();
+        let fast_wire_token_chunks = token_chunks
+            .into_iter()
+            .map(|chunk| chunk.body)
+            .collect::<Vec<_>>();
+        let token_stats_ms = token_stats_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_from_shared_dwa] row_classes_ms={row_classes_ms:.3} rows_ms={rows_ms:.3} states_ms={states_ms:.3} weight_pool_ms={weight_pool_ms:.3} token_stats_ms={token_stats_ms:.3} total_ms={:.3} token_sets={} token_ranges={} weight_entries={} weights={} geometries={} rows={} row_entries={} states={}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                token_sets.len(),
+                token_range_count,
+                weight_token_ids.len(),
+                weights.len(),
+                geometries.len(),
+                rows.len(),
+                total_row_entries,
+                states.len(),
+            );
+        }
+
+        Ok(Self {
+            start_state: dwa.start_state(),
+            token_set_chunks: Box::new([]),
+            token_set_locations: Box::new([]),
+            materialized_token_sets: Some(token_sets.into_boxed_slice()),
+            materialized_token_word_spans: Some(token_word_spans.into_boxed_slice()),
+            fast_wire_token_chunks: Some(fast_wire_token_chunks.into_boxed_slice()),
+            geometries: geometries.into_boxed_slice(),
+            weights: weights.into_boxed_slice(),
+            weight_token_ids: weight_token_ids.into_boxed_slice(),
+            label_pool: PackedRuntimeSeqPool {
+                values: label_values.into_boxed_slice(),
+                spans: label_spans.into_boxed_slice(),
+            },
+            target_pool: PackedRuntimeSeqPool {
+                values: target_values.into_boxed_slice(),
+                spans: target_spans.into_boxed_slice(),
+            },
+            weight_id_pool: PackedRuntimeSeqPool {
+                values: weight_values.into_boxed_slice(),
+                spans: weight_spans.into_boxed_slice(),
+            },
+            rows: rows.into_boxed_slice(),
+            states: states.into_boxed_slice(),
+        })
+    }
+
+    /// Build the read-only runtime representation directly from a finalized
+    /// compiler DWA.  Unlike `from_packed_bytes`, this does no wire-oriented
+    /// canonical sorting, front coding, varint encoding, or reparsing.  It is
+    /// intended to let compiler-created constraints use the same execution
+    /// representation as loaded constraints without paying serialization work
+    /// merely to construct it.
+    pub fn from_dwa(dwa: &DWA) -> Result<Self, String> {
+        if dwa.has_shared_transition_rows() {
+            return Self::from_shared_dwa_direct(dwa);
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_RUNTIME_BUILD").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+
+        let pooled_started = profile.then(std::time::Instant::now);
+        let (token_sets, weight_pool, transition_rows, state_rows, _) =
+            dwa.packed_pooled_parts();
+        let pooled_ms = pooled_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        const TOKEN_SET_CHUNK: usize = 1024;
+        let token_started = profile.then(std::time::Instant::now);
+        let build_token_chunk = |sets: &[Arc<RangeSetBlaze<u32>>]| {
+            let mut ranges = Vec::<[u32; 2]>::new();
+            let mut spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(sets.len());
+            for tokens in sets {
+                let start = u32::try_from(ranges.len())
+                    .map_err(|_| "packed runtime token-set chunk exceeds u32 offsets".to_owned())?;
+                let mut word_spans = 0u32;
+                for range in tokens.ranges() {
+                    let lo = *range.start();
+                    let hi = *range.end();
+                    ranges.push([lo, hi]);
+                    word_spans = word_spans.saturating_add(hi / 64 - lo / 64 + 1);
+                }
+                let len = u32::try_from(ranges.len() - start as usize)
+                    .map_err(|_| "packed runtime token set exceeds u32 ranges".to_owned())?;
+                spans.push(PackedRuntimeTokenSetSpan {
+                    start,
+                    len,
+                    word_spans,
+                });
+            }
+            Ok::<_, String>(PackedRuntimeTokenSetChunk {
+                ranges: ranges.into_boxed_slice(),
+                spans: spans.into_boxed_slice(),
+            })
+        };
+        let token_set_chunks = if token_sets.len() >= TOKEN_SET_CHUNK * 2
+            && rayon::current_num_threads() > 1
+        {
+            token_sets
+                .par_chunks(TOKEN_SET_CHUNK)
+                .map(build_token_chunk)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            token_sets
+                .chunks(TOKEN_SET_CHUNK)
+                .map(build_token_chunk)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut token_set_locations = Vec::with_capacity(token_sets.len());
+        for (chunk, sets) in token_sets.chunks(TOKEN_SET_CHUNK).enumerate() {
+            for local in 0..sets.len() {
+                token_set_locations.push(PackedRuntimeTokenSetLocation {
+                    chunk: chunk as u32,
+                    local: local as u32,
+                });
+            }
+        }
+        let token_ms = token_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        // Profile-only diagnostic: isolate RangeSetBlaze range iteration from
+        // allocation/copying into the packed slabs. This deliberately runs
+        // after the real token build so it cannot inflate token_ms.
+        let (range_iter_ms, range_iter_count, range_iter_checksum) = if profile {
+            let started = std::time::Instant::now();
+            let scan_one = |tokens: &Arc<RangeSetBlaze<u32>>| {
+                tokens.ranges().fold((0usize, 0u64), |(count, checksum), range| {
+                    (
+                        count + 1,
+                        checksum
+                            .wrapping_add(*range.start() as u64)
+                            .wrapping_add((*range.end() as u64).rotate_left(17)),
+                    )
+                })
+            };
+            let (count, checksum) = if token_sets.len() >= TOKEN_SET_CHUNK * 2
+                && rayon::current_num_threads() > 1
+            {
+                token_sets
+                    .par_iter()
+                    .map(scan_one)
+                    .reduce(|| (0usize, 0u64), |a, b| (a.0 + b.0, a.1.wrapping_add(b.1)))
+            } else {
+                token_sets
+                    .iter()
+                    .map(scan_one)
+                    .fold((0usize, 0u64), |a, b| (a.0 + b.0, a.1.wrapping_add(b.1)))
+            };
+            (started.elapsed().as_secs_f64() * 1000.0, count, checksum)
+        } else {
+            (0.0, 0usize, 0u64)
+        };
+
+        let weights_started = profile.then(std::time::Instant::now);
+        let mut geometries = vec![Vec::<(u32, u32)>::new()];
+        let mut geometry_ids = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+        geometry_ids.insert(Vec::new(), 0);
+        let total_weight_entries = weight_pool
+            .iter()
+            .map(|weight| weight.entries.len())
+            .sum::<usize>();
+        let mut weights = Vec::<PackedRuntimeWeight>::with_capacity(weight_pool.len());
+        let mut weight_token_ids = Vec::<u32>::with_capacity(total_weight_entries);
+        for weight in &weight_pool {
+            if weight.all {
+                weights.push(PackedRuntimeWeight {
+                    geometry: 0,
+                    token_ids_start: weight_token_ids.len() as u32,
+                    full: true,
+                });
+                continue;
+            }
+            let geometry = weight
+                .entries
+                .iter()
+                .map(|&(start, end, _)| (start, end))
+                .collect::<Vec<_>>();
+            let geometry_id = if let Some(&id) = geometry_ids.get(&geometry) {
+                id
+            } else {
+                let id = u32::try_from(geometries.len())
+                    .map_err(|_| "packed runtime DWA has too many weight geometries".to_owned())?;
+                geometry_ids.insert(geometry.clone(), id);
+                geometries.push(geometry);
+                id
+            };
+            let token_ids_start = u32::try_from(weight_token_ids.len())
+                .map_err(|_| "packed runtime DWA weight token ids exceed u32 offsets".to_owned())?;
+            for &(_, _, token_set) in &weight.entries {
+                if token_set as usize >= token_sets.len() {
+                    return Err("invalid direct packed-runtime token-set id".to_owned());
+                }
+                weight_token_ids.push(token_set);
+            }
+            weights.push(PackedRuntimeWeight {
+                geometry: geometry_id,
+                token_ids_start,
+                full: false,
+            });
+        }
+        let weights_ms = weights_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let rows_started = profile.then(std::time::Instant::now);
+        let total_row_entries = transition_rows.iter().map(Vec::len).sum::<usize>();
+        let mut label_values = Vec::<Label>::with_capacity(total_row_entries);
+        let mut target_values = Vec::<u32>::with_capacity(total_row_entries);
+        let mut weight_values = Vec::<u32>::with_capacity(total_row_entries);
+        let mut label_spans = Vec::<(u32, u32)>::with_capacity(transition_rows.len());
+        let mut target_spans = Vec::<(u32, u32)>::with_capacity(transition_rows.len());
+        let mut weight_spans = Vec::<(u32, u32)>::with_capacity(transition_rows.len());
+        let mut rows = Vec::<PackedRuntimeRow>::with_capacity(transition_rows.len());
+        for (row_id, row) in transition_rows.iter().enumerate() {
+            let start = u32::try_from(label_values.len())
+                .map_err(|_| "packed runtime DWA row pool exceeds u32 offsets".to_owned())?;
+            let len = u32::try_from(row.len())
+                .map_err(|_| "packed runtime DWA row exceeds u32 entries".to_owned())?;
+            for &(label, target, weight) in row {
+                if weight as usize >= weights.len() {
+                    return Err("invalid direct packed-runtime Weight id".to_owned());
+                }
+                label_values.push(label);
+                target_values.push(target);
+                weight_values.push(weight);
+            }
+            label_spans.push((start, len));
+            target_spans.push((start, len));
+            weight_spans.push((start, len));
+            let id = u32::try_from(row_id)
+                .map_err(|_| "packed runtime DWA has too many rows".to_owned())?;
+            rows.push(PackedRuntimeRow {
+                labels: id,
+                targets: id,
+                weights: id,
+            });
+        }
+        let rows_ms = rows_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let states_started = profile.then(std::time::Instant::now);
+        let mut states = Vec::<PackedRuntimeState>::with_capacity(state_rows.len());
+        for &(row, final_weight) in &state_rows {
+            if row as usize >= rows.len() {
+                return Err("invalid direct packed-runtime row id".to_owned());
+            }
+            let final_weight = final_weight.unwrap_or(u32::MAX);
+            if final_weight != u32::MAX && final_weight as usize >= weights.len() {
+                return Err("invalid direct packed-runtime final Weight id".to_owned());
+            }
+            states.push(PackedRuntimeState { row, final_weight });
+        }
+        let states_ms = states_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_from_dwa] pooled_ms={pooled_ms:.3} token_ms={token_ms:.3} weights_ms={weights_ms:.3} rows_ms={rows_ms:.3} states_ms={states_ms:.3} total_ms={:.3} token_sets={} token_ranges={} weights={} geometries={} rows={} row_entries={} states={}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                token_sets.len(),
+                token_set_chunks.iter().map(|chunk| chunk.ranges.len()).sum::<usize>(),
+                weights.len(),
+                geometries.len(),
+                rows.len(),
+                total_row_entries,
+                states.len(),
+            );
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_range_iter] ms={range_iter_ms:.3} ranges={range_iter_count} checksum={range_iter_checksum}",
+            );
+        }
+
+        Ok(Self {
+            start_state: dwa.start_state(),
+            token_set_chunks: token_set_chunks.into_boxed_slice(),
+            token_set_locations: token_set_locations.into_boxed_slice(),
+            materialized_token_sets: None,
+            materialized_token_word_spans: None,
+            fast_wire_token_chunks: None,
+            geometries: geometries.into_boxed_slice(),
+            weights: weights.into_boxed_slice(),
+            weight_token_ids: weight_token_ids.into_boxed_slice(),
+            label_pool: PackedRuntimeSeqPool {
+                values: label_values.into_boxed_slice(),
+                spans: label_spans.into_boxed_slice(),
+            },
+            target_pool: PackedRuntimeSeqPool {
+                values: target_values.into_boxed_slice(),
+                spans: target_spans.into_boxed_slice(),
+            },
+            weight_id_pool: PackedRuntimeSeqPool {
+                values: weight_values.into_boxed_slice(),
+                spans: weight_spans.into_boxed_slice(),
+            },
+            rows: rows.into_boxed_slice(),
+            states: states.into_boxed_slice(),
+        })
+    }
+
+    pub fn from_packed_bytes(input: &[u8]) -> Result<Self, String> {
+        let profile_runtime = std::env::var_os("GLRMASK_PROFILE_DWA_RUNTIME").is_some();
+        let total_started = profile_runtime.then(std::time::Instant::now);
+        let scan_started = profile_runtime.then(std::time::Instant::now);
+        if !input.starts_with(b"DWP6") {
+            return Err("invalid packed runtime DWA header".to_owned());
+        }
+        let mut pos = 4usize;
+        let start_state = take_var_u32(input, &mut pos)?;
+
+        let token_set_count = take_var_u32(input, &mut pos)? as usize;
+        let token_set_chunk_count = take_var_u32(input, &mut pos)? as usize;
+        let token_set_bodies = take_length_prefixed_slices(
+            input,
+            &mut pos,
+            token_set_chunk_count,
+            "token-set chunk",
+        )?;
+
+        let geometry_count = take_var_u32(input, &mut pos)? as usize;
+        let geometry_bodies = take_length_prefixed_slices(
+            input,
+            &mut pos,
+            geometry_count,
+            "weight geometry",
+        )?;
+
+        let weight_count = take_var_u32(input, &mut pos)? as usize;
+        let weight_bodies =
+            take_length_prefixed_slices(input, &mut pos, weight_count, "weight")?;
+
+        enum RowSource<'a> {
+            Direct(Vec<&'a [u8]>),
+            Components {
+                labels: Vec<&'a [u8]>,
+                targets: Vec<&'a [u8]>,
+                weights: Vec<&'a [u8]>,
+                rows: Vec<(u32, u32, u32)>,
+            },
+        }
+
+        let row_mode = *input
+            .get(pos)
+            .ok_or_else(|| "truncated packed DWA row mode".to_owned())?;
+        pos += 1;
+        let row_source = match row_mode {
+            0 => {
+                let row_count = take_var_u32(input, &mut pos)? as usize;
+                RowSource::Direct(take_length_prefixed_slices(
+                    input,
+                    &mut pos,
+                    row_count,
+                    "transition row",
+                )?)
+            }
+            1 => {
+                let label_count = take_var_u32(input, &mut pos)? as usize;
+                let labels = take_length_prefixed_slices(
+                    input,
+                    &mut pos,
+                    label_count,
+                    "label sequence",
+                )?;
+                let target_count = take_var_u32(input, &mut pos)? as usize;
+                let targets = take_length_prefixed_slices(
+                    input,
+                    &mut pos,
+                    target_count,
+                    "target sequence",
+                )?;
+                let weight_id_count = take_var_u32(input, &mut pos)? as usize;
+                let weights = take_length_prefixed_slices(
+                    input,
+                    &mut pos,
+                    weight_id_count,
+                    "weight-id sequence",
+                )?;
+                let row_count = take_var_u32(input, &mut pos)? as usize;
+                let mut rows = Vec::with_capacity(row_count);
+                for _ in 0..row_count {
+                    rows.push((
+                        take_var_u32(input, &mut pos)?,
+                        take_var_u32(input, &mut pos)?,
+                        take_var_u32(input, &mut pos)?,
+                    ));
+                }
+                RowSource::Components {
+                    labels,
+                    targets,
+                    weights,
+                    rows,
+                }
+            }
+            _ => return Err("invalid packed DWA row mode".to_owned()),
+        };
+
+        let state_count = take_var_u32(input, &mut pos)? as usize;
+        if start_state as usize >= state_count && state_count != 0 {
+            return Err("invalid packed DWA start state".to_owned());
+        }
+        let row_count = match &row_source {
+            RowSource::Direct(rows) => rows.len(),
+            RowSource::Components { rows, .. } => rows.len(),
+        };
+        let mut states = Vec::with_capacity(state_count);
+        for _ in 0..state_count {
+            let row = take_var_u32(input, &mut pos)?;
+            if row as usize >= row_count {
+                return Err("invalid packed DWA transition-row index".to_owned());
+            }
+            let final_encoded = take_var_u32(input, &mut pos)?;
+            let final_weight = if final_encoded == 0 {
+                u32::MAX
+            } else {
+                let weight = final_encoded - 1;
+                if weight as usize >= weight_count {
+                    return Err("invalid packed DWA final-weight index".to_owned());
+                }
+                weight
+            };
+            states.push(PackedRuntimeState { row, final_weight });
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed runtime DWA".to_owned());
+        }
+        let scan_ms = scan_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+
+        let decode_token_sets = || -> Result<Vec<PackedRuntimeTokenSetChunk>, String> {
+            let started = profile_runtime.then(std::time::Instant::now);
+            if token_set_chunk_count >= 16 && rayon::current_num_threads() > 1 {
+                let result = token_set_bodies
+                    .par_iter()
+                    .map(|body| decode_packed_runtime_token_set_chunk(body))
+                    .collect();
+                if let Some(started) = started {
+                    eprintln!("[glrmask/profile][packed_runtime_dwa] token_sets_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                }
+                result
+            } else {
+                let result = token_set_bodies
+                    .iter()
+                    .map(|body| decode_packed_runtime_token_set_chunk(body))
+                    .collect();
+                if let Some(started) = started {
+                    eprintln!("[glrmask/profile][packed_runtime_dwa] token_sets_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                }
+                result
+            }
+        };
+
+        let decode_other = || -> Result<_, String> {
+            let decode_geometry_weights = || -> Result<_, String> {
+                let started = profile_runtime.then(std::time::Instant::now);
+                let geometries: Vec<Vec<(u32, u32)>> =
+                    if geometry_count >= 1024 && rayon::current_num_threads() > 1 {
+                        geometry_bodies
+                            .par_iter()
+                            .map(|body| decode_packed_weight_geometry(body))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        geometry_bodies
+                            .iter()
+                            .map(|body| decode_packed_weight_geometry(body))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                let (weights, weight_token_ids) = decode_packed_runtime_weights_flat(
+                    &weight_bodies,
+                    &geometries,
+                    token_set_count,
+                )?;
+                if let Some(started) = started {
+                    eprintln!("[glrmask/profile][packed_runtime_dwa] geometry_weights_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                }
+                Ok((geometries, weights, weight_token_ids))
+            };
+
+            let decode_rows = || -> Result<_, String> {
+                let started = profile_runtime.then(std::time::Instant::now);
+                match row_source {
+                    RowSource::Direct(ref bodies) => {
+                        let result = decode_packed_runtime_direct_row_pools(bodies, weight_count);
+                        if let Some(started) = started {
+                            eprintln!("[glrmask/profile][packed_runtime_dwa] rows_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        result
+                    }
+                    RowSource::Components {
+                        ref labels,
+                        ref targets,
+                        ref weights,
+                        ref rows,
+                    } => {
+                        let decode_labels = || decode_packed_runtime_label_pool(labels);
+                        let decode_targets = || decode_packed_runtime_u32_pool(targets, "target");
+                        let decode_weights = || decode_packed_runtime_u32_pool(weights, "weight-id");
+                        let (label_pool, (target_pool, weight_pool)) = rayon::join(
+                            decode_labels,
+                            || rayon::join(decode_targets, decode_weights),
+                        );
+                        let label_pool = label_pool?;
+                        let target_pool = target_pool?;
+                        let weight_pool = weight_pool?;
+                        let mut packed_rows = Vec::with_capacity(rows.len());
+                        for &(labels, targets, weights) in rows {
+                            if labels as usize >= label_pool.len()
+                                || targets as usize >= target_pool.len()
+                                || weights as usize >= weight_pool.len()
+                            {
+                                return Err("invalid packed DWA row-component index".to_owned());
+                            }
+                            let len = label_pool
+                                .get(labels)
+                                .expect("validated packed DWA label pool id")
+                                .len();
+                            if target_pool
+                                .get(targets)
+                                .expect("validated packed DWA target pool id")
+                                .len()
+                                != len
+                                || weight_pool
+                                    .get(weights)
+                                    .expect("validated packed DWA weight pool id")
+                                    .len()
+                                    != len
+                            {
+                                return Err("mismatched packed DWA row-component lengths".to_owned());
+                            }
+                            if weight_pool
+                                .get(weights)
+                                .expect("validated packed DWA weight pool id")
+                                .iter()
+                                .any(|&weight| weight as usize >= weight_count)
+                            {
+                                return Err("invalid packed DWA weight index".to_owned());
+                            }
+                            packed_rows.push(PackedRuntimeRow {
+                                labels,
+                                targets,
+                                weights,
+                            });
+                        }
+                        let result = Ok((label_pool, target_pool, weight_pool, packed_rows));
+                        if let Some(started) = started {
+                            eprintln!("[glrmask/profile][packed_runtime_dwa] rows_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        result
+                    }
+                }
+            };
+
+            let ((geometries, weights, weight_token_ids), (labels, targets, weight_ids, rows)) =
+                if rayon::current_num_threads() > 1 {
+                    let (left, right) = rayon::join(decode_geometry_weights, decode_rows);
+                    (left?, right?)
+                } else {
+                    (decode_geometry_weights()?, decode_rows()?)
+                };
+            Ok((
+                geometries,
+                weights,
+                weight_token_ids,
+                labels,
+                targets,
+                weight_ids,
+                rows,
+            ))
+        };
+
+        let (token_set_chunks, other) = if rayon::current_num_threads() > 1 {
+            let (token_sets, other) = rayon::join(decode_token_sets, decode_other);
+            (token_sets?, other?)
+        } else {
+            (decode_token_sets()?, decode_other()?)
+        };
+        let (geometries, weights, weight_token_ids, labels, targets, weight_ids, rows) = other;
+
+        let mut token_set_locations = Vec::with_capacity(token_set_count);
+        for (chunk_index, chunk) in token_set_chunks.iter().enumerate() {
+            for local in 0..chunk.spans.len() {
+                token_set_locations.push(PackedRuntimeTokenSetLocation {
+                    chunk: chunk_index as u32,
+                    local: local as u32,
+                });
+            }
+        }
+        if token_set_locations.len() != token_set_count {
+            return Err("invalid packed DWA token-set count".to_owned());
+        }
+        for index in 0..targets.len() {
+            if targets
+                .get(index as u32)
+                .expect("packed runtime target pool span exists")
+                .iter()
+                .any(|&target| target as usize >= state_count)
+            {
+                return Err("invalid packed DWA target state".to_owned());
+            }
+        }
+
+        let result = Self {
+            start_state,
+            token_set_chunks: token_set_chunks.into_boxed_slice(),
+            token_set_locations: token_set_locations.into_boxed_slice(),
+            materialized_token_sets: None,
+            materialized_token_word_spans: None,
+            fast_wire_token_chunks: None,
+            geometries: geometries.into_boxed_slice(),
+            weights: weights.into_boxed_slice(),
+            weight_token_ids: weight_token_ids.into_boxed_slice(),
+            label_pool: labels,
+            target_pool: targets,
+            weight_id_pool: weight_ids,
+            rows: rows.into_boxed_slice(),
+            states: states.into_boxed_slice(),
+        };
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa] scan_ms={scan_ms:.3} total_ms={:.3}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(result)
+    }
+
+    #[inline]
+    pub fn start_state(&self) -> u32 {
+        self.start_state
+    }
+
+    #[inline]
+    pub fn state_count(&self) -> usize {
+        self.states.len()
+    }
+
+    #[inline]
+    pub fn token_set_count(&self) -> usize {
+        self.materialized_token_sets
+            .as_ref()
+            .map_or(self.token_set_locations.len(), |sets| sets.len())
+    }
+
+    #[inline]
+    pub fn materialized_token_sets_with_word_spans(
+        &self,
+    ) -> Option<(&[Arc<RangeSetBlaze<u32>>], &[u32])> {
+        Some((
+            self.materialized_token_sets.as_deref()?,
+            self.materialized_token_word_spans.as_deref()?,
+        ))
+    }
+
+    #[inline]
+    pub fn weight_count(&self) -> usize {
+        self.weights.len()
+    }
+
+    #[inline]
+    pub fn token_set(&self, id: u32) -> Option<PackedRuntimeTokenSetRef<'_>> {
+        if let Some(sets) = &self.materialized_token_sets {
+            let tokens = sets.get(id as usize)?;
+            let word_spans = *self
+                .materialized_token_word_spans
+                .as_ref()?
+                .get(id as usize)?;
+            return Some(PackedRuntimeTokenSetRef {
+                id,
+                storage: PackedRuntimeTokenSetStorageRef::Materialized(tokens),
+                word_spans,
+            });
+        }
+        let location = *self.token_set_locations.get(id as usize)?;
+        let chunk = self.token_set_chunks.get(location.chunk as usize)?;
+        let span = *chunk.spans.get(location.local as usize)?;
+        let start = span.start as usize;
+        let end = start + span.len as usize;
+        Some(PackedRuntimeTokenSetRef {
+            id,
+            storage: PackedRuntimeTokenSetStorageRef::Flat(&chunk.ranges[start..end]),
+            word_spans: span.word_spans,
+        })
+    }
+
+    #[inline]
+    pub fn weight(&self, id: u32) -> Option<PackedRuntimeWeightRef<'_>> {
+        ((id as usize) < self.weights.len()).then_some(PackedRuntimeWeightRef { dwa: self, id })
+    }
+
+    pub fn transition(&self, state: u32, label: Label) -> Option<(u32, PackedRuntimeWeightRef<'_>)> {
+        let state = *self.states.get(state as usize)?;
+        let row = *self.rows.get(state.row as usize)?;
+        let labels = self.label_pool.get(row.labels)?;
+        let index = labels.binary_search(&label).ok()?;
+        let target = *self.target_pool.get(row.targets)?.get(index)?;
+        let weight = *self.weight_id_pool.get(row.weights)?.get(index)?;
+        Some((target, self.weight(weight)?))
+    }
+
+    pub fn final_weight(&self, state: u32) -> Option<PackedRuntimeWeightRef<'_>> {
+        let state = *self.states.get(state as usize)?;
+        (state.final_weight != u32::MAX)
+            .then(|| self.weight(state.final_weight))
+            .flatten()
+    }
+
+    #[inline]
+    pub fn row_is_empty(&self, state: u32) -> bool {
+        let Some(state) = self.states.get(state as usize) else {
+            return true;
+        };
+        let Some(row) = self.rows.get(state.row as usize) else {
+            return true;
+        };
+        self.label_pool
+            .get(row.labels)
+            .is_none_or(|labels| labels.is_empty())
+    }
 }
 
 // --- Two-level weight-pool serde for DWA ---
@@ -380,6 +2144,228 @@ fn decode_packed_u32_sequence(body: &[u8], label: &str) -> Result<Vec<u32>, Stri
     Ok(values)
 }
 
+fn decode_packed_runtime_label_pool(
+    bodies: &[&[u8]],
+) -> Result<PackedRuntimeSeqPool<Label>, String> {
+    let mut values = Vec::<Label>::new();
+    let mut spans = Vec::<(u32, u32)>::with_capacity(bodies.len());
+    for body in bodies {
+        let mut pos = 0usize;
+        let count = take_var_u32(body, &mut pos)? as usize;
+        let start = u32::try_from(values.len())
+            .map_err(|_| "packed runtime label pool exceeds u32".to_owned())?;
+        values.reserve(count);
+        let mut previous = 0i64;
+        for _ in 0..count {
+            let delta = take_var_i64(body, &mut pos)?;
+            let label64 = previous
+                .checked_add(delta)
+                .ok_or_else(|| "overflowing packed DWA label sequence".to_owned())?;
+            values.push(
+                i32::try_from(label64)
+                    .map_err(|_| "overflowing packed DWA label sequence".to_owned())?,
+            );
+            previous = label64;
+        }
+        if pos != body.len() {
+            return Err("trailing bytes in packed DWA label sequence".to_owned());
+        }
+        spans.push((start, count as u32));
+    }
+    Ok(PackedRuntimeSeqPool {
+        values: values.into_boxed_slice(),
+        spans: spans.into_boxed_slice(),
+    })
+}
+
+fn decode_packed_runtime_u32_pool(
+    bodies: &[&[u8]],
+    label: &str,
+) -> Result<PackedRuntimeSeqPool<u32>, String> {
+    let mut values = Vec::<u32>::new();
+    let mut spans = Vec::<(u32, u32)>::with_capacity(bodies.len());
+    for body in bodies {
+        let mut pos = 0usize;
+        let mode = *body
+            .get(pos)
+            .ok_or_else(|| format!("truncated packed DWA {label} sequence mode"))?;
+        pos += 1;
+        let count = take_var_u32(body, &mut pos)? as usize;
+        let start = u32::try_from(values.len())
+            .map_err(|_| format!("packed runtime {label} pool exceeds u32"))?;
+        values.reserve(count);
+        match mode {
+            0 => {
+                for _ in 0..count {
+                    values.push(take_var_u32(body, &mut pos)?);
+                }
+            }
+            1 => {
+                let mut previous = 0i64;
+                for _ in 0..count {
+                    let delta = take_var_i64(body, &mut pos)?;
+                    let value = previous
+                        .checked_add(delta)
+                        .ok_or_else(|| format!("overflowing packed DWA {label} sequence"))?;
+                    values.push(
+                        u32::try_from(value)
+                            .map_err(|_| format!("overflowing packed DWA {label} sequence"))?,
+                    );
+                    previous = value;
+                }
+            }
+            _ => return Err(format!("invalid packed DWA {label} sequence mode")),
+        }
+        if pos != body.len() {
+            return Err(format!("trailing bytes in packed DWA {label} sequence"));
+        }
+        spans.push((start, count as u32));
+    }
+    Ok(PackedRuntimeSeqPool {
+        values: values.into_boxed_slice(),
+        spans: spans.into_boxed_slice(),
+    })
+}
+
+fn decode_packed_runtime_weights_flat(
+    bodies: &[&[u8]],
+    geometries: &[Vec<(u32, u32)>],
+    token_set_count: usize,
+) -> Result<(Vec<PackedRuntimeWeight>, Vec<u32>), String> {
+    let token_id_capacity = bodies
+        .iter()
+        .filter_map(|body| {
+            let mut pos = 1usize;
+            (body.first().copied() == Some(0))
+                .then(|| take_var_u32(body, &mut pos).ok())
+                .flatten()
+                .and_then(|geometry| geometries.get(geometry as usize))
+                .map(Vec::len)
+        })
+        .sum::<usize>();
+    let mut weights = Vec::with_capacity(bodies.len());
+    let mut token_ids = Vec::with_capacity(token_id_capacity);
+    for body in bodies {
+        let mut pos = 0usize;
+        let tag = *body
+            .get(pos)
+            .ok_or_else(|| "truncated packed DWA weight tag".to_owned())?;
+        pos += 1;
+        if tag == 1 {
+            if pos != body.len() {
+                return Err("trailing bytes in packed DWA full weight".to_owned());
+            }
+            weights.push(PackedRuntimeWeight {
+                geometry: 0,
+                token_ids_start: token_ids.len() as u32,
+                full: true,
+            });
+            continue;
+        }
+        if tag != 0 {
+            return Err("invalid packed DWA weight tag".to_owned());
+        }
+        let geometry = take_var_u32(body, &mut pos)?;
+        let geometry_ranges = geometries
+            .get(geometry as usize)
+            .ok_or_else(|| "invalid packed DWA weight-geometry index".to_owned())?;
+        let token_ids_start = u32::try_from(token_ids.len())
+            .map_err(|_| "packed runtime Weight token ids exceed u32".to_owned())?;
+        for _ in geometry_ranges {
+            let token_id = take_var_u32(body, &mut pos)?;
+            if token_id as usize >= token_set_count {
+                return Err("invalid packed DWA token-set index".to_owned());
+            }
+            token_ids.push(token_id);
+        }
+        if pos != body.len() {
+            return Err("trailing bytes in packed DWA weight body".to_owned());
+        }
+        weights.push(PackedRuntimeWeight {
+            geometry,
+            token_ids_start,
+            full: false,
+        });
+    }
+    Ok((weights, token_ids))
+}
+
+fn decode_packed_runtime_direct_row_pools(
+    bodies: &[&[u8]],
+    weight_count: usize,
+) -> Result<(
+    PackedRuntimeSeqPool<Label>,
+    PackedRuntimeSeqPool<u32>,
+    PackedRuntimeSeqPool<u32>,
+    Vec<PackedRuntimeRow>,
+), String> {
+    let mut label_values = Vec::<Label>::new();
+    let mut target_values = Vec::<u32>::new();
+    let mut weight_values = Vec::<u32>::new();
+    let mut label_spans = Vec::with_capacity(bodies.len());
+    let mut target_spans = Vec::with_capacity(bodies.len());
+    let mut weight_spans = Vec::with_capacity(bodies.len());
+    let mut rows = Vec::with_capacity(bodies.len());
+    for (row_id, body) in bodies.iter().enumerate() {
+        let mut pos = 0usize;
+        let count = take_var_u32(body, &mut pos)? as usize;
+        let label_start = label_values.len() as u32;
+        let target_start = target_values.len() as u32;
+        let weight_start = weight_values.len() as u32;
+        label_values.reserve(count);
+        target_values.reserve(count);
+        weight_values.reserve(count);
+        let mut previous_label = 0i64;
+        for index in 0..count {
+            let delta = take_var_i64(body, &mut pos)?;
+            let label64 = previous_label
+                .checked_add(delta)
+                .ok_or_else(|| "overflowing packed DWA label".to_owned())?;
+            let label = i32::try_from(label64)
+                .map_err(|_| "overflowing packed DWA label".to_owned())?;
+            if index != 0 && label64 <= previous_label {
+                return Err("packed DWA transition labels are not strictly increasing".to_owned());
+            }
+            previous_label = label64;
+            let target = take_var_u32(body, &mut pos)?;
+            let weight = take_var_u32(body, &mut pos)?;
+            if weight as usize >= weight_count {
+                return Err("invalid packed DWA weight index".to_owned());
+            }
+            label_values.push(label);
+            target_values.push(target);
+            weight_values.push(weight);
+        }
+        if pos != body.len() {
+            return Err("trailing bytes in packed DWA transition-row body".to_owned());
+        }
+        label_spans.push((label_start, count as u32));
+        target_spans.push((target_start, count as u32));
+        weight_spans.push((weight_start, count as u32));
+        let id = row_id as u32;
+        rows.push(PackedRuntimeRow {
+            labels: id,
+            targets: id,
+            weights: id,
+        });
+    }
+    Ok((
+        PackedRuntimeSeqPool {
+            values: label_values.into_boxed_slice(),
+            spans: label_spans.into_boxed_slice(),
+        },
+        PackedRuntimeSeqPool {
+            values: target_values.into_boxed_slice(),
+            spans: target_spans.into_boxed_slice(),
+        },
+        PackedRuntimeSeqPool {
+            values: weight_values.into_boxed_slice(),
+            spans: weight_spans.into_boxed_slice(),
+        },
+        rows,
+    ))
+}
+
 fn decode_packed_token_set_chunk(
     body: &[u8],
 ) -> Result<Vec<(std::sync::Arc<RangeSetBlaze<u32>>, u32)>, String> {
@@ -431,6 +2417,138 @@ fn decode_packed_token_set_chunk(
         return Err("invalid packed DWA token-set chunk length".to_owned());
     }
     Ok(out)
+}
+
+fn decode_packed_runtime_token_set_chunk(
+    body: &[u8],
+) -> Result<PackedRuntimeTokenSetChunk, String> {
+    let mut pos = 0usize;
+    let token_set_count = take_var_u32(body, &mut pos)? as usize;
+    let mut previous = EncodedTokenSet::new();
+    let mut prefix_word_spans = Vec::<u32>::new();
+    let mut ranges = Vec::<[u32; 2]>::new();
+    let mut spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(token_set_count);
+    for _ in 0..token_set_count {
+        let prefix_len = take_var_u32(body, &mut pos)? as usize;
+        if prefix_len > previous.len() {
+            return Err("invalid packed DWA token-set prefix length".to_owned());
+        }
+        let suffix_len = take_var_u32(body, &mut pos)? as usize;
+        previous.truncate(prefix_len);
+        prefix_word_spans.truncate(prefix_len);
+        previous.reserve(suffix_len);
+        prefix_word_spans.reserve(suffix_len);
+        let mut word_spans = prefix_word_spans.last().copied().unwrap_or(0);
+        let mut previous_end_plus_one = previous
+            .last()
+            .map_or(0u64, |range| range[1] as u64 + 1);
+        for _ in 0..suffix_len {
+            let gap = take_var_u64(body, &mut pos)?;
+            let start64 = previous_end_plus_one
+                .checked_add(gap)
+                .ok_or_else(|| "overflowing packed token-set range".to_owned())?;
+            let start = u32::try_from(start64)
+                .map_err(|_| "overflowing packed token-set start".to_owned())?;
+            let len = take_var_u32(body, &mut pos)?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| "overflowing packed token-set end".to_owned())?;
+            previous_end_plus_one = end as u64 + 1;
+            previous.push([start, end]);
+            word_spans = word_spans.saturating_add(end / 64 - start / 64 + 1);
+            prefix_word_spans.push(word_spans);
+        }
+        let start = u32::try_from(ranges.len())
+            .map_err(|_| "packed runtime token-set chunk exceeds u32 offsets".to_owned())?;
+        let len = u32::try_from(previous.len())
+            .map_err(|_| "packed runtime token set exceeds u32 ranges".to_owned())?;
+        ranges.extend_from_slice(&previous);
+        spans.push(PackedRuntimeTokenSetSpan {
+            start,
+            len,
+            word_spans,
+        });
+    }
+    if pos != body.len() {
+        return Err("invalid packed DWA token-set chunk length".to_owned());
+    }
+    Ok(PackedRuntimeTokenSetChunk {
+        ranges: ranges.into_boxed_slice(),
+        spans: spans.into_boxed_slice(),
+    })
+}
+
+fn decode_packed_runtime_weight(
+    body: &[u8],
+    geometries: &[Vec<(u32, u32)>],
+    token_set_count: usize,
+) -> Result<(u32, bool, Vec<u32>), String> {
+    let mut pos = 0usize;
+    let tag = *body
+        .get(pos)
+        .ok_or_else(|| "truncated packed DWA weight tag".to_owned())?;
+    pos += 1;
+    if tag == 1 {
+        if pos != body.len() {
+            return Err("trailing bytes in packed DWA full weight".to_owned());
+        }
+        return Ok((0, true, Vec::new()));
+    }
+    if tag != 0 {
+        return Err("invalid packed DWA weight tag".to_owned());
+    }
+    let geometry = take_var_u32(body, &mut pos)?;
+    let Some(geometry_ranges) = geometries.get(geometry as usize) else {
+        return Err("invalid packed DWA weight-geometry index".to_owned());
+    };
+    let mut token_ids = Vec::with_capacity(geometry_ranges.len());
+    for _ in geometry_ranges {
+        let token_id = take_var_u32(body, &mut pos)?;
+        if token_id as usize >= token_set_count {
+            return Err("invalid packed DWA token-set index".to_owned());
+        }
+        token_ids.push(token_id);
+    }
+    if pos != body.len() {
+        return Err("trailing bytes in packed DWA weight body".to_owned());
+    }
+    Ok((geometry, false, token_ids))
+}
+
+fn decode_packed_runtime_row(
+    body: &[u8],
+    weight_count: usize,
+) -> Result<(Vec<Label>, Vec<u32>, Vec<u32>), String> {
+    let mut pos = 0usize;
+    let transition_count = take_var_u32(body, &mut pos)? as usize;
+    let mut labels = Vec::with_capacity(transition_count);
+    let mut targets = Vec::with_capacity(transition_count);
+    let mut weights = Vec::with_capacity(transition_count);
+    let mut previous_label = 0i64;
+    for index in 0..transition_count {
+        let delta = take_var_i64(body, &mut pos)?;
+        let label64 = previous_label
+            .checked_add(delta)
+            .ok_or_else(|| "overflowing packed DWA label".to_owned())?;
+        let label = i32::try_from(label64)
+            .map_err(|_| "overflowing packed DWA label".to_owned())?;
+        if index != 0 && label64 <= previous_label {
+            return Err("packed DWA transition labels are not strictly increasing".to_owned());
+        }
+        previous_label = label64;
+        let target = take_var_u32(body, &mut pos)?;
+        let weight = take_var_u32(body, &mut pos)?;
+        if weight as usize >= weight_count {
+            return Err("invalid packed DWA weight index".to_owned());
+        }
+        labels.push(label);
+        targets.push(target);
+        weights.push(weight);
+    }
+    if pos != body.len() {
+        return Err("trailing bytes in packed DWA transition-row body".to_owned());
+    }
+    Ok((labels, targets, weights))
 }
 
 fn decode_packed_weight_geometry(body: &[u8]) -> Result<Vec<(u32, u32)>, String> {
@@ -656,17 +2774,45 @@ impl DWA {
         Vec<(u32, Option<u32>)>,
         usize,
     ) {
+        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let phase_started = profile.then(std::time::Instant::now);
         let transition_count = self
             .states
             .iter()
             .map(|state| state.transitions.len())
             .sum::<usize>();
 
-        let row_hash = |state: &DWAState| -> u64 {
+        let mut row_representatives = Vec::<usize>::new();
+        let mut state_row_ids = Vec::<u32>::with_capacity(self.states.len());
+        if self.shared_transition_rows {
+            let mut row_id_by_ptr = FxHashMap::<usize, u32>::default();
+            row_id_by_ptr.reserve(self.states.len().min(32_768));
+            for (state_index, state) in self.states.iter().enumerate() {
+                debug_assert!(matches!(
+                    state.transitions,
+                    DwaTransitionMap::Shared(_) | DwaTransitionMap::Packed(_)
+                ));
+                let ptr = state.transitions.ptr_key();
+                let row_id = if let Some(&row_id) = row_id_by_ptr.get(&ptr) {
+                    row_id
+                } else {
+                    let row_id = row_representatives.len() as u32;
+                    row_representatives.push(state_index);
+                    row_id_by_ptr.insert(ptr, row_id);
+                    row_id
+                };
+                state_row_ids.push(row_id);
+            }
+        } else {
+            let row_hash = |state: &DWAState| -> u64 {
             // Canonically shared rows can use pointer identity directly. Rows
             // that have been mutated are converted back to Owned by DerefMut,
             // so only those rows pay the structural hashing cost.
-            if matches!(state.transitions, DwaTransitionMap::Shared(_)) {
+            if matches!(
+                state.transitions,
+                DwaTransitionMap::Shared(_) | DwaTransitionMap::Packed(_)
+            ) {
                 return state.transitions.ptr_key() as u64;
             }
             let mut hasher = FxHasher::default();
@@ -677,63 +2823,80 @@ impl DWA {
                 weight.ptr_key().hash(&mut hasher);
             }
             hasher.finish()
-        };
-        let row_hashes = if self.states.len() >= 4_096 && rayon::current_num_threads() > 1 {
-            self.states.par_iter().map(row_hash).collect::<Vec<_>>()
-        } else {
-            self.states.iter().map(row_hash).collect::<Vec<_>>()
-        };
-
-        let mut row_hash_to_indices = FxHashMap::<u64, Vec<u32>>::default();
-        row_hash_to_indices.reserve(self.states.len().min(32_768));
-        let mut row_representatives = Vec::<usize>::new();
-        let mut state_row_ids = Vec::<u32>::with_capacity(self.states.len());
-        for (state_index, (&hash, state)) in row_hashes.iter().zip(&self.states).enumerate() {
-            let bucket = row_hash_to_indices.entry(hash).or_default();
-            let row_id = bucket
-                .iter()
-                .copied()
-                .find(|&candidate| {
-                    let representative = row_representatives[candidate as usize];
-                    self.states[representative].transitions == state.transitions
-                })
-                .unwrap_or_else(|| {
-                    let row_id = row_representatives.len() as u32;
-                    row_representatives.push(state_index);
-                    bucket.push(row_id);
-                    row_id
-                });
-            state_row_ids.push(row_id);
+            };
+            let row_hashes = if self.states.len() >= 4_096 && rayon::current_num_threads() > 1 {
+                self.states.par_iter().map(row_hash).collect::<Vec<_>>()
+            } else {
+                self.states.iter().map(row_hash).collect::<Vec<_>>()
+            };
+            let mut row_hash_to_indices = FxHashMap::<u64, Vec<u32>>::default();
+            row_hash_to_indices.reserve(self.states.len().min(32_768));
+            for (state_index, (&hash, state)) in row_hashes.iter().zip(&self.states).enumerate() {
+                let bucket = row_hash_to_indices.entry(hash).or_default();
+                let row_id = bucket
+                    .iter()
+                    .copied()
+                    .find(|&candidate| {
+                        let representative = row_representatives[candidate as usize];
+                        self.states[representative].transitions == state.transitions
+                    })
+                    .unwrap_or_else(|| {
+                        let row_id = row_representatives.len() as u32;
+                        row_representatives.push(state_index);
+                        bucket.push(row_id);
+                        row_id
+                    });
+                state_row_ids.push(row_id);
+            }
         }
+        let row_classes_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
-        let mut w_ptr_to_idx: FxHashMap<usize, u32> = FxHashMap::default();
-        w_ptr_to_idx.reserve(32_768);
+        let mut weight_ptr_to_id: FxHashMap<usize, u32> = FxHashMap::default();
+        weight_ptr_to_id.reserve(32_768);
         let mut weight_refs = Vec::<Weight>::new();
         let mut intern_weight = |w: &Weight| -> u32 {
             let ptr = w.ptr_key();
-            *w_ptr_to_idx.entry(ptr).or_insert_with(|| {
+            *weight_ptr_to_id.entry(ptr).or_insert_with(|| {
                 let idx = weight_refs.len() as u32;
                 weight_refs.push(w.clone());
                 idx
             })
         };
 
+        let transition_rows_started = profile.then(std::time::Instant::now);
         let transition_rows = row_representatives
             .iter()
             .map(|&state_index| {
                 self.states[state_index]
                     .transitions
-                    .iter()
-                    .map(|(&label, (target, weight))| (label, *target, intern_weight(weight)))
+                    .entries()
+                    .map(|(label, target, weight)| (label, target, intern_weight(weight)))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        let transition_rows_ms = transition_rows_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let state_rows_started = profile.then(std::time::Instant::now);
         let state_rows = self
             .states
             .iter()
             .zip(state_row_ids)
             .map(|(state, row)| (row, state.final_weight.as_ref().map(&mut intern_weight)))
             .collect::<Vec<_>>();
+        let state_rows_ms = state_rows_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let weight_discovery_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dwa_weight_discovery_split] transition_rows_ms={transition_rows_ms:.3} state_rows_ms={state_rows_ms:.3} transition_entries={} final_weights={}",
+                transition_rows.iter().map(Vec::len).sum::<usize>(),
+                state_rows.iter().filter(|(_, final_weight)| final_weight.is_some()).count(),
+            );
+        }
+        let phase_started = profile.then(std::time::Instant::now);
 
         // Weight IDs above are assigned in stable first-encounter order. Walk
         // the unique Weight maps in parallel, then assign token-set IDs in that
@@ -768,6 +2931,9 @@ impl DWA {
                 .map(materialize_weight)
                 .collect::<Vec<_>>()
         };
+        let weight_materialize_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         let mut ts_ptr_to_idx: FxHashMap<usize, u32> = FxHashMap::default();
         ts_ptr_to_idx.reserve(32_768);
@@ -802,6 +2968,16 @@ impl DWA {
                 entries,
             });
         }
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][dwa_pooled_parts] row_classes_ms={row_classes_ms:.3} weight_discovery_ms={weight_discovery_ms:.3} weight_materialize_ms={weight_materialize_ms:.3} token_set_intern_ms={:.3} total_ms={:.3} unique_rows={} weights={} token_sets={}",
+                phase_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                transition_rows.len(),
+                weight_pool.len(),
+                token_set_pool.len(),
+            );
+        }
 
         (
             token_set_pool,
@@ -813,8 +2989,14 @@ impl DWA {
     }
 
     fn to_packed_bytes(&self) -> Vec<u8> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let phase_started = profile.then(std::time::Instant::now);
         let (token_set_arcs, mut weight_pool, transition_rows, state_rows, transition_count) =
             self.packed_pooled_parts();
+        let pooled_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         // Adjacent token sets are often almost identical. Sort them
         // lexicographically, remap weight references, and front-code them in
@@ -831,10 +3013,18 @@ impl DWA {
                 .map(|ts| ts.ranges().map(|r| [*r.start(), *r.end()]).collect::<EncodedTokenSet>())
                 .collect::<Vec<_>>()
         };
+        let token_set_materialize_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
         let mut token_set_order = (0..token_set_pool.len()).collect::<Vec<_>>();
-        token_set_order.sort_unstable_by(|&left, &right| {
-            token_set_pool[left].cmp(&token_set_pool[right])
-        });
+        let compare_token_sets = |left: &usize, right: &usize| {
+            token_set_pool[*left].cmp(&token_set_pool[*right])
+        };
+        if token_set_order.len() >= 4_096 && rayon::current_num_threads() > 1 {
+            token_set_order.par_sort_unstable_by(compare_token_sets);
+        } else {
+            token_set_order.sort_unstable_by(compare_token_sets);
+        }
         let mut old_to_new_token_set = vec![0u32; token_set_pool.len()];
         for (new_index, &old_index) in token_set_order.iter().enumerate() {
             old_to_new_token_set[old_index] = new_index as u32;
@@ -848,6 +3038,9 @@ impl DWA {
             .into_iter()
             .map(Some)
             .collect::<Vec<_>>();
+        let token_set_sort_remap_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
         let token_set_pool = token_set_order
             .into_iter()
             .map(|old_index| {
@@ -895,6 +3088,9 @@ impl DWA {
             };
             weight_geometry_ids.push(geometry_id);
         }
+        let geometry_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         // Row pooling was fused into packed_pooled_parts(), before Weight-id
         // translation, so duplicate state rows never become duplicate serde
@@ -959,6 +3155,9 @@ impl DWA {
             }
         }
         let token_sets_end = out.len();
+        let token_set_encode_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         put_var_u32(&mut out, weight_geometries.len() as u32);
         for geometry in &weight_geometries {
@@ -977,6 +3176,9 @@ impl DWA {
             out.extend_from_slice(&body);
         }
         let weight_geometries_end = out.len();
+        let geometry_encode_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         put_var_u32(&mut out, weight_pool.len() as u32);
         for (weight_index, weight) in weight_pool.iter().enumerate() {
@@ -994,9 +3196,13 @@ impl DWA {
             out.extend_from_slice(&body);
         }
         let weights_end = out.len();
+        let weight_encode_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         let unique_row_transition_count = transition_rows.iter().map(Vec::len).sum::<usize>();
-        let use_component_rows = unique_row_transition_count >= 100_000;
+        let use_component_rows = unique_row_transition_count >= 100_000
+            && std::env::var_os("GLRMASK_DWA_DIRECT_ARTIFACT_ROWS").is_none();
         out.push(u8::from(use_component_rows));
         if use_component_rows {
             let mut label_ids = FxHashMap::<u64, Vec<u32>>::default();
@@ -1209,6 +3415,9 @@ impl DWA {
             }
         }
         let rows_end = out.len();
+        let row_encode_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let phase_started = profile.then(std::time::Instant::now);
 
         put_var_u32(&mut out, state_rows.len() as u32);
         for &(row, final_weight) in &state_rows {
@@ -1218,9 +3427,15 @@ impl DWA {
                 final_weight.map_or(0, |weight| weight.saturating_add(1)),
             );
         }
-        if std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION").is_some() {
+        let state_encode_ms = phase_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile {
             let weight_entries: usize = weight_pool.iter().map(|w| w.entries.len()).sum();
             let token_ranges: usize = token_set_pool.iter().map(Vec::len).sum();
+            eprintln!(
+                "[glrmask/profile][dwa_packed_phases] pooled_ms={pooled_ms:.3} token_set_materialize_ms={token_set_materialize_ms:.3} token_set_sort_remap_ms={token_set_sort_remap_ms:.3} geometry_ms={geometry_ms:.3} token_set_encode_ms={token_set_encode_ms:.3} geometry_encode_ms={geometry_encode_ms:.3} weight_encode_ms={weight_encode_ms:.3} row_encode_ms={row_encode_ms:.3} state_encode_ms={state_encode_ms:.3} total_ms={:.3}",
+                total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            );
             eprintln!(
                 "[glrmask/profile][dwa_packed] bytes={} token_set_bytes={} weight_geometry_bytes={} weight_bytes={} row_bytes={} state_ref_bytes={} states={} unique_rows={} transitions={} weights={} weight_geometries={} weight_entries={} token_sets={} token_ranges={}",
                 out.len(),
@@ -1317,6 +3532,7 @@ impl DWA {
                 .map(|body| decode_packed_weight(body, &ts_pool, &geometries))
                 .collect::<Result<Vec<_>, _>>()?
         };
+        let w_pool = Arc::<[Weight]>::from(w_pool);
         let weights_ms = weights_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let rows_started = profile.then(std::time::Instant::now);
@@ -1347,7 +3563,13 @@ impl DWA {
                             .map(|body| decode_packed_transition_row(body, &w_pool, state_count))
                             .collect::<Result<Vec<_>, _>>()?
                     };
-                (rows, state_count_pos, None)
+                (
+                    rows.into_iter()
+                        .map(|row| DwaTransitionMap::Shared(Arc::new(row)))
+                        .collect(),
+                    state_count_pos,
+                    None,
+                )
             }
             1 => {
                 let label_count = take_var_u32(input, &mut pos)? as usize;
@@ -1434,42 +3656,44 @@ impl DWA {
                 }
                 let state_count_pos = pos;
                 let state_count = take_var_u32(input, &mut pos)? as usize;
-                let build_row = |&(label_id, target_id, weight_id): &(usize, usize, usize)| {
+                for labels in &label_pool {
+                    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+                        return Err(
+                            "packed DWA transition labels are not strictly increasing".to_owned(),
+                        );
+                    }
+                }
+                for targets in &target_pool {
+                    if targets.iter().any(|&target| target as usize >= state_count) {
+                        return Err("invalid packed DWA target state".to_owned());
+                    }
+                }
+                for &(label_id, target_id, weight_id) in &row_components {
                     let labels = &label_pool[label_id];
                     let targets = &target_pool[target_id];
                     let weights = &weight_id_pool[weight_id];
                     if labels.len() != targets.len() || labels.len() != weights.len() {
                         return Err("mismatched packed DWA row-component lengths".to_owned());
                     }
-                    if labels.windows(2).any(|pair| pair[0] >= pair[1]) {
-                        return Err("packed DWA transition labels are not strictly increasing".to_owned());
-                    }
-                    let mut entries = Vec::with_capacity(labels.len());
-                    for ((&label, &target), &weight_index) in
-                        labels.iter().zip(targets).zip(weights)
-                    {
-                        if target as usize >= state_count {
-                            return Err("invalid packed DWA target state".to_owned());
-                        }
-                        let weight = w_pool
-                            .get(weight_index as usize)
-                            .cloned()
-                            .ok_or_else(|| "invalid packed DWA weight index".to_owned())?;
-                        entries.push((label, (target, weight)));
-                    }
-                    Ok(entries.into_iter().collect::<BTreeMap<_, _>>())
-                };
-                let rows = if row_count >= 1024 && rayon::current_num_threads() > 1 {
-                    row_components
-                        .par_iter()
-                        .map(build_row)
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    row_components
-                        .iter()
-                        .map(build_row)
-                        .collect::<Result<Vec<_>, _>>()?
-                };
+                }
+                let pool = Arc::new(PackedDwaRowPool {
+                    labels: label_pool,
+                    targets: target_pool,
+                    weight_ids: weight_id_pool,
+                    weights: Arc::clone(&w_pool),
+                });
+                let rows: Vec<DwaTransitionMap> = row_components
+                    .into_iter()
+                    .map(|(label_id, target_id, weight_id)| {
+                        DwaTransitionMap::Packed(Arc::new(PackedDwaTransitionRow {
+                            pool: Arc::clone(&pool),
+                            label_id,
+                            target_id,
+                            weight_id,
+                            materialized: OnceLock::new(),
+                        }))
+                    })
+                    .collect();
                 (rows, state_count_pos, Some(transition_weight_used))
             }
             _ => return Err("invalid packed DWA row mode".to_owned()),
@@ -1564,12 +3788,8 @@ impl DWA {
                 transition_word_spans,
             })
         };
-        let transition_rows = transition_rows
-            .into_iter()
-            .map(Arc::new)
-            .collect::<Vec<_>>();
         let build_state = |&(row, final_weight): &(usize, Option<usize>)| DWAState {
-            transitions: DwaTransitionMap::from_arc(Arc::clone(&transition_rows[row])),
+            transitions: transition_rows[row].clone(),
             final_weight: final_weight.map(|index| w_pool[index].clone()),
         };
         let build_states = || {
@@ -1791,6 +4011,65 @@ impl DWA {
         self.shared_transition_rows
     }
 
+    /// Canonicalize exact duplicate transition rows without changing state ids
+    /// or graph topology.  Weight-coordinate remapping can legitimately turn
+    /// previously shared rows back into `Owned` rows because `DerefMut` must
+    /// break the Arc identity before mutating a Weight.  Once all remapping is
+    /// finished, recovering row sharing is semantics-neutral and lets both the
+    /// runtime fast-row builder and the artifact encoder operate once per
+    /// unique row rather than once per state.
+    pub fn share_exact_transition_rows_owned(mut self) -> Self {
+        if self.shared_transition_rows || self.states.len() < 2 {
+            return self;
+        }
+
+        let hash_row = |state: &DWAState| {
+            let mut hasher = FxHasher::default();
+            state.transitions.len().hash(&mut hasher);
+            for (label, (target, weight)) in state.transitions.iter() {
+                label.hash(&mut hasher);
+                target.hash(&mut hasher);
+                weight.ptr_key().hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let hashes = if self.states.len() >= 4_096 && rayon::current_num_threads() > 1 {
+            self.states.par_iter().map(hash_row).collect::<Vec<_>>()
+        } else {
+            self.states.iter().map(hash_row).collect::<Vec<_>>()
+        };
+
+        let mut buckets =
+            FxHashMap::<u64, Vec<Arc<BTreeMap<Label, (u32, Weight)>>>>::default();
+        buckets.reserve(self.states.len().min(32_768));
+        for (state, hash) in self.states.iter_mut().zip(hashes) {
+            let transitions = match std::mem::take(&mut state.transitions) {
+                DwaTransitionMap::Owned(transitions) => transitions,
+                DwaTransitionMap::Shared(transitions) => {
+                    state.transitions = DwaTransitionMap::Shared(transitions);
+                    continue;
+                }
+                DwaTransitionMap::Packed(transitions) => {
+                    state.transitions = DwaTransitionMap::Packed(transitions);
+                    continue;
+                }
+            };
+            let bucket = buckets.entry(hash).or_default();
+            let shared = bucket
+                .iter()
+                .find(|candidate| candidate.as_ref() == &transitions)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let shared = Arc::new(transitions);
+                    bucket.push(Arc::clone(&shared));
+                    shared
+                });
+            state.transitions = DwaTransitionMap::Shared(shared);
+        }
+        self.shared_transition_rows = true;
+        self
+    }
+
     /// Merge states whose complete local DWA representation is already
     /// identical: same final weight and the same label -> (target, weight)
     /// transition row. This is deliberately much cheaper than automaton
@@ -1885,6 +4164,7 @@ impl DWA {
                 DwaTransitionMap::Owned(transitions) => transitions,
                 DwaTransitionMap::Shared(transitions) => Arc::try_unwrap(transitions)
                     .unwrap_or_else(|shared| shared.as_ref().clone()),
+                DwaTransitionMap::Packed(transitions) => transitions.materialized().clone(),
             };
             let bucket = row_buckets.entry(row_hash).or_default();
             let shared = bucket
