@@ -800,6 +800,74 @@ impl DFA {
         offset
     }
 
+    /// Clone a borrowed independently compiled component directly into this
+    /// DFA while rebasing it. This avoids the owned helper's clone-then-rewrite
+    /// double pass, which is material for composition of large cached lexers.
+    pub(super) fn append_rebased_component_ref(
+        &mut self,
+        component: &DFA,
+        global_group_ids: &[usize],
+    ) -> u32 {
+        self.invalidate_structural_caches();
+        assert_eq!(
+            component.group_id_to_u8set.len(),
+            global_group_ids.len(),
+            "one global group ID is required per component group",
+        );
+        let offset = u32::try_from(self.states.len()).expect("lexer DFA state ID overflow");
+
+        for (local_group, &global_group) in global_group_ids.iter().enumerate() {
+            assert!(
+                global_group < self.group_id_to_u8set.len(),
+                "global lexer group ID is out of range",
+            );
+            self.group_id_to_u8set[global_group] = component.group_id_to_u8set[local_group];
+        }
+
+        let total_groups = self.group_id_to_u8set.len();
+        let identity_groups = component.group_id_to_u8set.len() == total_groups
+            && global_group_ids
+                .iter()
+                .copied()
+                .eq(0..total_groups);
+        let clone_rebased = |source: &DFAState| {
+            let mut state = source.clone();
+            for (_, target) in state.transitions.iter_mut() {
+                *target = target
+                    .checked_add(offset)
+                    .expect("lexer DFA transition target overflow");
+            }
+            for target in &mut state.epsilon_transitions {
+                *target = target
+                    .checked_add(offset)
+                    .expect("lexer DFA epsilon target overflow");
+            }
+            if !identity_groups {
+                let mut finalizers = BitSet::new(total_groups);
+                for local_group in source.finalizers.iter() {
+                    finalizers.set(global_group_ids[local_group]);
+                }
+                let mut futures = BitSet::new(total_groups);
+                for local_group in source.possible_future_group_ids.iter() {
+                    futures.set(global_group_ids[local_group]);
+                }
+                state.finalizers = finalizers;
+                state.possible_future_group_ids = futures;
+            }
+            state
+        };
+        let appended = if component.states.len() >= 4096
+            && rayon::current_num_threads() > 1
+            && std::env::var_os("GLRMASK_SERIAL_APPEND_REBASE").is_none()
+        {
+            component.states.par_iter().map(clone_rebased).collect::<Vec<_>>()
+        } else {
+            component.states.iter().map(clone_rebased).collect::<Vec<_>>()
+        };
+        self.states.extend(appended);
+        offset
+    }
+
     pub fn has_epsilon_transitions(&self) -> bool {
         self.epsilon_transition_count() != 0
     }

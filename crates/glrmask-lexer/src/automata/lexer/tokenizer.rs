@@ -935,13 +935,12 @@ impl Tokenizer {
         }
 
         for &(tokenizer, terminal_offset) in children {
-            let component = tokenizer.dfa.clone();
             let global_groups = (0..tokenizer.num_terminals)
                 .map(|terminal| (terminal_offset + terminal) as usize)
                 .collect::<Vec<_>>();
             let state_offset = parent
                 .dfa
-                .append_rebased_component(component, &global_groups);
+                .append_rebased_component_ref(&tokenizer.dfa, &global_groups);
             state_offsets.push(state_offset);
             child_closures.push((
                 tokenizer.all_singleton_epsilon_closures(),
