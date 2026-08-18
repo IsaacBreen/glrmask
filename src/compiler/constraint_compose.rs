@@ -17917,6 +17917,25 @@ mod tests {
                 &tight_selected,
             );
             let tight_template_ms = tight_template_started.elapsed().as_secs_f64() * 1000.0;
+            let tight_delta_started = Instant::now();
+            let tight_delta_components = [&core, &dispatch];
+            let tight_delta_plan = prepare_concrete_boundary_delta_plan(
+                &composed_table,
+                &tight_delta_components,
+                &tight_selected,
+                &tight_templates,
+                concrete_grammar.num_terminals,
+            );
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_TEMPLATE_REUSE active={} changed={} unsafe={} unchanged={} compare_ms={:.3}",
+                tight_active_terminals,
+                tight_delta_plan.by_global_terminal.len(),
+                tight_delta_plan.unsafe_terminals.len(),
+                tight_active_terminals
+                    .saturating_sub(tight_delta_plan.by_global_terminal.len())
+                    .saturating_sub(tight_delta_plan.unsafe_terminals.len()),
+                tight_delta_started.elapsed().as_secs_f64() * 1000.0,
+            );
             let tight_parser_started = Instant::now();
             let tight_parser_raw = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
                 &composed_table.table,
