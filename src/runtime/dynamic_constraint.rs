@@ -372,9 +372,11 @@ impl DynamicConstraint {
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
+            packed_parser_dwa: None,
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),
             direct_regular_l1_complete_by_terminal: BTreeMap::new(),
+            packed_non_dwa_weights: None,
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -408,6 +410,7 @@ impl DynamicConstraint {
             original_token_to_internal: Vec::new(),
             internal_token_to_tokens: Vec::new(),
             token_bytes: payload.token_bytes,
+            packed_token_bytes: None,
             internal_token_bytes: BTreeMap::new(),
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
@@ -452,6 +455,7 @@ impl DynamicConstraint {
             final_mask_mapping: Default::default(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr: payload.ignore_expr,
+            serialized_artifact_cache: None,
         };
         inner
     }

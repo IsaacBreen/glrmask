@@ -764,7 +764,7 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .token_bytes_dense
         .get(token_id as usize)
         .and_then(|bytes| bytes.as_deref())
-        .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+        .or_else(|| constraint.token_bytes_for_id(token_id))
 }
 
 const COMMIT_ASSERT_MASK_EQUIVALENCE: u8 = 1 << 0;
@@ -8714,7 +8714,7 @@ nt start ::= item item? item?;
                             if !seen.insert(state_key) {
                                 continue;
                             }
-                            for (&token_id, bytes) in constraint.token_bytes.iter() {
+                            for (token_id, bytes) in constraint.token_bytes_iter() {
                                 for (&tokenizer_state, gss) in &state.state {
                                     if gss
                                         .all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())

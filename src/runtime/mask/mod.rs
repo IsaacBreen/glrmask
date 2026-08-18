@@ -19,7 +19,9 @@ use crate::ds::leveled_gss::{
 };
 use crate::ds::weight::Weight;
 use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
-use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
+use crate::runtime::constraint::{
+    Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
+};
 use crate::runtime::state::{ConstraintState, MaskCacheData, MaskScratch, ParserStateMap};
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use range_set_blaze::RangeSetBlaze;
@@ -108,8 +110,8 @@ fn single_path_direct_plan_reuse_dominates(
 
 #[derive(Clone, Copy)]
 enum SinglePathDirectPlanOp<'a> {
-    Merge(&'a Weight),
-    Intersect(&'a Weight),
+    Merge(RuntimeWeightRef<'a>),
+    Intersect(RuntimeWeightRef<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -136,18 +138,18 @@ fn materialize_single_path_seed_intersection(
     base: &[u64],
     dense: &mut Vec<u64>,
     internal_tsid: u32,
-    weight: &Weight,
+    weight: RuntimeWeightRef<'_>,
     precomputed: &DenseTokenMaskCache,
 ) -> bool {
     debug_assert!(!weight.is_full());
-    let Some(token_set) = weight.token_set_for_tsid_ref(internal_tsid) else {
+    let Some(token_set) = weight.token_set_for_tsid(internal_tsid) else {
         dense.clear();
         return false;
     };
 
     dense.clear();
     dense.resize(base.len(), 0);
-    let token_set_key = Arc::as_ptr(token_set) as usize;
+    if let Some(token_set_key) = token_set.materialized_key() {
     if let Some(mask) = precomputed.get(&token_set_key) {
         let mut any = false;
         for (idx, dense_word) in dense.iter_mut().enumerate() {
@@ -156,9 +158,10 @@ fn materialize_single_path_seed_intersection(
         }
         return any;
     }
+    }
 
     let mut any = false;
-    DenseMaskAcc::for_each_token_range_word(token_set, base.len(), |word_idx, token_mask| {
+    DenseMaskAcc::for_each_runtime_token_range_word(token_set, base.len(), |word_idx, token_mask| {
         let word = base[word_idx] & token_mask;
         dense[word_idx] |= word;
         any |= word != 0;
@@ -238,15 +241,39 @@ fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RuntimeTokenSetKey {
+    Materialized(usize),
+    PackedDwa(u32),
+    PackedPool(u32),
+}
+
+impl RuntimeTokenSetKey {
+    #[inline]
+    fn from_ref(token_set: RuntimeTokenSetRef<'_>) -> Self {
+        if let Some(key) = token_set.materialized_key() {
+            Self::Materialized(key)
+        } else if let Some(id) = token_set.packed_id() {
+            Self::PackedDwa(id)
+        } else {
+            Self::PackedPool(
+                token_set
+                    .packed_pool_id()
+                    .expect("runtime token set has identity"),
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct DenseTokenSetIntersectionKey {
     tsid: u32,
     dense: usize,
     dense_len: usize,
-    token_set: usize,
+    token_set: RuntimeTokenSetKey,
 }
 
 type DenseTokenSetIntersectionSmallCache =
-    SmallVec<[(Arc<[u64]>, usize, Option<Arc<[u64]>>); 8]>;
+    SmallVec<[(Arc<[u64]>, RuntimeTokenSetKey, Option<Arc<[u64]>>); 8]>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DenseGssTransitionKey {
@@ -360,6 +387,155 @@ impl DenseMaskAcc {
                 f(word_idx, Self::bit_range_mask(lo_bit, hi_bit));
             }
         }
+    }
+
+    fn for_each_runtime_token_range_word<F>(
+        tokens: RuntimeTokenSetRef<'_>,
+        word_limit: usize,
+        mut f: F,
+    ) where
+        F: FnMut(usize, u64),
+    {
+        if word_limit == 0 {
+            return;
+        }
+        let max_token_exclusive = word_limit.saturating_mul(64);
+        if max_token_exclusive == 0 {
+            return;
+        }
+        tokens.for_each_range(|start, end| {
+            let lo = start as usize;
+            if lo >= max_token_exclusive {
+                return;
+            }
+            let hi = (end as usize).min(max_token_exclusive - 1);
+            if lo > hi {
+                return;
+            }
+            let word_lo = lo / 64;
+            let word_hi = hi / 64;
+            for word_idx in word_lo..=word_hi {
+                let lo_bit = if word_idx == word_lo { lo % 64 } else { 0 };
+                let hi_bit = if word_idx == word_hi { hi % 64 } else { 63 };
+                f(word_idx, Self::bit_range_mask(lo_bit, hi_bit));
+            }
+        });
+    }
+
+    fn intersect_dense_with_runtime_token_set(
+        dense: &[u64],
+        token_set: RuntimeTokenSetRef<'_>,
+        precomputed: &DenseTokenMaskCache,
+    ) -> Option<Arc<[u64]>> {
+        if let Some(key) = token_set.materialized_key() {
+            if let Some(mask) = precomputed.get(&key) {
+                let mut out = vec![0u64; dense.len()];
+                let mut any = false;
+                for i in 0..dense.len() {
+                    let word = dense[i] & mask.get(i).copied().unwrap_or(0);
+                    any |= word != 0;
+                    out[i] = word;
+                }
+                return any.then(|| out.into());
+            }
+        }
+        let mut out = vec![0u64; dense.len()];
+        let mut any = false;
+        Self::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
+            let word = dense[word_idx] & token_mask;
+            if word != 0 {
+                out[word_idx] |= word;
+                any = true;
+            }
+        });
+        any.then(|| out.into())
+    }
+
+    fn or_dense_and_runtime_token_set_into(
+        dense: &[u64],
+        token_set: RuntimeTokenSetRef<'_>,
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+    ) {
+        if let Some(key) = token_set.materialized_key() {
+            if let Some(mask) = precomputed.get(&key) {
+                let n = dense.len().min(mask.len()).min(merged.len());
+                for i in 0..n {
+                    merged[i] |= dense[i] & mask[i];
+                }
+                return;
+            }
+        }
+        let word_limit = dense.len().min(merged.len());
+        Self::for_each_runtime_token_range_word(token_set, word_limit, |word_idx, token_mask| {
+            merged[word_idx] |= dense[word_idx] & token_mask;
+        });
+    }
+
+    fn intersect_with_runtime_weight_reuse(
+        &self,
+        weight: RuntimeWeightRef<'_>,
+        precomputed: &DenseTokenMaskCache,
+    ) -> Option<Self> {
+        if self.is_empty() {
+            return None;
+        }
+        if weight.is_full() {
+            return Some(self.clone());
+        }
+        let mut entries = SmallVec::new();
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = weight.token_set_for_tsid(*tsid) else {
+                continue;
+            };
+            if let Some(intersection) =
+                Self::intersect_dense_with_runtime_token_set(dense, token_set, precomputed)
+            {
+                entries.push((*tsid, intersection));
+            }
+        }
+        (!entries.is_empty()).then_some(Self(entries))
+    }
+
+    fn intersect_with_runtime_weight_small_cached(
+        &self,
+        weight: RuntimeWeightRef<'_>,
+        precomputed: &DenseTokenMaskCache,
+        cache: &mut DenseTokenSetIntersectionSmallCache,
+    ) -> Option<Self> {
+        if self.is_empty() {
+            return None;
+        }
+        if weight.is_full() {
+            return Some(self.clone());
+        }
+        let mut result = SmallVec::new();
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = weight.token_set_for_tsid(*tsid) else {
+                continue;
+            };
+            let token_key = RuntimeTokenSetKey::from_ref(token_set);
+            let cached = cache.iter().find(|(cached_dense, cached_token_set, _)| {
+                Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_key
+            });
+            let intersection = if let Some((_, _, result)) = cached {
+                result.clone()
+            } else {
+                let result = Self::intersect_dense_with_runtime_token_set(
+                    dense,
+                    token_set,
+                    precomputed,
+                );
+                if cache.len() < cache.inline_size() {
+                    cache.push((Arc::clone(dense), token_key, result.clone()));
+                }
+                result
+            };
+            if let Some(intersection) = intersection {
+                result.push((*tsid, intersection));
+            }
+        }
+        (!result.is_empty()).then_some(Self(result))
     }
 
     fn intersect_dense_with_tokens(
@@ -520,12 +696,13 @@ impl DenseMaskAcc {
             tsid,
             dense: dense.as_ptr() as usize,
             dense_len: dense.len(),
-            token_set: Arc::as_ptr(token_set) as usize,
+            token_set: RuntimeTokenSetKey::Materialized(Arc::as_ptr(token_set) as usize),
         };
         if let Some(cached) = cache.get(&key) {
             return cached.clone();
         }
-        if let Some(mask) = precomputed.get(&key.token_set) {
+        if let RuntimeTokenSetKey::Materialized(token_set_key) = key.token_set {
+            if let Some(mask) = precomputed.get(&token_set_key) {
             let mut any = false;
             let mut out: Option<Vec<u64>> = None;
             for i in 0..dense.len() {
@@ -549,6 +726,7 @@ impl DenseMaskAcc {
             };
             cache.insert(key, result.clone());
             return result;
+            }
         }
         let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
         cache.insert(key, result.clone());
@@ -592,7 +770,7 @@ impl DenseMaskAcc {
         precomputed: &DenseTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Arc<[u64]>> {
-        let token_set_key = Arc::as_ptr(token_set) as usize;
+        let token_set_key = RuntimeTokenSetKey::Materialized(Arc::as_ptr(token_set) as usize);
         if let Some((_, _, result)) = cache.iter().find(|(cached_dense, cached_token_set, _)| {
             Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_set_key
         }) {
@@ -1128,7 +1306,7 @@ mod tests {
                     if depth == 3 {
                         continue;
                     }
-                    for (&token, bytes) in constraint.token_bytes.iter() {
+                    for (token, bytes) in constraint.token_bytes_iter() {
                         if !allowed(&expected, token) {
                             continue;
                         }
@@ -1568,7 +1746,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         let transitions = &self.constraint.dwa_fast_transitions[dwa_state as usize];
         self.constraint
             .fast_parser_dwa_transition(transitions, parser_state)
-            .cloned()
+            .map(|(target, weight)| (target, weight.clone()))
     }
 
     fn eval_upper(&mut self, dwa_state: u32, node: u32) -> Option<DenseMaskAcc> {
@@ -2133,7 +2311,7 @@ fn enqueue_weighted_transition(
     queue: &mut MaskQueue,
     popped: &DenseMaskGSS,
     target: u32,
-    weight: &Weight,
+    weight: RuntimeWeightRef<'_>,
     precomputed: &DenseTokenMaskCache,
     transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
     transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
@@ -2170,7 +2348,7 @@ fn enqueue_weighted_transition(
         } else {
             None
         };
-        let intersected = allowed.intersect_with_weight_small_cached(
+        let intersected = allowed.intersect_with_runtime_weight_small_cached(
             weight,
             precomputed,
             transition_intersection_cache,
@@ -2196,7 +2374,7 @@ fn enqueue_weighted_transition(
 fn enqueue_parser_state_transition(
     constraint: &Constraint,
     queue: &mut MaskQueue,
-    fast_transitions: &FastDwaTransitionRow,
+    dwa_state: u32,
     parser_state: u32,
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
@@ -2210,7 +2388,7 @@ fn enqueue_parser_state_transition(
         None
     };
     let Some((target, weight)) = constraint
-        .fast_parser_dwa_transition(fast_transitions, parser_state)
+        .runtime_parser_dwa_transition(dwa_state, parser_state)
     else {
         if let (Some(profile), Some(start)) = (profile.as_mut(), lookup_start) {
             profile.transition_lookup_ns += elapsed_ns(start);
@@ -2225,7 +2403,7 @@ fn enqueue_parser_state_transition(
     enqueue_weighted_transition(
         queue,
         popped,
-        *target,
+        target,
         weight,
         precomputed,
         transition_gss_cache,
@@ -2998,8 +3176,7 @@ impl<'a> ConstraintState<'a> {
         else {
             return false;
         };
-        let parser_dwa = self.constraint.parser_dwa();
-        if parser_dwa.states().is_empty() {
+        if self.constraint.runtime_parser_dwa_state_count() == 0 {
             return false;
         }
 
@@ -3054,12 +3231,13 @@ impl<'a> ConstraintState<'a> {
                 let representative_path = stack_plans[plan_index].representative_path;
                 let stack = &paths[representative_path].2;
                 let ops_start = plan_ops.len();
-                let mut dwa_state_id = parser_dwa.start_state();
+                let mut dwa_state_id = self.constraint.runtime_parser_dwa_start_state();
                 let mut stack_idx = 0usize;
 
                 loop {
-                    let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
-                    if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(final_weight) =
+                        self.constraint.runtime_parser_dwa_final_weight(dwa_state_id)
+                    {
                         if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
                             plans_complete = false;
                             break 'build_plans;
@@ -3085,11 +3263,8 @@ impl<'a> ConstraintState<'a> {
                             plans_complete = false;
                             break 'build_plans;
                         }
-                        if let Some(accept_weight) = self
-                            .constraint
-                            .parser_top_accept
-                            .get(&positive_label)
-                            .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                        if let Some(accept_weight) =
+                            self.constraint.runtime_parser_top_accept(positive_label)
                         {
                             if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
                                 plans_complete = false;
@@ -3097,16 +3272,9 @@ impl<'a> ConstraintState<'a> {
                             }
                             plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
                         }
-                        if let Some(accept_parts) = self
-                            .constraint
-                            .parser_top_accept_parts
-                            .get(&positive_label)
-                            .or_else(|| {
-                                self.constraint
-                                    .parser_top_accept_parts
-                                    .get(&DEFAULT_LABEL)
-                            })
-                        {
+                        let accept_parts =
+                            self.constraint.runtime_parser_top_accept_parts(positive_label);
+                        if !accept_parts.is_empty() {
                             for accept_weight in accept_parts {
                                 if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
                                     plans_complete = false;
@@ -3117,11 +3285,9 @@ impl<'a> ConstraintState<'a> {
                         }
                     }
 
-                    let fast_transitions =
-                        &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
                     let Some((target, weight)) = self
                         .constraint
-                        .fast_parser_dwa_transition(fast_transitions, parser_state)
+                        .runtime_parser_dwa_transition(dwa_state_id, parser_state)
                     else {
                         break;
                     };
@@ -3130,7 +3296,7 @@ impl<'a> ConstraintState<'a> {
                         break 'build_plans;
                     }
                     plan_ops.push(SinglePathDirectPlanOp::Intersect(weight));
-                    dwa_state_id = *target;
+                    dwa_state_id = target;
                 }
 
                 stack_plans[plan_index].ops_start = ops_start;
@@ -3258,12 +3424,13 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 }
 
-                let mut dwa_state_id = parser_dwa.start_state();
+                let mut dwa_state_id = self.constraint.runtime_parser_dwa_start_state();
                 let mut stack_idx = 0usize;
 
                 loop {
-                    let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
-                    if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(final_weight) =
+                        self.constraint.runtime_parser_dwa_final_weight(dwa_state_id)
+                    {
                         used_direct_final = true;
                         let dense = if dense_is_seed {
                             seed_base.as_ref()
@@ -3308,11 +3475,8 @@ impl<'a> ConstraintState<'a> {
                         }
 
                         if !used_equivalent_wide_summary {
-                            if let Some(accept_weight) = self
-                                .constraint
-                                .parser_top_accept
-                                .get(&positive_label)
-                                .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                            if let Some(accept_weight) =
+                                self.constraint.runtime_parser_top_accept(positive_label)
                             {
                                 used_direct_final = true;
                                 self.merge_single_path_final_weight_to_internal(
@@ -3325,16 +3489,9 @@ impl<'a> ConstraintState<'a> {
                                     &mut direct_buf_dirty,
                                 );
                             }
-                            if let Some(accept_parts) = self
-                                .constraint
-                                .parser_top_accept_parts
-                                .get(&positive_label)
-                                .or_else(|| {
-                                    self.constraint
-                                        .parser_top_accept_parts
-                                        .get(&DEFAULT_LABEL)
-                                })
-                            {
+                            let accept_parts =
+                                self.constraint.runtime_parser_top_accept_parts(positive_label);
+                            if !accept_parts.is_empty() {
                                 used_direct_final = true;
                                 for accept_weight in accept_parts {
                                     self.merge_single_path_final_weight_to_internal(
@@ -3366,11 +3523,9 @@ impl<'a> ConstraintState<'a> {
                         }
                     }
 
-                    let fast_transitions =
-                        &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
                     let Some((target, weight)) = self
                         .constraint
-                        .fast_parser_dwa_transition(fast_transitions, parser_state)
+                        .runtime_parser_dwa_transition(dwa_state_id, parser_state)
                     else {
                         break;
                     };
@@ -3397,7 +3552,7 @@ impl<'a> ConstraintState<'a> {
                     ) {
                         break;
                     }
-                    dwa_state_id = *target;
+                    dwa_state_id = target;
                 }
             }
         }
@@ -3499,18 +3654,18 @@ impl<'a> ConstraintState<'a> {
         dense: &mut Vec<u64>,
         aux: &mut Vec<u64>,
         internal_tsid: u32,
-        weight: &Weight,
+        weight: RuntimeWeightRef<'_>,
         precomputed: &DenseTokenMaskCache,
     ) -> bool {
         if weight.is_full() {
             return dense.iter().any(|&word| word != 0);
         }
 
-        let Some(token_set) = weight.token_set_for_tsid_ref(internal_tsid) else {
+        let Some(token_set) = weight.token_set_for_tsid(internal_tsid) else {
             dense.fill(0);
             return false;
         };
-        let token_set_key = Arc::as_ptr(token_set) as usize;
+        if let Some(token_set_key) = token_set.materialized_key() {
         if let Some(mask) = precomputed.get(&token_set_key) {
             let mut any = false;
             for (idx, dense_word) in dense.iter_mut().enumerate() {
@@ -3519,10 +3674,11 @@ impl<'a> ConstraintState<'a> {
             }
             return any;
         }
+        }
 
         aux.clear();
         aux.resize(dense.len(), 0);
-        DenseMaskAcc::for_each_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
+        DenseMaskAcc::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
             aux[word_idx] |= dense[word_idx] & token_mask;
         });
         std::mem::swap(dense, aux);
@@ -3531,7 +3687,7 @@ impl<'a> ConstraintState<'a> {
 
     fn merge_single_path_final_weight_to_internal(
         &self,
-        final_weight: &Weight,
+        final_weight: RuntimeWeightRef<'_>,
         internal_tsid: u32,
         dense: &[u64],
         precomputed: &DenseTokenMaskCache,
@@ -3547,10 +3703,12 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let Some(token_set) = final_weight.token_set_for_tsid_ref(internal_tsid) else {
+        let Some(token_set) = final_weight.token_set_for_tsid(internal_tsid) else {
             return true;
         };
-        if let Some(buf) = direct_buf.as_deref_mut() {
+        if let (Some(buf), RuntimeTokenSetRef::Materialized(token_set)) =
+            (direct_buf.as_deref_mut(), token_set)
+        {
             let token_set_key = Arc::as_ptr(token_set) as usize;
             if self
                 .constraint
@@ -3573,7 +3731,7 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        DenseMaskAcc::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
+        DenseMaskAcc::or_dense_and_runtime_token_set_into(dense, token_set, precomputed, merged);
         false
     }
 
@@ -3614,7 +3772,7 @@ impl<'a> ConstraintState<'a> {
 
     fn merge_final_weight_to_internal(
         &self,
-        final_weight: &Weight,
+        final_weight: RuntimeWeightRef<'_>,
         acc: &DenseMaskAcc,
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
@@ -3632,11 +3790,13 @@ impl<'a> ConstraintState<'a> {
             }
         } else {
             for (tsid, dense) in &acc.0 {
-                let Some(token_set) = final_weight.token_set_for_tsid_ref(*tsid) else {
+                let Some(token_set) = final_weight.token_set_for_tsid(*tsid) else {
                     continue;
                 };
 
-                let handled_directly = if let Some(buf) = direct_buf.as_deref_mut() {
+                let handled_directly = if let (Some(buf), RuntimeTokenSetRef::Materialized(token_set)) =
+                    (direct_buf.as_deref_mut(), token_set)
+                {
                     let token_set_key = Arc::as_ptr(token_set) as usize;
                     if self
                         .constraint
@@ -3663,7 +3823,7 @@ impl<'a> ConstraintState<'a> {
                 };
 
                 if !handled_directly {
-                    DenseMaskAcc::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
+                    DenseMaskAcc::or_dense_and_runtime_token_set_into(dense, token_set, precomputed, merged);
                     all_direct = false;
                 }
             }
@@ -3674,7 +3834,7 @@ impl<'a> ConstraintState<'a> {
 
     fn merge_final_weight_for_accs(
         &self,
-        final_weight: &Weight,
+        final_weight: RuntimeWeightRef<'_>,
         accs: &[DenseMaskAcc],
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
@@ -3697,7 +3857,7 @@ impl<'a> ConstraintState<'a> {
 
     fn merge_final_weight_for_gss(
         &self,
-        final_weight: &Weight,
+        final_weight: RuntimeWeightRef<'_>,
         gss: &DenseMaskGSS,
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
@@ -3722,8 +3882,8 @@ impl<'a> ConstraintState<'a> {
         &self,
         gss: &ParserGSS,
         original_tokenizer_state: u32,
-        start_final_weight: Option<&Weight>,
-        start_fast_transitions: &FastDwaTransitionRow,
+        start_final_weight: Option<RuntimeWeightRef<'_>>,
+        start_dwa_state: u32,
         precomputed: &DenseTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
@@ -3731,7 +3891,10 @@ impl<'a> ConstraintState<'a> {
         direct_buf_used: &mut bool,
         direct_buf_dirty: &mut bool,
     ) -> bool {
-        if !start_fast_transitions.is_empty() {
+        if !self
+            .constraint
+            .runtime_parser_dwa_row_is_empty(start_dwa_state)
+        {
             return false;
         }
         let Some(summary) = self.constraint.direct_regular_wide_frontier_for_gss(gss) else {
@@ -3774,8 +3937,8 @@ impl<'a> ConstraintState<'a> {
 
     fn seed_mask_queue_merged(
         &self,
-        start_final_weight: Option<&Weight>,
-        start_fast_transitions: &FastDwaTransitionRow,
+        start_final_weight: Option<RuntimeWeightRef<'_>>,
+        start_dwa_state: u32,
         precomputed: &DenseTokenMaskCache,
         transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
         transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
@@ -3797,7 +3960,7 @@ impl<'a> ConstraintState<'a> {
                 gss,
                 original_tokenizer_state,
                 start_final_weight,
-                start_fast_transitions,
+                start_dwa_state,
                 precomputed,
                 merged,
                 direct_buf,
@@ -3885,11 +4048,8 @@ impl<'a> ConstraintState<'a> {
 
             for (parser_state, popped) in &decomposed {
                 let positive_label = encode_positive_label(*parser_state);
-                if let Some(accept_weight) = self
-                    .constraint
-                    .parser_top_accept
-                    .get(&positive_label)
-                    .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                if let Some(accept_weight) =
+                    self.constraint.runtime_parser_top_accept(positive_label)
                 {
                     let accumulate_start = if profile.is_some() {
                         Some(Instant::now())
@@ -3909,16 +4069,9 @@ impl<'a> ConstraintState<'a> {
                         profile.token_accumulation_ns += elapsed_ns(start);
                     }
                 }
-                if let Some(accept_parts) = self
-                    .constraint
-                    .parser_top_accept_parts
-                    .get(&positive_label)
-                    .or_else(|| {
-                        self.constraint
-                            .parser_top_accept_parts
-                            .get(&DEFAULT_LABEL)
-                    })
-                {
+                let accept_parts =
+                    self.constraint.runtime_parser_top_accept_parts(positive_label);
+                if !accept_parts.is_empty() {
                     let accumulate_start = if profile.is_some() {
                         Some(Instant::now())
                     } else {
@@ -3965,7 +4118,7 @@ impl<'a> ConstraintState<'a> {
                 enqueue_parser_state_transition(
                     self.constraint,
                     queue,
-                    start_fast_transitions,
+                    start_dwa_state,
                     *parser_state,
                     popped,
                     precomputed,
@@ -4105,7 +4258,7 @@ impl<'a> ConstraintState<'a> {
                         dense.for_each_acc(|accumulator| {
                             merge_accepted(
                                 &mut accepted,
-                                accumulator.intersect_with_weight_small_cached(
+                            accumulator.intersect_with_weight_small_cached(
                                     top_weight,
                                     precomputed,
                                     &mut seed_intersections,
@@ -4117,6 +4270,9 @@ impl<'a> ConstraintState<'a> {
                 self.constraint.for_each_direct_regular_l1_acceptance(
                     parser_state,
                     |top_weight| {
+                        let RuntimeWeightRef::Materialized(top_weight) = top_weight else {
+                            return;
+                        };
                         dense.for_each_acc(|accumulator| {
                             merge_accepted(
                                 &mut accepted,
@@ -4136,7 +4292,7 @@ impl<'a> ConstraintState<'a> {
                     return;
                 };
                 seed_gsses.push(dense);
-                seed_targets.push(*target);
+                seed_targets.push(target);
                 seed_weights.push(transition_weight.clone());
             });
         }
@@ -4329,9 +4485,7 @@ impl<'a> ConstraintState<'a> {
         force_profile: bool,
         total_start: Option<Instant>,
     ) -> Option<MaskProfile> {
-        let parser_dwa = self.constraint.parser_dwa();
-
-        if self.state.is_empty() || parser_dwa.states().is_empty() {
+        if self.state.is_empty() || self.constraint.runtime_parser_dwa_state_count() == 0 {
             buf.fill(0);
             self.store_mask_cache(buf, &[]);
             return total_start.map(|start| MaskProfile {
@@ -4367,13 +4521,12 @@ impl<'a> ConstraintState<'a> {
         };
         let delta_profile_enabled = profile.is_some() && mask_delta_profile_enabled();
 
-        let start_state = parser_dwa.start_state();
-        let start_dwa_state = &parser_dwa.states()[start_state as usize];
-        let start_fast_transitions = &self.constraint.dwa_fast_transitions[start_state as usize];
+        let start_state = self.constraint.runtime_parser_dwa_start_state();
+        let start_final_weight = self.constraint.runtime_parser_dwa_final_weight(start_state);
 
         self.seed_mask_queue_merged(
-            start_dwa_state.final_weight.as_ref(),
-            start_fast_transitions,
+            start_final_weight,
+            start_state,
             precomputed,
             &mut transition_gss_cache,
             &mut transition_intersection_cache,
@@ -4396,10 +4549,7 @@ impl<'a> ConstraintState<'a> {
                 break;
             };
 
-            let dwa_state = &parser_dwa.states()[wa_state as usize];
-            let fast_transitions = &self.constraint.dwa_fast_transitions[wa_state as usize];
-
-            if let Some(final_weight) = &dwa_state.final_weight {
+            if let Some(final_weight) = self.constraint.runtime_parser_dwa_final_weight(wa_state) {
                 let accumulate_start = if profile.is_some() {
                     Some(Instant::now())
                 } else {
@@ -4434,7 +4584,7 @@ impl<'a> ConstraintState<'a> {
                 enqueue_parser_state_transition(
                     self.constraint,
                     &mut queue,
-                    fast_transitions,
+                    wa_state,
                     parser_state,
                     &popped,
                     precomputed,

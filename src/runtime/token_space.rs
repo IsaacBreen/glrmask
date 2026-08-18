@@ -54,12 +54,14 @@ impl Constraint {
 		&self,
 		tokenizer_state: u32,
 	) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-		self.possible_matches
-			.iter()
-			.filter_map(|(&terminal, weight)| {
+		self.runtime_possible_match_terminals()
+			.filter_map(|terminal| {
+				let weight = self.runtime_possible_match_weight(terminal)?;
 				let mut tokens = RangeSetBlaze::new();
 				for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
-					tokens |= weight.tokens_for_tsid(internal_tsid);
+					if let Some(token_set) = weight.token_set_for_tsid(internal_tsid) {
+						tokens |= token_set.to_range_set();
+					}
 				}
 				if tokens.is_empty() {
 					None
@@ -137,12 +139,14 @@ impl Constraint {
 		if !self.possible_matches_complete {
 			return false;
 		}
-		let Some(weight) = self.possible_matches.get(&terminal) else {
+		let Some(weight) = self.runtime_possible_match_weight(terminal) else {
 			return true;
 		};
 		let mut internal_tokens = RangeSetBlaze::new();
 		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
-			internal_tokens |= weight.tokens_for_tsid(internal_tsid);
+			if let Some(token_set) = weight.token_set_for_tsid(internal_tsid) {
+				internal_tokens |= token_set.to_range_set();
+			}
 		}
 		if self.internal_token_to_tokens.is_empty() {
 			for token in internal_tokens.iter() {

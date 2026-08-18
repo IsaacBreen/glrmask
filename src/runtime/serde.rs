@@ -3,7 +3,7 @@ use crate::runtime::artifact::InternalTokenBufMasks;
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
@@ -13,12 +13,18 @@ const PREVIOUS_EXPRLESS_CONSTRAINT_VERSION: u16 = 10;
 const PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION: u16 = 11;
 const PREVIOUS_DOMAIN_LABELS_CONSTRAINT_VERSION: u16 = 12;
 const PREVIOUS_UNCOMPRESSED_CONSTRAINT_VERSION: u16 = 13;
-const CONSTRAINT_VERSION: u16 = 14;
+const PREVIOUS_SECTIONED_CONSTRAINT_VERSION: u16 = 14;
+const PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION: u16 = 15;
+const CONSTRAINT_VERSION: u16 = 16;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
 const V14_SECTION_MAGIC: [u8; 4] = *b"S14\0";
 const V14_SECTION_HEADER_LEN: usize = V14_SECTION_MAGIC.len() + 4 * 8;
+const V15_SECTION_MAGIC: [u8; 4] = *b"S15\0";
+const V15_SECTION_HEADER_LEN: usize = V15_SECTION_MAGIC.len() + 5 * 8;
+const V16_SECTION_MAGIC: [u8; 4] = *b"S16\0";
+const V16_SECTION_HEADER_LEN: usize = V16_SECTION_MAGIC.len() + 5 * 8;
 
 #[derive(Serialize)]
 struct ConstraintArtifactV10Ref<'a> {
@@ -118,6 +124,24 @@ struct ConstraintArtifactV14Core {
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
 }
 
+#[derive(Serialize)]
+struct ConstraintArtifactV15RuntimeRef<'a> {
+    terminal_live_states: &'a [Vec<u32>],
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV15Runtime {
+    terminal_live_states: Vec<Vec<u32>>,
+}
+
+enum DecodedParserDwa {
+    Materialized(
+        crate::automata::weighted::dwa::DWA,
+        Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
+    ),
+    Packed(std::sync::Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>),
+}
+
 fn v14_sections(payload: &[u8]) -> Result<(&[u8], &[u8], &[u8], &[u8]), String> {
     if payload.len() < V14_SECTION_HEADER_LEN || !payload.starts_with(&V14_SECTION_MAGIC) {
         return Err("invalid v14 constraint section header".to_owned());
@@ -158,6 +182,98 @@ fn v14_sections(payload: &[u8]) -> Result<(&[u8], &[u8], &[u8], &[u8]), String> 
     ))
 }
 
+fn v15_sections(
+    payload: &[u8],
+) -> Result<(&[u8], &[u8], &[u8], &[u8], &[u8]), String> {
+    if payload.len() < V15_SECTION_HEADER_LEN || !payload.starts_with(&V15_SECTION_MAGIC) {
+        return Err("invalid v15 constraint section header".to_owned());
+    }
+    let mut pos = V15_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v15 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v15 section length does not fit this platform".to_owned())
+    };
+    let weight_len = take_len()?;
+    let dwa_len = take_len()?;
+    let table_len = take_len()?;
+    let core_len = take_len()?;
+    let runtime_len = take_len()?;
+    let total = V15_SECTION_HEADER_LEN
+        .checked_add(weight_len)
+        .and_then(|value| value.checked_add(dwa_len))
+        .and_then(|value| value.checked_add(table_len))
+        .and_then(|value| value.checked_add(core_len))
+        .and_then(|value| value.checked_add(runtime_len))
+        .ok_or_else(|| "v15 constraint section lengths overflow".to_owned())?;
+    if total != payload.len() {
+        return Err("invalid v15 constraint section lengths".to_owned());
+    }
+    let mut pos = V15_SECTION_HEADER_LEN;
+    let weight = &payload[pos..pos + weight_len];
+    pos += weight_len;
+    let dwa = &payload[pos..pos + dwa_len];
+    pos += dwa_len;
+    let table = &payload[pos..pos + table_len];
+    pos += table_len;
+    let core = &payload[pos..pos + core_len];
+    pos += core_len;
+    let runtime = &payload[pos..pos + runtime_len];
+    Ok((weight, dwa, table, core, runtime))
+}
+
+fn v16_sections(
+    payload: &[u8],
+) -> Result<(&[u8], &[u8], &[u8], &[u8], &[u8]), String> {
+    if payload.len() < V16_SECTION_HEADER_LEN || !payload.starts_with(&V16_SECTION_MAGIC) {
+        return Err("invalid v16 constraint section header".to_owned());
+    }
+    let mut pos = V16_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v16 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v16 section length does not fit this platform".to_owned())
+    };
+    let weight_len = take_len()?;
+    let dwa_len = take_len()?;
+    let table_len = take_len()?;
+    let core_len = take_len()?;
+    let runtime_len = take_len()?;
+    let total = V16_SECTION_HEADER_LEN
+        .checked_add(weight_len)
+        .and_then(|value| value.checked_add(dwa_len))
+        .and_then(|value| value.checked_add(table_len))
+        .and_then(|value| value.checked_add(core_len))
+        .and_then(|value| value.checked_add(runtime_len))
+        .ok_or_else(|| "v16 constraint section lengths overflow".to_owned())?;
+    if total != payload.len() {
+        return Err("invalid v16 constraint section lengths".to_owned());
+    }
+    let mut pos = V16_SECTION_HEADER_LEN;
+    let weight = &payload[pos..pos + weight_len];
+    pos += weight_len;
+    let dwa = &payload[pos..pos + dwa_len];
+    pos += dwa_len;
+    let table = &payload[pos..pos + table_len];
+    pos += table_len;
+    let core = &payload[pos..pos + core_len];
+    pos += core_len;
+    let runtime = &payload[pos..pos + runtime_len];
+    Ok((weight, dwa, table, core, runtime))
+}
+
 fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
     let mut seen = HashSet::new();
     let mut weights = Vec::new();
@@ -182,6 +298,64 @@ fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
         push(weight);
     }
     weights
+}
+
+fn attach_packed_non_dwa_weights(
+    constraint: &mut Constraint,
+    pool: std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
+    ids: Vec<u32>,
+) -> Result<(), String> {
+    let mut ids = ids.into_iter();
+    let mut parser_top_accept = BTreeMap::new();
+    for &label in constraint.parser_top_accept.keys() {
+        let id = ids
+            .next()
+            .ok_or_else(|| "missing packed Weight id for parser_top_accept".to_owned())?;
+        parser_top_accept.insert(label, id);
+    }
+
+    let mut parser_top_accept_parts = BTreeMap::new();
+    for (&label, parts) in &constraint.parser_top_accept_parts {
+        let mut part_ids = Vec::with_capacity(parts.len());
+        for _ in parts {
+            part_ids.push(
+                ids.next().ok_or_else(|| {
+                    "missing packed Weight id for parser_top_accept_parts".to_owned()
+                })?,
+            );
+        }
+        parser_top_accept_parts.insert(label, part_ids);
+    }
+
+    let mut direct_regular_l1_complete_by_terminal = BTreeMap::new();
+    for &terminal in constraint.direct_regular_l1_complete_by_terminal.keys() {
+        let id = ids.next().ok_or_else(|| {
+            "missing packed Weight id for direct_regular_l1_complete_by_terminal".to_owned()
+        })?;
+        direct_regular_l1_complete_by_terminal.insert(terminal, id);
+    }
+
+    let mut possible_matches = BTreeMap::new();
+    for &terminal in constraint.possible_matches.keys() {
+        let id = ids
+            .next()
+            .ok_or_else(|| "missing packed Weight id for possible_matches".to_owned())?;
+        possible_matches.insert(terminal, id);
+    }
+    if ids.next().is_some() {
+        return Err("unused packed Weight ids after current constraint core decode".to_owned());
+    }
+
+    constraint.packed_non_dwa_weights = Some(std::sync::Arc::new(
+        crate::runtime::artifact::PackedNonDwaWeights {
+            pool,
+            parser_top_accept,
+            parser_top_accept_parts,
+            direct_regular_l1_complete_by_terminal,
+            possible_matches,
+        },
+    ));
+    Ok(())
 }
 
 fn invert_original_token_map(original_to_internal: &[u32]) -> Result<Vec<Vec<u32>>, String> {
@@ -225,74 +399,186 @@ impl Constraint {
     /// The wire format itself must be small and fast enough that loading does
     /// not depend on a decompression pass to hide structural redundancy.
     pub fn save(&self) -> Vec<u8> {
-        let ((weight_pool, core), (dwa, table)) = rayon::join(
+        if let Some(bytes) = &self.serialized_artifact_cache {
+            return bytes.to_vec();
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let ((weight_pool, core), (dwa, table, runtime)) = rayon::join(
             || {
+                let branch_started = profile.then(std::time::Instant::now);
                 let weights = constraint_serialized_weight_pool(self);
-                let weight_pool = crate::ds::weight::pack_pooled_weights(&weights);
-                crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
-                let previous_external = crate::automata::weighted::dwa::set_external_serde(true);
-                let previous_external_table =
-                    crate::compiler::glr::table::artifact_serde::set_external_serde(true);
-                let previous_compact_tokenizer =
-                    crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
-                let previous_omit_inverse =
-                    crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(true);
-                let previous_packed_original_token_map =
-                    crate::runtime::artifact::original_token_map_artifact_serde::set_packed(true);
-                let previous_packed_token_bytes =
-                    crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
-                let encoded = bincode::serialize(&ConstraintArtifactV14CoreRef {
-                    constraint: self,
-                    ignore_expr: &self.ignore_expr,
-                    terminal_exprs: self.tokenizer.terminal_exprs(),
-                    parser_state_domain_labels: &self.parser_state_domain_labels,
-                    internal_token_buf_masks: &self.internal_token_buf_masks,
-                });
-                crate::automata::lexer::tokenizer::set_compact_artifact_serde(
-                    previous_compact_tokenizer,
+                let (weight_pool, encoded) = rayon::join(
+                    || {
+                        let started = profile.then(std::time::Instant::now);
+                        let weight_pool = crate::ds::weight::pack_pooled_weights(&weights);
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=weights ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                weight_pool.len(),
+                            );
+                        }
+                        weight_pool
+                    },
+                    || {
+                        // The pooled Weight-id map is thread-local, so install
+                        // it inside the core branch rather than on the parent
+                        // Rayon worker.  Packing WPL3 only reads the same
+                        // immutable Weight slice and is independent once ids
+                        // have been defined by stable slice order.
+                        crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
+                        let previous_external =
+                            crate::automata::weighted::dwa::set_external_serde(true);
+                        let previous_external_table =
+                            crate::compiler::glr::table::artifact_serde::set_external_serde(true);
+                        let previous_compact_tokenizer =
+                            crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
+                        let previous_omit_inverse =
+                            crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(true);
+                        let previous_packed_original_token_map =
+                            crate::runtime::artifact::original_token_map_artifact_serde::set_packed(true);
+                        let previous_packed_token_bytes =
+                            crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
+                        let started = profile.then(std::time::Instant::now);
+                        // `bincode::serialize` first runs `serialized_size` and
+                        // then serializes again. Custom compact serializers
+                        // (especially the tokenizer) do real packing work in
+                        // both passes. Write once into a generously-sized Vec
+                        // instead; capacity growth is much cheaper than
+                        // rebuilding every packed field twice.
+                        let mut encoded = Vec::with_capacity(3 * 1024 * 1024);
+                        let encode_result = bincode::serialize_into(
+                            &mut encoded,
+                            &ConstraintArtifactV14CoreRef {
+                                constraint: self,
+                                ignore_expr: &self.ignore_expr,
+                                terminal_exprs: self.tokenizer.terminal_exprs(),
+                                parser_state_domain_labels: &self.parser_state_domain_labels,
+                                internal_token_buf_masks: &self.internal_token_buf_masks,
+                            },
+                        );
+                        crate::automata::lexer::tokenizer::set_compact_artifact_serde(
+                            previous_compact_tokenizer,
+                        );
+                        crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
+                            previous_packed_token_bytes,
+                        );
+                        crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
+                            previous_omit_inverse,
+                        );
+                        crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
+                            previous_packed_original_token_map,
+                        );
+                        crate::compiler::glr::table::artifact_serde::set_external_serde(
+                            previous_external_table,
+                        );
+                        crate::automata::weighted::dwa::set_external_serde(previous_external);
+                        crate::ds::weight::end_pooled_weight_serde_encode();
+                        encode_result.expect("Constraint core serialization should succeed");
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=core ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                encoded.len(),
+                            );
+                        }
+                        encoded
+                    },
                 );
-                crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
-                    previous_packed_token_bytes,
-                );
-                crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                    previous_omit_inverse,
-                );
-                crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                    previous_packed_original_token_map,
-                );
-                crate::compiler::glr::table::artifact_serde::set_external_serde(
-                    previous_external_table,
-                );
-                crate::automata::weighted::dwa::set_external_serde(previous_external);
-                crate::ds::weight::end_pooled_weight_serde_encode();
+                if let Some(started) = branch_started {
+                    eprintln!(
+                        "[glrmask/profile][constraint_save_section] name=weights_core_branch ms={:.3}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
                 (
                     weight_pool,
-                    encoded.expect("Constraint core serialization should succeed"),
+                    encoded,
                 )
             },
             || {
-                rayon::join(
-                    || self.parser_dwa.artifact_packed_bytes(),
-                    || crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table),
-                )
+                let ((dwa, table), runtime) = rayon::join(
+                    || {
+                        rayon::join(
+                    || {
+                        let started = profile.then(std::time::Instant::now);
+                        let bytes = self.packed_parser_dwa.as_ref().map_or_else(
+                            || self.parser_dwa.artifact_packed_bytes(),
+                            |packed| packed.fast_wire_bytes(),
+                        );
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=dwa ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                bytes.len(),
+                            );
+                        }
+                        bytes
+                    },
+                    || {
+                        let started = profile.then(std::time::Instant::now);
+                        let bytes = crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table);
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=table ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                bytes.len(),
+                            );
+                        }
+                        bytes
+                    },
+                        )
+                    },
+                    || {
+                        let started = profile.then(std::time::Instant::now);
+                        let bytes = bincode::serialize(&ConstraintArtifactV15RuntimeRef {
+                            terminal_live_states: &self.terminal_live_states,
+                        })
+                        .expect("Constraint runtime metadata serialization should succeed");
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=runtime ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                bytes.len(),
+                            );
+                        }
+                        bytes
+                    },
+                );
+                (dwa, table, runtime)
             },
         );
 
         let payload_len =
-            V14_SECTION_HEADER_LEN + weight_pool.len() + dwa.len() + table.len() + core.len();
+            V16_SECTION_HEADER_LEN
+                + weight_pool.len()
+                + dwa.len()
+                + table.len()
+                + core.len()
+                + runtime.len();
         let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload_len);
         bytes.extend_from_slice(&CONSTRAINT_MAGIC);
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&(payload_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&V14_SECTION_MAGIC);
+        bytes.extend_from_slice(&V16_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(table.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(core.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(runtime.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&weight_pool);
         bytes.extend_from_slice(&dwa);
         bytes.extend_from_slice(&table);
         bytes.extend_from_slice(&core);
+        bytes.extend_from_slice(&runtime);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][constraint_save] total_ms={:.3} bytes={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                bytes.len(),
+            );
+        }
         bytes
     }
 
@@ -315,6 +601,8 @@ impl Constraint {
                 | PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION
                 | PREVIOUS_DOMAIN_LABELS_CONSTRAINT_VERSION
                 | PREVIOUS_UNCOMPRESSED_CONSTRAINT_VERSION
+                | PREVIOUS_SECTIONED_CONSTRAINT_VERSION
+                | PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -400,64 +688,232 @@ impl Constraint {
         };
         let deserialize_started = profile.then(std::time::Instant::now);
         let mut packed_dwa_inventory = None;
-        let mut constraint = if version == CONSTRAINT_VERSION {
-            let (weight_section, dwa_section, table_section, core_section) = v14_sections(serialized)
-                .map_err(crate::GlrMaskError::Serialization)?;
-            let ((dwa_result, table_result), core_result) = rayon::join(
+        let mut constraint = if version == CONSTRAINT_VERSION
+            || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
+            || version == PREVIOUS_SECTIONED_CONSTRAINT_VERSION
+        {
+            let (weight_section, dwa_section, table_section, core_section, runtime_section) =
+                if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime) = v16_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (weight, dwa, table, core, Some(runtime))
+                } else if version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime) = v15_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (weight, dwa, table, core, Some(runtime))
+                } else {
+                    let (weight, dwa, table, core) = v14_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (weight, dwa, table, core, None)
+                };
+            let ((dwa_result, (table_result, runtime_result)), core_result) = rayon::join(
                 || {
                     rayon::join(
-                        || crate::automata::weighted::dwa::DWA::from_artifact_packed_bytes(dwa_section),
-                        || crate::compiler::glr::table::artifact_serde::from_compact_bytes(table_section),
+                        || {
+                            let started = profile.then(std::time::Instant::now);
+                            let result = if version == CONSTRAINT_VERSION
+                                || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
+                            {
+                                let decoded = if dwa_section.starts_with(b"DWF1") {
+                                    crate::automata::weighted::dwa::PackedRuntimeDwa::from_fast_wire_bytes(
+                                        dwa_section,
+                                    )
+                                } else {
+                                    crate::automata::weighted::dwa::PackedRuntimeDwa::from_packed_bytes(
+                                        dwa_section,
+                                    )
+                                };
+                                decoded.map(|dwa| {
+                                    DecodedParserDwa::Packed(std::sync::Arc::new(dwa))
+                                })
+                            } else {
+                                crate::automata::weighted::dwa::DWA::from_artifact_packed_bytes(
+                                    dwa_section,
+                                )
+                                .map(|(dwa, inventory)| {
+                                    DecodedParserDwa::Materialized(dwa, inventory)
+                                })
+                            };
+                            if let Some(started) = started {
+                                eprintln!("[glrmask/profile][constraint_section] name=dwa ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                            }
+                            result
+                        },
+                        || {
+                            rayon::join(
+                                || {
+                                    let started = profile.then(std::time::Instant::now);
+                                    let result = crate::compiler::glr::table::artifact_serde::from_compact_bytes(table_section);
+                                    if let Some(started) = started {
+                                        eprintln!("[glrmask/profile][constraint_section] name=table ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                                    }
+                                    result
+                                },
+                                || -> Result<Option<ConstraintArtifactV15Runtime>, String> {
+                                    let Some(runtime_section) = runtime_section else {
+                                        return Ok(None);
+                                    };
+                                    let started = profile.then(std::time::Instant::now);
+                                    let result = bincode::deserialize::<ConstraintArtifactV15Runtime>(runtime_section)
+                                        .map(Some)
+                                        .map_err(|err| err.to_string());
+                                    if let Some(started) = started {
+                                        eprintln!("[glrmask/profile][constraint_section] name=runtime ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                                    }
+                                    result
+                                },
+                            )
+                        },
                     )
                 },
-                || -> Result<ConstraintArtifactV14Core, String> {
-                    let weights = crate::ds::weight::unpack_pooled_weights(weight_section)?;
-                    crate::ds::weight::begin_pooled_weight_serde_decode(weights);
-                    let previous_external =
-                        crate::automata::weighted::dwa::set_external_serde(true);
-                    let previous_external_table =
-                        crate::compiler::glr::table::artifact_serde::set_external_serde(true);
-                    let previous_compact_tokenizer =
-                        crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
-                    let previous_omit_inverse =
+                || -> Result<
+                    (
+                        ConstraintArtifactV14Core,
+                        Option<std::sync::Arc<crate::runtime::artifact::token_bytes_artifact_serde::PackedTokenBytes>>,
+                        Option<(
+                            std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
+                            Vec<u32>,
+                        )>,
+                    ),
+                    String,
+                > {
+                    let section_started = profile.then(std::time::Instant::now);
+                    let weight_count = if version == CONSTRAINT_VERSION
+                        || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
+                    {
+                        Some(crate::ds::weight::PackedRuntimeWeightPool::peek_weight_count(
+                            weight_section,
+                        )?)
+                    } else {
+                        None
+                    };
+
+                    let decode_core = || -> Result<_, String> {
+                        if let Some(weight_count) = weight_count {
+                            crate::ds::weight::begin_pooled_weight_serde_deferred_decode(
+                                weight_count,
+                            );
+                        } else {
+                            let weights_started = profile.then(std::time::Instant::now);
+                            let weights = crate::ds::weight::unpack_pooled_weights(weight_section)?;
+                            if let Some(started) = weights_started {
+                                eprintln!("[glrmask/profile][constraint_section] name=weights ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                            }
+                            crate::ds::weight::begin_pooled_weight_serde_decode(weights);
+                        }
+                        let previous_external =
+                            crate::automata::weighted::dwa::set_external_serde(true);
+                        let previous_external_table =
+                            crate::compiler::glr::table::artifact_serde::set_external_serde(true);
+                        let previous_compact_tokenizer =
+                            crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
+                        let previous_omit_inverse =
+                            crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
+                                true,
+                            );
+                        let previous_packed_original_token_map =
+                            crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
+                                true,
+                            );
+                        let previous_packed_token_bytes =
+                            crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
+                        let previous_defer_token_bytes =
+                            crate::runtime::artifact::token_bytes_artifact_serde::set_defer_unpack(
+                                version == CONSTRAINT_VERSION
+                                    || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION,
+                            );
+                        let core_started = profile.then(std::time::Instant::now);
+                        let decoded = bincode::deserialize::<ConstraintArtifactV14Core>(core_section)
+                            .map_err(|err| err.to_string());
+                        let deferred_token_bytes =
+                            crate::runtime::artifact::token_bytes_artifact_serde::take_deferred();
+                        let deferred_weight_ids = if weight_count.is_some() {
+                            crate::ds::weight::take_pooled_weight_serde_deferred_ids()
+                        } else {
+                            Vec::new()
+                        };
+                        if let Some(started) = core_started {
+                            eprintln!("[glrmask/profile][constraint_section] name=core_bincode ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        crate::automata::lexer::tokenizer::set_compact_artifact_serde(
+                            previous_compact_tokenizer,
+                        );
+                        crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
+                            previous_packed_token_bytes,
+                        );
+                        crate::runtime::artifact::token_bytes_artifact_serde::set_defer_unpack(
+                            previous_defer_token_bytes,
+                        );
                         crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                            true,
+                            previous_omit_inverse,
                         );
-                    let previous_packed_original_token_map =
                         crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                            true,
+                            previous_packed_original_token_map,
                         );
-                    let previous_packed_token_bytes =
-                        crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
-                    let decoded = bincode::deserialize::<ConstraintArtifactV14Core>(core_section)
-                        .map_err(|err| err.to_string());
-                    crate::automata::lexer::tokenizer::set_compact_artifact_serde(
-                        previous_compact_tokenizer,
-                    );
-                    crate::runtime::artifact::token_bytes_artifact_serde::set_packed(
-                        previous_packed_token_bytes,
-                    );
-                    crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                        previous_omit_inverse,
-                    );
-                    crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                        previous_packed_original_token_map,
-                    );
-                    crate::compiler::glr::table::artifact_serde::set_external_serde(
-                        previous_external_table,
-                    );
-                    crate::automata::weighted::dwa::set_external_serde(previous_external);
-                    crate::ds::weight::end_pooled_weight_serde_decode();
-                    decoded
+                        crate::compiler::glr::table::artifact_serde::set_external_serde(
+                            previous_external_table,
+                        );
+                        crate::automata::weighted::dwa::set_external_serde(previous_external);
+                        crate::ds::weight::end_pooled_weight_serde_decode();
+                        decoded.map(|artifact| {
+                            (artifact, deferred_token_bytes, deferred_weight_ids)
+                        })
+                    };
+
+                    let (artifact, deferred_token_bytes, packed_weights) =
+                        if version == CONSTRAINT_VERSION
+                            || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
+                        {
+                            let weights_started = profile.then(std::time::Instant::now);
+                            // WPL3 current-format runtime indexing is now only
+                            // a small linear framing scan + one section copy.
+                            // Running that tiny job as another nested Rayon
+                            // branch competes with the much heavier core/DWA
+                            // decoders and increases wall time on Windows.
+                            let packed_weights =
+                                crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(
+                                    weight_section,
+                                )?;
+                            if let Some(started) = weights_started {
+                                eprintln!("[glrmask/profile][constraint_section] name=weights_packed ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                            }
+                            let (artifact, deferred_token_bytes, deferred_weight_ids) = decode_core()?;
+                            (
+                                artifact,
+                                deferred_token_bytes,
+                                Some((std::sync::Arc::new(packed_weights), deferred_weight_ids)),
+                            )
+                        } else {
+                            let (artifact, deferred_token_bytes, _) = decode_core()?;
+                            (artifact, deferred_token_bytes, None)
+                        };
+                    if let Some(started) = section_started {
+                        eprintln!("[glrmask/profile][constraint_section] name=core_total ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    Ok((artifact, deferred_token_bytes, packed_weights))
                 },
             );
-            let (parser_dwa, inventory) =
-                dwa_result.map_err(crate::GlrMaskError::Serialization)?;
+            let parser_dwa = dwa_result.map_err(crate::GlrMaskError::Serialization)?;
             let table = table_result.map_err(crate::GlrMaskError::Serialization)?;
-            let artifact = core_result.map_err(crate::GlrMaskError::Serialization)?;
-            packed_dwa_inventory = inventory;
+            let runtime = runtime_result.map_err(crate::GlrMaskError::Serialization)?;
+            let (artifact, deferred_token_bytes, packed_weights) =
+                core_result.map_err(crate::GlrMaskError::Serialization)?;
             let mut constraint = artifact.constraint;
-            constraint.parser_dwa = parser_dwa;
+            if let Some((pool, ids)) = packed_weights {
+                attach_packed_non_dwa_weights(&mut constraint, pool, ids)
+                    .map_err(crate::GlrMaskError::Serialization)?;
+            }
+            match parser_dwa {
+                DecodedParserDwa::Materialized(parser_dwa, inventory) => {
+                    constraint.parser_dwa = parser_dwa;
+                    constraint.packed_parser_dwa = None;
+                    packed_dwa_inventory = inventory;
+                }
+                DecodedParserDwa::Packed(parser_dwa) => {
+                    constraint.parser_dwa = crate::automata::weighted::dwa::DWA::new(0, 0);
+                    constraint.packed_parser_dwa = Some(parser_dwa);
+                }
+            }
             constraint.table = table;
             constraint.internal_token_to_tokens =
                 invert_original_token_map(&constraint.original_token_to_internal)
@@ -465,6 +921,10 @@ impl Constraint {
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
             constraint.internal_token_buf_masks = artifact.internal_token_buf_masks;
+            constraint.packed_token_bytes = deferred_token_bytes;
+            if let Some(runtime) = runtime {
+                constraint.terminal_live_states = runtime.terminal_live_states;
+            }
             constraint
                 .tokenizer
                 .restore_terminal_exprs(artifact.terminal_exprs)
@@ -564,6 +1024,11 @@ impl Constraint {
                 bytes.len(),
                 total_started.elapsed().as_secs_f64() * 1000.0,
             );
+        }
+        if version == CONSTRAINT_VERSION
+            || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
+        {
+            constraint.serialized_artifact_cache = Some(std::sync::Arc::from(bytes));
         }
         Ok(constraint)
     }

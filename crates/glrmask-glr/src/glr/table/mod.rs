@@ -252,6 +252,81 @@ pub mod artifact_serde {
         direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
     }
 
+    #[derive(Serialize)]
+    struct CompactTableMetaRef<'a> {
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        rules: &'a [Rule],
+        nonterminal_display_names: &'a [String],
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        forwarded_shifts: &'a FxHashSet<(u32, TerminalID)>,
+        control_terminals: &'a BTreeSet<TerminalID>,
+        skip_terminals: &'a BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: &'a [DirectRegularWideFrontierDescriptor],
+    }
+
+    #[derive(Deserialize)]
+    struct CompactTableMeta {
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        rules: Vec<Rule>,
+        nonterminal_display_names: Vec<String>,
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+        control_terminals: BTreeSet<TerminalID>,
+        skip_terminals: BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
+    }
+
+    const PARALLEL_TABLE_MAGIC: &[u8; 4] = b"GTC2";
+    const PARALLEL_TABLE_HEADER_LEN: usize = 4 + 4 * 8;
+
+    fn assemble_table(
+        action: Vec<ActionRow>,
+        goto: Vec<GotoRow>,
+        advance: CompactAdvance,
+        meta: CompactTableMeta,
+    ) -> Result<GLRTable, String> {
+        let row_count_valid = |len: usize| len == 0 || len == meta.num_states as usize;
+        if !row_count_valid(action.len()) || !row_count_valid(goto.len()) {
+            return Err(format!(
+                "compact GLR table row count does not match num_states: action={} goto={} num_states={}",
+                action.len(),
+                goto.len(),
+                meta.num_states,
+            ));
+        }
+        if meta.rules.len() != meta.num_rules as usize {
+            return Err("compact GLR table rule count does not match num_rules".to_owned());
+        }
+        let advance = advance.into_rows(meta.num_terminals)?;
+        if !advance.is_empty() && advance.len() != meta.num_states as usize {
+            return Err("compact GLR advance row count does not match num_states".to_owned());
+        }
+        Ok(GLRTable {
+            action,
+            goto,
+            num_states: meta.num_states,
+            num_terminals: meta.num_terminals,
+            num_rules: meta.num_rules,
+            rules: meta.rules,
+            nonterminal_display_names: meta.nonterminal_display_names,
+            construction: meta.construction,
+            admission_policy: meta.admission_policy,
+            advance,
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: meta.forwarded_shifts,
+            control_terminals: meta.control_terminals,
+            skip_terminals: meta.skip_terminals,
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: meta.direct_regular_wide_frontiers,
+        })
+    }
+
     fn placeholder() -> GLRTable {
         GLRTable {
             action: Vec::new(),
@@ -298,61 +373,120 @@ pub mod artifact_serde {
     }
 
     pub fn to_compact_bytes(table: &GLRTable) -> Vec<u8> {
-        bincode::serialize(&CompactTableRef {
-            action: &table.action,
-            goto: &table.goto,
-            num_states: table.num_states,
-            num_terminals: table.num_terminals,
-            num_rules: table.num_rules,
-            rules: &table.rules,
-            nonterminal_display_names: &table.nonterminal_display_names,
-            construction: table.construction,
-            admission_policy: table.admission_policy,
-            advance: CompactAdvance::from_rows(&table.advance),
-            forwarded_shifts: &table.forwarded_shifts,
-            control_terminals: &table.control_terminals,
-            skip_terminals: &table.skip_terminals,
-            direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
-        })
-        .expect("compact GLR table serialization should succeed")
+        let ((action, goto), (advance, meta)) = rayon::join(
+            || {
+                rayon::join(
+                    || bincode::serialize(&table.action).expect("GLR action serialization should succeed"),
+                    || bincode::serialize(&table.goto).expect("GLR goto serialization should succeed"),
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        let compact = CompactAdvance::from_rows(&table.advance);
+                        bincode::serialize(&compact).expect("GLR advance serialization should succeed")
+                    },
+                    || {
+                        bincode::serialize(&CompactTableMetaRef {
+                            num_states: table.num_states,
+                            num_terminals: table.num_terminals,
+                            num_rules: table.num_rules,
+                            rules: &table.rules,
+                            nonterminal_display_names: &table.nonterminal_display_names,
+                            construction: table.construction,
+                            admission_policy: table.admission_policy,
+                            forwarded_shifts: &table.forwarded_shifts,
+                            control_terminals: &table.control_terminals,
+                            skip_terminals: &table.skip_terminals,
+                            direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+                        })
+                        .expect("GLR metadata serialization should succeed")
+                    },
+                )
+            },
+        );
+        let mut out = Vec::with_capacity(
+            PARALLEL_TABLE_HEADER_LEN + action.len() + goto.len() + advance.len() + meta.len(),
+        );
+        out.extend_from_slice(PARALLEL_TABLE_MAGIC);
+        for len in [action.len(), goto.len(), advance.len(), meta.len()] {
+            out.extend_from_slice(&(len as u64).to_le_bytes());
+        }
+        out.extend_from_slice(&action);
+        out.extend_from_slice(&goto);
+        out.extend_from_slice(&advance);
+        out.extend_from_slice(&meta);
+        out
     }
 
     pub fn from_compact_bytes(input: &[u8]) -> Result<GLRTable, String> {
+        if input.starts_with(PARALLEL_TABLE_MAGIC) {
+            if input.len() < PARALLEL_TABLE_HEADER_LEN {
+                return Err("truncated parallel GLR table header".to_owned());
+            }
+            let mut pos = PARALLEL_TABLE_MAGIC.len();
+            let mut lengths = [0usize; 4];
+            for len in &mut lengths {
+                let end = pos + 8;
+                let encoded = u64::from_le_bytes(
+                    input[pos..end]
+                        .try_into()
+                        .expect("parallel GLR table length has fixed width"),
+                );
+                *len = usize::try_from(encoded)
+                    .map_err(|_| "parallel GLR table section length does not fit platform".to_owned())?;
+                pos = end;
+            }
+            let expected = lengths.iter().try_fold(PARALLEL_TABLE_HEADER_LEN, |total, &len| {
+                total.checked_add(len)
+            }).ok_or_else(|| "parallel GLR table section lengths overflow".to_owned())?;
+            if expected != input.len() {
+                return Err("invalid parallel GLR table section lengths".to_owned());
+            }
+            let action = &input[pos..pos + lengths[0]];
+            pos += lengths[0];
+            let goto = &input[pos..pos + lengths[1]];
+            pos += lengths[1];
+            let advance = &input[pos..pos + lengths[2]];
+            pos += lengths[2];
+            let meta = &input[pos..pos + lengths[3]];
+
+            let ((action, goto), (advance, meta)) = rayon::join(
+                || {
+                    rayon::join(
+                        || bincode::deserialize::<Vec<ActionRow>>(action).map_err(|err| err.to_string()),
+                        || bincode::deserialize::<Vec<GotoRow>>(goto).map_err(|err| err.to_string()),
+                    )
+                },
+                || {
+                    rayon::join(
+                        || bincode::deserialize::<CompactAdvance>(advance).map_err(|err| err.to_string()),
+                        || bincode::deserialize::<CompactTableMeta>(meta).map_err(|err| err.to_string()),
+                    )
+                },
+            );
+            return assemble_table(action?, goto?, advance?, meta?);
+        }
+
         let artifact: CompactTable = bincode::deserialize(input).map_err(|err| err.to_string())?;
-        let row_count_valid = |len: usize| len == 0 || len == artifact.num_states as usize;
-        if !row_count_valid(artifact.action.len()) || !row_count_valid(artifact.goto.len()) {
-            return Err(format!(
-                "compact GLR table row count does not match num_states: action={} goto={} num_states={}",
-                artifact.action.len(),
-                artifact.goto.len(),
-                artifact.num_states,
-            ));
-        }
-        if artifact.rules.len() != artifact.num_rules as usize {
-            return Err("compact GLR table rule count does not match num_rules".to_owned());
-        }
-        let advance = artifact.advance.into_rows(artifact.num_terminals)?;
-        if !advance.is_empty() && advance.len() != artifact.num_states as usize {
-            return Err("compact GLR advance row count does not match num_states".to_owned());
-        }
-        Ok(GLRTable {
-            action: artifact.action,
-            goto: artifact.goto,
-            num_states: artifact.num_states,
-            num_terminals: artifact.num_terminals,
-            num_rules: artifact.num_rules,
-            rules: artifact.rules,
-            nonterminal_display_names: artifact.nonterminal_display_names,
-            construction: artifact.construction,
-            admission_policy: artifact.admission_policy,
-            advance,
-            unconditional_advance: Vec::new(),
-            forwarded_shifts: artifact.forwarded_shifts,
-            control_terminals: artifact.control_terminals,
-            skip_terminals: artifact.skip_terminals,
-            guarded_shift_index: Vec::new(),
-            direct_regular_wide_frontiers: artifact.direct_regular_wide_frontiers,
-        })
+        assemble_table(
+            artifact.action,
+            artifact.goto,
+            artifact.advance,
+            CompactTableMeta {
+                num_states: artifact.num_states,
+                num_terminals: artifact.num_terminals,
+                num_rules: artifact.num_rules,
+                rules: artifact.rules,
+                nonterminal_display_names: artifact.nonterminal_display_names,
+                construction: artifact.construction,
+                admission_policy: artifact.admission_policy,
+                forwarded_shifts: artifact.forwarded_shifts,
+                control_terminals: artifact.control_terminals,
+                skip_terminals: artifact.skip_terminals,
+                direct_regular_wide_frontiers: artifact.direct_regular_wide_frontiers,
+            },
+        )
     }
 }
 
