@@ -1005,12 +1005,17 @@ pub fn characterize_selected_terminals(
         grammar.num_terminals as usize,
         "selected template mask must cover the merged terminal domain",
     );
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let total_started = profile.then(Instant::now);
+    let index_started = profile.then(Instant::now);
     let index = build_characterization_index(table, grammar);
+    let index_ms = index_started.map_or(0.0, elapsed_ms);
 
     // The full-grammar path already quotients equal sparse LR action signatures
     // and characterizes representatives in parallel.  Selected composition
     // templates need the same exact optimization: without it a small boundary
     // set is paradoxically characterized serially one terminal at a time.
+    let signature_started = profile.then(Instant::now);
     let mut groups_by_signature: FxHashMap<TerminalActionSignature<'_>, Vec<TerminalID>> =
         FxHashMap::default();
     for (terminal, &is_selected) in selected.iter().enumerate() {
@@ -1024,6 +1029,8 @@ pub fn characterize_selected_terminals(
             .push(terminal);
     }
     let groups = groups_by_signature.into_values().collect::<Vec<_>>();
+    let signature_ms = signature_started.map_or(0.0, elapsed_ms);
+    let characterize_started = profile.then(Instant::now);
     let characterized = groups
         .par_iter()
         .map(|terminals| {
@@ -1031,12 +1038,23 @@ pub fn characterize_selected_terminals(
             (terminals.clone(), characterization)
         })
         .collect::<Vec<_>>();
+    let characterize_ms = characterize_started.map_or(0.0, elapsed_ms);
 
+    let fanout_started = profile.then(Instant::now);
     let mut result = BTreeMap::new();
     for (terminals, characterization) in characterized {
         for terminal in terminals {
             result.insert(terminal, characterization.clone());
         }
+    }
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][selected_terminal_characterization] selected={} groups={} index_ms={index_ms:.3} signature_ms={signature_ms:.3} characterize_ms={characterize_ms:.3} fanout_ms={:.3} total_ms={:.3}",
+            selected.iter().filter(|&&value| value).count(),
+            groups.len(),
+            fanout_started.map_or(0.0, elapsed_ms),
+            elapsed_ms(total_started),
+        );
     }
     result
 }

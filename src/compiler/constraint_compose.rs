@@ -7373,6 +7373,57 @@ fn rebuild_transported_component_templates(
     result
 }
 
+fn build_complete_composed_parser_template_cache(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    analyzed: &AnalyzedGrammar,
+    scoped_ignore_terminals: &BitSet,
+) -> Vec<Option<UnweightedDfa>> {
+    let terminal_count = analyzed.num_terminals as usize;
+    let parent_terminal_end = composed_table
+        .terminal_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(analyzed.num_terminals) as usize;
+
+    // The linker rewrites parent continuation semantics. Ordinary child rows
+    // are copied and their LR-state labels are transported through the exact
+    // state relation; scoped child ignores are the child-side exception.
+    let mut fresh = vec![false; terminal_count];
+    fresh[..parent_terminal_end.min(terminal_count)].fill(true);
+    for terminal in scoped_ignore_terminals.iter() {
+        if let Some(slot) = fresh.get_mut(terminal) {
+            *slot = true;
+        }
+    }
+
+    let mut reuse = vec![false; terminal_count];
+    for terminal in parent_terminal_end.min(terminal_count)..terminal_count {
+        reuse[terminal] = !fresh[terminal];
+    }
+    let transported = rebuild_transported_component_templates(
+        composed_table,
+        components,
+        &reuse,
+    );
+
+    let characterizations =
+        characterize_selected_terminals(&composed_table.table, analyzed, &fresh);
+    let fresh_templates = Templates::from_characterizations(&characterizations);
+    let mut result = vec![None; terminal_count];
+    for (terminal, dfa) in transported {
+        if let Some(slot) = result.get_mut(terminal as usize) {
+            *slot = Some(dfa);
+        }
+    }
+    for (terminal, dfa) in fresh_templates.by_terminal {
+        if let Some(slot) = result.get_mut(terminal as usize) {
+            *slot = Some(dfa);
+        }
+    }
+    result
+}
+
 
 #[derive(Debug, Clone)]
 struct ConcreteBoundaryDeltaEntry {
@@ -10212,6 +10263,33 @@ fn build_boundary_repair(
                 .unwrap_or(false)
         {
             composition_parser_templates_by_terminal[terminal as usize] = Some(dfa.clone());
+        }
+    }
+    if std::env::var_os("GLRMASK_COMPOSE_BUILD_FULL_TEMPLATE_CACHE").is_some() {
+        let cache_started_at = Instant::now();
+        composition_parser_templates_by_terminal = build_complete_composed_parser_template_cache(
+            composed_table,
+            components,
+            &analyzed,
+            &ignore_terminals.scoped,
+        );
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_composition_parser_template_cache] entries={} states={} transitions={} ms={:.3}",
+                composition_parser_templates_by_terminal.iter().flatten().count(),
+                composition_parser_templates_by_terminal
+                    .iter()
+                    .flatten()
+                    .map(|dfa| dfa.states.len())
+                    .sum::<usize>(),
+                composition_parser_templates_by_terminal
+                    .iter()
+                    .flatten()
+                    .flat_map(|dfa| dfa.states.iter())
+                    .map(|state| state.transitions.len())
+                    .sum::<usize>(),
+                cache_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     }
     let terminal_dwa = terminal_dwa?;
@@ -17983,13 +18061,18 @@ mod tests {
                 concrete_grammar.num_terminals,
             );
             eprintln!(
-                "MINBOUND OUTER_IDEAL_TEMPLATE_REUSE active={} changed={} unsafe={} unchanged={} compare_ms={:.3}",
+                "MINBOUND OUTER_IDEAL_TEMPLATE_REUSE active={} changed={} unsafe={} unchanged={} changed_ids={:?} compare_ms={:.3}",
                 tight_active_terminals,
                 tight_delta_plan.by_global_terminal.len(),
                 tight_delta_plan.unsafe_terminals.len(),
                 tight_active_terminals
                     .saturating_sub(tight_delta_plan.by_global_terminal.len())
                     .saturating_sub(tight_delta_plan.unsafe_terminals.len()),
+                tight_delta_plan
+                    .by_global_terminal
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
                 tight_delta_started.elapsed().as_secs_f64() * 1000.0,
             );
             let split_reuse_started = Instant::now();
@@ -18068,6 +18151,91 @@ mod tests {
                 split_mismatches,
                 split_missing,
                 split_reuse_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let hybrid_started = Instant::now();
+            let parent_terminal_end = composed_table.terminal_offsets[1];
+            let mut parent_selected = vec![false; tight_selected.len()];
+            let mut child_selected = tight_selected.clone();
+            for terminal in 0..parent_terminal_end as usize {
+                parent_selected[terminal] = tight_selected[terminal];
+                child_selected[terminal] = false;
+            }
+            let ((mut hybrid_dfas, hybrid_transport_ms), (parent_templates, parent_characterize_ms, parent_template_ms)) =
+                rayon::join(
+                    || {
+                        let started = Instant::now();
+                        let result = rebuild_transported_component_templates(
+                            &composed_table,
+                            &tight_delta_components,
+                            &child_selected,
+                        );
+                        (result, started.elapsed().as_secs_f64() * 1000.0)
+                    },
+                    || {
+                        let started = Instant::now();
+                        let parent_characterizations = characterize_selected_terminals(
+                            &composed_table.table,
+                            &concrete_grammar,
+                            &parent_selected,
+                        );
+                        let parent_characterize_ms =
+                            started.elapsed().as_secs_f64() * 1000.0;
+                        let started = Instant::now();
+                        let (parent_templates, _) =
+                            Templates::from_characterizations_profiled(&parent_characterizations);
+                        let parent_template_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        (parent_templates, parent_characterize_ms, parent_template_ms)
+                    },
+                );
+            hybrid_dfas.extend(parent_templates.by_terminal);
+            let skeleton_started = Instant::now();
+            let hybrid_templates = Templates::from_terminal_dfas(hybrid_dfas);
+            let skeleton_ms = skeleton_started.elapsed().as_secs_f64() * 1000.0;
+            let validate_started = Instant::now();
+            let mut hybrid_mismatches = Vec::<u32>::new();
+            for (terminal, &active) in tight_selected.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let terminal = terminal as u32;
+                let Some(reference) = tight_templates.by_terminal.get(&terminal) else {
+                    hybrid_mismatches.push(terminal);
+                    continue;
+                };
+                let Some(candidate) = hybrid_templates.by_terminal.get(&terminal) else {
+                    hybrid_mismatches.push(terminal);
+                    continue;
+                };
+                if !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(candidate, reference))
+                    || !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(reference, candidate))
+                {
+                    hybrid_mismatches.push(terminal);
+                }
+            }
+            let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
+            let child_cache_hits = tight_selected
+                .iter()
+                .enumerate()
+                .skip(parent_terminal_end as usize)
+                .filter(|(_, active)| **active)
+                .filter(|(terminal, _)| {
+                    dispatch
+                        .composition_parser_templates_by_terminal
+                        .get(*terminal - parent_terminal_end as usize)
+                        .is_some_and(Option::is_some)
+                })
+                .count();
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_HYBRID_TEMPLATES active={} parent_active={} child_active={} child_cache_hits={} mismatches={} mismatch_ids={:?} states={} transitions={} transport_ms={hybrid_transport_ms:.3} parent_characterize_ms={parent_characterize_ms:.3} parent_template_ms={parent_template_ms:.3} skeleton_ms={skeleton_ms:.3} validate_ms={validate_ms:.3} total_ms={:.3}",
+                tight_active_terminals,
+                parent_selected.iter().filter(|&&selected| selected).count(),
+                tight_active_terminals.saturating_sub(parent_selected.iter().filter(|&&selected| selected).count()),
+                child_cache_hits,
+                hybrid_mismatches.len(),
+                hybrid_mismatches,
+                hybrid_templates.by_terminal.values().map(|dfa| dfa.states.len()).sum::<usize>(),
+                hybrid_templates.by_terminal.values().flat_map(|dfa| dfa.states.iter()).map(|state| state.transitions.len()).sum::<usize>(),
+                hybrid_started.elapsed().as_secs_f64() * 1000.0,
             );
             if std::env::var_os("GLRMASK_MINBOUND_TEMPLATE_STORAGE").is_some() {
                 let active_raw = bincode::serialize(&old_transported)

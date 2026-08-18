@@ -817,6 +817,19 @@ pub struct Templates {
 }
 
 impl Templates {
+    pub fn from_terminal_dfas(
+        by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
+    ) -> Self {
+        let by_terminal_nwa = by_terminal
+            .iter()
+            .map(|(&terminal, dfa)| (terminal, dfa_to_nwa_skeleton(dfa)))
+            .collect();
+        Self {
+            by_terminal,
+            by_terminal_nwa,
+        }
+    }
+
     /// Build exact templates for a constant-depth direct-regular parser table.
     ///
     /// Every terminal action replaces the current parser top with one of a
