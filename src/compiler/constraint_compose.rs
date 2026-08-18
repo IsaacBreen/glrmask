@@ -11060,6 +11060,41 @@ pub(crate) fn compose_constraints(
             composed_table: Some(&composed_table.table),
         })
         .collect::<Vec<_>>();
+    if compose_profile_enabled() {
+        for (component_index, relation) in composed_table.state_relations.iter().enumerate() {
+            let empty = relation.iter().filter(|targets| targets.is_empty()).count();
+            let singleton = relation.iter().filter(|targets| targets.len() == 1).count();
+            let multi = relation.len().saturating_sub(empty + singleton);
+            let mut affine_delta = None::<i64>;
+            let mut affine_singletons = 0usize;
+            let mut non_affine_singletons = 0usize;
+            for (local, targets) in relation.iter().enumerate() {
+                if let [target] = targets.as_slice() {
+                    let delta = *target as i64 - local as i64;
+                    match affine_delta {
+                        None => {
+                            affine_delta = Some(delta);
+                            affine_singletons += 1;
+                        }
+                        Some(expected) if expected == delta => affine_singletons += 1,
+                        Some(_) => non_affine_singletons += 1,
+                    }
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][constraint_state_relation_shape] component={} local_states={} empty={} singleton={} multi={} affine_delta={:?} affine_singletons={} non_affine_singletons={} total_targets={}",
+                component_index,
+                relation.len(),
+                empty,
+                singleton,
+                multi,
+                affine_delta,
+                affine_singletons,
+                non_affine_singletons,
+                relation.iter().map(Vec::len).sum::<usize>(),
+            );
+        }
+    }
     let parser_default_domains = build_parser_default_domain_plan(
         &parser_components,
         composed_table.table.num_states,
@@ -11730,6 +11765,34 @@ pub(crate) fn compose_constraints_owned_parent(
             composed_table: Some(&composed_table.table),
         })
         .collect::<Vec<_>>();
+    if compose_profile_enabled() {
+        for (component_index, relation) in composed_table.state_relations.iter().enumerate() {
+            let empty = relation.iter().filter(|targets| targets.is_empty()).count();
+            let singleton = relation.iter().filter(|targets| targets.len() == 1).count();
+            let multi = relation.len().saturating_sub(empty + singleton);
+            let mut deltas = BTreeMap::<i64, usize>::new();
+            for (local, targets) in relation.iter().enumerate() {
+                if let [target] = targets.as_slice() {
+                    *deltas.entry(*target as i64 - local as i64).or_default() += 1;
+                }
+            }
+            let dominant = deltas
+                .iter()
+                .max_by_key(|(_, count)| **count)
+                .map(|(delta, count)| (*delta, *count));
+            eprintln!(
+                "[glrmask/profile][constraint_state_relation_shape] component={} local_states={} empty={} singleton={} multi={} dominant_affine={:?} distinct_deltas={} total_targets={}",
+                component_index,
+                relation.len(),
+                empty,
+                singleton,
+                multi,
+                dominant,
+                deltas.len(),
+                relation.iter().map(Vec::len).sum::<usize>(),
+            );
+        }
+    }
     let parser_default_domains = build_parser_default_domain_plan(
         &parser_components,
         composed_table.table.num_states,
