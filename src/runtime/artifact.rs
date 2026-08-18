@@ -213,6 +213,160 @@ impl BackedInternalTokenBufMasks {
         }
     }
 }
+
+/// Contiguous dense-mask matrix used by the word-group prefix cache. The old
+/// `Vec<Box<[u32]>>` representation allocated one heap object per row; this
+/// keeps the same row-slice API while requiring one aligned allocation.
+const DENSE_BUF_MASK_ROWS_FLAT_MIN_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum DenseBufMaskRowsStorage {
+    Rows(Vec<Box<[u32]>>),
+    Flat(Box<[u32]>),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DenseBufMaskRows {
+    storage: DenseBufMaskRowsStorage,
+    rows: usize,
+    row_len: usize,
+}
+
+impl Default for DenseBufMaskRows {
+    fn default() -> Self {
+        Self {
+            storage: DenseBufMaskRowsStorage::Rows(Vec::new()),
+            rows: 0,
+            row_len: 0,
+        }
+    }
+}
+
+impl DenseBufMaskRows {
+    #[inline]
+    pub(crate) fn prefer_flat(rows: usize, row_len: usize) -> bool {
+        rows.checked_mul(row_len)
+            .and_then(|values| values.checked_mul(std::mem::size_of::<u32>()))
+            .is_some_and(|bytes| bytes >= DENSE_BUF_MASK_ROWS_FLAT_MIN_BYTES)
+    }
+
+    pub(crate) fn from_flat(
+        flat: Box<[u32]>,
+        rows: usize,
+        row_len: usize,
+    ) -> Result<Self, String> {
+        let expected = rows
+            .checked_mul(row_len)
+            .ok_or_else(|| "dense mask row dimensions overflow".to_owned())?;
+        if flat.len() != expected {
+            return Err("dense mask flat length does not match row dimensions".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Flat(flat),
+            rows,
+            row_len,
+        })
+    }
+
+    pub(crate) fn from_rows(rows: Vec<Box<[u32]>>) -> Result<Self, String> {
+        let row_count = rows.len();
+        let row_len = rows.first().map_or(0, |row| row.len());
+        if rows.iter().any(|row| row.len() != row_len) {
+            return Err("dense mask rows have inconsistent lengths".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Rows(rows),
+            rows: row_count,
+            row_len,
+        })
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    #[inline]
+    pub(crate) fn row_len(&self) -> usize {
+        self.row_len
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, row: usize) -> Option<&[u32]> {
+        if row >= self.rows {
+            return None;
+        }
+        match &self.storage {
+            DenseBufMaskRowsStorage::Rows(rows) => rows.get(row).map(Box::as_ref),
+            DenseBufMaskRowsStorage::Flat(flat) => {
+                let start = row * self.row_len;
+                flat.get(start..start + self.row_len)
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn last(&self) -> Option<&[u32]> {
+        self.rows.checked_sub(1).and_then(|row| self.get(row))
+    }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> DenseBufMaskRowsIter<'_> {
+        DenseBufMaskRowsIter {
+            rows: self,
+            next: 0,
+        }
+    }
+}
+
+impl std::ops::Index<usize> for DenseBufMaskRows {
+    type Output = [u32];
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("dense mask row index out of bounds")
+    }
+}
+
+pub(crate) struct DenseBufMaskRowsIter<'a> {
+    rows: &'a DenseBufMaskRows,
+    next: usize,
+}
+
+impl<'a> Iterator for DenseBufMaskRowsIter<'a> {
+    type Item = &'a [u32];
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.get(self.next)?;
+        self.next += 1;
+        Some(row)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.rows.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for DenseBufMaskRowsIter<'_> {}
+
+impl<'a> IntoIterator for &'a DenseBufMaskRows {
+    type Item = &'a [u32];
+    type IntoIter = DenseBufMaskRowsIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
@@ -3395,7 +3549,7 @@ pub struct Constraint {
     /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
     /// internal-word run `[start, end)`.
     #[serde(skip)]
-    pub(crate) word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
     /// Prefix sums of `word_group_sparse_masks[i].len()`.
     #[serde(skip)]
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,

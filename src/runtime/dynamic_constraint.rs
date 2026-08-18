@@ -424,7 +424,7 @@ impl DynamicConstraint {
             mega_word_group_buf_masks: Vec::new(),
             giga_word_group_buf_masks: Vec::new(),
             word_group_sparse_masks: Vec::new(),
-            word_group_prefix_buf_masks: Vec::new(),
+            word_group_prefix_buf_masks: Default::default(),
             word_group_sparse_prefix_entries: Vec::new(),
             quad_group_sparse_masks: Vec::new(),
             quad_group_dense_masks: Vec::new(),

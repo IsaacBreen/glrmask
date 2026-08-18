@@ -22,7 +22,7 @@ use super::artifact::{
     empty_dense_words, DenseAcceptanceRows, DirectRegularDynamicFrontierCacheEntry,
     DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
     DirectRegularParserStateAcceptance, DirectRegularWideFrontierAcceptance,
-    DenseWeightBufMaskCache,
+    DenseBufMaskRows, DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
     DynamicSelfLoopProjection,
@@ -421,7 +421,7 @@ pub(crate) struct TokenMaskCachePrebuild {
     mega_word_group_buf_masks: Vec<Box<[u32]>>,
     giga_word_group_buf_masks: Vec<Box<[u32]>>,
     word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    word_group_prefix_buf_masks: DenseBufMaskRows,
     word_group_sparse_prefix_entries: Vec<usize>,
     quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
     quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
@@ -537,16 +537,31 @@ impl TokenMaskCachePrebuild {
             build_blocks(8).0
         };
 
-        let mut word_group_prefix_buf_masks =
-            Vec::with_capacity(word_group_sparse_masks.len() + 1);
+        let prefix_rows = word_group_sparse_masks.len() + 1;
         let mut prefix_dense = vec![0u32; mask_words];
-        word_group_prefix_buf_masks.push(prefix_dense.clone().into_boxed_slice());
-        for group in &word_group_sparse_masks {
-            for &(word_idx, mask) in group {
-                prefix_dense[word_idx as usize] |= mask;
+        let word_group_prefix_buf_masks = if DenseBufMaskRows::prefer_flat(prefix_rows, mask_words) {
+            let mut flat = Vec::with_capacity(prefix_rows.saturating_mul(mask_words));
+            flat.extend_from_slice(&prefix_dense);
+            for group in &word_group_sparse_masks {
+                for &(word_idx, mask) in group {
+                    prefix_dense[word_idx as usize] |= mask;
+                }
+                flat.extend_from_slice(&prefix_dense);
             }
-            word_group_prefix_buf_masks.push(prefix_dense.clone().into_boxed_slice());
-        }
+            DenseBufMaskRows::from_flat(flat.into_boxed_slice(), prefix_rows, mask_words)
+                .expect("word-group prefix dimensions should match construction")
+        } else {
+            let mut rows = Vec::with_capacity(prefix_rows);
+            rows.push(prefix_dense.clone().into_boxed_slice());
+            for group in &word_group_sparse_masks {
+                for &(word_idx, mask) in group {
+                    prefix_dense[word_idx as usize] |= mask;
+                }
+                rows.push(prefix_dense.clone().into_boxed_slice());
+            }
+            DenseBufMaskRows::from_rows(rows)
+                .expect("word-group prefix rows should have uniform dimensions")
+        };
         let mut word_group_sparse_prefix_entries =
             Vec::with_capacity(word_group_sparse_masks.len() + 1);
         let mut prefix_entries = 0usize;
@@ -2771,7 +2786,7 @@ impl Constraint {
         ) = block_masks;
         self.word_group_sparse_masks = word_group_sparse_masks;
         self.word_group_prefix_buf_masks = if skip_load_dense_group_caches {
-            Vec::new()
+            DenseBufMaskRows::default()
         } else {
             self.compute_word_group_prefix_buf_masks()
         };
@@ -3921,18 +3936,33 @@ impl Constraint {
         combined.into_boxed_slice()
     }
 
-    fn compute_word_group_prefix_buf_masks(&self) -> Vec<Box<[u32]>> {
+    fn compute_word_group_prefix_buf_masks(&self) -> DenseBufMaskRows {
         let buf_words = self.mask_len();
-        let mut prefixes = Vec::with_capacity(self.word_group_sparse_masks.len() + 1);
+        let rows = self.word_group_sparse_masks.len() + 1;
         let mut current = vec![0u32; buf_words];
-        prefixes.push(current.clone().into_boxed_slice());
-        for group in &self.word_group_sparse_masks {
-            for &(word_idx, mask) in group {
-                current[word_idx as usize] |= mask;
+        if DenseBufMaskRows::prefer_flat(rows, buf_words) {
+            let mut flat = Vec::with_capacity(rows.saturating_mul(buf_words));
+            flat.extend_from_slice(&current);
+            for group in &self.word_group_sparse_masks {
+                for &(word_idx, mask) in group {
+                    current[word_idx as usize] |= mask;
+                }
+                flat.extend_from_slice(&current);
             }
-            prefixes.push(current.clone().into_boxed_slice());
+            DenseBufMaskRows::from_flat(flat.into_boxed_slice(), rows, buf_words)
+                .expect("word-group prefix dimensions should match construction")
+        } else {
+            let mut dense_rows = Vec::with_capacity(rows);
+            dense_rows.push(current.clone().into_boxed_slice());
+            for group in &self.word_group_sparse_masks {
+                for &(word_idx, mask) in group {
+                    current[word_idx as usize] |= mask;
+                }
+                dense_rows.push(current.clone().into_boxed_slice());
+            }
+            DenseBufMaskRows::from_rows(dense_rows)
+                .expect("word-group prefix rows should have uniform dimensions")
         }
-        prefixes
     }
 
     fn compute_sparse_entry_prefix(groups: &[InternalTokenBufMasks]) -> Vec<usize> {
@@ -4731,7 +4761,7 @@ impl Constraint {
         self.all_tokens_buf_mask = self
             .word_group_prefix_buf_masks
             .last()
-            .cloned()
+            .map(Box::<[u32]>::from)
             .unwrap_or_default();
 
         let buf_len = self.mask_len();

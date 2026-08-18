@@ -1,6 +1,7 @@
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
-    BackedInternalTokenBufMasks, InternalTokenBufMasks, PackedInternalTokenBufMask,
+    BackedInternalTokenBufMasks, DenseBufMaskRows, InternalTokenBufMasks,
+    PackedInternalTokenBufMask,
 };
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
@@ -237,12 +238,12 @@ struct TokenMaskCacheIrregular {
 enum TokenMaskCacheArtifact {
     Full {
         tail: TokenMaskCacheTail,
-        word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+        word_group_prefix_buf_masks: DenseBufMaskRows,
     },
     Fast {
         irregular: TokenMaskCacheIrregular,
         word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-        word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+        word_group_prefix_buf_masks: DenseBufMaskRows,
     },
     WordSparse(Vec<InternalTokenBufMasks>),
 }
@@ -348,31 +349,73 @@ fn append_cache_u32s(out: &mut Vec<u8>, values: &[u32]) {
     }
 }
 
-fn decode_cache_u32_row(input: &[u8], pos: &mut usize, len: usize) -> Result<Box<[u32]>, String> {
-    let byte_len = len
+fn decode_cache_u32_rows(
+    input: &[u8],
+    pos: &mut usize,
+    rows: usize,
+    row_len: usize,
+) -> Result<DenseBufMaskRows, String> {
+    if !DenseBufMaskRows::prefer_flat(rows, row_len) {
+        let row_bytes = row_len
+            .checked_mul(4)
+            .ok_or_else(|| "token-mask prefix row byte length overflow".to_owned())?;
+        let mut decoded_rows = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            let end = pos
+                .checked_add(row_bytes)
+                .ok_or_else(|| "token-mask prefix row offset overflow".to_owned())?;
+            let bytes = input
+                .get(*pos..end)
+                .ok_or_else(|| "truncated token-mask prefix row".to_owned())?;
+            let mut row = Vec::<u32>::with_capacity(row_len);
+            if cfg!(target_endian = "little") {
+                unsafe {
+                    row.set_len(row_len);
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        row.as_mut_ptr().cast::<u8>(),
+                        row_bytes,
+                    );
+                }
+            } else {
+                row.extend(
+                    bytes
+                        .chunks_exact(4)
+                        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())),
+                );
+            }
+            *pos = end;
+            decoded_rows.push(row.into_boxed_slice());
+        }
+        return DenseBufMaskRows::from_rows(decoded_rows);
+    }
+    let values = rows
+        .checked_mul(row_len)
+        .ok_or_else(|| "token-mask prefix dimensions overflow".to_owned())?;
+    let byte_len = values
         .checked_mul(4)
-        .ok_or_else(|| "token-mask prefix row length overflow".to_owned())?;
+        .ok_or_else(|| "token-mask prefix byte length overflow".to_owned())?;
     let end = pos
         .checked_add(byte_len)
-        .ok_or_else(|| "token-mask prefix row offset overflow".to_owned())?;
+        .ok_or_else(|| "token-mask prefix offset overflow".to_owned())?;
     let bytes = input
         .get(*pos..end)
-        .ok_or_else(|| "truncated token-mask prefix row".to_owned())?;
-    let mut row = Vec::<u32>::with_capacity(len);
+        .ok_or_else(|| "truncated token-mask prefix".to_owned())?;
+    let mut flat = Vec::<u32>::with_capacity(values);
     if cfg!(target_endian = "little") {
         unsafe {
-            row.set_len(len);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), row.as_mut_ptr().cast::<u8>(), byte_len);
+            flat.set_len(values);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), flat.as_mut_ptr().cast::<u8>(), byte_len);
         }
     } else {
-        row.extend(
+        flat.extend(
             bytes
                 .chunks_exact(4)
                 .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap())),
         );
     }
     *pos = end;
-    Ok(row.into_boxed_slice())
+    DenseBufMaskRows::from_flat(flat.into_boxed_slice(), rows, row_len)
 }
 
 fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
@@ -560,10 +603,8 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
             word_group_sparse_masks.push(decoded);
         }
         let mut pos = prefix_start;
-        let mut word_group_prefix_buf_masks = Vec::with_capacity(prefix_rows);
-        for _ in 0..prefix_rows {
-            word_group_prefix_buf_masks.push(decode_cache_u32_row(input, &mut pos, mask_words)?);
-        }
+        let word_group_prefix_buf_masks =
+            decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?;
         debug_assert_eq!(pos, input.len());
         if let Some(started) = body_started {
             eprintln!(
@@ -604,10 +645,8 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let prefix_started = profile.then(std::time::Instant::now);
     let mut pos = tail_end;
-    let mut word_group_prefix_buf_masks = Vec::with_capacity(prefix_rows);
-    for _ in 0..prefix_rows {
-        word_group_prefix_buf_masks.push(decode_cache_u32_row(input, &mut pos, mask_words)?);
-    }
+    let word_group_prefix_buf_masks =
+        decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?;
     if pos != input.len() {
         return Err("trailing bytes in token-mask cache".to_owned());
     }
