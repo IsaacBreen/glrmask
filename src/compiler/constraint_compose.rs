@@ -673,7 +673,7 @@ fn build_direct_component_token_coordinates(
     let mut local_to_global_tokens = components
         .iter()
         .map(|component| {
-            vec![Vec::<u32>::new(); component.constraint.internal_token_to_tokens.len()]
+            vec![Vec::<u32>::new(); component.constraint.internal_token_count()]
         })
         .collect::<Vec<_>>();
 
@@ -795,7 +795,10 @@ fn build_direct_component_token_coordinates(
     };
 
     let parent = components[0].constraint;
-    for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+    let parent_token_groups = parent
+        .internal_token_groups()
+        .ok_or_else(|| "composed parent has no explicit internal-token partition".to_owned())?;
+    for (parent_local, originals) in parent_token_groups.iter().enumerate() {
         let mut groups = BTreeMap::<Vec<u32>, Vec<u32>>::new();
         for &original in originals {
             if !selected_original
@@ -810,9 +813,7 @@ fn build_direct_component_token_coordinates(
                 .map(|component| {
                     component
                         .constraint
-                        .original_token_to_internal
-                        .get(original as usize)
-                        .copied()
+                        .original_token_internal_at(original)
                         .unwrap_or(u32::MAX)
                 })
                 .collect::<Vec<_>>();
@@ -828,11 +829,7 @@ fn build_direct_component_token_coordinates(
 
     let mut parent_unmapped = BTreeMap::<Vec<u32>, Vec<u32>>::new();
     for &original in original_token_ids {
-        let parent_local = parent
-            .original_token_to_internal
-            .get(original as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
+        let parent_local = parent.original_token_internal_at(original).unwrap_or(u32::MAX);
         if parent_local != u32::MAX {
             continue;
         }
@@ -841,9 +838,7 @@ fn build_direct_component_token_coordinates(
             .map(|component| {
                 component
                     .constraint
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX)
             })
             .collect::<Vec<_>>();
@@ -2634,14 +2629,12 @@ fn boundary_candidate_state_ranges_by_token(
             {
                 continue;
             }
-            let internal = if constraint.internal_token_to_tokens.is_empty() {
-                original
-            } else {
+            let internal = if constraint.has_original_token_map() {
                 constraint
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX)
+            } else {
+                original
             };
             if internal == u32::MAX {
                 continue;
@@ -2713,10 +2706,11 @@ fn boundary_candidate_state_ranges_by_token_reference(
         } else {
             Box::new(constraint.possible_matches.values())
         };
+        let token_groups = constraint.internal_token_groups();
         for weight in weights {
             for (start_tsid, end_tsid, internal_tokens) in weight.range_entries() {
                 for internal_token in internal_tokens.iter() {
-                    if constraint.internal_token_to_tokens.is_empty() {
+                    let Some(token_groups) = token_groups else {
                         if candidate_tokens.contains(&internal_token)
                             && vocab
                                 .entries_map()
@@ -2730,10 +2724,8 @@ fn boundary_candidate_state_ranges_by_token_reference(
                             ));
                         }
                         continue;
-                    }
-                    let Some(originals) = constraint
-                        .internal_token_to_tokens
-                        .get(internal_token as usize)
+                    };
+                    let Some(originals) = token_groups.get(internal_token as usize)
                     else {
                         continue;
                     };
@@ -2942,6 +2934,7 @@ fn boundary_token_prefilter(
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             summaries[terminal_offset + local_terminal] = Some(
                 component
@@ -2970,6 +2963,7 @@ fn boundary_token_prefilter(
     let mut conservative_first = U8Set::empty();
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             let global_terminal = terminal_offset + local_terminal;
             if !seed_terminals
@@ -3040,6 +3034,7 @@ fn boundary_token_prefilter(
     if allow_suffix_seed {
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             if !seed_terminals
                 .get(terminal_offset + local_terminal)
@@ -3053,7 +3048,16 @@ fn boundary_token_prefilter(
             };
             for (_, _, internal_tokens) in weight.range_entries() {
                 for internal_token in internal_tokens.iter() {
-                    if component.internal_token_to_tokens.is_empty() {
+                    if let Some(token_groups) = token_groups {
+                        if let Some(originals) = token_groups.get(internal_token as usize) {
+                            candidates.extend(originals.iter().copied().filter(|token| {
+                                vocab
+                                    .entries_map()
+                                    .get(token)
+                                    .is_some_and(|bytes| bytes.len() >= 2)
+                            }));
+                        }
+                    } else {
                         if vocab
                             .entries_map()
                             .get(&internal_token)
@@ -3061,15 +3065,6 @@ fn boundary_token_prefilter(
                         {
                             candidates.insert(internal_token);
                         }
-                    } else if let Some(originals) =
-                        component.internal_token_to_tokens.get(internal_token as usize)
-                    {
-                        candidates.extend(originals.iter().copied().filter(|token| {
-                            vocab
-                                .entries_map()
-                                .get(token)
-                                .is_some_and(|bytes| bytes.len() >= 2)
-                        }));
                     }
                 }
             }
@@ -13002,7 +12997,10 @@ fn build_composed_constraint_unfinalized(
         template_dfas_by_terminal,
         fast_template_dfas_by_terminal: Vec::new(),
         original_token_to_internal,
+        packed_original_token_to_internal: None,
+        deferred_original_token_to_internal: OnceLock::new(),
         internal_token_to_tokens,
+        deferred_internal_token_to_tokens: OnceLock::new(),
         token_bytes: vocab.entries_arc(),
         packed_token_bytes: None,
         internal_token_bytes,
@@ -13144,14 +13142,11 @@ pub(crate) fn compose_constraints(
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
-    let vocab_entries = vocab.entries_arc();
     for (component_index, constraint) in std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if !Arc::ptr_eq(&constraint.token_bytes, &vocab_entries)
-            && constraint.token_bytes.as_ref() != vocab.entries_map()
-        {
+        if !constraint.token_bytes_match_vocab(vocab) {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));
@@ -13924,14 +13919,11 @@ pub(crate) fn compose_constraints_owned_parent(
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
-    let vocab_entries = vocab.entries_arc();
     for (component_index, constraint) in std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if !Arc::ptr_eq(&constraint.token_bytes, &vocab_entries)
-            && constraint.token_bytes.as_ref() != vocab.entries_map()
-        {
+        if !constraint.token_bytes_match_vocab(vocab) {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));

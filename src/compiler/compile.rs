@@ -8,7 +8,27 @@ pub(crate) use super::pipeline::{
 };
 
 pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
-    super::stages::id_map_and_terminal_dwa::prepare_vocab_for_terminal_dwa(vocab);
-    super::constraint_possible_matches::prepare_vocab_for_possible_matches(vocab);
-    super::constraint_possible_matches::prepare_vocab_for_dynamic_mask(vocab);
+    let profile = std::env::var_os("GLRMASK_PROFILE_VOCAB_PREPARE").is_some();
+    let run = |name: &str, f: &mut dyn FnMut()| {
+        let started = std::time::Instant::now();
+        f();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][vocab_prepare] name={name} ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    };
+    run("packed_token_bytes", &mut || {
+        crate::runtime::prepare_shared_packed_token_bytes(vocab)
+    });
+    run("terminal_dwa", &mut || {
+        super::stages::id_map_and_terminal_dwa::prepare_vocab_for_terminal_dwa(vocab)
+    });
+    run("possible_matches", &mut || {
+        super::constraint_possible_matches::prepare_vocab_for_possible_matches(vocab)
+    });
+    run("dynamic_mask", &mut || {
+        super::constraint_possible_matches::prepare_vocab_for_dynamic_mask(vocab)
+    });
 }

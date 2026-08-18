@@ -1,4 +1,4 @@
-pub(crate) mod profile;
+﻿pub(crate) mod profile;
 pub(crate) mod queue;
 
 use crate::automata::lexer::Lexer;
@@ -18,7 +18,7 @@ use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
 };
 use crate::ds::weight::Weight;
-use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
+use crate::runtime::artifact::IndexedDagDenseMask;
 use crate::runtime::constraint::{
     Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
 };
@@ -2001,7 +2001,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     /// independently of the current seed accumulator.
     ///
     /// The denotation evaluated below uses only union and intersection with
-    /// parser-DWA weights. Therefore `E(q, G, a) = a ∩ E(q, G, U)` for every
+    /// parser-DWA weights. Therefore `E(q, G, a) = a âˆ© E(q, G, U)` for every
     /// seed accumulator `a` and seed universe `U`. Caching `E(q, G, U)` by
     /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
     /// produce a different `a` at the next model token.
@@ -4662,7 +4662,7 @@ impl<'a> ConstraintState<'a> {
                     let mut added_cost = 0u64;
                     let mut removed_cost = 0u64;
                     let capture_delta_summary = delta_profile_enabled;
-                    let n_internal = self.constraint.internal_token_to_tokens.len();
+                    let n_internal = self.constraint.internal_token_count();
                     let word_len = merged.len().max(cache_data.merged_dense.len());
                     for wi in 0..word_len {
                         if wi * 64 >= n_internal {
@@ -5342,3 +5342,4 @@ impl<'a> ConstraintState<'a> {
     }
 
 }
+

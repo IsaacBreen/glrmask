@@ -1,4 +1,4 @@
-mod artifact;
+﻿mod artifact;
 mod commit;
 mod constraint;
 mod dynamic_mask;
@@ -13,6 +13,7 @@ pub(crate) use artifact::{
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
     FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
+    prepare_shared_packed_token_bytes,
 };
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};

@@ -388,7 +388,8 @@ pub(super) fn composition_terminal_classes(
             .iter()
             .map(|component| {
                 component
-                    .internal_token_to_tokens
+                    .internal_token_groups()
+                    .unwrap_or(&[])
                     .iter()
                     .map(|originals| OriginalTokenSetFingerprint::from_originals(originals))
                     .collect::<Vec<_>>()

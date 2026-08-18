@@ -373,38 +373,46 @@ pub mod artifact_serde {
     }
 
     pub fn to_compact_bytes(table: &GLRTable) -> Vec<u8> {
-        let ((action, goto), (advance, meta)) = rayon::join(
-            || {
-                rayon::join(
-                    || bincode::serialize(&table.action).expect("GLR action serialization should succeed"),
-                    || bincode::serialize(&table.goto).expect("GLR goto serialization should succeed"),
-                )
-            },
-            || {
-                rayon::join(
-                    || {
-                        let compact = CompactAdvance::from_rows(&table.advance);
-                        bincode::serialize(&compact).expect("GLR advance serialization should succeed")
-                    },
-                    || {
-                        bincode::serialize(&CompactTableMetaRef {
-                            num_states: table.num_states,
-                            num_terminals: table.num_terminals,
-                            num_rules: table.num_rules,
-                            rules: &table.rules,
-                            nonterminal_display_names: &table.nonterminal_display_names,
-                            construction: table.construction,
-                            admission_policy: table.admission_policy,
-                            forwarded_shifts: &table.forwarded_shifts,
-                            control_terminals: &table.control_terminals,
-                            skip_terminals: &table.skip_terminals,
-                            direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
-                        })
-                        .expect("GLR metadata serialization should succeed")
-                    },
-                )
-            },
-        );
+        let encode_action = || {
+            bincode::serialize(&table.action).expect("GLR action serialization should succeed")
+        };
+        let encode_goto = || {
+            bincode::serialize(&table.goto).expect("GLR goto serialization should succeed")
+        };
+        let encode_advance = || {
+            let compact = CompactAdvance::from_rows(&table.advance);
+            bincode::serialize(&compact).expect("GLR advance serialization should succeed")
+        };
+        let encode_meta = || {
+            bincode::serialize(&CompactTableMetaRef {
+                num_states: table.num_states,
+                num_terminals: table.num_terminals,
+                num_rules: table.num_rules,
+                rules: &table.rules,
+                nonterminal_display_names: &table.nonterminal_display_names,
+                construction: table.construction,
+                admission_policy: table.admission_policy,
+                forwarded_shifts: &table.forwarded_shifts,
+                control_terminals: &table.control_terminals,
+                skip_terminals: &table.skip_terminals,
+                direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+            })
+            .expect("GLR metadata serialization should succeed")
+        };
+        // Scheduling four tiny bincode jobs costs more than the work for the
+        // ordinary schema tables. Keep large tables parallel, but let compact
+        // tables stay on one worker and in cache.
+        let (action, goto, advance, meta) = if table.num_states < 1_024
+            || rayon::current_num_threads() == 1
+        {
+            (encode_action(), encode_goto(), encode_advance(), encode_meta())
+        } else {
+            let ((action, goto), (advance, meta)) = rayon::join(
+                || rayon::join(encode_action, encode_goto),
+                || rayon::join(encode_advance, encode_meta),
+            );
+            (action, goto, advance, meta)
+        };
         let mut out = Vec::with_capacity(
             PARALLEL_TABLE_HEADER_LEN + action.len() + goto.len() + advance.len() + meta.len(),
         );
@@ -421,6 +429,7 @@ pub mod artifact_serde {
 
     pub fn from_compact_bytes(input: &[u8]) -> Result<GLRTable, String> {
         if input.starts_with(PARALLEL_TABLE_MAGIC) {
+            let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
             if input.len() < PARALLEL_TABLE_HEADER_LEN {
                 return Err("truncated parallel GLR table header".to_owned());
             }
@@ -451,20 +460,86 @@ pub mod artifact_serde {
             pos += lengths[2];
             let meta = &input[pos..pos + lengths[3]];
 
-            let ((action, goto), (advance, meta)) = rayon::join(
-                || {
-                    rayon::join(
-                        || bincode::deserialize::<Vec<ActionRow>>(action).map_err(|err| err.to_string()),
-                        || bincode::deserialize::<Vec<GotoRow>>(goto).map_err(|err| err.to_string()),
-                    )
-                },
-                || {
-                    rayon::join(
-                        || bincode::deserialize::<CompactAdvance>(advance).map_err(|err| err.to_string()),
-                        || bincode::deserialize::<CompactTableMeta>(meta).map_err(|err| err.to_string()),
-                    )
-                },
-            );
+            let decode_action = || {
+                let started = profile.then(std::time::Instant::now);
+                let result = bincode::deserialize::<Vec<ActionRow>>(action)
+                    .map_err(|err| err.to_string());
+                if let Some(started) = started {
+                    eprintln!(
+                        "[glrmask/profile][table_decode] name=action ms={:.3} bytes={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        action.len(),
+                    );
+                }
+                result
+            };
+            let decode_goto = || {
+                let started = profile.then(std::time::Instant::now);
+                let result = bincode::deserialize::<Vec<GotoRow>>(goto)
+                    .map_err(|err| err.to_string());
+                if let Some(started) = started {
+                    eprintln!(
+                        "[glrmask/profile][table_decode] name=goto ms={:.3} bytes={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        goto.len(),
+                    );
+                }
+                result
+            };
+            let decode_advance = || {
+                let started = profile.then(std::time::Instant::now);
+                let result = bincode::deserialize::<CompactAdvance>(advance)
+                    .map_err(|err| err.to_string());
+                if let Some(started) = started {
+                    eprintln!(
+                        "[glrmask/profile][table_decode] name=advance ms={:.3} bytes={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        advance.len(),
+                    );
+                }
+                result
+            };
+            let decode_meta = || {
+                let started = profile.then(std::time::Instant::now);
+                let result = bincode::deserialize::<CompactTableMeta>(meta)
+                    .map_err(|err| err.to_string());
+                if profile && let Ok(decoded) = &result {
+                    eprintln!(
+                        "[glrmask/profile][table_meta_shape] rules={} names={} forwarded={} controls={} skips={} wide={} rule_bytes={} name_bytes={} forwarded_bytes={} control_bytes={} skip_bytes={} wide_bytes={}",
+                        decoded.rules.len(),
+                        decoded.nonterminal_display_names.len(),
+                        decoded.forwarded_shifts.len(),
+                        decoded.control_terminals.len(),
+                        decoded.skip_terminals.len(),
+                        decoded.direct_regular_wide_frontiers.len(),
+                        bincode::serialized_size(&decoded.rules).unwrap_or(0),
+                        bincode::serialized_size(&decoded.nonterminal_display_names).unwrap_or(0),
+                        bincode::serialized_size(&decoded.forwarded_shifts).unwrap_or(0),
+                        bincode::serialized_size(&decoded.control_terminals).unwrap_or(0),
+                        bincode::serialized_size(&decoded.skip_terminals).unwrap_or(0),
+                        bincode::serialized_size(&decoded.direct_regular_wide_frontiers).unwrap_or(0),
+                    );
+                }
+                if let Some(started) = started {
+                    eprintln!(
+                        "[glrmask/profile][table_decode] name=meta ms={:.3} bytes={}",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        meta.len(),
+                    );
+                }
+                result
+            };
+            let (action, goto, advance, meta) = if input.len() < 128 * 1024
+                || rayon::current_num_threads() == 1
+            {
+                (decode_action(), decode_goto(), decode_advance(), decode_meta())
+            } else {
+                let ((action, goto), (advance, meta)) = rayon::join(
+                    || rayon::join(decode_action, decode_goto),
+                    || rayon::join(decode_advance, decode_meta),
+                );
+                (action, goto, advance, meta)
+            };
             return assemble_table(action?, goto?, advance?, meta?);
         }
 
