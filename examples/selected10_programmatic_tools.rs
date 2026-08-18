@@ -126,6 +126,24 @@ fn dispatcher_parent_source() -> String {
     source
 }
 
+
+fn dispatcher_literal_names_parent_source() -> String {
+    let mut source = String::from("start suffix;\n");
+    for index in 0..SELECTED10.len() {
+        source.push_str(&format!(
+            "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
+            DISPATCH_PLACEHOLDER_BASE + SELECTED10.len() as u32 + index as u32
+        ));
+    }
+    source.push_str("nt suffix ::=\n    ");
+    for index in 0..SELECTED10.len() {
+        if index != 0 { source.push_str("\n  | "); }
+        source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
+    }
+    source.push_str(";\n");
+    source
+}
+
 fn js_core_source(cfa_root: &Path) -> String {
     let path = cfa_root.join("data/sources/grammars/js.glrm");
     let mut source = fs::read_to_string(&path)
@@ -161,10 +179,12 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         }
     }
 
-    let dispatch_path = cache_dir.join("dispatch.bin");
+    let literal_names = std::env::var_os("SELECTED10_LITERAL_NAMES").is_some();
+    let dispatch_path = cache_dir.join(if literal_names { "dispatch-literal.bin" } else { "dispatch.bin" });
     if rebuild || !dispatch_path.exists() {
         let parent_started = Instant::now();
-        let parent = Constraint::from_glrm_grammar(&dispatcher_parent_source(), vocab).unwrap();
+        let parent_source = if literal_names { dispatcher_literal_names_parent_source() } else { dispatcher_parent_source() };
+        let parent = Constraint::from_glrm_grammar(&parent_source, vocab).unwrap();
         eprintln!("[selected10] dispatcher parent compile: {:.3} ms", parent_started.elapsed().as_secs_f64() * 1000.0);
 
         let schemas = SELECTED10
@@ -172,12 +192,16 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
             .enumerate()
             .map(|(index, (short_name, _))| load_constraint(&schema_cache_path(cache_dir, index, short_name)))
             .collect::<Vec<_>>();
-        let names = (0..SELECTED10.len())
-            .map(|index| load_constraint(&name_cache_path(cache_dir, index)))
-            .collect::<Vec<_>>();
-        let mut bindings = Vec::<(String, &Constraint)>::with_capacity(SELECTED10.len() * 2);
+        let names = (!literal_names).then(|| {
+            (0..SELECTED10.len())
+                .map(|index| load_constraint(&name_cache_path(cache_dir, index)))
+                .collect::<Vec<_>>()
+        });
+        let mut bindings = Vec::<(String, &Constraint)>::with_capacity(if literal_names { SELECTED10.len() } else { SELECTED10.len() * 2 });
         for index in 0..SELECTED10.len() {
-            bindings.push((format!("TOOL_NAME_SLOT_{index}"), &names[index]));
+            if let Some(names) = names.as_ref() {
+                bindings.push((format!("TOOL_NAME_SLOT_{index}"), &names[index]));
+            }
             bindings.push((format!("TOOL_ARGS_SLOT_{index}"), &schemas[index]));
         }
         let refs = bindings.iter().map(|(name, child)| (name.as_str(), *child)).collect::<Vec<_>>();
@@ -213,16 +237,21 @@ fn percentile_ms(samples: &[Duration], q: f64) -> f64 {
 
 fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
     let core_bytes = fs::read(cache_dir.join("core.bin")).expect("core.bin missing; run --prepare");
-    let dispatch_bytes = fs::read(cache_dir.join("dispatch.bin")).expect("dispatch.bin missing; run --prepare");
+    let literal_names = std::env::var_os("SELECTED10_LITERAL_NAMES").is_some();
+    let dispatch_name = if literal_names { "dispatch-literal.bin" } else { "dispatch.bin" };
+    let dispatch_bytes = fs::read(cache_dir.join(dispatch_name)).expect("dispatch cache missing; run --prepare");
     let mut samples = Vec::with_capacity(runs);
     let mut output = None;
 
     for run in 0..runs {
+        eprintln!("[selected10/debug] run={} before_load dispatch={dispatch_name}", run + 1);
         let load_started = Instant::now();
         let core = Constraint::load(&core_bytes).unwrap();
         let dispatch = Constraint::load(&dispatch_bytes).unwrap();
         let load = load_started.elapsed();
+        eprintln!("[selected10/debug] run={} after_load ms={:.3}", run + 1, load.as_secs_f64() * 1000.0);
 
+        eprintln!("[selected10/debug] run={} before_compose", run + 1);
         let compose_started = Instant::now();
         let composed = core
             .compose_subgrammars_owned(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], vocab)

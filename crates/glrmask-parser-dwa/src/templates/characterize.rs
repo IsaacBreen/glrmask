@@ -1006,19 +1006,39 @@ pub fn characterize_selected_terminals(
         "selected template mask must cover the merged terminal domain",
     );
     let index = build_characterization_index(table, grammar);
-    selected
-        .iter()
-        .enumerate()
-        .filter_map(|(terminal, &is_selected)| {
-            is_selected.then(|| {
-                let terminal = terminal as TerminalID;
-                (
-                    terminal,
-                    characterize_terminal(table, &index, terminal),
-                )
-            })
+
+    // The full-grammar path already quotients equal sparse LR action signatures
+    // and characterizes representatives in parallel.  Selected composition
+    // templates need the same exact optimization: without it a small boundary
+    // set is paradoxically characterized serially one terminal at a time.
+    let mut groups_by_signature: FxHashMap<TerminalActionSignature<'_>, Vec<TerminalID>> =
+        FxHashMap::default();
+    for (terminal, &is_selected) in selected.iter().enumerate() {
+        if !is_selected {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        groups_by_signature
+            .entry(terminal_action_signature_from_index(table, &index, terminal))
+            .or_default()
+            .push(terminal);
+    }
+    let groups = groups_by_signature.into_values().collect::<Vec<_>>();
+    let characterized = groups
+        .par_iter()
+        .map(|terminals| {
+            let characterization = characterize_terminal(table, &index, terminals[0]);
+            (terminals.clone(), characterization)
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let mut result = BTreeMap::new();
+    for (terminals, characterization) in characterized {
+        for terminal in terminals {
+            result.insert(terminal, characterization.clone());
+        }
+    }
+    result
 }
 
 fn characterize_terminals_unquotiented(

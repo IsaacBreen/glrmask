@@ -481,6 +481,17 @@ pub fn compose_subgrammar_tables(
     for (child_index, child_input) in children.iter().enumerate() {
         let child = child_input.table;
         let terminal_offset = terminal_offsets[child_index + 1];
+        // A child may itself already be a composed/scoped table. Its Skip
+        // actions are copied below like ordinary LR actions, so their metadata
+        // must be transported as well. `child_input.ignore_terminal` only
+        // describes a standalone component-level ignore and is intentionally
+        // None for such precomposed children.
+        skip_terminals.extend(
+            child
+                .skip_terminals
+                .iter()
+                .map(|terminal| terminal + terminal_offset),
+        );
         let nonterminal_offset = nonterminal_offsets[child_index];
         let child_root_local = child_root_nonterminal(child)?;
         let child_root = child_root_local + nonterminal_offset;
