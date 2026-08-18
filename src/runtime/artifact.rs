@@ -1931,17 +1931,121 @@ pub(crate) mod internal_token_inverse_artifact_serde {
 /// `id + 1` varints. Older artifact versions leave this mode disabled.
 pub(crate) mod original_token_map_artifact_serde {
     use std::cell::Cell;
+    use std::sync::Arc;
 
     use serde::{Deserialize, Serialize};
 
-    const MAGIC: &[u8; 4] = b"OTM1";
+    const VARINT_MAGIC: &[u8; 4] = b"OTM1";
+    const FIXED_MAGIC: &[u8; 4] = b"OTM2";
+    const FIXED_HEADER_LEN: usize = FIXED_MAGIC.len() + 1 + 4;
+
+    #[derive(Debug)]
+    pub(crate) struct PackedOriginalTokenMap {
+        backing: Arc<Vec<u8>>,
+        payload_start: usize,
+        count: usize,
+        width: usize,
+    }
+
+    impl PackedOriginalTokenMap {
+        pub(crate) fn parse_backed(
+            backing: Arc<Vec<u8>>,
+            start: usize,
+            len: usize,
+        ) -> Result<Self, String> {
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| "fixed original-token map range overflows".to_owned())?;
+            let input = backing
+                .get(start..end)
+                .ok_or_else(|| "fixed original-token map is outside artifact backing".to_owned())?;
+            if input.len() < FIXED_HEADER_LEN || !input.starts_with(FIXED_MAGIC) {
+                return Err("invalid fixed original-token map header".to_owned());
+            }
+            let width = input[FIXED_MAGIC.len()] as usize;
+            if !matches!(width, 1 | 2 | 4) {
+                return Err("invalid fixed original-token map width".to_owned());
+            }
+            let count_start = FIXED_MAGIC.len() + 1;
+            let count = u32::from_le_bytes(
+                input[count_start..count_start + 4]
+                    .try_into()
+                    .expect("fixed original-token count has fixed width"),
+            ) as usize;
+            let payload_len = count
+                .checked_mul(width)
+                .ok_or_else(|| "fixed original-token map payload overflows".to_owned())?;
+            if FIXED_HEADER_LEN
+                .checked_add(payload_len)
+                .is_none_or(|expected| expected != input.len())
+            {
+                return Err("invalid fixed original-token map length".to_owned());
+            }
+            Ok(Self {
+                backing,
+                payload_start: start + FIXED_HEADER_LEN,
+                count,
+                width,
+            })
+        }
+
+        #[inline]
+        pub(crate) fn len(&self) -> usize {
+            self.count
+        }
+
+        #[inline]
+        pub(crate) fn is_empty(&self) -> bool {
+            self.count == 0
+        }
+
+        #[inline]
+        pub(crate) fn get(&self, index: usize) -> Option<u32> {
+            if index >= self.count {
+                return None;
+            }
+            let start = self.payload_start + index * self.width;
+            let bytes = self.backing.get(start..start + self.width)?;
+            Some(match self.width {
+                1 => {
+                    let value = bytes[0];
+                    if value == u8::MAX { u32::MAX } else { value as u32 }
+                }
+                2 => {
+                    let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                    if value == u16::MAX { u32::MAX } else { value as u32 }
+                }
+                4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                _ => unreachable!(),
+            })
+        }
+
+        pub(crate) fn materialize(&self) -> Vec<u32> {
+            (0..self.count)
+                .map(|index| self.get(index).expect("validated packed original-token map index"))
+                .collect()
+        }
+    }
 
     thread_local! {
         static PACKED: Cell<bool> = const { Cell::new(false) };
+        static EXTERNAL: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(crate) fn set_packed(enabled: bool) -> bool {
         PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn set_external(enabled: bool) -> bool {
+        EXTERNAL.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn to_fast_bytes(value: &[u32]) -> Vec<u8> {
+        pack_fixed(value)
+    }
+
+    pub(crate) fn from_fast_bytes(input: &[u8]) -> Result<Vec<u32>, String> {
+        unpack(input)
     }
 
     #[inline]
@@ -1974,9 +2078,9 @@ pub(crate) mod original_token_map_artifact_serde {
         Err("overflowing packed original-token map".to_owned())
     }
 
-    fn pack(value: &[u32]) -> Vec<u8> {
+    fn pack_varint(value: &[u32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(value.len().saturating_mul(2));
-        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(VARINT_MAGIC);
         put_var_u32(
             &mut out,
             u32::try_from(value.len()).expect("token vocabulary should fit u32"),
@@ -1994,11 +2098,11 @@ pub(crate) mod original_token_map_artifact_serde {
         out
     }
 
-    fn unpack(input: &[u8]) -> Result<Vec<u32>, String> {
-        if !input.starts_with(MAGIC) {
-            return Err("invalid packed original-token map header".to_owned());
+    fn unpack_varint(input: &[u8]) -> Result<Vec<u32>, String> {
+        if !input.starts_with(VARINT_MAGIC) {
+            return Err("invalid varint original-token map header".to_owned());
         }
-        let mut pos = MAGIC.len();
+        let mut pos = VARINT_MAGIC.len();
         let count = take_var_u32(input, &mut pos)? as usize;
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
@@ -2011,26 +2115,199 @@ pub(crate) mod original_token_map_artifact_serde {
         Ok(out)
     }
 
+    fn pack_fixed(value: &[u32]) -> Vec<u8> {
+        let max_internal = value
+            .iter()
+            .copied()
+            .filter(|&internal| internal != u32::MAX)
+            .max()
+            .unwrap_or(0);
+        let width = if max_internal < u8::MAX as u32 {
+            1u8
+        } else if max_internal < u16::MAX as u32 {
+            2u8
+        } else {
+            4u8
+        };
+        let payload_len = value
+            .len()
+            .checked_mul(width as usize)
+            .expect("original-token map payload should fit usize");
+        let mut out = Vec::with_capacity(FIXED_HEADER_LEN + payload_len);
+        out.extend_from_slice(FIXED_MAGIC);
+        out.push(width);
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("token vocabulary should fit u32")
+                .to_le_bytes(),
+        );
+        match width {
+            1 => {
+                for &internal in value {
+                    out.push(if internal == u32::MAX {
+                        u8::MAX
+                    } else {
+                        internal as u8
+                    });
+                }
+            }
+            2 => {
+                for &internal in value {
+                    let encoded = if internal == u32::MAX {
+                        u16::MAX
+                    } else {
+                        internal as u16
+                    };
+                    out.extend_from_slice(&encoded.to_le_bytes());
+                }
+            }
+            4 => {
+                for &internal in value {
+                    out.extend_from_slice(&internal.to_le_bytes());
+                }
+            }
+            _ => unreachable!(),
+        }
+        out
+    }
+
+    fn unpack_fixed(input: &[u8]) -> Result<Vec<u32>, String> {
+        if input.len() < FIXED_HEADER_LEN || !input.starts_with(FIXED_MAGIC) {
+            return Err("invalid fixed original-token map header".to_owned());
+        }
+        let width = input[FIXED_MAGIC.len()] as usize;
+        if !matches!(width, 1 | 2 | 4) {
+            return Err("invalid fixed original-token map width".to_owned());
+        }
+        let count_start = FIXED_MAGIC.len() + 1;
+        let count = u32::from_le_bytes(
+            input[count_start..count_start + 4]
+                .try_into()
+                .expect("fixed original-token count has fixed width"),
+        ) as usize;
+        let payload_len = count
+            .checked_mul(width)
+            .ok_or_else(|| "fixed original-token map payload overflows".to_owned())?;
+        if FIXED_HEADER_LEN
+            .checked_add(payload_len)
+            .is_none_or(|expected| expected != input.len())
+        {
+            return Err("invalid fixed original-token map length".to_owned());
+        }
+        let payload = &input[FIXED_HEADER_LEN..];
+        let mut out = Vec::with_capacity(count);
+        match width {
+            1 => out.extend(payload.iter().map(|&encoded| {
+                if encoded == u8::MAX {
+                    u32::MAX
+                } else {
+                    encoded as u32
+                }
+            })),
+            2 => out.extend(payload.chunks_exact(2).map(|bytes| {
+                let encoded = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if encoded == u16::MAX {
+                    u32::MAX
+                } else {
+                    encoded as u32
+                }
+            })),
+            4 => out.extend(payload.chunks_exact(4).map(|bytes| {
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            })),
+            _ => unreachable!(),
+        }
+        Ok(out)
+    }
+
+    fn unpack(input: &[u8]) -> Result<Vec<u32>, String> {
+        if input.starts_with(FIXED_MAGIC) {
+            unpack_fixed(input)
+        } else if input.starts_with(VARINT_MAGIC) {
+            unpack_varint(input)
+        } else {
+            Err("invalid packed original-token map header".to_owned())
+        }
+    }
+
     pub fn serialize<S>(value: &[u32], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
+        if EXTERNAL.with(Cell::get) {
+            return 0u8.serialize(serializer);
+        }
         if !PACKED.with(Cell::get) {
             return value.serialize(serializer);
         }
-        pack(value).serialize(serializer)
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let pack_started = profile.then(std::time::Instant::now);
+        let packed = pack_fixed(value);
+        let pack_ms = pack_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        let wire_bytes = packed.len();
+        let result = packed.serialize(serializer);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][original_token_map_encode] entries={} wire_bytes={} pack_ms={:.3} total_ms={:.3}",
+                value.len(),
+                wire_bytes,
+                pack_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
+        if EXTERNAL.with(Cell::get) {
+            let marker = u8::deserialize(deserializer)?;
+            if marker != 0 {
+                return Err(serde::de::Error::custom(
+                    "invalid external original-token map placeholder",
+                ));
+            }
+            return Ok(Vec::new());
+        }
         if !PACKED.with(Cell::get) {
             return Vec::<u32>::deserialize(deserializer);
         }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
         let packed = Vec::<u8>::deserialize(deserializer)?;
         let packed_len = packed.len();
-        unpack(&packed).map_err(serde::de::Error::custom)
+        let result = unpack(&packed).map_err(serde::de::Error::custom);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][original_token_map_decode] wire_bytes={} ms={:.3}",
+                packed_len,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fixed_original_token_map_roundtrips_all_widths_and_legacy() {
+            for values in [
+                vec![0, 12, u32::MAX, 254],
+                vec![0, 255, 4096, u32::MAX, 65534],
+                vec![0, 65535, 1_000_000, u32::MAX],
+            ] {
+                let packed = pack_fixed(&values);
+                assert_eq!(unpack(&packed).unwrap(), values);
+
+                let legacy = pack_varint(&values);
+                assert_eq!(unpack(&legacy).unwrap(), values);
+            }
+        }
     }
 }
 
@@ -2048,11 +2325,14 @@ pub(crate) mod token_bytes_artifact_serde {
 
     use serde::{Deserialize, Serialize};
 
-    const MAGIC: &[u8; 4] = b"TBP1";
+    const LEGACY_MAGIC: &[u8; 4] = b"TBP1";
+    const INDEXED_MAGIC: &[u8; 4] = b"TBP2";
+    const INDEXED_HEADER_LEN: usize = INDEXED_MAGIC.len() + 1 + 4;
 
     thread_local! {
         static PACKED: Cell<bool> = const { Cell::new(false) };
         static DEFER_UNPACK: Cell<bool> = const { Cell::new(false) };
+        static EXTERNAL: Cell<bool> = const { Cell::new(false) };
         static DEFERRED: RefCell<Option<Arc<PackedTokenBytes>>> = const { RefCell::new(None) };
     }
 
@@ -2064,36 +2344,69 @@ pub(crate) mod token_bytes_artifact_serde {
         DEFER_UNPACK.with(|mode| mode.replace(enabled))
     }
 
+    pub(crate) fn set_external(enabled: bool) -> bool {
+        EXTERNAL.with(|mode| mode.replace(enabled))
+    }
+
     pub(crate) fn take_deferred() -> Option<Arc<PackedTokenBytes>> {
         DEFERRED.with(|slot| slot.borrow_mut().take())
     }
 
     #[derive(Debug)]
     pub(crate) struct PackedTokenBytes {
-        wire: Arc<[u8]>,
+        wire: Arc<Vec<u8>>,
+        wire_start: usize,
+        wire_len: usize,
+        indexed: Option<PackedTokenBytesIndexed>,
         spans: Box<[(u32, u32)]>,
         sparse_ids: Option<Box<[u32]>>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct PackedTokenBytesIndexed {
+        count: usize,
+        sparse_ids_start: Option<usize>,
+        offsets_start: usize,
+        data_start: usize,
+    }
+
     impl PackedTokenBytes {
         fn parse(wire: Vec<u8>) -> Result<Self, String> {
-            if !wire.starts_with(MAGIC) {
+            let wire_len = wire.len();
+            Self::parse_backed(Arc::new(wire), 0, wire_len)
+        }
+
+        pub(crate) fn parse_backed(
+            wire: Arc<Vec<u8>>,
+            wire_start: usize,
+            wire_len: usize,
+        ) -> Result<Self, String> {
+            let wire_end = wire_start
+                .checked_add(wire_len)
+                .ok_or_else(|| "overflowing packed token-byte backing range".to_owned())?;
+            let input = wire
+                .get(wire_start..wire_end)
+                .ok_or_else(|| "packed token-byte backing range is out of bounds".to_owned())?;
+            if input.starts_with(INDEXED_MAGIC) {
+                return Self::parse_indexed_backed(wire, wire_start, wire_len);
+            }
+            if !input.starts_with(LEGACY_MAGIC) {
                 return Err("invalid packed token-byte header".to_owned());
             }
-            let mut pos = MAGIC.len();
-            let sparse = match wire.get(pos).copied() {
+            let mut pos = LEGACY_MAGIC.len();
+            let sparse = match input.get(pos).copied() {
                 Some(0) => false,
                 Some(1) => true,
                 _ => return Err("invalid packed token-byte mode".to_owned()),
             };
             pos += 1;
-            let count = take_var_u32(&wire, &mut pos)? as usize;
+            let count = take_var_u32(input, &mut pos)? as usize;
             let mut spans = Vec::with_capacity(count);
             let mut sparse_ids = sparse.then(|| Vec::with_capacity(count));
             let mut previous_end = 0u64;
             for dense_id in 0..count {
                 let id = if sparse {
-                    let gap = take_var_u32(&wire, &mut pos)? as u64;
+                    let gap = take_var_u32(input, &mut pos)? as u64;
                     let id = previous_end
                         .checked_add(gap)
                         .ok_or_else(|| "overflowing packed token id".to_owned())?;
@@ -2107,12 +2420,12 @@ pub(crate) mod token_bytes_artifact_serde {
                         .map_err(|_| "dense packed token id exceeds u32".to_owned())?
                 };
                 let _ = id;
-                let len = take_var_u32(&wire, &mut pos)? as usize;
+                let len = take_var_u32(input, &mut pos)? as usize;
                 let start = pos;
                 let end = start
                     .checked_add(len)
                     .ok_or_else(|| "overflowing packed token-byte length".to_owned())?;
-                if end > wire.len() {
+                if end > input.len() {
                     return Err("truncated packed token bytes".to_owned());
                 }
                 spans.push((
@@ -2123,44 +2436,131 @@ pub(crate) mod token_bytes_artifact_serde {
                 ));
                 pos = end;
             }
-            if pos != wire.len() {
+            if pos != input.len() {
                 return Err("trailing bytes in packed token-byte vocabulary".to_owned());
             }
             Ok(Self {
-                wire: Arc::from(wire.into_boxed_slice()),
+                wire,
+                wire_start,
+                wire_len,
+                indexed: None,
                 spans: spans.into_boxed_slice(),
                 sparse_ids: sparse_ids.map(Vec::into_boxed_slice),
             })
         }
 
+        fn parse_indexed_backed(
+            wire: Arc<Vec<u8>>,
+            wire_start: usize,
+            wire_len: usize,
+        ) -> Result<Self, String> {
+            let wire_end = wire_start
+                .checked_add(wire_len)
+                .ok_or_else(|| "overflowing indexed token-byte backing range".to_owned())?;
+            let input = wire
+                .get(wire_start..wire_end)
+                .ok_or_else(|| "indexed token-byte backing range is out of bounds".to_owned())?;
+            if input.len() < INDEXED_HEADER_LEN || !input.starts_with(INDEXED_MAGIC) {
+                return Err("invalid indexed token-byte header".to_owned());
+            }
+            let sparse = match input[INDEXED_MAGIC.len()] {
+                0 => false,
+                1 => true,
+                _ => return Err("invalid indexed token-byte mode".to_owned()),
+            };
+            let count_start = INDEXED_MAGIC.len() + 1;
+            let count = u32::from_le_bytes(
+                input[count_start..count_start + 4]
+                    .try_into()
+                    .expect("indexed token count has fixed width"),
+            ) as usize;
+            let sparse_ids_start = sparse.then_some(INDEXED_HEADER_LEN);
+            let ids_bytes = if sparse {
+                count
+                    .checked_mul(4)
+                    .ok_or_else(|| "indexed token-id table overflows".to_owned())?
+            } else {
+                0
+            };
+            let offsets_start = INDEXED_HEADER_LEN
+                .checked_add(ids_bytes)
+                .ok_or_else(|| "indexed token-byte offsets start overflows".to_owned())?;
+            let offsets_bytes = count
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(4))
+                .ok_or_else(|| "indexed token-byte offset table overflows".to_owned())?;
+            let data_start = offsets_start
+                .checked_add(offsets_bytes)
+                .ok_or_else(|| "indexed token-byte data start overflows".to_owned())?;
+            if data_start > input.len() {
+                return Err("truncated indexed token-byte tables".to_owned());
+            }
+            let first_offset = read_u32_at(input, offsets_start)? as usize;
+            let final_offset = read_u32_at(input, offsets_start + count * 4)? as usize;
+            if first_offset != 0 || final_offset != input.len() - data_start {
+                return Err("invalid indexed token-byte offset bounds".to_owned());
+            }
+            Ok(Self {
+                wire,
+                wire_start,
+                wire_len,
+                indexed: Some(PackedTokenBytesIndexed {
+                    count,
+                    sparse_ids_start,
+                    offsets_start,
+                    data_start,
+                }),
+                spans: Box::new([]),
+                sparse_ids: None,
+            })
+        }
+
+        #[inline]
+        pub(crate) fn wire(&self) -> &[u8] {
+            &self.wire[self.wire_start..self.wire_start + self.wire_len]
+        }
+
         #[inline]
         pub(crate) fn len(&self) -> usize {
-            self.spans.len()
+            self.indexed.map_or(self.spans.len(), |indexed| indexed.count)
         }
 
         #[inline]
         pub(crate) fn get(&self, token_id: u32) -> Option<&[u8]> {
+            if let Some(indexed) = self.indexed {
+                let index = match indexed.sparse_ids_start {
+                    None => usize::try_from(token_id)
+                        .ok()
+                        .filter(|&index| index < indexed.count)?,
+                    Some(_) => self.indexed_sparse_token_index(indexed, token_id)?,
+                };
+                return self.indexed_bytes_at(indexed, index);
+            }
             let index = match &self.sparse_ids {
                 None => usize::try_from(token_id).ok().filter(|&index| index < self.spans.len())?,
                 Some(ids) => ids.binary_search(&token_id).ok()?,
             };
             let (start, len) = self.spans[index];
             let start = start as usize;
-            self.wire.get(start..start + len as usize)
+            self.wire().get(start..start + len as usize)
         }
 
         pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
-            self.spans.iter().enumerate().map(|(index, &(start, len))| {
+            (0..self.len()).map(|index| {
                 let token_id = self
-                    .sparse_ids
-                    .as_ref()
-                    .map_or(index as u32, |ids| ids[index]);
-                let start = start as usize;
-                (token_id, &self.wire[start..start + len as usize])
+                    .token_id_at(index)
+                    .expect("validated packed token index should have an id");
+                let bytes = self
+                    .bytes_at_index(index)
+                    .expect("validated packed token index should have bytes");
+                (token_id, bytes)
             })
         }
 
         pub(crate) fn max_token_id(&self) -> Option<u32> {
+            if self.indexed.is_some() {
+                return self.len().checked_sub(1).and_then(|index| self.token_id_at(index));
+            }
             match &self.sparse_ids {
                 Some(ids) => ids.last().copied(),
                 None => self.spans.len().checked_sub(1).map(|id| id as u32),
@@ -2174,6 +2574,81 @@ pub(crate) mod token_bytes_artifact_serde {
                     .collect(),
             )
         }
+
+        fn token_id_at(&self, index: usize) -> Option<u32> {
+            if let Some(indexed) = self.indexed {
+                if index >= indexed.count {
+                    return None;
+                }
+                return indexed.sparse_ids_start.map_or_else(
+                    || u32::try_from(index).ok(),
+                    |start| read_u32_at(self.wire(), start + index * 4).ok(),
+                );
+            }
+            self.sparse_ids
+                .as_ref()
+                .map_or_else(|| u32::try_from(index).ok(), |ids| ids.get(index).copied())
+        }
+
+        fn bytes_at_index(&self, index: usize) -> Option<&[u8]> {
+            if let Some(indexed) = self.indexed {
+                return self.indexed_bytes_at(indexed, index);
+            }
+            let &(start, len) = self.spans.get(index)?;
+            let start = start as usize;
+            self.wire().get(start..start + len as usize)
+        }
+
+        fn indexed_bytes_at(
+            &self,
+            indexed: PackedTokenBytesIndexed,
+            index: usize,
+        ) -> Option<&[u8]> {
+            if index >= indexed.count {
+                return None;
+            }
+            let wire = self.wire();
+            let start = read_u32_at(wire, indexed.offsets_start + index * 4).ok()? as usize;
+            let end = read_u32_at(wire, indexed.offsets_start + (index + 1) * 4).ok()? as usize;
+            if start > end {
+                return None;
+            }
+            wire.get(indexed.data_start + start..indexed.data_start + end)
+        }
+
+        fn indexed_sparse_token_index(
+            &self,
+            indexed: PackedTokenBytesIndexed,
+            token_id: u32,
+        ) -> Option<usize> {
+            let start = indexed.sparse_ids_start?;
+            let wire = self.wire();
+            let mut lo = 0usize;
+            let mut hi = indexed.count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let candidate = read_u32_at(wire, start + mid * 4).ok()?;
+                match candidate.cmp(&token_id) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => return Some(mid),
+                }
+            }
+            None
+        }
+    }
+
+    #[inline]
+    fn read_u32_at(input: &[u8], pos: usize) -> Result<u32, String> {
+        let end = pos
+            .checked_add(4)
+            .ok_or_else(|| "packed token-byte u32 offset overflows".to_owned())?;
+        let bytes = input
+            .get(pos..end)
+            .ok_or_else(|| "truncated packed token-byte u32".to_owned())?;
+        Ok(u32::from_le_bytes(
+            bytes.try_into().expect("packed token u32 has fixed width"),
+        ))
     }
 
     #[inline]
@@ -2206,14 +2681,14 @@ pub(crate) mod token_bytes_artifact_serde {
         Err("overflowing packed token-byte varint".to_owned())
     }
 
-    fn pack(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+    fn pack_legacy(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
         let dense = value
             .keys()
             .copied()
             .enumerate()
             .all(|(expected, actual)| actual as usize == expected);
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(LEGACY_MAGIC);
         out.push(u8::from(!dense));
         put_var_u32(
             &mut out,
@@ -2240,11 +2715,70 @@ pub(crate) mod token_bytes_artifact_serde {
         out
     }
 
+    fn pack(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        let dense = value
+            .keys()
+            .copied()
+            .enumerate()
+            .all(|(expected, actual)| actual as usize == expected);
+        let count = value.len();
+        let data_len = value.values().try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes.len())
+        });
+        let Some(data_len) = data_len.filter(|&len| u32::try_from(len).is_ok()) else {
+            return pack_legacy(value);
+        };
+        let ids_len = if dense { 0 } else { count.saturating_mul(4) };
+        let Some(offsets_len) = count.checked_add(1).and_then(|count| count.checked_mul(4)) else {
+            return pack_legacy(value);
+        };
+        let capacity = INDEXED_HEADER_LEN
+            .checked_add(ids_len)
+            .and_then(|len| len.checked_add(offsets_len))
+            .and_then(|len| len.checked_add(data_len));
+        let Some(capacity) = capacity else {
+            return pack_legacy(value);
+        };
+        let mut out = Vec::with_capacity(capacity);
+        out.extend_from_slice(INDEXED_MAGIC);
+        out.push(u8::from(!dense));
+        out.extend_from_slice(
+            &u32::try_from(count)
+                .expect("token vocabulary should fit u32")
+                .to_le_bytes(),
+        );
+        if !dense {
+            for &token_id in value.keys() {
+                out.extend_from_slice(&token_id.to_le_bytes());
+            }
+        }
+        let mut offset = 0u32;
+        out.extend_from_slice(&offset.to_le_bytes());
+        for bytes in value.values() {
+            offset = offset
+                .checked_add(bytes.len() as u32)
+                .expect("indexed token-byte data length was prevalidated");
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        for bytes in value.values() {
+            out.extend_from_slice(bytes);
+        }
+        debug_assert_eq!(out.len(), capacity);
+        out
+    }
+
+    pub(crate) fn pack_external(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        pack(value)
+    }
+
     fn unpack(input: &[u8]) -> Result<Arc<BTreeMap<u32, Vec<u8>>>, String> {
-        if !input.starts_with(MAGIC) {
+        if input.starts_with(INDEXED_MAGIC) {
+            return PackedTokenBytes::parse(input.to_vec()).map(|packed| packed.materialize());
+        }
+        if !input.starts_with(LEGACY_MAGIC) {
             return Err("invalid packed token-byte header".to_owned());
         }
-        let mut pos = MAGIC.len();
+        let mut pos = LEGACY_MAGIC.len();
         let sparse = match input.get(pos).copied() {
             Some(0) => false,
             Some(1) => true,
@@ -2297,6 +2831,9 @@ pub(crate) mod token_bytes_artifact_serde {
         if !PACKED.with(Cell::get) {
             return value.serialize(serializer);
         }
+        if EXTERNAL.with(Cell::get) {
+            return Vec::<u8>::new().serialize(serializer);
+        }
         pack(value).serialize(serializer)
     }
 
@@ -2315,6 +2852,14 @@ pub(crate) mod token_bytes_artifact_serde {
         let packed = Vec::<u8>::deserialize(deserializer)?;
         let packed_len = packed.len();
         let packed_ms = packed_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        if EXTERNAL.with(Cell::get) {
+            if !packed.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "external packed token-byte placeholder must be empty",
+                ));
+            }
+            return Ok(Arc::new(BTreeMap::new()));
+        }
         let unpack_started = profile.then(std::time::Instant::now);
         let result = if DEFER_UNPACK.with(Cell::get) {
             let deferred = PackedTokenBytes::parse(packed)
@@ -2335,6 +2880,97 @@ pub(crate) mod token_bytes_artifact_serde {
         }
         result
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn check_roundtrip(value: BTreeMap<u32, Vec<u8>>) {
+            let packed = pack(&value);
+            assert!(packed.starts_with(INDEXED_MAGIC));
+            let view = PackedTokenBytes::parse(packed).unwrap();
+            assert_eq!(view.len(), value.len());
+            assert_eq!(
+                view.iter()
+                    .map(|(id, bytes)| (id, bytes.to_vec()))
+                    .collect::<BTreeMap<_, _>>(),
+                value
+            );
+            for (&id, bytes) in &value {
+                assert_eq!(view.get(id), Some(bytes.as_slice()));
+            }
+            assert_eq!(view.max_token_id(), value.keys().next_back().copied());
+
+            let legacy = pack_legacy(&value);
+            let legacy_view = PackedTokenBytes::parse(legacy).unwrap();
+            assert_eq!(
+                legacy_view
+                    .iter()
+                    .map(|(id, bytes)| (id, bytes.to_vec()))
+                    .collect::<BTreeMap<_, _>>(),
+                value
+            );
+        }
+
+        #[test]
+        fn indexed_token_bytes_roundtrip_dense_and_sparse() {
+            check_roundtrip(BTreeMap::from([
+                (0, b"a".to_vec()),
+                (1, b"bc".to_vec()),
+                (2, Vec::new()),
+            ]));
+            check_roundtrip(BTreeMap::from([
+                (2, b"a".to_vec()),
+                (9, b"bc".to_vec()),
+                (1000, b"xyz".to_vec()),
+            ]));
+        }
+    }
+}
+
+type SharedPackedTokenBytesCache =
+    FxHashMap<usize, (std::sync::Weak<BTreeMap<u32, Vec<u8>>>, Arc<Vec<u8>>) >;
+
+fn shared_packed_token_bytes_cache() -> &'static Mutex<SharedPackedTokenBytesCache> {
+    static CACHE: OnceLock<Mutex<SharedPackedTokenBytesCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Lazily cache the canonical packed vocabulary section by the identity of the
+/// shared immutable token map. `Vocab::clone()` preserves that Arc identity, so
+/// independently compiled constraints can reuse this section without charging
+/// vocabulary construction or compilation for serialization work.
+pub(crate) fn shared_packed_token_bytes(
+    token_bytes: &Arc<BTreeMap<u32, Vec<u8>>>,
+) -> Arc<Vec<u8>> {
+    let key = Arc::as_ptr(token_bytes) as usize;
+    if let Ok(cache) = shared_packed_token_bytes_cache().lock() {
+        if let Some((source, packed)) = cache.get(&key)
+            && source
+                .upgrade()
+                .is_some_and(|source| Arc::ptr_eq(&source, token_bytes))
+        {
+            return Arc::clone(packed);
+        }
+    }
+
+    let packed = Arc::new(token_bytes_artifact_serde::pack_external(token_bytes));
+    if let Ok(mut cache) = shared_packed_token_bytes_cache().lock() {
+        if let Some((source, existing)) = cache.get(&key)
+            && source
+                .upgrade()
+                .is_some_and(|source| Arc::ptr_eq(&source, token_bytes))
+        {
+            return Arc::clone(existing);
+        }
+        cache.insert(key, (Arc::downgrade(token_bytes), Arc::clone(&packed)));
+    }
+    packed
+}
+
+pub(crate) fn prepare_shared_packed_token_bytes(vocab: &crate::Vocab) {
+    let entries = vocab.entries_arc();
+    drop(shared_packed_token_bytes(&entries));
 }
 
 #[derive(
@@ -2492,12 +3128,27 @@ pub struct Constraint {
     /// splits required by possible_matches.
     #[serde(default, with = "original_token_map_artifact_serde")]
     pub(crate) original_token_to_internal: Vec<u32>,
+    /// Current-format loads retain the fixed-width original-token map inside
+    /// the owned artifact instead of expanding all model-token entries to
+    /// `u32`. Ordinary static mask/commit performs direct packed lookups; only
+    /// composition/debug-style bulk access materializes the vector lazily.
+    #[serde(skip, default)]
+    pub(crate) packed_original_token_to_internal:
+        Option<Arc<original_token_map_artifact_serde::PackedOriginalTokenMap>>,
+    #[serde(skip, default)]
+    pub(crate) deferred_original_token_to_internal: OnceLock<Vec<u32>>,
     /// Final shared constraint-internal token id -> original token ids.
     ///
     /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
     /// final internal token ids.
     #[serde(default, with = "internal_token_inverse_artifact_serde")]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
+    /// Current-format loads can defer reconstructing the explicit inverse of
+    /// `original_token_to_internal`. Static mask/commit only needs the internal
+    /// token count and the already-serialized mask fragments; composition and
+    /// token-space expansion materialize this inverse on first use.
+    #[serde(skip, default)]
+    pub(crate) deferred_internal_token_to_tokens: OnceLock<Vec<Vec<u32>>>,
     #[serde(with = "token_bytes_artifact_serde")]
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     /// Current sectioned artifacts can retain the packed immutable vocabulary
@@ -2506,7 +3157,10 @@ pub struct Constraint {
     /// materialized and leave this empty.
     #[serde(skip, default)]
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
-    #[serde(default)]
+    // Compiler-side scratch/result metadata only. No runtime or composition
+    // path reads this field; composition rebuilds the map for its result when
+    // needed. Persisting it duplicated token bytes inside every constraint.
+    #[serde(skip, default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
@@ -2670,7 +3324,7 @@ pub struct Constraint {
     /// so resave can return a single bulk copy instead of rediscovering and
     /// re-encoding the same canonical pools.
     #[serde(skip, default)]
-    pub(crate) serialized_artifact_cache: Option<Arc<[u8]>>,
+    pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
 }
 
 

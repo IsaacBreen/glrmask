@@ -12,6 +12,7 @@ pub(crate) use glrmask_artifact::CommitTemplateDfas;
 pub(crate) use artifact::{
     ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
     FastCommitTemplateDfas, FastTokenizerTransitions, SpecialTokenTerminal,
+    prepare_shared_packed_token_bytes,
 };
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};

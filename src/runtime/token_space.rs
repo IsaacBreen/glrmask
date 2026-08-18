@@ -10,6 +10,99 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::Constraint;
 
 impl Constraint {
+	#[inline]
+	pub(crate) fn has_original_token_map(&self) -> bool {
+		!self.original_token_to_internal.is_empty()
+			|| self
+				.packed_original_token_to_internal
+				.as_ref()
+				.is_some_and(|packed| !packed.is_empty())
+	}
+
+	pub(crate) fn original_token_map(&self) -> &[u32] {
+		if !self.original_token_to_internal.is_empty() {
+			return &self.original_token_to_internal;
+		}
+		let Some(packed) = self.packed_original_token_to_internal.as_ref() else {
+			return &[];
+		};
+		self.deferred_original_token_to_internal
+			.get_or_init(|| packed.materialize())
+			.as_slice()
+	}
+
+	#[inline]
+	pub(crate) fn original_token_internal_at(&self, token_id: u32) -> Option<u32> {
+		let index = token_id as usize;
+		if let Some(&internal) = self.original_token_to_internal.get(index) {
+			return Some(internal);
+		}
+		self.packed_original_token_to_internal
+			.as_ref()
+			.and_then(|packed| packed.get(index))
+	}
+
+	#[inline]
+	pub(crate) fn internal_token_count(&self) -> usize {
+		if !self.internal_token_to_tokens.is_empty() {
+			return self.internal_token_to_tokens.len();
+		}
+		if let Some(groups) = self.deferred_internal_token_to_tokens.get() {
+			return groups.len();
+		}
+		if self.internal_token_buf_offsets.len() > 1
+			&& self.internal_token_buf_offsets.last().copied().map(|end| end as usize)
+				== Some(self.internal_token_buf_flat.len())
+		{
+			return self.internal_token_buf_offsets.len() - 1;
+		}
+		if !self.internal_token_buf_masks.is_empty() {
+			return self.internal_token_buf_masks.len();
+		}
+		self.original_token_map()
+			.iter()
+			.copied()
+			.filter(|&internal| internal != u32::MAX)
+			.max()
+			.map_or_else(
+				|| self.max_original_token_id().map_or(0, |id| id as usize + 1),
+				|internal| internal as usize + 1,
+			)
+	}
+
+	pub(crate) fn internal_token_groups(&self) -> Option<&[Vec<u32>]> {
+		if !self.internal_token_to_tokens.is_empty() {
+			return Some(&self.internal_token_to_tokens);
+		}
+		if !self.has_original_token_map() {
+			return None;
+		}
+		let group_count = self.internal_token_count();
+		let original_token_to_internal = self.original_token_map();
+		Some(
+			self.deferred_internal_token_to_tokens
+				.get_or_init(|| {
+					let mut counts = vec![0usize; group_count];
+					for &internal in original_token_to_internal {
+						if internal != u32::MAX {
+							counts[internal as usize] += 1;
+						}
+					}
+					let mut groups = counts
+						.into_iter()
+						.map(Vec::<u32>::with_capacity)
+						.collect::<Vec<_>>();
+					for (original, &internal) in original_token_to_internal.iter().enumerate() {
+						if internal != u32::MAX {
+							groups[internal as usize].push(original as u32);
+						}
+					}
+					groups
+				})
+				.as_slice(),
+		)
+	}
+
 	pub(crate) fn runtime_source_state_offset(&self) -> Option<u32> {
 		self.runtime_source_state_offset
 	}
@@ -99,23 +192,19 @@ impl Constraint {
 	}
 
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
-		self.original_token_to_internal
-			.get(token_id as usize)
-			.copied()
+		self.original_token_internal_at(token_id)
 			.filter(|internal_id| *internal_id != u32::MAX)
 			.unwrap_or(token_id)
 	}
 
 	pub(crate) fn final_internal_token_for_original(&self, token_id: u32) -> Option<u32> {
-		let internal = *self.original_token_to_internal.get(token_id as usize)?;
+		let internal = self.original_token_internal_at(token_id)?;
 
 		if internal == u32::MAX {
 			return None;
 		}
 
-		if !self.internal_token_to_tokens.is_empty()
-			&& internal as usize >= self.internal_token_to_tokens.len()
-		{
+		if internal as usize >= self.internal_token_count() {
 			return None;
 		}
 
@@ -148,14 +237,14 @@ impl Constraint {
 				internal_tokens |= token_set.to_range_set();
 			}
 		}
-		if self.internal_token_to_tokens.is_empty() {
+		let Some(groups) = self.internal_token_groups() else {
 			for token in internal_tokens.iter() {
 				visit(token);
 			}
 			return true;
-		}
+		};
 		for internal_token in internal_tokens.iter() {
-			if let Some(originals) = self.internal_token_to_tokens.get(internal_token as usize) {
+			if let Some(originals) = groups.get(internal_token as usize) {
 				for &original in originals {
 					visit(original);
 				}
@@ -165,25 +254,25 @@ impl Constraint {
 	}
 
 	pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
-		if self.internal_token_to_tokens.is_empty() {
+		if !self.has_original_token_map() && self.internal_token_to_tokens.is_empty() {
 			let Some(max_token_id) = self.max_original_token_id() else {
 				return RangeSetBlaze::new();
 			};
 			return RangeSetBlaze::from_iter([0..=max_token_id]);
 		}
 
-		RangeSetBlaze::from_iter([0..=self.internal_token_to_tokens.len().saturating_sub(1) as u32])
+		RangeSetBlaze::from_iter([0..=self.internal_token_count().saturating_sub(1) as u32])
 	}
 
 	pub(crate) fn expand_internal_token_set(
 		&self,
 		internal_tokens: &RangeSetBlaze<u32>,
 	) -> RangeSetBlaze<u32> {
-		if self.internal_token_to_tokens.is_empty() {
+		let Some(groups) = self.internal_token_groups() else {
 			return internal_tokens.clone();
-		}
+		};
 
-		let all_ids = self.collect_original_token_ids(internal_tokens);
+		let all_ids = Self::collect_original_token_ids(groups, internal_tokens);
 		Self::range_set_from_sorted_ids(&all_ids)
 	}
 
@@ -198,15 +287,18 @@ impl Constraint {
 		crate::runtime::state::ParserStateMap::singleton(initial_tok_state, parser_gss)
 	}
 
-	fn collect_original_token_ids(&self, internal_tokens: &RangeSetBlaze<u32>) -> Vec<u32> {
+	fn collect_original_token_ids(
+		groups: &[Vec<u32>],
+		internal_tokens: &RangeSetBlaze<u32>,
+	) -> Vec<u32> {
 		let total_estimate: usize = internal_tokens
 			.iter()
-			.filter_map(|token| self.internal_token_to_tokens.get(token as usize))
+			.filter_map(|token| groups.get(token as usize))
 			.map(Vec::len)
 			.sum();
 		let mut all_ids = Vec::with_capacity(total_estimate);
 		for internal_token in internal_tokens.iter() {
-			if let Some(originals) = self.internal_token_to_tokens.get(internal_token as usize) {
+			if let Some(originals) = groups.get(internal_token as usize) {
 				all_ids.extend_from_slice(originals);
 			}
 		}

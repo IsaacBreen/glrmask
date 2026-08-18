@@ -4147,7 +4147,7 @@ impl<'a> ConstraintState<'a> {
                     let mut added_cost = 0u64;
                     let mut removed_cost = 0u64;
                     let capture_delta_summary = delta_profile_enabled;
-                    let n_internal = self.constraint.internal_token_to_tokens.len();
+                    let n_internal = self.constraint.internal_token_count();
                     let word_len = merged.len().max(cache_data.merged_dense.len());
                     for wi in 0..word_len {
                         if wi * 64 >= n_internal {

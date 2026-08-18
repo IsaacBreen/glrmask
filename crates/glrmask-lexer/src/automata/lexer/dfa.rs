@@ -568,6 +568,56 @@ impl DFA {
         }
     }
 
+    /// Build the metadata-only DFA representation used by current static
+    /// artifacts in one pass. Byte transitions live in the packed runtime
+    /// sidecar, so constructing default states and then resizing/installing
+    /// their terminal metadata is unnecessary load-time traffic.
+    pub(super) fn new_from_sparse_metadata(
+        group_id_to_u8set: Vec<U8Set>,
+        epsilon_offsets: &[u32],
+        epsilon_targets: &[u32],
+        finalizer_offsets: &[u32],
+        finalizers: &[u32],
+        future_offsets: &[u32],
+        futures: &[u32],
+    ) -> Self {
+        let state_count = epsilon_offsets.len().saturating_sub(1);
+        debug_assert_eq!(finalizer_offsets.len(), state_count + 1);
+        debug_assert_eq!(future_offsets.len(), state_count + 1);
+        let group_count = group_id_to_u8set.len();
+        let mut states = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let mut finalizer_bits = BitSet::new(group_count);
+            let a = finalizer_offsets[state] as usize;
+            let b = finalizer_offsets[state + 1] as usize;
+            for &terminal in &finalizers[a..b] {
+                finalizer_bits.set(terminal as usize);
+            }
+
+            let mut future_bits = BitSet::new(group_count);
+            let a = future_offsets[state] as usize;
+            let b = future_offsets[state + 1] as usize;
+            for &terminal in &futures[a..b] {
+                future_bits.set(terminal as usize);
+            }
+
+            let a = epsilon_offsets[state] as usize;
+            let b = epsilon_offsets[state + 1] as usize;
+            states.push(DFAState {
+                transitions: CharTransitions::default(),
+                finalizers: finalizer_bits,
+                possible_future_group_ids: future_bits,
+                epsilon_transitions: epsilon_targets[a..b].to_vec(),
+            });
+        }
+        Self {
+            states,
+            group_id_to_u8set,
+            derived_stats: OnceLock::new(),
+            min_match_byte_len_cache: OnceLock::new(),
+        }
+    }
+
     /// Construct a one-group DFA whose per-state acceptance and strict-future
     /// metadata are already known.
     ///

@@ -5170,7 +5170,13 @@ fn compile_prepared_with_profile_and_table_construction(
         // a few milliseconds, so even small amounts of extra finalization work
         // would be a bad trade. The gap between the two populations is large in
         // practice (hundreds of states versus tens of thousands).
-        const PACKED_RUNTIME_DWA_STATE_THRESHOLD: usize = 4_096;
+        // Keep the compact runtime representation for the upper ordinary-
+        // schema tail as well as giant parser DWAs. The p99-ish population is
+        // already expensive enough to repack on first save, while the p50/p90
+        // population remains below this cutoff and pays no extra finalization.
+        // This boundary is deliberately well above their observed ~136/~275
+        // states but below the ~454-state p99 representative.
+        const PACKED_RUNTIME_DWA_STATE_THRESHOLD: usize = 384;
         let build_packed_parser_dwa =
             parser_dwa.states().len() >= PACKED_RUNTIME_DWA_STATE_THRESHOLD;
         let internal_token_bytes_started_at = Instant::now();
@@ -5261,7 +5267,10 @@ fn compile_prepared_with_profile_and_table_construction(
             runtime_product_exact_source_states,
             runtime_product_state_by_source_subset: Default::default(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
+            packed_original_token_to_internal: None,
+            deferred_original_token_to_internal: std::sync::OnceLock::new(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
+            deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
             template_dfas_by_terminal,
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
@@ -5312,10 +5321,20 @@ fn compile_prepared_with_profile_and_table_construction(
             serialized_artifact_cache: None,
         };
         if build_packed_parser_dwa {
+            let packed_started_at = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
+                .is_some()
+                .then(Instant::now);
             let packed = crate::automata::weighted::dwa::PackedRuntimeDwa::from_dwa(
                 &constraint.parser_dwa,
             )
             .expect("direct packed-runtime DWA construction should succeed");
+            if let Some(started_at) = packed_started_at {
+                eprintln!(
+                    "[glrmask/profile][packed_runtime_dwa_build] states={} ms={:.3}",
+                    constraint.parser_dwa.states().len(),
+                    elapsed_ms(started_at),
+                );
+            }
             if std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some() {
                 let started_at = Instant::now();
                 let bytes = packed.fast_wire_bytes();
