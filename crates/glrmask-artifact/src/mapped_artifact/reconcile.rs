@@ -1082,14 +1082,21 @@ fn remap_token_set_with_disjoint_runs_uncached(
     // Parent-major common coordinates make the dominant map interval-preserving:
     // a whole local range becomes one global range.  Fall back to exact local
     // class expansion for child/non-monotone maps.
-    let mut mapped = RangeSetBlaze::new();
     if let Some(lookup) = token_map.contiguous_interval_lookup.as_ref() {
-        for local_range in tokens.ranges() {
-            if let Some((start, end)) = lookup.remap(*local_range.start(), *local_range.end()) {
-                mapped.ranges_insert(start..=end);
-            }
-        }
+        // `tokens.ranges()` is sorted/disjoint, and an interval-preserving
+        // monotone map keeps the images sorted/disjoint.  Let RangeSetBlaze
+        // consume that ordered stream directly instead of paying one balanced
+        // tree insertion per source range (millions of ranges in large parser
+        // artifacts).
+        return Arc::new(RangeSetBlaze::from_iter(tokens.ranges().filter_map(
+            |local_range| {
+                lookup
+                    .remap(*local_range.start(), *local_range.end())
+                    .map(|(start, end)| start..=end)
+            },
+        )));
     } else {
+        let mut mapped = RangeSetBlaze::new();
         for local_token in tokens.iter() {
             if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
                 for &(start, end) in runs {
@@ -1097,8 +1104,8 @@ fn remap_token_set_with_disjoint_runs_uncached(
                 }
             }
         }
+        Arc::new(mapped)
     }
-    Arc::new(mapped)
 }
 
 fn remap_local_token_range_with_disjoint_runs(
