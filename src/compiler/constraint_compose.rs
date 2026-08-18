@@ -7310,8 +7310,11 @@ fn rebuild_transported_component_templates(
     components: &[&Constraint],
     active_terminals: &[bool],
 ) -> BTreeMap<u32, UnweightedDfa> {
+    let profile_transport =
+        std::env::var_os("GLRMASK_PROFILE_TEMPLATE_TRANSPORT").is_some();
     let mut result = BTreeMap::new();
     for (component_index, component) in components.iter().copied().enumerate() {
+        let component_started = Instant::now();
         let terminal_offset = composed_table.terminal_offsets[component_index];
         let mut selected = vec![false; component.table.num_terminals as usize];
         for (local, selected_slot) in selected.iter_mut().enumerate() {
@@ -7322,31 +7325,59 @@ fn rebuild_transported_component_templates(
             continue;
         }
         let mut missing = vec![false; selected.len()];
-        for (local_terminal, &is_selected) in selected.iter().enumerate() {
-            if !is_selected {
-                continue;
-            }
-            let cached = component
-                .composition_parser_templates_by_terminal
-                .get(local_terminal)
-                .and_then(Option::as_ref);
-            let Some(cached) = cached else {
-                missing[local_terminal] = true;
-                continue;
-            };
-            let global_terminal = terminal_offset + local_terminal as u32;
-            if let Some(transported) = transport_composition_template_dfa(
-                cached.clone(),
-                &composed_table.state_relations[component_index],
-            ) {
+        let relation = &composed_table.state_relations[component_index];
+        let cached_started = Instant::now();
+        let cached_results = selected
+            .par_iter()
+            .enumerate()
+            .filter_map(|(local_terminal, &is_selected)| {
+                is_selected.then(|| {
+                    let transported = component
+                        .composition_parser_templates_by_terminal
+                        .get(local_terminal)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .and_then(|dfa| transport_composition_template_dfa(dfa, relation));
+                    (local_terminal, transported)
+                })
+            })
+            .collect::<Vec<_>>();
+        let cached_ms = cached_started.elapsed().as_secs_f64() * 1000.0;
+        let insert_started = Instant::now();
+        let mut cache_hits = 0usize;
+        let mut cache_states = 0usize;
+        let mut cache_transitions = 0usize;
+        for (local_terminal, transported) in cached_results {
+            if let Some(transported) = transported {
+                cache_hits += 1;
+                cache_states += transported.states.len();
+                cache_transitions += transported
+                    .states
+                    .iter()
+                    .map(|state| state.transitions.len())
+                    .sum::<usize>();
+                let global_terminal = terminal_offset + local_terminal as u32;
                 result.insert(global_terminal, transported);
             } else {
                 missing[local_terminal] = true;
             }
         }
+        let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
         if !missing.iter().any(|&value| value) {
+            if profile_transport {
+                eprintln!(
+                    "[glrmask/profile][composition_template_transport] component={} selected={} cache_hits={} cache_misses=0 cache_states={} cache_transitions={} cached_ms={cached_ms:.3} insert_ms={insert_ms:.3} fallback_ms=0.000 total_ms={:.3}",
+                    component_index,
+                    selected.iter().filter(|&&value| value).count(),
+                    cache_hits,
+                    cache_states,
+                    cache_transitions,
+                    component_started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             continue;
         }
+        let fallback_started = Instant::now();
         let Some(augmented_start) = component.table.rules.first().map(|rule| rule.lhs) else {
             continue;
         };
@@ -7368,6 +7399,19 @@ fn rebuild_transported_component_templates(
                 continue;
             };
             result.insert(global_terminal, transported);
+        }
+        if profile_transport {
+            eprintln!(
+                "[glrmask/profile][composition_template_transport] component={} selected={} cache_hits={} cache_misses={} cache_states={} cache_transitions={} cached_ms={cached_ms:.3} insert_ms={insert_ms:.3} fallback_ms={:.3} total_ms={:.3}",
+                component_index,
+                selected.iter().filter(|&&value| value).count(),
+                cache_hits,
+                missing.iter().filter(|&&value| value).count(),
+                cache_states,
+                cache_transitions,
+                fallback_started.elapsed().as_secs_f64() * 1000.0,
+                component_started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     }
     result
@@ -7419,6 +7463,23 @@ fn build_complete_composed_parser_template_cache(
     for (terminal, dfa) in fresh_templates.by_terminal {
         if let Some(slot) = result.get_mut(terminal as usize) {
             *slot = Some(dfa);
+        }
+    }
+
+    // A small number of child templates can fail direct transport when their
+    // standalone stack-effect language mentions a start/accept state whose
+    // composition relation is one-to-many. Re-characterize only those missing
+    // terminals in the already-composed table so the persisted cache is truly
+    // complete for future nested composition.
+    let missing = result.iter().map(Option::is_none).collect::<Vec<_>>();
+    if missing.iter().any(|&value| value) {
+        let missing_characterizations =
+            characterize_selected_terminals(&composed_table.table, analyzed, &missing);
+        let missing_templates = Templates::from_characterizations(&missing_characterizations);
+        for (terminal, dfa) in missing_templates.by_terminal {
+            if let Some(slot) = result.get_mut(terminal as usize) {
+                *slot = Some(dfa);
+            }
         }
     }
     result
