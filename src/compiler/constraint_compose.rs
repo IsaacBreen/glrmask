@@ -191,7 +191,7 @@ fn build_parser_default_domain_plan(
     num_parser_states: u32,
 ) -> ParserDefaultDomainPlan {
     let n = num_parser_states as usize;
-    let symbolic_parent_defaults =
+    let force_parent_defaults =
         std::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some();
     let mut preimage_count = vec![0u32; n];
     let mut owner_component = vec![u32::MAX; n];
@@ -225,7 +225,7 @@ fn build_parser_default_domain_plan(
         }
         let component = owner_component[state] as usize;
         let local = owner_local[state] as usize;
-        if (!symbolic_parent_defaults && component == 0) || component >= components.len() {
+        if component >= components.len() {
             continue;
         }
         if let Some(slot) = local_multiplicities
@@ -239,8 +239,7 @@ fn build_parser_default_domain_plan(
     let force = symbolic_child_defaults_env_override();
     let min_saved = symbolic_child_default_min_saved_edges();
     let mut component_predicted = vec![0usize; components.len()];
-    let first_domain_component = usize::from(!symbolic_parent_defaults);
-    for component_index in first_domain_component..components.len() {
+    for component_index in 0..components.len() {
         let component = components[component_index];
         let domain_total = local_multiplicities[component_index].iter().sum::<usize>();
         if domain_total == 0 {
@@ -264,6 +263,22 @@ fn build_parser_default_domain_plan(
         }
     }
 
+    // A symbolic child domain already pays the one runtime state->domain map
+    // lookup. Once that map is selected, representing the parent's exact
+    // unambiguous domain as one additional label is purely a graph-size win:
+    // it replaces concrete DEFAULT expansion without adding lookup depth.
+    // Keep parent-only/small compositions on the historical zero-overhead
+    // path unless explicitly forced.
+    let child_feature_selected = match force {
+        Some(false) => false,
+        Some(true) => true,
+        None => component_predicted
+            .iter()
+            .skip(1)
+            .any(|&predicted| predicted >= min_saved),
+    };
+    let symbolic_parent_defaults = force_parent_defaults || child_feature_selected;
+    let first_domain_component = usize::from(!symbolic_parent_defaults);
     let max_domains = components.len().saturating_sub(first_domain_component);
     let labels_fit = (num_parser_states as i64)
         .saturating_add(max_domains as i64)
@@ -273,12 +288,7 @@ fn build_parser_default_domain_plan(
     let mut parser_state_labels = vec![NO_PARSER_DOMAIN_LABEL; n];
     let mut predicted_saved_edges = 0usize;
 
-    let feature_selected = labels_fit
-        && match force {
-            Some(false) => false,
-            Some(true) => true,
-            None => component_predicted.iter().any(|&predicted| predicted >= min_saved),
-        };
+    let feature_selected = labels_fit && (child_feature_selected || force_parent_defaults);
     if feature_selected {
         // Once one child amortizes the table-sized runtime map, every further
         // exact child domain is a marginal win: one synthetic label replaces a
