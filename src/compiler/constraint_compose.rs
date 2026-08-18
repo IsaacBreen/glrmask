@@ -8171,12 +8171,18 @@ fn build_composition_templates(
     let from_characterizations_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
     let commit_started_at = Instant::now();
     let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
-    for (&terminal, dfa) in &templates.by_terminal {
-        let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-        if let Some(split) = try_split_commit_template_dfas(&commit_dfa)
-            && let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize)
-        {
-            *slot = Some(Arc::new(split));
+    let split_templates = templates
+        .by_terminal
+        .par_iter()
+        .filter_map(|(&terminal, dfa)| {
+            let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+            try_split_commit_template_dfas(&commit_dfa)
+                .map(|split| (terminal, Arc::new(split)))
+        })
+        .collect::<Vec<_>>();
+    for (terminal, split) in split_templates {
+        if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+            *slot = Some(split);
         }
     }
     let commit_ms = commit_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -18790,6 +18796,17 @@ mod tests {
             let fast_skeleton_started = Instant::now();
             let fast_templates = Templates::from_terminal_dfas(fast_dfas);
             let fast_skeleton_ms = fast_skeleton_started.elapsed().as_secs_f64() * 1000.0;
+            let fast_commit_started = Instant::now();
+            let fast_commit_templates = fast_templates
+                .by_terminal
+                .par_iter()
+                .filter_map(|(&terminal, dfa)| {
+                    let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                    try_split_commit_template_dfas(&commit_dfa)
+                        .map(|split| (terminal, Arc::new(split)))
+                })
+                .collect::<Vec<_>>();
+            let fast_commit_ms = fast_commit_started.elapsed().as_secs_f64() * 1000.0;
             let fast_validate_started = Instant::now();
             let mut fast_template_mismatches = Vec::new();
             for (terminal, &active) in tight_selected.iter().enumerate() {
@@ -18823,15 +18840,16 @@ mod tests {
                 .expect("fast ideal templates should induce a parser NWA");
             let fast_nwa_ms = fast_nwa_started.elapsed().as_secs_f64() * 1000.0;
             eprintln!(
-                "MINBOUND OUTER_IDEAL_FAST_TEMPLATE_NWA active={} reused={} patched={} characterization_cache_hits={} transport_ms={fast_transport_ms:.3} patch_assembly_ms={fast_patch_assembly_ms:.3} patch_compile_ms={fast_patch_compile_ms:.3} skeleton_ms={fast_skeleton_ms:.3} validate_ms={fast_validate_ms:.3} mismatches={} nwa_states={} nwa_transitions={} nwa_ms={fast_nwa_ms:.3} counted_total_ms={:.3} total_with_validation_ms={:.3}",
+                "MINBOUND OUTER_IDEAL_FAST_TEMPLATE_NWA active={} reused={} patched={} characterization_cache_hits={} transport_ms={fast_transport_ms:.3} patch_assembly_ms={fast_patch_assembly_ms:.3} patch_compile_ms={fast_patch_compile_ms:.3} skeleton_ms={fast_skeleton_ms:.3} commit_templates={} commit_ms={fast_commit_ms:.3} validate_ms={fast_validate_ms:.3} mismatches={} nwa_states={} nwa_transitions={} nwa_ms={fast_nwa_ms:.3} counted_total_ms={:.3} total_with_validation_ms={:.3}",
                 tight_active_terminals,
                 reuse_selected.iter().filter(|&&selected| selected).count(),
                 fast_patched_characterizations.len(),
                 fast_characterization_cache_hits,
+                fast_commit_templates.len(),
                 fast_template_mismatches.len(),
                 fast_parser_nwa.states().len(),
                 fast_parser_nwa.states().iter().map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>()).sum::<usize>(),
-                fast_transport_ms + fast_patch_assembly_ms + fast_patch_compile_ms + fast_skeleton_ms + fast_nwa_ms,
+                fast_transport_ms + fast_patch_assembly_ms + fast_patch_compile_ms + fast_skeleton_ms + fast_commit_ms + fast_nwa_ms,
                 fast_template_path_started.elapsed().as_secs_f64() * 1000.0,
             );
             let patched_characterization_started = Instant::now();
