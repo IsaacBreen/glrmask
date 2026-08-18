@@ -12660,6 +12660,13 @@ pub(crate) fn compose_constraints_owned_parent(
         .collect::<Vec<_>>();
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
         component_tokenizer_state_layout_owned_parent(&component_constraints);
+    let tokenizer_inputs = component_constraints
+        .iter()
+        .enumerate()
+        .map(|(index, constraint)| {
+            (&constraint.tokenizer, composed_table.terminal_offsets[index])
+        })
+        .collect::<Vec<_>>();
 
     let component_views_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
     let specials_started_at = Instant::now();
@@ -12801,7 +12808,29 @@ pub(crate) fn compose_constraints_owned_parent(
     let skip_boundary_for_floor =
         std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
-    let (prepared_components_result, (boundary_result, boundary_ms)) = rayon::join(
+    let ((tokenizer_result, tokenizer_ms), (prepared_components_result, (boundary_result, boundary_ms))) =
+        rayon::join(
+            || {
+                let started_at = Instant::now();
+                let parent_tokenizer = parent.tokenizer.clone();
+                let child_tokenizers = children
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        (
+                            &child.constraint.tokenizer,
+                            composed_table.terminal_offsets[index + 1],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let result = Tokenizer::disjoint_union_with_owned_parent(
+                    parent_tokenizer,
+                    composed_table.terminal_offsets[0],
+                    &child_tokenizers,
+                );
+                (result, started_at.elapsed().as_secs_f64() * 1000.0)
+            },
+            || rayon::join(
             || {
                 let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (possible_matches_result, possible_matches_extract_ms))) =
                     rayon::join(
@@ -12949,7 +12978,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 }
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
-        );
+        ));
     let (prepared_components, coordinate_ms, possible_matches_extract_ms) = prepared_components_result?;
     let boundary_repair = boundary_result?;
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -12975,14 +13004,6 @@ pub(crate) fn compose_constraints_owned_parent(
     );
     let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let child_tokenizers = children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            (&child.constraint.tokenizer, composed_table.terminal_offsets[index + 1])
-        })
-        .collect::<Vec<_>>();
-    let tokenizer_started_at = Instant::now();
     let parent_fast_transitions = std::mem::take(&mut parent.tokenizer_fast_transitions);
     let child_fast_transitions = children
         .iter()
@@ -12997,23 +13018,13 @@ pub(crate) fn compose_constraints_owned_parent(
     let tokenizer_fast_transitions = parent_fast_transitions
         .append_rebased_children(&child_fast_transitions)
         .unwrap_or_default();
-    let parent_tokenizer = std::mem::replace(
-        &mut parent.tokenizer,
-        Tokenizer::disjoint_union_with_terminal_offsets(&[]).0,
-    );
-    let (mut tokenizer, tokenizer_state_offsets) =
-        Tokenizer::disjoint_union_with_owned_parent(
-            parent_tokenizer,
-            composed_table.terminal_offsets[0],
-            &child_tokenizers,
-        );
+    let (mut tokenizer, tokenizer_state_offsets) = tokenizer_result;
     if let Some(canonical) = merged_ignores.canonical {
         tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
     }
-    let tokenizer_ms = tokenizer_started_at.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(
         tokenizer_state_offsets, expected_tokenizer_state_offsets,
-        "owned-parent tokenizer state offsets differ from predicted layout",
+        "predicted composed tokenizer state offsets differ from materialized union",
     );
 
 
