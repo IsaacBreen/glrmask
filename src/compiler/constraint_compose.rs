@@ -62,6 +62,7 @@ use crate::compiler::glr::table::{
     Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput, compose_subgrammar_tables,
     compose_subgrammar_tables_explicit,
 };
+use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{ScopedWeightOpCache, SharedTokenSet, Weight};
@@ -1017,9 +1018,18 @@ struct BoundaryTokenNodeKey {
     offset: usize,
     /// `u32::MAX` means no non-ignore terminal has committed yet.
     last_terminal: u32,
+    /// Last concrete terminal edge, including IGNORE. IGNORE is transparent
+    /// for parser follow legality but still carries component/interface
+    /// provenance for cross-token interface fusion.
+    last_graph_terminal: u32,
     /// Whether this path has touched a terminal that can begin a child or a
     /// parent continuation (or a scoped ignore terminal).
     seeded: bool,
+    /// Whether two concrete parser-visible terminals on this path witness an
+    /// actual composed-grammar interface pair.  This is independently
+    /// sufficient boundary evidence; requiring `seeded && interface_witnessed`
+    /// is strictly stronger than the grammar semantics.
+    interface_witnessed: bool,
     /// False only for the arbitrary-residual first fragment. Once any
     /// terminal commits, subsequent fragments start from lexer reset.
     started: bool,
@@ -1332,22 +1342,149 @@ fn scan_component_residual_start_groups(
     starts_by_scan
 }
 
+
+fn visible_boundary_interface_pairs(
+    analyzed: &AnalyzedGrammar,
+    boundary_nonterminals: &BTreeSet<u32>,
+    control_terminals: &BTreeSet<u32>,
+) -> BTreeSet<(u32, u32)> {
+    let set_len = analyzed.num_terminals as usize + 1;
+    let mut last = vec![BitSet::new(set_len); analyzed.num_nonterminals as usize];
+    loop {
+        let mut changed = false;
+        for rule in &analyzed.rules {
+            let lhs = rule.lhs as usize;
+            let mut additions = BitSet::new(set_len);
+            for symbol in rule.rhs.iter().rev() {
+                match symbol {
+                    Symbol::Terminal(terminal) => {
+                        if *terminal < analyzed.num_terminals {
+                            additions.set(*terminal as usize);
+                        }
+                        break;
+                    }
+                    Symbol::Nonterminal(nonterminal) => {
+                        if let Some(row) = last.get(*nonterminal as usize) {
+                            additions.union_with(row);
+                        }
+                        if !analyzed.nullable.contains(nonterminal) {
+                            break;
+                        }
+                    }
+                }
+            }
+            let before = last[lhs].count_ones();
+            last[lhs].union_with(&additions);
+            changed |= last[lhs].count_ones() != before;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // PRECEDE is FOLLOW on the reversed grammar: the visible terminals that
+    // may occur immediately before a nonterminal, propagating through nullable
+    // prefixes and callers.
+    let mut precede = vec![BitSet::new(set_len); analyzed.num_nonterminals as usize];
+    loop {
+        let mut changed = false;
+        for rule in &analyzed.rules {
+            for (position, symbol) in rule.rhs.iter().enumerate() {
+                let Symbol::Nonterminal(nonterminal) = symbol else {
+                    continue;
+                };
+                let mut additions = BitSet::new(set_len);
+                let mut prefix_nullable = true;
+                for prefix in rule.rhs[..position].iter().rev() {
+                    match prefix {
+                        Symbol::Terminal(terminal) => {
+                            if *terminal < analyzed.num_terminals {
+                                additions.set(*terminal as usize);
+                            }
+                            prefix_nullable = false;
+                            break;
+                        }
+                        Symbol::Nonterminal(previous) => {
+                            if let Some(row) = last.get(*previous as usize) {
+                                additions.union_with(row);
+                            }
+                            if !analyzed.nullable.contains(previous) {
+                                prefix_nullable = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if prefix_nullable {
+                    if let Some(lhs_precede) = precede.get(rule.lhs as usize) {
+                        additions.union_with(lhs_precede);
+                    }
+                }
+                let target = &mut precede[*nonterminal as usize];
+                let before = target.count_ones();
+                target.union_with(&additions);
+                changed |= target.count_ones() != before;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let lexical = |terminal: usize| {
+        terminal < analyzed.num_terminals as usize
+            && !control_terminals.contains(&(terminal as u32))
+    };
+    let mut pairs = BTreeSet::new();
+    for &nonterminal in boundary_nonterminals {
+        let Some(before) = precede.get(nonterminal as usize) else {
+            continue;
+        };
+        let Some(first) = analyzed.first.get(nonterminal as usize) else {
+            continue;
+        };
+        for left in before.iter().filter(|&terminal| lexical(terminal)) {
+            for right in first.iter().filter(|&terminal| lexical(terminal)) {
+                pairs.insert((left as u32, right as u32));
+            }
+        }
+        let Some(last_row) = last.get(nonterminal as usize) else {
+            continue;
+        };
+        let Some(after) = analyzed.follow.get(nonterminal as usize) else {
+            continue;
+        };
+        for left in last_row.iter().filter(|&terminal| lexical(terminal)) {
+            for right in after.iter().filter(|&terminal| lexical(terminal)) {
+                pairs.insert((left as u32, right as u32));
+            }
+        }
+    }
+    pairs
+}
+
 fn transition_boundary_key(
     key: BoundaryTokenNodeKey,
     terminal: u32,
     next_offset: usize,
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
+    interface_pairs: &BTreeSet<(u32, u32)>,
+    ignore_fusion_edges: &BTreeSet<(u32, u32)>,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> Option<BoundaryTokenNodeKey> {
     if ignore_terminals.contains(terminal as usize) {
         return Some(BoundaryTokenNodeKey {
             offset: next_offset,
+            last_graph_terminal: terminal,
             seeded: key.seeded
                 || seed_terminals
                     .get(terminal as usize)
                     .copied()
                     .unwrap_or(false),
+            interface_witnessed: key.interface_witnessed
+                || (key.last_graph_terminal != u32::MAX
+                    && ignore_fusion_edges.contains(&(key.last_graph_terminal, terminal))),
             started: true,
             ..key
         });
@@ -1362,11 +1499,17 @@ fn transition_boundary_key(
     Some(BoundaryTokenNodeKey {
         offset: next_offset,
         last_terminal: terminal,
+        last_graph_terminal: terminal,
         seeded: key.seeded
             || seed_terminals
                 .get(terminal as usize)
                 .copied()
                 .unwrap_or(false),
+        interface_witnessed: key.interface_witnessed
+            || (key.last_terminal != u32::MAX
+                && interface_pairs.contains(&(key.last_terminal, terminal)))
+            || (key.last_graph_terminal != u32::MAX
+                && ignore_fusion_edges.contains(&(key.last_graph_terminal, terminal))),
         started: true,
     })
 }
@@ -1377,6 +1520,8 @@ fn build_boundary_token_graph(
     reset_scans: &[&ResidualScanResult],
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
+    interface_pairs: &BTreeSet<(u32, u32)>,
+    ignore_fusion_edges: &BTreeSet<(u32, u32)>,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> Option<(Vec<BoundaryTokenNode>, Vec<bool>, Vec<bool>)> {
     let mut nodes = Vec::<BoundaryTokenNode>::new();
@@ -1385,7 +1530,9 @@ fn build_boundary_token_graph(
     let start_key = BoundaryTokenNodeKey {
         offset: 0,
         last_terminal: u32::MAX,
+        last_graph_terminal: u32::MAX,
         seeded: false,
+        interface_witnessed: false,
         started: false,
     };
     nodes.push(BoundaryTokenNode {
@@ -1421,6 +1568,8 @@ fn build_boundary_token_graph(
                 next_offset,
                 seed_terminals,
                 ignore_terminals,
+                interface_pairs,
+                ignore_fusion_edges,
                 disallowed_follows,
             ) else {
                 continue;
@@ -1429,7 +1578,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && target_key.seeded;
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -1453,6 +1602,8 @@ fn build_boundary_token_graph(
                 bytes.len(),
                 seed_terminals,
                 ignore_terminals,
+                interface_pairs,
+                ignore_fusion_edges,
                 disallowed_follows,
             ) else {
                 continue;
@@ -1461,7 +1612,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && target_key.seeded;
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -1567,6 +1718,7 @@ fn boundary_candidate_state_ranges_by_token(
 fn candidate_start_state_groups_for_token(
     token_id: u32,
     candidate_ranges: &BTreeMap<u32, Vec<(usize, u32, u32)>>,
+    extra_start_states_by_token: &BTreeMap<u32, Vec<u32>>,
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
 ) -> Vec<(u32, Vec<u32>)> {
@@ -1575,6 +1727,16 @@ fn candidate_start_state_groups_for_token(
     // component's local start state.
     let mut support_by_representative = FxHashMap::<u32, Vec<u32>>::default();
     support_by_representative.insert(0, vec![0]);
+    if let Some(extra_states) = extra_start_states_by_token.get(&token_id) {
+        // These states are an exact support subset, not necessarily a whole
+        // existing TSID class, so preserve them as singleton representatives.
+        // The residual scanner will still merge equal lexical scans afterward.
+        for &state in extra_states {
+            if state != 0 {
+                support_by_representative.entry(state).or_default().push(state);
+            }
+        }
+    }
     if let Some(ranges) = candidate_ranges.get(&token_id) {
         for &(component_index, start_tsid, end_tsid) in ranges {
             let constraint = components[component_index];
@@ -1879,6 +2041,257 @@ fn boundary_token_prefilter(
     candidates
 }
 
+
+#[derive(Debug, Default)]
+struct BoundaryIgnoreFusionCandidates {
+    /// Grammar-derived model tokens that can straddle an interface through an
+    /// IGNORE fragment. These are added to the ordinary boundary prefilter.
+    token_ids: BTreeSet<u32>,
+    /// Exact raw merged tokenizer states from which a left-hand interface
+    /// terminal/IGNORE fragment can complete inside this token.  The ordinary
+    /// possible-matches index does not necessarily contain this support because
+    /// the token subsequently resets and enters another component.
+    extra_start_states_by_token: BTreeMap<u32, Vec<u32>>,
+    /// Pair-aware adjacent terminal edges used by the exact token graph.  Each
+    /// edge is either source-component IGNORE -> target interface terminal or
+    /// source interface terminal -> target-component IGNORE.
+    terminal_edges: BTreeSet<(u32, u32)>,
+}
+
+fn boundary_interface_ignore_fusion_candidates(
+    vocab: &Vocab,
+    components: &[&Constraint],
+    tokenizer_state_offsets: &[u32],
+    terminal_offsets: &[u32],
+    interface_pairs: &BTreeSet<(u32, u32)>,
+) -> BoundaryIgnoreFusionCandidates {
+    debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
+    debug_assert_eq!(components.len(), terminal_offsets.len());
+    let started_at = Instant::now();
+
+    let terminal_owner = |terminal: u32| -> Option<(usize, u32)> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        let local = terminal.checked_sub(*terminal_offsets.get(component)?)?;
+        (local < components.get(component)?.tokenizer.num_terminals())
+            .then_some((component, local))
+    };
+
+    // Derive the two exact pair-aware IGNORE orientations from real grammar
+    // interfaces.  Lexically equal aliases are deliberately *not* collapsed:
+    // terminal IDs carry the concrete component provenance needed here.
+    let mut terminal_edges = BTreeSet::<(u32, u32)>::new();
+    for &(source, target) in interface_pairs {
+        let (Some((source_component, _)), Some((target_component, _))) =
+            (terminal_owner(source), terminal_owner(target))
+        else {
+            continue;
+        };
+        if source_component == target_component {
+            continue;
+        }
+        if let Some(ignore) = components[source_component].ignore_terminal {
+            terminal_edges.insert((terminal_offsets[source_component] + ignore, target));
+        }
+        if let Some(ignore) = components[target_component].ignore_terminal {
+            terminal_edges.insert((source, terminal_offsets[target_component] + ignore));
+        }
+    }
+    if terminal_edges.is_empty() {
+        return BoundaryIgnoreFusionCandidates::default();
+    }
+
+    // Exit fusions can leave the target component's IGNORE in progress at the
+    // model-token boundary.  The next token may finish that same IGNORE and
+    // only then begin the paired target terminal.  This continuation is local
+    // to the target component (so it is *not* a new crossing edge), but its
+    // residual lexer support is composition-specific because the parser is now
+    // in the post-subgrammar continuation.  Include it in candidate-support
+    // discovery so the ordinary Delta_t lane can represent that continuation.
+    let mut support_edges = terminal_edges.clone();
+    for &(_source, target) in interface_pairs {
+        let Some((target_component, _)) = terminal_owner(target) else {
+            continue;
+        };
+        if let Some(ignore) = components[target_component].ignore_terminal {
+            support_edges.insert((terminal_offsets[target_component] + ignore, target));
+        }
+    }
+
+    // Necessary adjacent-byte signatures.  At a nonempty split, the final byte
+    // consumed by the left terminal is immediately followed by the first byte
+    // consumed by the right terminal.  Opaque/missing expressions use the full
+    // byte set, which may retain extra candidates but can never remove a real
+    // witness.
+    let summary_for = |terminal: u32| -> ExprByteSummary {
+        terminal_owner(terminal)
+            .and_then(|(component, local)| components[component].tokenizer.terminal_expr(local))
+            .map(expr_byte_summary)
+            .unwrap_or(ExprByteSummary {
+                nullable: false,
+                first: U8Set::all(),
+                last: U8Set::all(),
+                reachable: U8Set::all(),
+            })
+    };
+    let mut relations_by_adjacent = vec![Vec::<(u32, u32)>::new(); 1 << 16];
+    for &(left, right) in &support_edges {
+        let left_bytes = summary_for(left).last;
+        let right_bytes = summary_for(right).first;
+        for left_byte in 0u16..=255 {
+            if !left_bytes.contains(left_byte as u8) {
+                continue;
+            }
+            for right_byte in 0u16..=255 {
+                if right_bytes.contains(right_byte as u8) {
+                    relations_by_adjacent[((left_byte << 8) | right_byte) as usize]
+                        .push((left, right));
+                }
+            }
+        }
+    }
+    for relations in &mut relations_by_adjacent {
+        relations.sort_unstable();
+        relations.dedup();
+    }
+
+    let mut token_ids = BTreeSet::<u32>::new();
+    let mut extra_start_states_by_token = BTreeMap::<u32, Vec<u32>>::new();
+    let mut coarse_tokens = 0usize;
+    let mut grouped_scans = 0usize;
+
+    for (&token_id, bytes) in vocab.entries_map() {
+        if bytes.len() < 2 {
+            continue;
+        }
+        let mut relevant_edges = BTreeSet::<(u32, u32)>::new();
+        for adjacent in bytes.windows(2) {
+            let key = ((adjacent[0] as usize) << 8) | adjacent[1] as usize;
+            relevant_edges.extend(relations_by_adjacent[key].iter().copied());
+        }
+        if relevant_edges.is_empty() {
+            continue;
+        }
+        coarse_tokens += 1;
+
+        let mut rights_by_left = BTreeMap::<u32, Vec<u32>>::new();
+        for (left, right) in relevant_edges {
+            rights_by_left.entry(left).or_default().push(right);
+        }
+        for rights in rights_by_left.values_mut() {
+            rights.sort_unstable();
+            rights.dedup();
+        }
+
+        for (left, rights) in rights_by_left {
+            let Some((left_component, left_local)) = terminal_owner(left) else {
+                continue;
+            };
+            let component = components[left_component];
+            let Some(live_states) = component.terminal_live_states.get(left_local as usize) else {
+                continue;
+            };
+            if live_states.is_empty() {
+                continue;
+            }
+            let local_start = component.tokenizer.start_state();
+            // Include the component reset in the exact proof so exit-oriented
+            // fusions are discovered even when the left terminal begins in the
+            // current model token.  We do not publish that local reset as extra
+            // support below: merged state zero already represents reset.
+            let starts = live_states.clone();
+            if starts.is_empty() {
+                continue;
+            }
+
+            for (end_states, matches, grouped_starts) in component
+                .tokenizer
+                .execute_summary_groups_from_states(bytes, &starts)
+            {
+                let _ = end_states;
+                grouped_scans += 1;
+                let Some(width) = matches
+                    .iter()
+                    .find_map(|(terminal, width)| (*terminal == left_local).then_some(*width))
+                else {
+                    continue;
+                };
+                if width == 0 || width >= bytes.len() {
+                    continue;
+                }
+                let suffix = &bytes[width..];
+                let mut right_live = false;
+                for &right in &rights {
+                    let Some((right_component, right_local)) = terminal_owner(right) else {
+                        continue;
+                    };
+                    let right_constraint = components[right_component];
+                    let (right_end_states, right_matches) = right_constraint
+                        .tokenizer
+                        .execute_summary_from_state(
+                            suffix,
+                            right_constraint.tokenizer.start_state(),
+                        );
+                    let completed = right_matches.iter().any(|&(terminal, matched_width)| {
+                        terminal == right_local && matched_width == suffix.len()
+                    });
+                    let unfinished = right_end_states.iter().any(|&state| {
+                        right_constraint
+                            .tokenizer
+                            .possible_future_terminals_iter(state)
+                            .any(|terminal| terminal == right_local)
+                    });
+                    if completed || unfinished {
+                        right_live = true;
+                        break;
+                    }
+                }
+                if !right_live {
+                    continue;
+                }
+                token_ids.insert(token_id);
+                let output = extra_start_states_by_token.entry(token_id).or_default();
+                output.extend(
+                    grouped_starts
+                        .into_iter()
+                        .filter(|&local_state| local_state != local_start)
+                        .filter_map(|local_state| {
+                            tokenizer_state_offsets[left_component].checked_add(local_state)
+                        }),
+                );
+            }
+        }
+    }
+
+    for states in extra_start_states_by_token.values_mut() {
+        states.sort_unstable();
+        states.dedup();
+    }
+    if compose_profile_enabled() {
+        let support_states = extra_start_states_by_token
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_interface_ignore_fusions] interface_pairs={} terminal_edges={} support_edges={} coarse_tokens={} candidates={} support_states={} grouped_scans={} ms={:.3}",
+            interface_pairs.len(),
+            terminal_edges.len(),
+            support_edges.len(),
+            coarse_tokens,
+            token_ids.len(),
+            support_states,
+            grouped_scans,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    BoundaryIgnoreFusionCandidates {
+        token_ids,
+        extra_start_states_by_token,
+        terminal_edges,
+    }
+}
+
 fn discover_boundary_token_paths(
     vocab: &Vocab,
     components: &[&Constraint],
@@ -1886,6 +2299,7 @@ fn discover_boundary_token_paths(
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
+    interface_pairs: &BTreeSet<(u32, u32)>,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> BoundaryTokenDiscovery {
     let num_terminals = components
@@ -1896,6 +2310,13 @@ fn discover_boundary_token_paths(
         .unwrap_or(0) as usize;
     let reset_starts = composite_reset_states(components, tokenizer_state_offsets);
     let reset_live_bytes = component_reset_live_bytes(components);
+    let ignore_fusions = boundary_interface_ignore_fusion_candidates(
+        vocab,
+        components,
+        tokenizer_state_offsets,
+        terminal_offsets,
+        interface_pairs,
+    );
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let all_multi_byte_entries = vocab
         .entries_map()
@@ -1934,7 +2355,7 @@ fn discover_boundary_token_paths(
     };
     let suffix_cache_ms = suffix_cache_started_at.elapsed().as_secs_f64() * 1000.0;
     let prefilter_started_at = Instant::now();
-    let prefilter = if use_prefilter {
+    let mut prefilter = if use_prefilter {
         if let Some(cache) = reset_suffix_cache.as_ref() {
             all_multi_byte_entries
                 .iter()
@@ -1968,6 +2389,7 @@ fn discover_boundary_token_paths(
             .map(|&(token_id, _)| token_id)
             .collect::<BTreeSet<_>>()
     };
+    prefilter.extend(ignore_fusions.token_ids.iter().copied());
     let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
     let multi_byte_entries = all_multi_byte_entries
         .iter()
@@ -2020,6 +2442,7 @@ fn discover_boundary_token_paths(
             let candidate_groups = candidate_start_state_groups_for_token(
                 token_id,
                 &candidate_ranges,
+                &ignore_fusions.extra_start_states_by_token,
                 components,
                 tokenizer_state_offsets,
             );
@@ -2045,6 +2468,8 @@ fn discover_boundary_token_paths(
                     &reset_scans,
                     seed_terminals,
                     ignore_terminals,
+                    interface_pairs,
+                    &ignore_fusions.terminal_edges,
                     disallowed_follows,
                 ) else {
                     continue;
@@ -8526,6 +8951,17 @@ fn build_boundary_repair(
             *slot = true;
         }
     }
+    let interface_pairs = visible_boundary_interface_pairs(
+        &analyzed,
+        &composed_table.boundary_nonterminals,
+        &composed_table.control_terminals,
+    );
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_interface_pairs] pairs={}",
+            interface_pairs.len(),
+        );
+    }
     // The composed rule graph substitutes every placeholder occurrence with
     // the remapped child root. Its grammar-level ever-follow relation is
     // therefore exact for adjacent terminal matches and can discard lexical
@@ -8566,6 +9002,7 @@ fn build_boundary_repair(
                             &composed_table.terminal_offsets,
                             &seed_terminals,
                             &ignore_terminals.all,
+                            &interface_pairs,
                             &disallowed_follows,
                         );
                         (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -12492,6 +12929,176 @@ mod tests {
             &vocab,
             4,
         );
+    }
+
+    #[test]
+    fn ignore_interface_fusions_survive_model_token_boundaries() {
+        // Entry orientation:
+        //   token 0 = "Xa" leaves parent IGNORE="ab" in progress;
+        //   token 1 = "bt" completes that IGNORE and enters the child.
+        // Exit orientation:
+        //   token 3 = "X" enters the child at reset;
+        //   token 4 = "ta" completes child T and starts parent IGNORE;
+        //   token 5 = "b!" completes IGNORE in the following model token.
+        let vocab = Vocab::new(vec![
+            (0, b"Xa".to_vec()),
+            (1, b"bt".to_vec()),
+            (2, b"!".to_vec()),
+            (3, b"X".to_vec()),
+            (4, b"ta".to_vec()),
+            (5, b"b!".to_vec()),
+            (6, b"a".to_vec()),
+            (7, b"b".to_vec()),
+            (8, b"t".to_vec()),
+            (9, b"ab".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= "ab";
+                t X ::= "X";
+                t BANG ::= "!";
+                t SUB ::= @token(999);
+                nt document ::= X SUB BANG;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                t CHILD_T ::= "t";
+                nt child ::= CHILD_T;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= "ab";
+                t X ::= "X";
+                t BANG ::= "!";
+                g child ::= {
+                    start child;
+                    t CHILD_T ::= "t";
+                    nt child ::= CHILD_T;
+                };
+                nt document ::= X child BANG;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        // Verify the candidate theorem directly, not merely through the final
+        // parser.  The entry token must carry a non-reset raw-state support;
+        // the exit token begins at reset and therefore needs no extra support.
+        let composed_table = compose_subgrammar_tables(
+            &parent.table,
+            None,
+            &[SubgrammarTableInput {
+                placeholder_terminal: terminal(&parent, "SUB"),
+                table: &child.table,
+                ignore_terminal: child.ignore_terminal,
+                start_nullable: child.table.embedded_start_nullable(),
+            }],
+        )
+        .unwrap();
+        let augmented_start = composed_table.table.rules[0].lhs;
+        let analyzed = AnalyzedGrammar::from_composed_rules(
+            composed_table.table.rules.clone(),
+            composed_table.table.num_terminals,
+            parent
+                .terminal_display_names
+                .iter()
+                .cloned()
+                .chain(
+                    child
+                        .terminal_display_names
+                        .iter()
+                        .map(|name| format!("subgrammar0::{name}")),
+                )
+                .collect(),
+            composed_table.table.nonterminal_display_names.clone(),
+            augmented_start,
+        );
+        let interface_pairs = visible_boundary_interface_pairs(
+            &analyzed,
+            &composed_table.boundary_nonterminals,
+            &composed_table.control_terminals,
+        );
+        let (_merged_tokenizer, tokenizer_state_offsets) =
+            Tokenizer::disjoint_union_with_terminal_offsets(&[
+                (&parent.tokenizer, composed_table.terminal_offsets[0]),
+                (&child.tokenizer, composed_table.terminal_offsets[1]),
+            ]);
+        let components = [&parent, &child];
+        let fusion = boundary_interface_ignore_fusion_candidates(
+            &vocab,
+            &components,
+            &tokenizer_state_offsets,
+            &composed_table.terminal_offsets,
+            &interface_pairs,
+        );
+        assert!(fusion.token_ids.contains(&1), "entry fusion token bt was not derived");
+        assert!(fusion.token_ids.contains(&4), "exit fusion token ta was not derived");
+        assert!(
+            fusion
+                .extra_start_states_by_token
+                .get(&1)
+                .is_some_and(|states| !states.is_empty()),
+            "entry fusion must retain the in-progress parent-IGNORE start state",
+        );
+
+        let parent_ignore = composed_table.terminal_offsets[0] + terminal(&parent, "PARENT_WS");
+        let child_t = composed_table.terminal_offsets[1] + terminal(&child, "CHILD_T");
+        assert!(fusion.terminal_edges.contains(&(parent_ignore, child_t)));
+        assert!(fusion.terminal_edges.contains(&(child_t, parent_ignore)));
+
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+        for sequence in [[0u32, 1, 2].as_slice(), [3u32, 4, 5].as_slice()] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for &token in sequence {
+                let actual_mask = actual.mask();
+                let expected_mask = expected.mask();
+                if actual_mask != expected_mask {
+                    eprintln!(
+                        "IGNORE_FUSION_STATE sequence={sequence:?} before_token={token} actual={:?} expected={:?}",
+                        actual.debug_parser_stacks(),
+                        expected.debug_parser_stacks(),
+                    );
+                    let differing = vocab
+                        .entries_map()
+                        .iter()
+                        .filter_map(|(&candidate, bytes)| {
+                            (token_allowed(&actual_mask, candidate)
+                                != token_allowed(&expected_mask, candidate))
+                                .then_some((candidate, bytes.clone(), token_allowed(&actual_mask, candidate), token_allowed(&expected_mask, candidate)))
+                        })
+                        .collect::<Vec<_>>();
+                    eprintln!("IGNORE_FUSION_DIFF {differing:?}");
+                }
+                assert_eq!(
+                    actual_mask,
+                    expected_mask,
+                    "mask mismatch before token {token} in sequence {sequence:?}",
+                );
+                actual.commit_token(token).unwrap_or_else(|error| {
+                    panic!("composed rejected token {token} in {sequence:?}: {error}")
+                });
+                expected.commit_token(token).unwrap_or_else(|error| {
+                    panic!("monolithic rejected token {token} in {sequence:?}: {error}")
+                });
+            }
+            assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(actual.is_finished(), expected.is_finished());
+            assert!(actual.is_finished(), "sequence {sequence:?} should finish");
+        }
     }
 
     #[test]
