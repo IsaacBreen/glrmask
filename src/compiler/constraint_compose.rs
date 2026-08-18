@@ -958,52 +958,6 @@ fn strip_unscoped_ignore_identity(
     }
 }
 
-fn strip_unscoped_ignore_identity_with_removed(
-    automaton: &mut NWA,
-    ignore_possible_matches: Option<&Weight>,
-) -> Option<Weight> {
-    let Some(ignore_weight) = ignore_possible_matches else {
-        return None;
-    };
-    let mut removed = Weight::empty();
-    let starts = automaton.start_states().to_vec();
-    for start in starts {
-        let Some(state) = automaton.states_mut().get_mut(start as usize) else {
-            continue;
-        };
-        let Some(final_weight) = state.final_weight.take() else {
-            continue;
-        };
-        let overlap = final_weight.intersection(ignore_weight);
-        if !overlap.is_empty() {
-            removed = removed.union(&overlap);
-        }
-        let retained = final_weight.difference(ignore_weight);
-        if !retained.is_empty() {
-            state.final_weight = Some(retained);
-        }
-    }
-    (!removed.is_empty()).then_some(removed)
-}
-
-/// Convert the removed standalone-ignore empty-word acceptance into the exact
-/// static top-of-stack predicate used by the composed parser. The composed LR
-/// table marks a scoped ignore with `Skip`; for precisely those top states the
-/// parser stack is unchanged, so the removed weight is valid without inspecting
-/// deeper stack symbols. `parser_top_accept` implements exactly that predicate.
-fn scoped_ignore_top_acceptance(
-    removed: &Weight,
-    composed_table: &ComposedTable,
-    terminal: u32,
-) -> BTreeMap<i32, Weight> {
-    let mut result = BTreeMap::new();
-    for state in 0..composed_table.table.num_states {
-        if matches!(composed_table.table.action(state, terminal), Some(Action::Skip)) {
-            result.insert(encode_positive_label(state), removed.clone());
-        }
-    }
-    result
-}
 
 type PossibleMatches = BTreeMap<u32, Weight>;
 
@@ -1016,20 +970,17 @@ struct BoundaryRepair {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BoundaryTokenNodeKey {
     offset: usize,
-    /// `u32::MAX` means no non-ignore terminal has committed yet.
+    /// `u32::MAX` means no parser-visible terminal has committed yet.
+    /// Globally erased trivia does not update this field.
     last_terminal: u32,
-    /// Last concrete terminal edge, including IGNORE. IGNORE is transparent
-    /// for parser follow legality but still carries component/interface
-    /// provenance for cross-token interface fusion.
-    last_graph_terminal: u32,
     /// Whether this path has touched a terminal that can begin a child or a
     /// parent continuation (or a scoped ignore terminal).
     seeded: bool,
     /// Whether two concrete parser-visible terminals on this path witness an
-    /// actual composed-grammar interface pair.  This is independently
-    /// sufficient boundary evidence; requiring `seeded && interface_witnessed`
-    /// is strictly stronger than the grammar semantics.
-    interface_witnessed: bool,
+    /// a concrete component switch.  This is independently
+    /// sufficient boundary evidence; either a seed or a component switch is sufficient lexical boundary evidence;
+    /// the LR table later decides exact parser legality.
+    component_switch_witnessed: bool,
     /// False only for the arbitrary-residual first fragment. Once any
     /// terminal commits, subsequent fragments start from lexer reset.
     started: bool,
@@ -1468,48 +1419,29 @@ fn transition_boundary_key(
     terminal: u32,
     next_offset: usize,
     seed_terminals: &[bool],
-    ignore_terminals: &BitSet,
-    interface_pairs: &BTreeSet<(u32, u32)>,
-    ignore_fusion_edges: &BTreeSet<(u32, u32)>,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    globally_erased_terminals: &BitSet,
+    terminal_components: &[usize],
 ) -> Option<BoundaryTokenNodeKey> {
-    if ignore_terminals.contains(terminal as usize) {
+    if globally_erased_terminals.contains(terminal as usize) {
         return Some(BoundaryTokenNodeKey {
             offset: next_offset,
-            last_graph_terminal: terminal,
-            seeded: key.seeded
-                || seed_terminals
-                    .get(terminal as usize)
-                    .copied()
-                    .unwrap_or(false),
-            interface_witnessed: key.interface_witnessed
-                || (key.last_graph_terminal != u32::MAX
-                    && ignore_fusion_edges.contains(&(key.last_graph_terminal, terminal))),
             started: true,
             ..key
         });
     }
-    if key.last_terminal != u32::MAX
-        && disallowed_follows
-            .get(&key.last_terminal)
-            .is_some_and(|blocked| blocked.contains(terminal as usize))
-    {
-        return None;
-    }
+
+    let switched_component = key.last_terminal != u32::MAX
+        && terminal_components.get(key.last_terminal as usize)
+            != terminal_components.get(terminal as usize);
     Some(BoundaryTokenNodeKey {
         offset: next_offset,
         last_terminal: terminal,
-        last_graph_terminal: terminal,
         seeded: key.seeded
             || seed_terminals
                 .get(terminal as usize)
                 .copied()
                 .unwrap_or(false),
-        interface_witnessed: key.interface_witnessed
-            || (key.last_terminal != u32::MAX
-                && interface_pairs.contains(&(key.last_terminal, terminal)))
-            || (key.last_graph_terminal != u32::MAX
-                && ignore_fusion_edges.contains(&(key.last_graph_terminal, terminal))),
+        component_switch_witnessed: key.component_switch_witnessed || switched_component,
         started: true,
     })
 }
@@ -1519,10 +1451,8 @@ fn build_boundary_token_graph(
     arbitrary_scan: &ResidualScanResult,
     reset_scans: &[&ResidualScanResult],
     seed_terminals: &[bool],
-    ignore_terminals: &BitSet,
-    interface_pairs: &BTreeSet<(u32, u32)>,
-    ignore_fusion_edges: &BTreeSet<(u32, u32)>,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    globally_erased_terminals: &BitSet,
+    terminal_components: &[usize],
 ) -> Option<(Vec<BoundaryTokenNode>, Vec<bool>, Vec<bool>)> {
     let mut nodes = Vec::<BoundaryTokenNode>::new();
     let mut node_ids = FxHashMap::<BoundaryTokenNodeKey, usize>::default();
@@ -1530,9 +1460,8 @@ fn build_boundary_token_graph(
     let start_key = BoundaryTokenNodeKey {
         offset: 0,
         last_terminal: u32::MAX,
-        last_graph_terminal: u32::MAX,
         seeded: false,
-        interface_witnessed: false,
+        component_switch_witnessed: false,
         started: false,
     };
     nodes.push(BoundaryTokenNode {
@@ -1567,10 +1496,8 @@ fn build_boundary_token_graph(
                 terminal,
                 next_offset,
                 seed_terminals,
-                ignore_terminals,
-                interface_pairs,
-                ignore_fusion_edges,
-                disallowed_follows,
+                globally_erased_terminals,
+                terminal_components,
             ) else {
                 continue;
             };
@@ -1578,7 +1505,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.component_switch_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -1601,10 +1528,8 @@ fn build_boundary_token_graph(
                 terminal,
                 bytes.len(),
                 seed_terminals,
-                ignore_terminals,
-                interface_pairs,
-                ignore_fusion_edges,
-                disallowed_follows,
+                globally_erased_terminals,
+                terminal_components,
             ) else {
                 continue;
             };
@@ -1612,7 +1537,7 @@ fn build_boundary_token_graph(
                 target
             } else {
                 let target = nodes.len();
-                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.interface_witnessed);
+                let is_accepting = target_key.offset == bytes.len() && (target_key.seeded || target_key.component_switch_witnessed);
                 nodes.push(BoundaryTokenNode {
                     key: target_key,
                     outgoing: Vec::new(),
@@ -2042,254 +1967,92 @@ fn boundary_token_prefilter(
 }
 
 
-#[derive(Debug, Default)]
-struct BoundaryIgnoreFusionCandidates {
-    /// Grammar-derived model tokens that can straddle an interface through an
-    /// IGNORE fragment. These are added to the ordinary boundary prefilter.
-    token_ids: BTreeSet<u32>,
-    /// Exact raw merged tokenizer states from which a left-hand interface
-    /// terminal/IGNORE fragment can complete inside this token.  The ordinary
-    /// possible-matches index does not necessarily contain this support because
-    /// the token subsequently resets and enters another component.
-    extra_start_states_by_token: BTreeMap<u32, Vec<u32>>,
-    /// Pair-aware adjacent terminal edges used by the exact token graph.  Each
-    /// edge is either source-component IGNORE -> target interface terminal or
-    /// source interface terminal -> target-component IGNORE.
-    terminal_edges: BTreeSet<(u32, u32)>,
-}
-
-fn boundary_interface_ignore_fusion_candidates(
-    vocab: &Vocab,
+/// Extra arbitrary lexer starts needed by boundary discovery.
+///
+/// Static `possible_matches` is intentionally sparse: it indexes delayed-terminal
+/// queries used by runtime masking, not every raw lexer residual from which a
+/// model token may begin. Boundary composition has a stronger requirement: a
+/// token can start in the middle of any parser-visible terminal that participates
+/// in a boundary witness. Preserve those residual starts directly from the
+/// component `terminal_live_states` inverse index.
+///
+/// This is deliberately terminal-generic. Scoped IGNORE participates only
+/// because it is a visible terminal in `relevant_terminals`; globally erased
+/// IGNORE is excluded by the caller and remains lexical epsilon.
+fn boundary_visible_residual_starts_by_token(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
-    interface_pairs: &BTreeSet<(u32, u32)>,
-) -> BoundaryIgnoreFusionCandidates {
+    vocab: &Vocab,
+    candidate_tokens: &BTreeSet<u32>,
+    relevant_terminals: &BitSet,
+) -> BTreeMap<u32, Vec<u32>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
     debug_assert_eq!(components.len(), terminal_offsets.len());
-    let started_at = Instant::now();
 
-    let terminal_owner = |terminal: u32| -> Option<(usize, u32)> {
-        let component = terminal_offsets
-            .partition_point(|&offset| offset <= terminal)
-            .checked_sub(1)?;
-        let local = terminal.checked_sub(*terminal_offsets.get(component)?)?;
-        (local < components.get(component)?.tokenizer.num_terminals())
-            .then_some((component, local))
-    };
-
-    // Derive the two exact pair-aware IGNORE orientations from real grammar
-    // interfaces.  Lexically equal aliases are deliberately *not* collapsed:
-    // terminal IDs carry the concrete component provenance needed here.
-    let mut terminal_edges = BTreeSet::<(u32, u32)>::new();
-    for &(source, target) in interface_pairs {
-        let (Some((source_component, _)), Some((target_component, _))) =
-            (terminal_owner(source), terminal_owner(target))
-        else {
-            continue;
-        };
-        if source_component == target_component {
-            continue;
-        }
-        if let Some(ignore) = components[source_component].ignore_terminal {
-            terminal_edges.insert((terminal_offsets[source_component] + ignore, target));
-        }
-        if let Some(ignore) = components[target_component].ignore_terminal {
-            terminal_edges.insert((source, terminal_offsets[target_component] + ignore));
-        }
-    }
-    if terminal_edges.is_empty() {
-        return BoundaryIgnoreFusionCandidates::default();
-    }
-
-    // Exit fusions can leave the target component's IGNORE in progress at the
-    // model-token boundary.  The next token may finish that same IGNORE and
-    // only then begin the paired target terminal.  This continuation is local
-    // to the target component (so it is *not* a new crossing edge), but its
-    // residual lexer support is composition-specific because the parser is now
-    // in the post-subgrammar continuation.  Include it in candidate-support
-    // discovery so the ordinary Delta_t lane can represent that continuation.
-    let mut support_edges = terminal_edges.clone();
-    for &(_source, target) in interface_pairs {
-        let Some((target_component, _)) = terminal_owner(target) else {
-            continue;
-        };
-        if let Some(ignore) = components[target_component].ignore_terminal {
-            support_edges.insert((terminal_offsets[target_component] + ignore, target));
-        }
-    }
-
-    // Necessary adjacent-byte signatures.  At a nonempty split, the final byte
-    // consumed by the left terminal is immediately followed by the first byte
-    // consumed by the right terminal.  Opaque/missing expressions use the full
-    // byte set, which may retain extra candidates but can never remove a real
-    // witness.
-    let summary_for = |terminal: u32| -> ExprByteSummary {
-        terminal_owner(terminal)
-            .and_then(|(component, local)| components[component].tokenizer.terminal_expr(local))
-            .map(expr_byte_summary)
-            .unwrap_or(ExprByteSummary {
-                nullable: false,
-                first: U8Set::all(),
-                last: U8Set::all(),
-                reachable: U8Set::all(),
-            })
-    };
-    let mut relations_by_adjacent = vec![Vec::<(u32, u32)>::new(); 1 << 16];
-    for &(left, right) in &support_edges {
-        let left_bytes = summary_for(left).last;
-        let right_bytes = summary_for(right).first;
-        for left_byte in 0u16..=255 {
-            if !left_bytes.contains(left_byte as u8) {
+    // Necessary first-byte filter: if the epsilon closure of a residual raw
+    // state has no transition on the model token's first byte, that token
+    // cannot begin from that state. Build the inverse once so the filter is
+    // terminal-generic and independent of vocabulary size.
+    let mut starts_by_first_byte = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index];
+        let state_offset = tokenizer_state_offsets[component_index];
+        let closures = component.tokenizer.all_singleton_epsilon_closures();
+        let mut relevant_states = Vec::<u32>::new();
+        for local_terminal in 0..component.tokenizer.num_terminals() {
+            let global_terminal = terminal_offset + local_terminal;
+            if !relevant_terminals.contains(global_terminal as usize) {
                 continue;
             }
-            for right_byte in 0u16..=255 {
-                if right_bytes.contains(right_byte as u8) {
-                    relations_by_adjacent[((left_byte << 8) | right_byte) as usize]
-                        .push((left, right));
-                }
-            }
-        }
-    }
-    for relations in &mut relations_by_adjacent {
-        relations.sort_unstable();
-        relations.dedup();
-    }
-
-    let mut token_ids = BTreeSet::<u32>::new();
-    let mut extra_start_states_by_token = BTreeMap::<u32, Vec<u32>>::new();
-    let mut coarse_tokens = 0usize;
-    let mut grouped_scans = 0usize;
-
-    for (&token_id, bytes) in vocab.entries_map() {
-        if bytes.len() < 2 {
-            continue;
-        }
-        let mut relevant_edges = BTreeSet::<(u32, u32)>::new();
-        for adjacent in bytes.windows(2) {
-            let key = ((adjacent[0] as usize) << 8) | adjacent[1] as usize;
-            relevant_edges.extend(relations_by_adjacent[key].iter().copied());
-        }
-        if relevant_edges.is_empty() {
-            continue;
-        }
-        coarse_tokens += 1;
-
-        let mut rights_by_left = BTreeMap::<u32, Vec<u32>>::new();
-        for (left, right) in relevant_edges {
-            rights_by_left.entry(left).or_default().push(right);
-        }
-        for rights in rights_by_left.values_mut() {
-            rights.sort_unstable();
-            rights.dedup();
-        }
-
-        for (left, rights) in rights_by_left {
-            let Some((left_component, left_local)) = terminal_owner(left) else {
+            let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
                 continue;
             };
-            let component = components[left_component];
-            let Some(live_states) = component.terminal_live_states.get(left_local as usize) else {
-                continue;
-            };
-            if live_states.is_empty() {
-                continue;
-            }
-            let local_start = component.tokenizer.start_state();
-            // Include the component reset in the exact proof so exit-oriented
-            // fusions are discovered even when the left terminal begins in the
-            // current model token.  We do not publish that local reset as extra
-            // support below: merged state zero already represents reset.
-            let starts = live_states.clone();
-            if starts.is_empty() {
-                continue;
-            }
-
-            for (end_states, matches, grouped_starts) in component
-                .tokenizer
-                .execute_summary_groups_from_states(bytes, &starts)
-            {
-                let _ = end_states;
-                grouped_scans += 1;
-                let Some(width) = matches
+            relevant_states.extend(
+                live_states
                     .iter()
-                    .find_map(|(terminal, width)| (*terminal == left_local).then_some(*width))
-                else {
-                    continue;
-                };
-                if width == 0 || width >= bytes.len() {
-                    continue;
+                    .copied()
+                    .filter(|&state| state != component.tokenizer.start_state()),
+            );
+        }
+        relevant_states.sort_unstable();
+        relevant_states.dedup();
+
+        for local_state in relevant_states {
+            let Some(global_state) = state_offset.checked_add(local_state) else {
+                continue;
+            };
+            let Some(closure) = closures.get(local_state as usize) else {
+                continue;
+            };
+            let mut bytes = U8Set::empty();
+            for &closure_state in closure.iter() {
+                for (byte, _) in component.tokenizer.transitions_from(closure_state) {
+                    bytes.insert(byte);
                 }
-                let suffix = &bytes[width..];
-                let mut right_live = false;
-                for &right in &rights {
-                    let Some((right_component, right_local)) = terminal_owner(right) else {
-                        continue;
-                    };
-                    let right_constraint = components[right_component];
-                    let (right_end_states, right_matches) = right_constraint
-                        .tokenizer
-                        .execute_summary_from_state(
-                            suffix,
-                            right_constraint.tokenizer.start_state(),
-                        );
-                    let completed = right_matches.iter().any(|&(terminal, matched_width)| {
-                        terminal == right_local && matched_width == suffix.len()
-                    });
-                    let unfinished = right_end_states.iter().any(|&state| {
-                        right_constraint
-                            .tokenizer
-                            .possible_future_terminals_iter(state)
-                            .any(|terminal| terminal == right_local)
-                    });
-                    if completed || unfinished {
-                        right_live = true;
-                        break;
-                    }
+            }
+            for byte in 0u16..=255 {
+                if bytes.contains(byte as u8) {
+                    starts_by_first_byte[byte as usize].push(global_state);
                 }
-                if !right_live {
-                    continue;
-                }
-                token_ids.insert(token_id);
-                let output = extra_start_states_by_token.entry(token_id).or_default();
-                output.extend(
-                    grouped_starts
-                        .into_iter()
-                        .filter(|&local_state| local_state != local_start)
-                        .filter_map(|local_state| {
-                            tokenizer_state_offsets[left_component].checked_add(local_state)
-                        }),
-                );
             }
         }
     }
+    for starts in &mut starts_by_first_byte {
+        starts.sort_unstable();
+        starts.dedup();
+    }
 
-    for states in extra_start_states_by_token.values_mut() {
-        states.sort_unstable();
-        states.dedup();
-    }
-    if compose_profile_enabled() {
-        let support_states = extra_start_states_by_token
-            .values()
-            .map(Vec::len)
-            .sum::<usize>();
-        eprintln!(
-            "[glrmask/profile][constraint_boundary_interface_ignore_fusions] interface_pairs={} terminal_edges={} support_edges={} coarse_tokens={} candidates={} support_states={} grouped_scans={} ms={:.3}",
-            interface_pairs.len(),
-            terminal_edges.len(),
-            support_edges.len(),
-            coarse_tokens,
-            token_ids.len(),
-            support_states,
-            grouped_scans,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    BoundaryIgnoreFusionCandidates {
-        token_ids,
-        extra_start_states_by_token,
-        terminal_edges,
-    }
+    candidate_tokens
+        .iter()
+        .filter_map(|&token| {
+            let bytes = vocab.entries_map().get(&token)?;
+            (bytes.len() >= 2)
+                .then(|| starts_by_first_byte[bytes[0] as usize].clone())
+                .filter(|starts| !starts.is_empty())
+                .map(|starts| (token, starts))
+        })
+        .collect()
 }
 
 fn discover_boundary_token_paths(
@@ -2300,7 +2063,6 @@ fn discover_boundary_token_paths(
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
     interface_pairs: &BTreeSet<(u32, u32)>,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> BoundaryTokenDiscovery {
     let num_terminals = components
         .iter()
@@ -2308,15 +2070,28 @@ fn discover_boundary_token_paths(
         .map(|(component, offset)| offset + component.tokenizer.num_terminals())
         .max()
         .unwrap_or(0) as usize;
+    let mut terminal_components = vec![0usize; num_terminals];
+    for (component_index, component) in components.iter().enumerate() {
+        let offset = terminal_offsets[component_index] as usize;
+        for local in 0..component.tokenizer.num_terminals() as usize {
+            if let Some(owner) = terminal_components.get_mut(offset + local) {
+                *owner = component_index;
+            }
+        }
+    }
     let reset_starts = composite_reset_states(components, tokenizer_state_offsets);
     let reset_live_bytes = component_reset_live_bytes(components);
-    let ignore_fusions = boundary_interface_ignore_fusion_candidates(
-        vocab,
-        components,
-        tokenizer_state_offsets,
-        terminal_offsets,
-        interface_pairs,
-    );
+    let mut residual_start_terminals = BitSet::new(num_terminals);
+    for (terminal, &seed) in seed_terminals.iter().enumerate() {
+        if seed && !ignore_terminals.contains(terminal) {
+            residual_start_terminals.set(terminal);
+        }
+    }
+    for &(left, _) in interface_pairs {
+        if !ignore_terminals.contains(left as usize) {
+            residual_start_terminals.set(left as usize);
+        }
+    }
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let all_multi_byte_entries = vocab
         .entries_map()
@@ -2355,7 +2130,7 @@ fn discover_boundary_token_paths(
     };
     let suffix_cache_ms = suffix_cache_started_at.elapsed().as_secs_f64() * 1000.0;
     let prefilter_started_at = Instant::now();
-    let mut prefilter = if use_prefilter {
+    let prefilter = if use_prefilter {
         if let Some(cache) = reset_suffix_cache.as_ref() {
             all_multi_byte_entries
                 .iter()
@@ -2389,7 +2164,14 @@ fn discover_boundary_token_paths(
             .map(|&(token_id, _)| token_id)
             .collect::<BTreeSet<_>>()
     };
-    prefilter.extend(ignore_fusions.token_ids.iter().copied());
+    let extra_residual_starts = boundary_visible_residual_starts_by_token(
+        components,
+        tokenizer_state_offsets,
+        terminal_offsets,
+        vocab,
+        &prefilter,
+        &residual_start_terminals,
+    );
     let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
     let multi_byte_entries = all_multi_byte_entries
         .iter()
@@ -2442,7 +2224,7 @@ fn discover_boundary_token_paths(
             let candidate_groups = candidate_start_state_groups_for_token(
                 token_id,
                 &candidate_ranges,
-                &ignore_fusions.extra_start_states_by_token,
+                &extra_residual_starts,
                 components,
                 tokenizer_state_offsets,
             );
@@ -2468,9 +2250,7 @@ fn discover_boundary_token_paths(
                     &reset_scans,
                     seed_terminals,
                     ignore_terminals,
-                    interface_pairs,
-                    &ignore_fusions.terminal_edges,
-                    disallowed_follows,
+                    &terminal_components,
                 ) else {
                     continue;
                 };
@@ -3182,9 +2962,6 @@ fn direct_boundary_terminal_automaton(
         last_component: Option<usize>,
         crossed: bool,
         changed_count: u8,
-        has_scoped_ignore: bool,
-        has_inherited_scoped_ignore: bool,
-        has_non_ignore_terminal: bool,
         unsafe_path: bool,
     }
     #[derive(Debug, Clone)]
@@ -3202,7 +2979,6 @@ fn direct_boundary_terminal_automaton(
         CrossedFull,
         LocalComplexFull,
         LocalDeltaNovelty,
-        LocalScopedIgnoreOnly,
     }
 
     let terminal_component = |terminal: u32| -> usize {
@@ -3310,9 +3086,6 @@ fn direct_boundary_terminal_automaton(
                 last_component: initial_component,
                 crossed: false,
                 changed_count: 0,
-                has_scoped_ignore: false,
-                has_inherited_scoped_ignore: false,
-                has_non_ignore_terminal: false,
                 // Merged tokenizer state 0 epsilon-dispatches to every
                 // component start, and component parser-DWA transport maps each
                 // local start TSID onto this same global TSID 0. Therefore a
@@ -3344,19 +3117,9 @@ fn direct_boundary_terminal_automaton(
                     let next_component = terminal_component(edge.terminal);
                     let parser_relevant = !globally_erasable_ignore_terminals
                         .contains(edge.terminal as usize);
-                    let scoped_ignore = parser_relevant
-                        && delta_plan
-                            .scoped_ignore_terminals
-                            .contains(&edge.terminal);
-                    let stripped_scoped_ignore = scoped_ignore
-                        && delta_plan
-                            .stripped_identity_terminals
-                            .contains(&edge.terminal);
                     let changed = parser_relevant
-                        && !scoped_ignore
                         && delta_plan.by_global_terminal.contains_key(&edge.terminal);
                     let unsafe_terminal = parser_relevant
-                        && !scoped_ignore
                         && delta_plan.unsafe_terminals.contains(&edge.terminal);
                     let switched = source_key
                         .last_component
@@ -3369,11 +3132,6 @@ fn direct_boundary_terminal_automaton(
                             .changed_count
                             .saturating_add(u8::from(changed))
                             .min(2),
-                        has_scoped_ignore: source_key.has_scoped_ignore || scoped_ignore,
-                        has_inherited_scoped_ignore: source_key.has_inherited_scoped_ignore
-                            || (scoped_ignore && !stripped_scoped_ignore),
-                        has_non_ignore_terminal: source_key.has_non_ignore_terminal
-                            || (parser_relevant && !scoped_ignore),
                         unsafe_path: source_key.unsafe_path || unsafe_terminal,
                     };
                     let target = if let Some(&target) = expanded_by_key.get(&next_key) {
@@ -3407,7 +3165,6 @@ fn direct_boundary_terminal_automaton(
                 DeltaLane::CrossedFull,
                 DeltaLane::LocalComplexFull,
                 DeltaLane::LocalDeltaNovelty,
-                DeltaLane::LocalScopedIgnoreOnly,
             ] {
                 // For a safe component-local terminal word with one or more
                 // ordinary changed terminals, do not rebuild the whole
@@ -3430,15 +3187,6 @@ fn direct_boundary_terminal_automaton(
                         witness.accepting[key.local]
                             && !key.crossed
                             && !key.unsafe_path
-                            // A top-level component ignore is erased in the
-                            // cached standalone parser artifact.  When the
-                            // same model token also commits a real terminal,
-                            // scoped Skip is the same parser identity, so the
-                            // ordinary novelty factorization may simply erase
-                            // it as epsilon.  An inherited scoped Skip from an
-                            // already-composed component can carry a real
-                            // phase transition and remains conservative-full.
-                            && !key.has_inherited_scoped_ignore
                             && key.changed_count != 0
                     };
                     let mut productive = vec![[false; 2]; expanded_nodes.len()];
@@ -3465,31 +3213,7 @@ fn direct_boundary_terminal_automaton(
                                     continue;
                                 }
 
-                                if delta_plan
-                                    .stripped_identity_terminals
-                                    .contains(&edge.terminal)
-                                {
-                                    if productive[edge.target][seen_index] {
-                                        let target =
-                                            expanded_to_canonical[edge.target][seen_index];
-                                        debug_assert_ne!(target, usize::MAX);
-                                        epsilons.push(target);
-                                    }
-                                    continue;
-                                }
-
-                                let ordinary_delta = delta_plan
-                                    .by_global_terminal
-                                    .get(&edge.terminal)
-                                    .filter(|_| {
-                                        !delta_plan
-                                            .scoped_ignore_terminals
-                                            .contains(&edge.terminal)
-                                    });
-                                if let Some(entry) = ordinary_delta {
-                                    let old_terminal = entry.old_terminal.expect(
-                                        "ordinary concrete boundary delta must retain its old template",
-                                    );
+                                if let Some(entry) = delta_plan.by_global_terminal.get(&edge.terminal) {
                                     if novelty_seen {
                                         if productive[edge.target][1] {
                                             let target = expanded_to_canonical[edge.target][1];
@@ -3503,7 +3227,7 @@ fn direct_boundary_terminal_automaton(
                                         if productive[edge.target][0] {
                                             let target = expanded_to_canonical[edge.target][0];
                                             debug_assert_ne!(target, usize::MAX);
-                                            transitions.push((old_terminal, target));
+                                            transitions.push((entry.old_terminal, target));
                                         }
                                         if productive[edge.target][1] {
                                             let target = expanded_to_canonical[edge.target][1];
@@ -3553,20 +3277,8 @@ fn direct_boundary_terminal_automaton(
                     }
                     match lane {
                         DeltaLane::CrossedFull => key.crossed,
-                        DeltaLane::LocalComplexFull => {
-                            !key.crossed
-                                && (key.unsafe_path
-                                    || (key.has_inherited_scoped_ignore
-                                        && key.changed_count != 0))
-                        }
+                        DeltaLane::LocalComplexFull => !key.crossed && key.unsafe_path,
                         DeltaLane::LocalDeltaNovelty => unreachable!(),
-                        DeltaLane::LocalScopedIgnoreOnly => {
-                            !key.crossed
-                                && !key.unsafe_path
-                                && key.changed_count == 0
-                                && key.has_scoped_ignore
-                                && !key.has_non_ignore_terminal
-                        }
                     }
                 };
                 let mut productive = expanded_nodes
@@ -3606,22 +3318,7 @@ fn direct_boundary_terminal_automaton(
                         } else {
                             let terminal = match lane {
                                 DeltaLane::LocalDeltaNovelty => unreachable!(),
-                                DeltaLane::LocalScopedIgnoreOnly => {
-                                    if delta_plan
-                                        .scoped_ignore_terminals
-                                        .contains(&edge.terminal)
-                                    {
-                                        delta_plan
-                                            .by_global_terminal
-                                            .get(&edge.terminal)
-                                            .map_or(edge.terminal, |entry| entry.delta_terminal)
-                                    } else {
-                                        edge.terminal
-                                    }
-                                }
-                                DeltaLane::CrossedFull | DeltaLane::LocalComplexFull => {
-                                    edge.terminal
-                                }
+                                DeltaLane::CrossedFull | DeltaLane::LocalComplexFull => edge.terminal,
                             };
                             transitions.push((terminal, target));
                         }
@@ -3648,7 +3345,6 @@ fn direct_boundary_terminal_automaton(
                     },
                     DeltaLane::LocalComplexFull => delta_complex_lane_starts += 1,
                     DeltaLane::LocalDeltaNovelty => unreachable!(),
-                    DeltaLane::LocalScopedIgnoreOnly => {}
                 }
             }
             // Safe, non-crossing accepting paths with zero changed terminals
@@ -5640,7 +5336,6 @@ fn compose_component_parser_dwas_and_possible_matches(
     merged_tokenizer_state_count: usize,
     original_token_ids: &[u32],
     strip_scoped_ignore_identity: bool,
-    scoped_ignore_table: Option<&ComposedTable>,
 ) -> Result<(MappedArtifact<(DWA, PossibleMatches)>, BTreeMap<i32, Weight>), String> {
     if components.is_empty() {
         return Err("cannot compose zero parser DWAs".into());
@@ -5664,7 +5359,6 @@ fn compose_component_parser_dwas_and_possible_matches(
     let global_tsid_count = id_map.num_tsids() as usize;
     struct PreparedComponentArtifact {
         artifact: (NWA, PossibleMatches),
-        scoped_top_accept: BTreeMap<i32, Weight>,
         parser_nwa_ms: f64,
         possible_matches_ms: f64,
         remap_ms: f64,
@@ -5688,33 +5382,20 @@ fn compose_component_parser_dwas_and_possible_matches(
             let started_at = Instant::now();
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
             let possible_matches_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-            let mut scoped_top_accept = BTreeMap::<i32, Weight>::new();
             if strip_scoped_ignore_identity {
-                let global_ignore = component
+                let ignore_weight = component
                     .constraint
                     .ignore_terminal
-                    .map(|ignore| terminal_offset + ignore);
-                let ignore_weight = global_ignore.and_then(|ignore| possible_matches.get(&ignore));
-                if let (Some(composed_table), Some(global_ignore)) =
-                    (scoped_ignore_table, global_ignore)
-                {
-                    if let Some(removed) =
-                        strip_unscoped_ignore_identity_with_removed(&mut parser_nwa, ignore_weight)
-                    {
-                        scoped_top_accept = scoped_ignore_top_acceptance(
-                            &removed,
-                            composed_table,
-                            global_ignore,
-                        );
-                    }
-                } else {
-                    strip_unscoped_ignore_identity(&mut parser_nwa, ignore_weight);
-                }
+                    .and_then(|ignore| possible_matches.get(&(terminal_offset + ignore)));
+                // The standalone parser's globally-erased trivia identity must
+                // not leak into other scopes. The composed boundary parser
+                // reintroduces any state-dependent visible terminal behavior
+                // directly from the composed LR table.
+                strip_unscoped_ignore_identity(&mut parser_nwa, ignore_weight);
             }
             let mut artifact = (parser_nwa, possible_matches);
             let started_at = Instant::now();
             let mut weights = artifact.weight_refs_mut();
-            weights.extend(scoped_top_accept.values_mut());
             remap_weights_with_maps(
                 &mut weights,
                 &coordinate_maps.local_to_global_tsids,
@@ -5725,7 +5406,6 @@ fn compose_component_parser_dwas_and_possible_matches(
             let remap_ms = started_at.elapsed().as_secs_f64() * 1000.0;
             Ok::<_, String>(PreparedComponentArtifact {
                 artifact,
-                scoped_top_accept,
                 parser_nwa_ms,
                 possible_matches_ms,
                 remap_ms,
@@ -5773,17 +5453,10 @@ fn compose_component_parser_dwas_and_possible_matches(
             );
         }
     }
-    let mut parser_top_accept = BTreeMap::<i32, Weight>::new();
-    let mut artifacts = Vec::with_capacity(prepared.len());
-    for prepared in prepared {
-        for (label, weight) in prepared.scoped_top_accept {
-            parser_top_accept
-                .entry(label)
-                .and_modify(|existing| *existing = existing.union(&weight))
-                .or_insert(weight);
-        }
-        artifacts.push(prepared.artifact);
-    }
+    let artifacts = prepared
+        .into_iter()
+        .map(|prepared| prepared.artifact)
+        .collect::<Vec<_>>();
 
     let automata = artifacts
         .iter()
@@ -5881,7 +5554,7 @@ fn compose_component_parser_dwas_and_possible_matches(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok((MappedArtifact::new((dwa, possible_matches), id_map), parser_top_accept))
+    Ok((MappedArtifact::new((dwa, possible_matches), id_map), BTreeMap::new()))
 }
 
 fn explicit_parser_nwa(
@@ -6587,8 +6260,8 @@ fn rebuild_transported_component_templates(
 
 #[derive(Debug, Clone)]
 struct ConcreteBoundaryDeltaEntry {
-    old_terminal: Option<u32>,
-    old_template: Option<UnweightedDfa>,
+    old_terminal: u32,
+    old_template: UnweightedDfa,
     delta_terminal: u32,
     delta_template: UnweightedDfa,
 }
@@ -6598,27 +6271,14 @@ struct ConcreteBoundaryDeltaPlan {
     original_num_terminals: u32,
     synthetic_num_terminals: u32,
     by_global_terminal: BTreeMap<u32, ConcreteBoundaryDeltaEntry>,
-    /// Active ordinary terminals for which both the transported component
-    /// template and composed template were available and compared.  Absence
-    /// from `by_global_terminal` means Old == New only for this set.
+    /// Active terminals whose transported standalone template and composed
+    /// template were compared exactly. An empty standalone language is represented
+    /// by an ordinary empty DFA; a missing transported template is unknown and
+    /// therefore conservative, never interpreted as the empty language.
     compared_terminals: BTreeSet<u32>,
-    /// Scoped component ignores whose standalone cached parser artifacts had
-    /// only their unqualified empty-word identity branch stripped.  They are
-    /// not ordinary template deltas: ignore-bearing paths that also commit a
-    /// real local terminal remain reusable from the cached component artifact.
-    /// Boundary repair needs only the local ignore-only branch, plus ordinary
-    /// full repair on genuinely cross-component paths.
-    scoped_ignore_terminals: BTreeSet<u32>,
-    /// Subset of `scoped_ignore_terminals` whose standalone component parser
-    /// artifact has its unqualified start-final identity support removed by
-    /// `strip_unscoped_ignore_identity` during *this* composition.  Existing
-    /// `table.skip_terminals` inherited from an already-composed component are
-    /// not in this set: their scoped semantics are already represented by the
-    /// cached component parser artifact and need no new local repair.
-    stripped_identity_terminals: BTreeSet<u32>,
-    /// Active terminals for which we could not prove `Old âŠ† New` after
-    /// transporting the cached component template into the composed parser
-    /// coordinate. Any local path touching one of these stays on the full
+    /// Active terminals for which we could not prove `Old ⊆ New` after
+    /// transporting the cached component template into composed parser
+    /// coordinates. Any local path touching one of these stays on the full
     /// composed-template lane.
     unsafe_terminals: BTreeSet<u32>,
 }
@@ -6628,7 +6288,6 @@ fn prepare_concrete_boundary_delta_plan(
     components: &[&Constraint],
     active_terminals: &[bool],
     composed_templates: &Templates,
-    stripped_scoped_ignore_terminals: &BitSet,
     original_num_terminals: u32,
 ) -> ConcreteBoundaryDeltaPlan {
     let old_templates = rebuild_transported_component_templates(
@@ -6639,60 +6298,27 @@ fn prepare_concrete_boundary_delta_plan(
     let mut by_global_terminal = BTreeMap::new();
     let mut compared_terminals = BTreeSet::new();
     let mut unsafe_terminals = BTreeSet::new();
-    let scoped_ignore_terminals = stripped_scoped_ignore_terminals
-        .iter()
-        .map(|terminal| terminal as u32)
-        .collect::<BTreeSet<_>>();
     let mut next_terminal = original_num_terminals;
-    let stripped_identity_terminals = components
-        .iter()
-        .enumerate()
-        .filter_map(|(component_index, component)| {
-            component.ignore_terminal.map(|terminal| {
-                composed_table.terminal_offsets[component_index] + terminal
-            })
-        })
-        .filter(|&terminal| stripped_scoped_ignore_terminals.contains(terminal as usize))
-        .collect::<BTreeSet<_>>();
 
     for (terminal, &active) in active_terminals.iter().enumerate() {
         if !active {
             continue;
         }
         let terminal = terminal as u32;
-        if scoped_ignore_terminals.contains(&terminal) {
-            let Some(new) = composed_templates.by_terminal.get(&terminal) else {
-                unsafe_terminals.insert(terminal);
-                continue;
-            };
-            if !unweighted_dfa_language_is_empty(new) {
-                let delta_terminal = next_terminal;
-                next_terminal += 1;
-                by_global_terminal.insert(
-                    terminal,
-                    ConcreteBoundaryDeltaEntry {
-                        old_terminal: None,
-                        old_template: None,
-                        delta_terminal,
-                        // Scoped ignore identity was explicitly removed from
-                        // the transported component parser artifact before
-                        // union. Its reusable baseline is therefore empty, so
-                        // the exact additive linker delta is the full composed
-                        // scoped-ignore template.
-                        delta_template: new.clone(),
-                    },
-                );
-            }
+        let Some(new) = composed_templates.by_terminal.get(&terminal) else {
+            unsafe_terminals.insert(terminal);
             continue;
-        }
-        let (Some(old), Some(new)) = (
-            old_templates.get(&terminal),
-            composed_templates.by_terminal.get(&terminal),
-        ) else {
+        };
+        let Some(old) = old_templates.get(&terminal) else {
+            // Characterization produces an explicit empty DFA when the standalone
+            // terminal has no parser action. Missing here therefore means template
+            // transport failed (for example because the state relation is not
+            // functionally representable), not Old=∅. Keep the full conservative lane.
             unsafe_terminals.insert(terminal);
             continue;
         };
         compared_terminals.insert(terminal);
+
         let removed = unweighted_dfa_difference(old, new);
         if !unweighted_dfa_language_is_empty(&removed) {
             unsafe_terminals.insert(terminal);
@@ -6708,8 +6334,8 @@ fn prepare_concrete_boundary_delta_plan(
         by_global_terminal.insert(
             terminal,
             ConcreteBoundaryDeltaEntry {
-                old_terminal: Some(old_terminal),
-                old_template: Some(old.clone()),
+                old_terminal,
+                old_template: old.clone(),
                 delta_terminal,
                 delta_template: delta,
             },
@@ -6717,20 +6343,9 @@ fn prepare_concrete_boundary_delta_plan(
     }
 
     if compose_profile_enabled() {
-        let ordinary_deltas = by_global_terminal
-            .values()
-            .filter(|entry| entry.old_terminal.is_some())
-            .count();
         eprintln!(
-            "[glrmask/profile][constraint_boundary_delta_plan] ordinary_deltas={} ordinary_delta_ids={:?} scoped_ignores={} scoped_ignore_ids={:?} stripped_identity_ids={:?} unsafe={} unsafe_ids={:?}",
-            ordinary_deltas,
-            by_global_terminal
-                .iter()
-                .filter_map(|(&terminal, entry)| entry.old_terminal.is_some().then_some(terminal))
-                .collect::<Vec<_>>(),
-            scoped_ignore_terminals.len(),
-            scoped_ignore_terminals.iter().copied().collect::<Vec<_>>(),
-            stripped_identity_terminals.iter().copied().collect::<Vec<_>>(),
+            "[glrmask/profile][constraint_boundary_delta_plan] deltas={} unsafe={} unsafe_ids={:?}",
+            by_global_terminal.len(),
             unsafe_terminals.len(),
             unsafe_terminals.iter().take(64).copied().collect::<Vec<_>>(),
         );
@@ -6741,12 +6356,9 @@ fn prepare_concrete_boundary_delta_plan(
         synthetic_num_terminals: next_terminal,
         by_global_terminal,
         compared_terminals,
-        scoped_ignore_terminals,
-        stripped_identity_terminals,
         unsafe_terminals,
     }
 }
-
 
 
 /// Exact reset/base-case support for a one-terminal parser-template delta.
@@ -6979,8 +6591,6 @@ fn factor_one_terminal_seed_relations(
         }
         let terminal = sequence[0];
         let entry = plan.by_global_terminal.get(&terminal);
-        let ordinary_delta = entry.filter(|entry| entry.old_terminal.is_some());
-        let scoped_full_delta = entry.filter(|entry| entry.old_terminal.is_none());
         let unsafe_or_unclassified = plan.unsafe_terminals.contains(&terminal)
             || (!plan.compared_terminals.contains(&terminal) && entry.is_none());
 
@@ -6991,14 +6601,6 @@ fn factor_one_terminal_seed_relations(
                     insert_relation(&mut factored, terminal, state, token);
                     continue;
                 }
-                if let Some(entry) = scoped_full_delta {
-                    // For a stripped scoped ignore the synthetic delta template
-                    // is exactly full New_t (the reusable old identity is empty).
-                    delta_cells += 1;
-                    insert_relation(&mut factored, entry.delta_terminal, state, token);
-                    continue;
-                }
-
                 match support_shadowed_at_component_start(terminal, state, token) {
                     Some(true) => {
                         promoted_shadow_cells += 1;
@@ -7006,7 +6608,7 @@ fn factor_one_terminal_seed_relations(
                         insert_relation(&mut factored, terminal, state, token);
                     }
                     Some(false) => {
-                        if let Some(entry) = ordinary_delta {
+                        if let Some(entry) = entry {
                             delta_cells += 1;
                             insert_relation(&mut factored, entry.delta_terminal, state, token);
                         } else {
@@ -7062,17 +6664,13 @@ fn install_concrete_boundary_delta_templates(
     plan: &ConcreteBoundaryDeltaPlan,
 ) {
     for entry in plan.by_global_terminal.values() {
-        if let (Some(old_terminal), Some(old_template)) =
-            (entry.old_terminal, entry.old_template.as_ref())
-        {
-            templates
-                .by_terminal
-                .insert(old_terminal, old_template.clone());
-            templates.by_terminal_nwa.insert(
-                old_terminal,
-                unweighted_dfa_to_template_nwa(old_template),
-            );
-        }
+        templates
+            .by_terminal
+            .insert(entry.old_terminal, entry.old_template.clone());
+        templates.by_terminal_nwa.insert(
+            entry.old_terminal,
+            unweighted_dfa_to_template_nwa(&entry.old_template),
+        );
         templates
             .by_terminal
             .insert(entry.delta_terminal, entry.delta_template.clone());
@@ -9001,18 +8599,9 @@ fn build_boundary_repair(
             interface_pairs.len(),
         );
     }
-    // The composed rule graph substitutes every placeholder occurrence with
-    // the remapped child root. Its grammar-level ever-follow relation is
-    // therefore exact for adjacent terminal matches and can discard lexical
-    // component switches that no parser derivation can realize. Retain an
-    // opt-out while the composition differential corpus validates this path.
-    let disallowed_follows = if std::env::var_os("GLRMASK_COMPOSE_DISABLE_GRAMMAR_FOLLOWS")
-        .is_some()
-    {
-        BTreeMap::<u32, BitSet>::new()
-    } else {
-        crate::compiler::pipeline::compute_disallowed_follows(&analyzed)
-    };
+    // Lexical discovery does not impose grammar-RHS follow legality. The
+    // composed LR table is the authority for parser-visible terminal sequences,
+    // including state-dependent identity/scope-refining terminals.
     // Boundary-path discovery and exact one-byte seed analysis are independent
     // read-only passes over the tokenizer.  Running them serially made boundary
     // repair pay two full million-state/vocabulary scans back-to-back.
@@ -9040,9 +8629,8 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             &composed_table.terminal_offsets,
                             &seed_terminals,
-                            &ignore_terminals.all,
+                            &ignore_terminals.global,
                             &interface_pairs,
-                            &disallowed_follows,
                         );
                         (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
                     },
@@ -9242,7 +8830,6 @@ fn build_boundary_repair(
                 components,
                 &active_terminals,
                 &templates,
-                &ignore_terminals.scoped,
                 analyzed.num_terminals,
             );
             install_concrete_boundary_delta_templates(&mut templates, &plan);
@@ -9337,7 +8924,7 @@ fn build_boundary_repair(
                                             false,
                                             ignore_terminals.canonical,
                                             &analyzed,
-                                            &disallowed_follows,
+                                            &BTreeMap::new(),
                                             flat_trans,
                                             &global_max_length_state_map,
                                             None,
@@ -9729,7 +9316,6 @@ fn build_static_dynamic_overlay_metadata(
         components,
         &delta_terminals,
         &templates,
-        &merged_ignores.scoped,
         analyzed.num_terminals,
     );
     let plan_ms = plan_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -9767,10 +9353,9 @@ fn build_static_dynamic_overlay_metadata(
         .collect::<Vec<_>>();
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_component_only_delta_metadata] changed={} unsafe={} scoped={} templates_ms={templates_ms:.3} plan_ms={plan_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_component_only_delta_metadata] changed={} unsafe={} templates_ms={templates_ms:.3} plan_ms={plan_ms:.3} total_ms={:.3}",
             plan.by_global_terminal.len(),
             plan.unsafe_terminals.len(),
-            plan.scoped_ignore_terminals.len(),
             delta_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -10681,7 +10266,6 @@ pub(crate) fn compose_constraints(
                                 merged_tokenizer_state_count,
                                 &original_token_ids,
                                 !global_ignores,
-                                Some(&composed_table),
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -10823,7 +10407,6 @@ pub(crate) fn compose_constraints(
                     merged_tokenizer_state_count,
                     &original_token_ids,
                     !global_ignores,
-                    None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
@@ -10876,7 +10459,6 @@ pub(crate) fn compose_constraints(
                                 merged_tokenizer_state_count,
                                 &original_token_ids,
                                 !global_ignores,
-                                None,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -12525,7 +12107,6 @@ mod tests {
             merged_tokenizer.num_states() as usize,
             &vocab.entries_map().keys().copied().collect::<Vec<_>>(),
             false,
-            None,
         )
         .unwrap();
         assert!(merged.0.artifact().0.num_states() > 0);
@@ -12972,7 +12553,7 @@ mod tests {
     }
 
     #[test]
-    fn ignore_interface_fusions_survive_model_token_boundaries() {
+    fn scoped_visible_terminals_survive_model_token_boundaries() {
         // Entry orientation:
         //   token 0 = "Xa" leaves parent IGNORE="ab" in progress;
         //   token 1 = "bt" completes that IGNORE and enters the child.
@@ -13032,12 +12613,12 @@ mod tests {
         )
         .unwrap();
 
-        // Verify the candidate theorem directly, not merely through the final
-        // parser.  The entry token must carry a non-reset raw-state support;
-        // the exit token begins at reset and therefore needs no extra support.
+        // Scoped trivia is represented as a real terminal in the composed LR
+        // table. Its parser semantics is state-dependent identity (`Skip`), not
+        // a lexer-side boundary special case.
         let composed_table = compose_subgrammar_tables(
             &parent.table,
-            None,
+            Some(terminal(&parent, "PARENT_WS")),
             &[SubgrammarTableInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
                 table: &child.table,
@@ -13046,56 +12627,11 @@ mod tests {
             }],
         )
         .unwrap();
-        let augmented_start = composed_table.table.rules[0].lhs;
-        let analyzed = AnalyzedGrammar::from_composed_rules(
-            composed_table.table.rules.clone(),
-            composed_table.table.num_terminals,
-            parent
-                .terminal_display_names
-                .iter()
-                .cloned()
-                .chain(
-                    child
-                        .terminal_display_names
-                        .iter()
-                        .map(|name| format!("subgrammar0::{name}")),
-                )
-                .collect(),
-            composed_table.table.nonterminal_display_names.clone(),
-            augmented_start,
-        );
-        let interface_pairs = visible_boundary_interface_pairs(
-            &analyzed,
-            &composed_table.boundary_nonterminals,
-            &composed_table.control_terminals,
-        );
-        let (_merged_tokenizer, tokenizer_state_offsets) =
-            Tokenizer::disjoint_union_with_terminal_offsets(&[
-                (&parent.tokenizer, composed_table.terminal_offsets[0]),
-                (&child.tokenizer, composed_table.terminal_offsets[1]),
-            ]);
-        let components = [&parent, &child];
-        let fusion = boundary_interface_ignore_fusion_candidates(
-            &vocab,
-            &components,
-            &tokenizer_state_offsets,
-            &composed_table.terminal_offsets,
-            &interface_pairs,
-        );
-        assert!(fusion.token_ids.contains(&1), "entry fusion token bt was not derived");
-        assert!(fusion.token_ids.contains(&4), "exit fusion token ta was not derived");
-        assert!(
-            fusion
-                .extra_start_states_by_token
-                .get(&1)
-                .is_some_and(|states| !states.is_empty()),
-            "entry fusion must retain the in-progress parent-IGNORE start state",
-        );
-
-        let parent_ignore = composed_table.terminal_offsets[0] + terminal(&parent, "PARENT_WS");
-        let child_t = composed_table.terminal_offsets[1] + terminal(&child, "CHILD_T");
-        assert!(fusion.terminal_edges.contains(&(parent_ignore, child_t)));
-        assert!(fusion.terminal_edges.contains(&(child_t, parent_ignore)));
+        let parent_ignore = terminal(&parent, "PARENT_WS");
+        assert!(composed_table.table.skip_terminals.contains(&parent_ignore));
+        assert!(composed_table.table.action.iter().any(|row| {
+            matches!(row.get(&parent_ignore), Some(Action::Skip))
+        }));
 
         let composed = parent
             .compose_subgrammars(&[("SUB", &child)], &vocab)
