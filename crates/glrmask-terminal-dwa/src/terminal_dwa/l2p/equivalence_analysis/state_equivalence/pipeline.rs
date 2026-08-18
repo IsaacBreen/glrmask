@@ -144,6 +144,47 @@ pub fn run_state_equivalence_pipeline(
     kbounded_tokenizer_view: Option<&TokenizerView>,
     kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
+    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
+        tokenizer,
+        vocab,
+        initial_state_map,
+        active_groups,
+        scope,
+        config,
+        prebuilt_nfa_refinement,
+        kbounded_tokenizer_view,
+        kbounded_byte_to_class,
+        false,
+    )
+}
+
+/// Run the ordinary state-equivalence pipeline, optionally certifying that the
+/// incoming state map is already the stable restricted-observation quotient for
+/// this exact tokenizer, active-terminal mask, and vocabulary-byte alphabet.
+///
+/// This is stronger than merely supplying an `initial_state_map`: a certified
+/// map is already an output-labelled right congruence for the mandatory L2P
+/// restricted-observation pass. Re-running that fixed point can therefore only
+/// reproduce the same partition. The certificate also implies every bounded
+/// max-length observer over the same byte alphabet, matching the existing
+/// post-restricted-observation certification logic below.
+pub fn run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    active_groups: Option<&[bool]>,
+    scope: StateEquivalenceScope,
+    config: &StateEquivalencePipelineConfig,
+    prebuilt_nfa_refinement: Option<&super::nfa::PrebuiltSparsePowersetRefinement<'_>>,
+    kbounded_tokenizer_view: Option<&TokenizerView>,
+    kbounded_byte_to_class: Option<&[u8; 256]>,
+    initial_restricted_observation_certified: bool,
+) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
+    assert!(
+        !initial_restricted_observation_certified
+            || (initial_state_map.is_some() && matches!(scope, StateEquivalenceScope::L2p)),
+        "a restricted-observation certificate requires an L2P initial state map",
+    );
     let mut current_state_map = initial_state_map
         .cloned()
         .unwrap_or_else(|| identity_state_map(tokenizer.num_states() as usize));
@@ -157,7 +198,8 @@ pub fn run_state_equivalence_pipeline(
         ..StateEquivalencePipelineProfile::default()
     };
     let statistic = max_length::cached_statistic(vocab);
-    let mut stable_restricted_observation = false;
+    let mut stable_restricted_observation = initial_restricted_observation_certified;
+    profile.relevant_byte_congruence_certified = initial_restricted_observation_certified;
 
     for kind in &config.passes {
         let bounded_observer_already_certified =
@@ -203,6 +245,19 @@ pub fn run_state_equivalence_pipeline(
                     matches!(scope, StateEquivalenceScope::L2p),
                     "restricted-observation state equivalence is L2P-only",
                 );
+                if stable_restricted_observation {
+                    profile.restricted_observation_state_equiv_ms = 0.0;
+                    profile.restricted_observation_reps =
+                        current_state_map.num_internal_ids() as usize;
+                    profile.pass_profiles.push(StateEquivalencePassProfile {
+                        kind: StateEquivalencePassKind::RestrictedObservation,
+                        name: "restricted_observation_certified",
+                        elapsed_ms: 0.0,
+                        representative_count: current_state_map.num_internal_ids() as usize,
+                        skipped: true,
+                    });
+                    continue;
+                }
                 let started_at = Instant::now();
                 current_state_map = if tokenizer.has_epsilon_transitions() {
                     if let Some(prebuilt) = prebuilt_nfa_refinement {

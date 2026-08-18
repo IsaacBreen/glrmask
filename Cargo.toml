@@ -80,6 +80,10 @@ harness = false
 [[example]]
 name = "profile_glr"
 
+[[example]]
+name = "selected10_programmatic_tools"
+required-features = ["internal-api"]
+
 # Public API suites.
 [[test]]
 name = "integration"

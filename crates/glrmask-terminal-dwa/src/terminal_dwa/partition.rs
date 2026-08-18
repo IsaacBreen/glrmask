@@ -5,7 +5,7 @@
 //! single `(InternalIdMap, DWA)` for the partition.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
 use crate::automata::lexer::Lexer;
@@ -13,7 +13,8 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
-    classify_terminal_path_lengths, split_vocab_for_active_l2p_terminals,
+    classify_terminal_path_lengths, classify_terminal_path_lengths_with_probe,
+    split_vocab_for_active_l2p_terminals,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     PartitionTerminalDwas, TerminalColoring, TerminalDwaPhaseProfile, TerminalPathLength,
@@ -243,6 +244,31 @@ fn split_l2p_vocab_enabled() -> bool {
 ///    callers can merge like families across all vocabulary partitions.
 ///
 /// Returns `None` if the vocab is empty.
+fn speculative_p2_pool_threads() -> Option<usize> {
+    std::env::var("GLRMASK_SPECULATIVE_P2_POOL_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threads| threads > 0)
+}
+
+fn speculative_p2_pool() -> Option<&'static rayon::ThreadPool> {
+    let threads = speculative_p2_pool_threads()?;
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    Some(POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("glrmask-p2-spec-{index}"))
+            .build()
+            .expect("failed to build speculative p2 Rayon pool")
+    }))
+}
+
+pub(crate) fn prepare_speculative_p2_pool() {
+    if std::env::var_os("GLRMASK_SPECULATIVE_P2_L2P").is_some() {
+        let _ = speculative_p2_pool();
+    }
+}
+
 pub fn build_partition_id_map_and_terminal_dwa(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -265,8 +291,235 @@ pub fn build_partition_id_map_and_terminal_dwa(
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
     terminal_filter: Option<&[bool]>,
 ) -> Option<PartitionTerminalDwas> {
+    let speculative = partition_label == "p2"
+        && std::env::var_os("GLRMASK_SPECULATIVE_P2_L2P").is_some();
+    if !speculative {
+        return build_partition_id_map_and_terminal_dwa_impl(
+            partition_label,
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            always_allowed_follows,
+            disallowed_follows,
+            token_path_disallowed_follows,
+            normalized_token_path_disallowed_follows,
+            flat_trans,
+            initial_state_map,
+            shared_vocab_dfa_cache,
+            shared_original_vocab_dfa_cache,
+            shared_original_vocab_analysis_dfa_cache,
+            shared_transition_cache,
+            shared_ti_output_cache,
+            shared_classify_cache,
+            terminal_filter,
+            None,
+            None,
+            None,
+            false,
+        ).0;
+    }
+
+    std::thread::scope(|scope| {
+        let witness_mask = Mutex::new(None::<Vec<bool>>);
+        let (spec_tx, spec_rx) = mpsc::sync_channel::<Option<PartitionTerminalDwas>>(1);
+        let callback = |witness: &BitSet| {
+            if witness.is_empty() {
+                return;
+            }
+            let mut mask = vec![false; grammar.num_terminals as usize];
+            for terminal in witness.iter() {
+                if terminal_filter.is_none_or(|filter| filter.get(terminal).copied().unwrap_or(false)) {
+                    mask[terminal] = true;
+                }
+            }
+            if !mask.iter().any(|&active| active) {
+                return;
+            }
+            {
+                let mut slot = witness_mask.lock().expect("speculative witness mask poisoned");
+                if slot.is_some() {
+                    return;
+                }
+                *slot = Some(mask.clone());
+            }
+            let spec_tx = spec_tx.clone();
+            let lengths = mask
+                .iter()
+                .map(|&active| {
+                    if active { TerminalPathLength::TwoPlus } else { TerminalPathLength::Zero }
+                })
+                .collect::<Vec<_>>();
+            scope.spawn(move || {
+                let build = || {
+                    build_partition_id_map_and_terminal_dwa_impl(
+                        partition_label,
+                        tokenizer,
+                        vocab,
+                        terminal_coloring,
+                        use_terminal_coloring,
+                        ignore_terminal,
+                        grammar,
+                        always_allowed_follows,
+                        disallowed_follows,
+                        token_path_disallowed_follows,
+                        normalized_token_path_disallowed_follows,
+                        flat_trans,
+                        initial_state_map,
+                        shared_vocab_dfa_cache,
+                        shared_original_vocab_dfa_cache,
+                        shared_original_vocab_analysis_dfa_cache,
+                        shared_transition_cache,
+                        shared_ti_output_cache,
+                        shared_classify_cache,
+                        terminal_filter,
+                        Some(&lengths),
+                        None,
+                        None,
+                        false,
+                    )
+                    .0
+                };
+                let parts = if let Some(pool) = speculative_p2_pool() {
+                    pool.install(build)
+                } else {
+                    build()
+                };
+                let _ = spec_tx.send(parts);
+            });
+        };
+
+        let (mut exact, speculative_hit) = build_partition_id_map_and_terminal_dwa_impl(
+            partition_label,
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            always_allowed_follows,
+            disallowed_follows,
+            token_path_disallowed_follows,
+            normalized_token_path_disallowed_follows,
+            flat_trans,
+            initial_state_map,
+            shared_vocab_dfa_cache,
+            shared_original_vocab_dfa_cache,
+            shared_original_vocab_analysis_dfa_cache,
+            shared_transition_cache,
+            shared_ti_output_cache,
+            shared_classify_cache,
+            terminal_filter,
+            None,
+            Some(&callback),
+            Some(&witness_mask),
+            true,
+        );
+
+        if speculative_hit {
+            let spec = spec_rx
+                .recv()
+                .expect("speculative p2 L2P worker ended without a result");
+            let spec = spec.expect("witnessed p2 L2P mask produced no terminal DWA");
+            let exact = exact
+                .as_mut()
+                .expect("exact p2 L1 branch vanished during speculative hit");
+            debug_assert!(spec.l1.is_none());
+            exact.l2p = spec.l2p;
+            exact.l2p_single_l1 = spec.l2p_single_l1;
+            if spec.profile.total_ms() > exact.profile.total_ms() {
+                exact.profile = spec.profile;
+            }
+            if compile_profile_enabled() {
+                eprintln!("[glrmask/profile][speculative_p2_l2p] hit=true");
+            }
+        } else if compile_profile_enabled() {
+            eprintln!("[glrmask/profile][speculative_p2_l2p] hit=false");
+        }
+        if std::env::var_os("GLRMASK_SPECULATIVE_P2_STRICT_REFERENCE").is_some() {
+            let (baseline, _) = build_partition_id_map_and_terminal_dwa_impl(
+                partition_label,
+                tokenizer,
+                vocab,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                grammar,
+                always_allowed_follows,
+                disallowed_follows,
+                token_path_disallowed_follows,
+                normalized_token_path_disallowed_follows,
+                flat_trans,
+                initial_state_map,
+                shared_vocab_dfa_cache,
+                shared_original_vocab_dfa_cache,
+                shared_original_vocab_analysis_dfa_cache,
+                shared_transition_cache,
+                shared_ti_output_cache,
+                shared_classify_cache,
+                terminal_filter,
+                None,
+                None,
+                None,
+                false,
+            );
+            let baseline = baseline.expect("strict speculative p2 baseline vanished");
+            let candidate = exact.as_ref().expect("strict speculative p2 candidate vanished");
+            let compare_family = |name: &str,
+                                  left: &Option<crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa>,
+                                  right: &Option<crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa>| {
+                match (left, right) {
+                    (None, None) => {}
+                    (Some(left), Some(right)) => {
+                        super::l2p::terminal_dwa_equivalence::compare(left, right)
+                            .unwrap_or_else(|mismatch| panic!("speculative p2 {name} mismatch: {mismatch}"));
+                    }
+                    _ => panic!("speculative p2 {name} family presence differed"),
+                }
+            };
+            compare_family("l1", &baseline.l1, &candidate.l1);
+            compare_family("l2p", &baseline.l2p, &candidate.l2p);
+            compare_family(
+                "l2p_single_l1",
+                &baseline.l2p_single_l1,
+                &candidate.l2p_single_l1,
+            );
+            eprintln!("[glrmask/profile][speculative_p2_strict_reference] differs=false");
+        }
+        exact
+    })
+}
+
+fn build_partition_id_map_and_terminal_dwa_impl(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    always_allowed_follows: &[Vec<TerminalID>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
+    flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
+    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+    terminal_filter: Option<&[bool]>,
+    precomputed_terminal_path_lengths: Option<&[TerminalPathLength]>,
+    witness_probe_callback: Option<&dyn Fn(&BitSet)>,
+    speculative_witness_mask: Option<&Mutex<Option<Vec<bool>>>>,
+    allow_speculative_skip: bool,
+) -> (Option<PartitionTerminalDwas>, bool) {
     if vocab.is_empty() {
-        return None;
+        return (None, false);
     }
 
     let total_started_at = Instant::now();
@@ -283,6 +536,23 @@ pub fn build_partition_id_map_and_terminal_dwa(
     let classify_started_at = Instant::now();
     let mut terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
+    } else if let Some(precomputed) = precomputed_terminal_path_lengths {
+        assert_eq!(
+            precomputed.len(),
+            num_terminals as usize,
+            "precomputed terminal path lengths must cover the terminal domain",
+        );
+        precomputed.to_vec()
+    } else if witness_probe_callback.is_some() {
+        classify_terminal_path_lengths_with_probe(
+            partition_label,
+            tokenizer,
+            vocab,
+            token_path_disallowed_follows.as_ref(),
+            num_terminals,
+            shared_classify_cache,
+            witness_probe_callback,
+        )
     } else {
         classify_terminal_path_lengths(
             partition_label,
@@ -337,6 +607,21 @@ pub fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
+    let speculative_hit = allow_speculative_skip
+        && speculative_witness_mask
+            .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+            .is_some_and(|witness| witness == l2p_mask);
+    if compile_profile_enabled() && allow_speculative_skip {
+        eprintln!(
+            "[glrmask/profile][speculative_p2_mask] hit={} exact={:?} witness={:?}",
+            speculative_hit,
+            l2p_mask.iter().enumerate().filter_map(|(i, &v)| v.then_some(i)).collect::<Vec<_>>(),
+            speculative_witness_mask
+                .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+                .map(|mask| mask.iter().enumerate().filter_map(|(i, &v)| v.then_some(i)).collect::<Vec<_>>()),
+        );
+    }
+
     super::definition_skeleton::report_partition(
         partition_label,
         tokenizer,
@@ -345,6 +630,14 @@ pub fn build_partition_id_map_and_terminal_dwa(
         &l1_mask,
         &l2p_mask,
     );
+    if std::env::var_os("GLRMASK_DUMP_L2P_MASKS").is_some() {
+        let ids = l2p_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &active)| active.then_some(terminal))
+            .collect::<Vec<_>>();
+        eprintln!("[glrmask/dump][l2p_mask] partition={} ids={:?}", partition_label, ids);
+    }
 
     let use_prebuilt_l1_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
         .map(|value| {
@@ -415,6 +708,8 @@ pub fn build_partition_id_map_and_terminal_dwa(
     let shared_l1_parent_order = derive_l1_subset_order
         .then(|| super::l1::prepared_l1_identity_vocab_order(vocab));
 
+    let effective_l2p_initial_state_map = initial_state_map;
+
     // The split-off L1 branch observes only the L2P terminal set. Large lexer
     // components belonging exclusively to other terminals are exact empty
     // residuals for this branch and can be collapsed before token replay.
@@ -427,17 +722,20 @@ pub fn build_partition_id_map_and_terminal_dwa(
         })
         .flatten()
         .filter(|map| {
-            initial_state_map.is_none_or(|initial| {
+            effective_l2p_initial_state_map.is_none_or(|initial| {
                 map.num_internal_ids() < initial.num_internal_ids()
             })
         });
-    let split_l1_initial_state_map = split_l1_structural_state_map.as_ref().or(initial_state_map);
+    let split_l1_initial_state_map = split_l1_structural_state_map
+        .as_ref()
+        .or(effective_l2p_initial_state_map);
     if compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][inactive_component_state_map] partition={} raw_states={} inherited_reps={} split_l1_reps={}",
             partition_label,
             tokenizer.num_states(),
-            initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            effective_l2p_initial_state_map
+                .map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
             split_l1_initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
         );
     }
@@ -569,7 +867,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
             }
         },
         || {
-            if has_l2p {
+            if has_l2p && !speculative_hit {
                 let started_at = Instant::now();
                 let Some(split) = l2p_vocab_split.as_ref() else {
                     let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
@@ -626,7 +924,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                             let branch_label = format!("{partition_label}.l2p");
                             let active_terminal_count =
                                 l2p_mask.iter().filter(|&&active| active).count();
-                            let source_states = initial_state_map
+                            let source_states = effective_l2p_initial_state_map
                                 .map(ManyToOneIdMap::num_internal_ids)
                                 .unwrap_or_else(|| tokenizer.num_states()) as usize;
                             let materialization_requested = structural_branch_tokenizer_selected(
@@ -643,21 +941,21 @@ pub fn build_partition_id_map_and_terminal_dwa(
                                     source_states,
                                 );
                             let branch_state_map = inactive_component_branch_state_map(
-                                tokenizer,
-                                &l2p_mask,
-                                initial_state_map,
-                                &branch_label,
-                            )
-                            .or_else(|| {
-                                build_branch_active_state_map(
                                     tokenizer,
-                                    &boundary_vocab,
                                     &l2p_mask,
                                     initial_state_map,
                                     &branch_label,
-                                    state_map_requested,
                                 )
-                            });
+                                .or_else(|| {
+                                    build_branch_active_state_map(
+                                        tokenizer,
+                                        &boundary_vocab,
+                                        &l2p_mask,
+                                        initial_state_map,
+                                        &branch_label,
+                                        state_map_requested,
+                                    )
+                                });
                             let materialized = materialization_requested
                                 .then(|| {
                                     branch_state_map.as_ref().and_then(|(map, _)| {
@@ -826,8 +1124,12 @@ pub fn build_partition_id_map_and_terminal_dwa(
             dominant_branch = Some((l2p_single_ms, split_l1.profile));
         }
     }
-    let Some((_, dominant_branch_profile)) = dominant_branch else {
-        return None;
+    let dominant_branch_profile = if let Some((_, profile)) = dominant_branch {
+        profile
+    } else if speculative_hit {
+        TerminalDwaPhaseProfile::default()
+    } else {
+        return (None, false);
     };
     let post_branch_ms = post_branch_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -881,8 +1183,10 @@ pub fn build_partition_id_map_and_terminal_dwa(
         l2p_single_l1: l2p_single_l1_pair,
         profile: partition_profile,
     };
-    debug_assert!(!result.is_empty());
-    Some(result)
+    if !speculative_hit {
+        debug_assert!(!result.is_empty());
+    }
+    (Some(result), speculative_hit)
 }
 
 

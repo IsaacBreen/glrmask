@@ -13,7 +13,9 @@ use super::state_equivalence::global_token_position::GlobalTokenPositionStatePar
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use super::state_equivalence::{
     build_state_map_from_subset_representatives, resolve_l2p_pipeline_config,
-    run_state_equivalence_pipeline, StateEquivalenceScope,
+    run_state_equivalence_pipeline,
+    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate,
+    StateEquivalenceScope,
 };
 use super::state_equivalence::nfa::{
     PrebuiltSparsePowersetRefinement, TokenBoundedAnalysisTrie, build_bounded_analysis_view,
@@ -32,6 +34,40 @@ use super::shared::{
     representative_tokens_for_vocab_classes,
     tokenizer_group_count,
 };
+
+fn assert_same_many_to_one_partition(
+    left: &ManyToOneIdMap,
+    right: &ManyToOneIdMap,
+    message: &str,
+) {
+    assert_eq!(
+        left.original_to_internal.len(),
+        right.original_to_internal.len(),
+        "{message}: raw domains differ",
+    );
+    let mut left_to_right = FxHashMap::<u32, u32>::default();
+    let mut right_to_left = FxHashMap::<u32, u32>::default();
+    for (&left_class, &right_class) in left
+        .original_to_internal
+        .iter()
+        .zip(&right.original_to_internal)
+    {
+        assert_eq!(
+            left_class == u32::MAX,
+            right_class == u32::MAX,
+            "{message}: mapped raw domains differ",
+        );
+        if left_class == u32::MAX {
+            continue;
+        }
+        if let Some(previous) = left_to_right.insert(left_class, right_class) {
+            assert_eq!(previous, right_class, "{message}: left class split");
+        }
+        if let Some(previous) = right_to_left.insert(right_class, left_class) {
+            assert_eq!(previous, left_class, "{message}: right class split");
+        }
+    }
+}
 use super::state::fast as state_equivalence_analysis;
 use super::vocab::common_atom as common_atom_preclass;
 use super::vocab::fast as vocab_equivalence_analysis;
@@ -285,9 +321,10 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     );
     let mut collisions = FxHashMap::<u128, Vec<usize>>::default();
     let mut representative_token_bytes = Vec::new();
+    let mut representative_original_indices = Vec::new();
     let mut original_to_repr = Vec::with_capacity(tokens.len());
 
-    for token in tokens {
+    for (original_index, token) in tokens.iter().enumerate() {
         let bytes = token.as_ref();
         let hash = hash_byte_class_seq(bytes, byte_to_class);
         let repr_idx = if let Some(&primary) = hash_to_repr.get(&hash) {
@@ -306,12 +343,14 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
             } else {
                 let idx = representative_token_bytes.len();
                 representative_token_bytes.push(bytes);
+                representative_original_indices.push(original_index);
                 collisions.entry(hash).or_default().push(idx);
                 idx
             }
         } else {
             let idx = representative_token_bytes.len();
             representative_token_bytes.push(bytes);
+            representative_original_indices.push(original_index);
             hash_to_repr.insert(hash, idx);
             idx
         };
@@ -320,6 +359,7 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
 
     TokenDedup {
         representative_token_bytes,
+        representative_original_indices,
         original_to_repr,
     }
 }
@@ -1918,6 +1958,7 @@ pub fn analyze_equivalences_with_group_filter(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    initial_state_map_has_stable_restricted_observation: bool,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
@@ -1937,6 +1978,7 @@ pub fn analyze_equivalences_with_group_filter(
         flat_trans,
         shared_transition_cache,
         initial_state_map,
+        initial_state_map_has_stable_restricted_observation,
         token_position_partition,
         precomputed_raw_observations,
         prebuilt_token_trie,
@@ -1962,6 +2004,7 @@ fn analyze_equivalences_impl(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    initial_state_map_has_stable_restricted_observation: bool,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
@@ -2098,6 +2141,11 @@ fn analyze_equivalences_impl(
             .initial_states
             .len()
             .saturating_mul(dedup.representative_token_bytes.len());
+        // Even when the incoming TI map already certifies the mandatory
+        // restricted-observation fixed point, keep constructing this topology
+        // when the normal policy selects it: the later exact analysis view can
+        // reuse the same sparse powerset.  The certificate removes only the
+        // redundant refinement pass, not a topology that remains useful.
         let should_probe_prepass_powerset = should_probe_l2p_nfa_powerset(
             analysis_view_policy,
             prepass_pair_estimate,
@@ -2199,7 +2247,8 @@ fn analyze_equivalences_impl(
                 pipeline_config.passes,
             );
         }
-        let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
+        let (tokenizer_states, pipeline_profile) =
+            run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
             tokenizer,
             vocab,
             initial_state_map,
@@ -2209,7 +2258,33 @@ fn analyze_equivalences_impl(
             prebuilt_nfa_refinement.as_ref(),
             None,
             None,
+            initial_state_map_has_stable_restricted_observation,
         );
+        if initial_state_map_has_stable_restricted_observation
+            && std::env::var_os("GLRMASK_VALIDATE_TI_RESTRICTED_OBSERVATION_REUSE").is_some()
+        {
+            let (reference, _) = run_state_equivalence_pipeline(
+                tokenizer,
+                vocab,
+                initial_state_map,
+                active_groups,
+                StateEquivalenceScope::L2p,
+                &pipeline_config,
+                None,
+                None,
+                None,
+            );
+            assert_same_many_to_one_partition(
+                &tokenizer_states,
+                &reference,
+                "TI restricted-observation reuse changed the state partition",
+            );
+            eprintln!(
+                "[glrmask/profile][ti_restricted_observation_reuse_validation] partition={} result=equivalent reps={}",
+                partition_label,
+                tokenizer_states.num_internal_ids(),
+            );
+        }
 
         let raw_pre_representatives = tokenizer_states
             .representative_original_ids
@@ -2529,10 +2604,12 @@ fn analyze_equivalences_impl(
                 })
                 .flatten();
             let common_atom_preclasses = common_atom_preclass_enabled().then(|| {
-                common_atom_preclass::try_find_common_atom_preclasses(
+                common_atom_preclass::try_find_common_atom_preclasses_with_vocab(
                     tokenizer,
                     active_groups,
                     &dedup.representative_token_bytes,
+                    vocab,
+                    &dedup.representative_original_indices,
                 )
             });
             let precomputed_vocab = if let Some((classes, factor_profile)) = first_byte_factored {

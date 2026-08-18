@@ -36,7 +36,7 @@
 //! `extern g name;` declares the same kind of scoped call without defining the
 //! child body in this source file. It is accepted by
 //! [`from_glrm_with_external_subgrammars`], which lowers each external call to a
-//! hidden non-vocabulary placeholder and returns the exact binding manifest.
+//! hidden non-vocabulary linker control and returns the exact binding manifest.
 //!
 //! Ignore is also scope-local. `ignore I;` admits `I*` before the first lexical
 //! atom in that grammar scope, between lexical atoms, and after the last lexical
@@ -424,8 +424,6 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
 pub struct ExternalSubgrammarPlaceholder {
     /// Source-level binding name. Nested externals use `outer::inner`.
     pub binding_name: String,
-    /// Actual terminal display name in the flattened parent constraint.
-    pub terminal_name: String,
     /// Automatically allocated non-vocabulary token ID.
     pub token_id: u32,
 }
@@ -2199,7 +2197,6 @@ fn flatten_scope(
                     .external_placeholders
                     .push(ExternalSubgrammarPlaceholder {
                         binding_name,
-                        terminal_name: alias_name,
                         token_id,
                     });
             }
@@ -3354,14 +3351,14 @@ nt document ::= "<" payload wrapper ">" END?;
             vec![53, 54],
         );
         for placeholder in &parsed.placeholders {
-            let rule = parsed
+            let rules = parsed
                 .grammar
                 .rules
                 .iter()
-                .find(|rule| rule.name == placeholder.terminal_name)
-                .expect("external placeholder terminal must be emitted");
-            assert!(rule.is_terminal);
-            assert_eq!(rule.expr, GrammarExpr::SpecialToken(placeholder.token_id));
+                .filter(|rule| rule.expr == GrammarExpr::SpecialToken(placeholder.token_id))
+                .collect::<Vec<_>>();
+            assert_eq!(rules.len(), 1, "external placeholder terminal must be emitted exactly once");
+            assert!(rules[0].is_terminal);
         }
         lower(&parsed.grammar).expect("external parent shell must lower normally");
     }

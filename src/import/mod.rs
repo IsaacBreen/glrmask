@@ -441,123 +441,6 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 }
 
 impl Constraint {
-    /// Compose this already-compiled parent constraint with independently
-    /// compiled child constraints.
-    ///
-    /// Each tuple names a unique terminal in the parent grammar whose shift is
-    /// a manual subgrammar call placeholder. The placeholder terminal is
-    /// removed from the reachable merged lexer/table and replaced by the
-    /// corresponding child's start table. A placeholder must be a
-    /// non-vocabulary sentinel: it must have no possible model-token matches in
-    /// the compiled parent (normally use an `@token(...)` id outside `vocab`).
-    /// Its token ID must also be distinct from every grammar-level end token
-    /// and other live special token retained by the composed constraint.
-    /// All constraints must have been compiled for exactly `vocab`.
-    ///
-    /// Expensive component lexer/parser artifacts are reused. Composition
-    /// compiles only the restricted cross-component boundary repair and the
-    /// commit-template DFAs for terminals selected by that repair.
-    /// Components may declare different ignore terminals. Equivalent ignore
-    /// languages are canonicalized into one global transparent ignore.
-    /// Different ignore languages remain scope-local and are interpreted by
-    /// the explicit boundary parser, including inside fused model tokens.
-    pub fn compose_subgrammars(
-        &self,
-        children: &[(&str, &Constraint)],
-        vocab: &crate::Vocab,
-    ) -> crate::Result<Self> {
-        let mut inputs = Vec::with_capacity(children.len());
-        let mut seen_placeholders = std::collections::BTreeSet::<u32>::new();
-        for &(placeholder_name, child) in children {
-            let matches = self
-                .terminal_display_names
-                .iter()
-                .enumerate()
-                .filter_map(|(terminal, name)| {
-                    (name == placeholder_name).then_some(terminal as u32)
-                })
-                .collect::<Vec<_>>();
-            let placeholder_terminal = match matches.as_slice() {
-                [terminal] => *terminal,
-                [] => {
-                    return Err(crate::GlrMaskError::Compilation(format!(
-                        "parent constraint has no terminal named {placeholder_name:?}",
-                    )));
-                }
-                _ => {
-                    return Err(crate::GlrMaskError::Compilation(format!(
-                        "parent constraint has multiple terminals named {placeholder_name:?}; placeholder names must be unique",
-                    )));
-                }
-            };
-            if !seen_placeholders.insert(placeholder_terminal) {
-                return Err(crate::GlrMaskError::Compilation(format!(
-                    "parent placeholder terminal {placeholder_name:?} was supplied more than once",
-                )));
-            }
-            inputs.push(crate::compiler::constraint_compose::CompiledSubgrammarInput {
-                placeholder_terminal,
-                constraint: child,
-            });
-        }
-        crate::compiler::constraint_compose::compose_constraints(self, &inputs, vocab)
-            .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
-    }
-
-    /// Consume this compiled parent while composing independently compiled
-    /// children. The returned value is the same ordinary flattened
-    /// `Constraint` as [`Constraint::compose_subgrammars`], but the parent's
-    /// large tokenizer storage is moved into the result instead of cloned and
-    /// rebased. Use this when the original parent is no longer needed.
-    pub fn compose_subgrammars_owned(
-        self,
-        children: &[(&str, &Constraint)],
-        vocab: &crate::Vocab,
-    ) -> crate::Result<Self> {
-        let mut inputs = Vec::with_capacity(children.len());
-        let mut seen_placeholders = std::collections::BTreeSet::<u32>::new();
-        for &(placeholder_name, child) in children {
-            let matches = self
-                .terminal_display_names
-                .iter()
-                .enumerate()
-                .filter_map(|(terminal, name)| {
-                    (name == placeholder_name).then_some(terminal as u32)
-                })
-                .collect::<Vec<_>>();
-            let placeholder_terminal = match matches.as_slice() {
-                [terminal] => *terminal,
-                [] => {
-                    return Err(crate::GlrMaskError::Compilation(format!(
-                        "parent constraint has no terminal named {placeholder_name:?}",
-                    )));
-                }
-                _ => {
-                    return Err(crate::GlrMaskError::Compilation(format!(
-                        "parent constraint has multiple terminals named {placeholder_name:?}; placeholder names must be unique",
-                    )));
-                }
-            };
-            if !seen_placeholders.insert(placeholder_terminal) {
-                return Err(crate::GlrMaskError::Compilation(format!(
-                    "parent placeholder terminal {placeholder_name:?} was supplied more than once",
-                )));
-            }
-            inputs.push(crate::compiler::constraint_compose::CompiledSubgrammarInput {
-                placeholder_terminal,
-                constraint: child,
-            });
-        }
-        crate::compiler::constraint_compose::compose_constraints_owned_parent(
-            self,
-            &inputs,
-            vocab,
-        )
-        .map(|composition| composition.constraint)
-        .map_err(crate::GlrMaskError::Compilation)
-    }
-
     /// Compile an EBNF grammar for `vocab`.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
@@ -661,7 +544,7 @@ impl Constraint {
     ///
     /// Binding names are the source names of top-level externals. Externals
     /// nested inside inline subgrammars use qualified names such as
-    /// `outer::leaf`. Hidden non-vocabulary placeholder IDs are allocated
+    /// `outer::leaf`. Hidden non-vocabulary linker-control IDs are allocated
     /// automatically; callers never need to manufacture `@token(...)`
     /// sentinels. Missing, duplicate, and unknown bindings are rejected before
     /// compilation or linking.
@@ -706,7 +589,7 @@ impl Constraint {
                 }
             }
 
-            let mut composition_bindings = Vec::with_capacity(parsed.placeholders.len());
+            let mut external_bindings = Vec::with_capacity(parsed.placeholders.len());
             for placeholder in &parsed.placeholders {
                 let child = children_by_name
                     .remove(placeholder.binding_name.as_str())
@@ -716,7 +599,7 @@ impl Constraint {
                             placeholder.binding_name,
                         ))
                     })?;
-                composition_bindings.push((placeholder.terminal_name.as_str(), child));
+                external_bindings.push((placeholder.token_id, placeholder.binding_name.as_str(), child));
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
                 return Err(crate::GlrMaskError::Compilation(format!(
@@ -731,10 +614,41 @@ impl Constraint {
                 GlrTableConstruction::ExperimentalCoreMerged,
                 end_token_ids,
             )?;
-            if composition_bindings.is_empty() {
+            if external_bindings.is_empty() {
                 return Ok(parent);
             }
-            parent.compose_subgrammars_owned(&composition_bindings, vocab)
+
+            let mut composition_inputs = Vec::with_capacity(external_bindings.len());
+            for (placeholder_token_id, binding_name, child) in external_bindings {
+                let mut matching_terminals = parent
+                    .special_token_terminals
+                    .iter()
+                    .filter(|special| special.token_id == placeholder_token_id)
+                    .map(|special| special.terminal_id);
+                let placeholder_terminal = matching_terminals.next().ok_or_else(|| {
+                    crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {binding_name:?} lost its hidden linker terminal",
+                    ))
+                })?;
+                if matching_terminals.next().is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
+                    )));
+                }
+                composition_inputs.push(
+                    crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                        placeholder_terminal,
+                        constraint: child,
+                    },
+                );
+            }
+            crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                parent,
+                &composition_inputs,
+                vocab,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
         })
     }
 }

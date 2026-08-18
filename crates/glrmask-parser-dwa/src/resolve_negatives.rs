@@ -1169,6 +1169,11 @@ fn apply_finality_fixpoint_acyclic_direct(
     reverse_topo_order: &[usize],
     weight_ops: &mut ScopedWeightOpCache,
 ) {
+    let profile_pairs = std::env::var_os("GLRMASK_PROFILE_FINALITY_PAIR_REUSE").is_some();
+    let mut intersection_pairs = profile_pairs.then(FxHashSet::<(usize, usize)>::default);
+    let mut propagated_edges = 0usize;
+    let mut guarded_edges = 0usize;
+    let mut full_shortcuts = 0usize;
     // In reverse topological order, every successor of `state_id` has already
     // contributed its complete final weight. Merge each propagated contribution
     // directly into the predecessor's single accumulator instead of allocating
@@ -1179,6 +1184,16 @@ fn apply_finality_fixpoint_acyclic_direct(
         };
 
         for edge in &preds[state_id] {
+            if profile_pairs {
+                propagated_edges += 1;
+                if reachable_final.is_guarded_by(edge.weight) {
+                    guarded_edges += 1;
+                } else if reachable_final.weight.is_full() || edge.weight.is_full() {
+                    full_shortcuts += 1;
+                } else if let Some(pairs) = intersection_pairs.as_mut() {
+                    pairs.insert((reachable_final.weight.ptr_key(), edge.weight.ptr_key()));
+                }
+            }
             let Some(propagated) =
                 reachable_final.intersection_with_edge_cached(edge.weight, weight_ops)
             else {
@@ -1190,6 +1205,19 @@ fn apply_finality_fixpoint_acyclic_direct(
                 weight_ops,
             );
         }
+    }
+    if let Some(pairs) = intersection_pairs {
+        eprintln!(
+            "[glrmask/profile][finality_pair_reuse] propagated_edges={} guarded_edges={} full_shortcuts={} intersection_edges={} unique_intersection_pairs={} pair_reuse={}",
+            propagated_edges,
+            guarded_edges,
+            full_shortcuts,
+            propagated_edges.saturating_sub(guarded_edges + full_shortcuts),
+            pairs.len(),
+            propagated_edges
+                .saturating_sub(guarded_edges + full_shortcuts)
+                .saturating_sub(pairs.len()),
+        );
     }
 }
 

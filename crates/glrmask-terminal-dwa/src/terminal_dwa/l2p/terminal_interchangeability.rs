@@ -1297,6 +1297,10 @@ impl TiRawDiscoveryData {
 /// active-terminal mask of an iterative TI round.
 pub struct TiDiscoveryContext {
     topology: Arc<RestrictedTopology>,
+    /// Exact byte alphabet supplied by the L2P vocabulary partition.  The
+    /// topology may internally compress equivalent bytes, so its stored edge
+    /// labels are not a lossless reconstruction of this semantic input.
+    relevant_bytes: [bool; 256],
     raw: Arc<TiRawDiscoveryData>,
     root_output_signatures: Vec<RootOutputSignature>,
     root_observed_states: usize,
@@ -1321,9 +1325,48 @@ pub struct TiDiscoveryContext {
     first_round_memo: std::cell::RefCell<FxHashMap<(TerminalID, TerminalID), bool>>,
 }
 
+/// Exact stable restricted-observation quotient produced from the final TI
+/// discovery round.  The mask and byte alphabet are retained with the map so
+/// callers can reuse the fixed-point certificate only when their downstream
+/// observation semantics are identical.
+pub struct TiRestrictedObservationSeed {
+    pub state_map: ManyToOneIdMap,
+    pub active_terminals: Arc<[bool]>,
+    pub relevant_bytes: [bool; 256],
+}
+
 impl TiDiscoveryContext {
+    /// Keep the cached output projection synchronized with the current
+    /// monotone TI mask even when a discovery round can return before building
+    /// an `InterchangeabilityDfa`.  This occurs at the fixed point after an
+    /// earlier round merged terminals: the root/candidate prefilters may prove
+    /// there are no remaining pairs, but downstream restricted-observation
+    /// reuse still needs the exact output projection for the final active mask.
+    ///
+    /// Projection is exact because later TI masks only remove terminals.  We
+    /// deliberately do nothing when no prior seed exists, avoiding new work on
+    /// partitions whose first round already has no candidates.
+    fn refresh_output_projection_seed_if_present(&self, active_terminals: &[bool]) {
+        let needs_refresh = self
+            .output_projection_seed
+            .borrow()
+            .as_ref()
+            .is_some_and(|seed| seed.active_terminals.as_ref() != active_terminals);
+        if !needs_refresh {
+            return;
+        }
+
+        let dfa = InterchangeabilityDfa::from_context(active_terminals, self);
+        *self.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
+            active_terminals: Arc::from(active_terminals.to_vec()),
+            output_pairs: Arc::clone(&dfa.output_pairs),
+            output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+        });
+    }
+
     fn from_topology(
         tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
         topology: RestrictedTopology,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
         profile_label: &'static str,
@@ -1356,6 +1399,7 @@ impl TiDiscoveryContext {
         }
         Self {
             topology,
+            relevant_bytes: *relevant_bytes,
             raw,
             root_output_signatures,
             root_observed_states,
@@ -1381,6 +1425,7 @@ impl TiDiscoveryContext {
         let topology_finished_at = Instant::now();
         Self::from_topology(
             tokenizer,
+            relevant_bytes,
             topology,
             shared_output_cache,
             "ti_context_build",
@@ -1421,6 +1466,7 @@ impl TiDiscoveryContext {
         let topology_finished_at = Instant::now();
         Ok(Self::from_topology(
             tokenizer,
+            relevant_bytes,
             topology,
             shared_output_cache,
             "ti_context_build",
@@ -1460,6 +1506,7 @@ impl TiDiscoveryContext {
         let topology_finished_at = Instant::now();
         Self::from_topology(
             tokenizer,
+            relevant_bytes,
             topology,
             shared_output_cache,
             "ti_context_build_c",
@@ -1505,6 +1552,7 @@ impl TiDiscoveryContext {
         let topology_finished_at = Instant::now();
         Ok(Self::from_topology(
             tokenizer,
+            relevant_bytes,
             topology,
             shared_output_cache,
             "ti_context_build_c",
@@ -1548,7 +1596,7 @@ impl TiDiscoveryContext {
         &self,
         tokenizer: &Tokenizer,
         initial_state_map: Option<&ManyToOneIdMap>,
-    ) -> Option<ManyToOneIdMap> {
+    ) -> Option<TiRestrictedObservationSeed> {
         if !tokenizer.has_epsilon_transitions() || !self.topology.nfa_configurations_use_raw_states {
             return None;
         }
@@ -1559,7 +1607,7 @@ impl TiDiscoveryContext {
             tokenizer,
             Some(seed.active_terminals.as_ref()),
         )?;
-        Some(compute_state_map_from_prebuilt_sparse_powerset(
+        let state_map = compute_state_map_from_prebuilt_sparse_powerset(
             tokenizer,
             initial_state_map,
             RefinementDepth::Stable,
@@ -1569,7 +1617,12 @@ impl TiDiscoveryContext {
             Some(&active_language),
             &self.topology.edge_offsets[..self.topology.real_state_count + 1],
             &self.topology.edges,
-        ))
+        );
+        Some(TiRestrictedObservationSeed {
+            state_map,
+            active_terminals: Arc::clone(&seed.active_terminals),
+            relevant_bytes: self.relevant_bytes,
+        })
     }
 
 
@@ -8567,6 +8620,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             .filter(|&terminal| Some(terminal) != ignore_terminal)
             .collect::<Vec<_>>();
         if candidates.len() < 2 {
+            context.refresh_output_projection_seed_if_present(active_terminals);
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
@@ -8603,6 +8657,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
         if root_candidate_pairs == 0 {
+            context.refresh_output_projection_seed_if_present(active_terminals);
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
@@ -8625,6 +8680,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         if structural_candidate_pairs == 0 {
+            context.refresh_output_projection_seed_if_present(active_terminals);
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
@@ -8692,6 +8748,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             );
         }
         if exact_candidate_pairs == 0 {
+            context.refresh_output_projection_seed_if_present(active_terminals);
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
         let mut result = singleton_partition(active_terminals);

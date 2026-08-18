@@ -127,10 +127,6 @@ ignore languages remain scope-local: parent trivia is accepted in parent states
 and child trivia is accepted only after entering the child, including inside
 fused model tokens.
 
-`Constraint.compose_subgrammars(...)` remains available as a lower-level API
-for callers that already have a compiled parent containing explicit
-non-vocabulary `@token(...)` placeholder terminals.
-
 ### Decode
 
 Create one state per generated sequence:

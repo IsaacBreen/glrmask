@@ -6,7 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::Vocab;
-use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
@@ -22,7 +22,6 @@ use crate::compiler::stages::resolve_negatives::{
     apply_finality_fixpoint, resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::stages::templates::compile_bundle::BundleGroupDfaCache;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
@@ -38,9 +37,61 @@ type DeferredFinalEntries = SmallVec<[(u32, Weight); 4]>;
 type FinalPathWeights = SmallVec<[Weight; 4]>;
 type FinalGroups = SmallVec<[(Weight, FinalPathWeights); 4]>;
 
+struct ParallelSupportScanScratch {
+    weight_ops: ScopedWeightOpCache,
+    dense: Vec<TargetContribs>,
+    dense_touched: Vec<bool>,
+    touched_dense: Vec<usize>,
+    default: TargetContribs,
+    sparse: FxHashMap<i32, TargetContribs>,
+}
+
+impl ParallelSupportScanScratch {
+    fn new(dense_label_limit: usize) -> Self {
+        Self {
+            weight_ops: ScopedWeightOpCache::default(),
+            dense: (0..dense_label_limit).map(|_| TargetContribs::new()).collect(),
+            dense_touched: vec![false; dense_label_limit],
+            touched_dense: Vec::new(),
+            default: TargetContribs::new(),
+            sparse: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, label: i32, target: u32, weight: Weight) {
+        if label >= 0 && (label as usize) < self.dense.len() {
+            let index = label as usize;
+            if !self.dense_touched[index] {
+                self.dense_touched[index] = true;
+                self.touched_dense.push(index);
+            }
+            self.dense[index].push((target, weight));
+        } else if label == DEFAULT_LABEL {
+            self.default.push((target, weight));
+        } else {
+            self.sparse.entry(label).or_default().push((target, weight));
+        }
+    }
+
+    fn take_labels(&mut self) -> Vec<(i32, TargetContribs)> {
+        let mut labels = Vec::with_capacity(
+            self.touched_dense.len() + usize::from(!self.default.is_empty()) + self.sparse.len(),
+        );
+        for index in self.touched_dense.drain(..) {
+            self.dense_touched[index] = false;
+            labels.push((index as i32, std::mem::take(&mut self.dense[index])));
+        }
+        if !self.default.is_empty() {
+            labels.push((DEFAULT_LABEL, std::mem::take(&mut self.default)));
+        }
+        labels.extend(self.sparse.drain());
+        labels
+    }
+}
+
 const PROFILE_PARSER_DWA_DETERMINIZE_DETAIL_ENV: &str =
     "GLRMASK_PROFILE_PARSER_DWA_DETERMINIZE_DETAIL";
-const LARGE_PARSER_NWA_ALGEBRA_OPT_MIN_STATES: usize = 65_536;
 
 #[inline]
 fn add_target_contribution(contribs: &mut TargetContribs, target: u32, add: Weight) {
@@ -290,22 +341,58 @@ struct DeterminizedDwaWithSupports {
 }
 
 #[derive(Debug, Clone)]
-enum PendingEdgeWeight {
-    Immediate(Weight),
-    Deferred(usize),
-}
-
-#[derive(Debug, Clone)]
 struct CachedClosure {
     to_state: u32,
-    edge_weight: PendingEdgeWeight,
+    edge_weight: Weight,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DeferredEdgeWeightPatch {
-    state: u32,
-    label: i32,
-    job: usize,
+struct ParserSingletonSubsetCache {
+    primary: Option<Vec<Option<(usize, u32)>>>,
+    overflow: FxHashMap<(u32, usize), u32>,
+}
+
+impl ParserSingletonSubsetCache {
+    fn new(num_nwa_states: usize) -> Self {
+        let dense = num_nwa_states >= std::env::var("GLRMASK_PARSER_SINGLETON_DENSE_MIN_NWA_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384)
+            && std::env::var_os("GLRMASK_DISABLE_PARSER_SINGLETON_DENSE_CACHE").is_none();
+        Self {
+            primary: dense.then(|| vec![None; num_nwa_states]),
+            overflow: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, state: u32, weight_key: usize) -> Option<u32> {
+        if let Some(primary) = &self.primary
+            && let Some((primary_weight, dwa_state)) = primary[state as usize]
+            && primary_weight == weight_key
+        {
+            return Some(dwa_state);
+        }
+        self.overflow.get(&(state, weight_key)).copied()
+    }
+
+    #[inline]
+    fn insert(&mut self, state: u32, weight_key: usize, dwa_state: u32) {
+        if let Some(primary) = &mut self.primary {
+            let slot = &mut primary[state as usize];
+            match *slot {
+                None => {
+                    *slot = Some((weight_key, dwa_state));
+                    return;
+                }
+                Some((existing_weight, _)) if existing_weight == weight_key => {
+                    *slot = Some((weight_key, dwa_state));
+                    return;
+                }
+                Some(_) => {}
+            }
+        }
+        self.overflow.insert((state, weight_key), dwa_state);
+    }
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -486,7 +573,6 @@ fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates
                 .is_some_and(terminal_template_has_acceptance)
     })
 }
-
 
 fn build_state_summaries(
     terminal_automaton: &TerminalAutomaton,
@@ -1167,12 +1253,14 @@ fn collapse_immediate_acceptance_certificates(
     rewrites.len()
 }
 
-fn trim_unreachable_dwa(dwa: DWA) -> DWA {
+fn trim_unreachable_dwa(mut dwa: DWA) -> DWA {
     if dwa.states().is_empty() {
         return dwa;
     }
-    let old_states = dwa.states().to_vec();
     let old_start = dwa.start_state() as usize;
+    // Consume the state's owned BTreeMaps/weights instead of cloning the whole
+    // DWA and then cloning every reachable row a second time.
+    let old_states = std::mem::take(dwa.states_mut());
     let mut reachable = vec![false; old_states.len()];
     let mut queue = VecDeque::from([old_start]);
     reachable[old_start] = true;
@@ -1188,25 +1276,49 @@ fn trim_unreachable_dwa(dwa: DWA) -> DWA {
     }
 
     let mut remap = vec![u32::MAX; old_states.len()];
-    let mut new_states = Vec::with_capacity(reachable.iter().filter(|&&live| live).count());
-    for (old_id, state) in old_states.iter().enumerate() {
-        if reachable[old_id] {
-            remap[old_id] = new_states.len() as u32;
-            new_states.push(state.clone());
+    let live_count = reachable.iter().filter(|&&live| live).count();
+    let mut next_id = 0u32;
+    for (old_id, &live) in reachable.iter().enumerate() {
+        if live {
+            remap[old_id] = next_id;
+            next_id += 1;
         }
     }
-    for state in &mut new_states {
-        state.transitions.retain(|_, (target, weight)| {
-            if weight.is_empty() || (*target as usize) >= remap.len() {
-                return false;
-            }
-            let mapped = remap[*target as usize];
-            if mapped == u32::MAX {
-                return false;
-            }
-            *target = mapped;
-            true
+    let mut new_states = Vec::with_capacity(live_count);
+    for (old_id, state) in old_states.into_iter().enumerate() {
+        if reachable[old_id] {
+            new_states.push(state);
+        }
+    }
+    if rayon::current_num_threads() > 1 && new_states.len() >= 16_384 {
+        use rayon::prelude::*;
+        new_states.par_iter_mut().for_each(|state| {
+            state.transitions.retain(|_, (target, weight)| {
+                if weight.is_empty() || (*target as usize) >= remap.len() {
+                    return false;
+                }
+                let mapped = remap[*target as usize];
+                if mapped == u32::MAX {
+                    return false;
+                }
+                *target = mapped;
+                true
+            });
         });
+    } else {
+        for state in &mut new_states {
+            state.transitions.retain(|_, (target, weight)| {
+                if weight.is_empty() || (*target as usize) >= remap.len() {
+                    return false;
+                }
+                let mapped = remap[*target as usize];
+                if mapped == u32::MAX {
+                    return false;
+                }
+                *target = mapped;
+                true
+            });
+        }
     }
     DWA::from_parts(new_states, remap[old_start])
 }
@@ -1235,30 +1347,57 @@ fn collapse_final_leaf_targets(mut dwa: DWA) -> DWA {
 
     let sink = dwa.add_state();
     dwa.set_final_weight(sink, Weight::all());
-    let mut changed = false;
-    for state_id in 0..sink as usize {
-        let mut remove = Vec::new();
-        for (&label, (target, edge_weight)) in &mut dwa.states_mut()[state_id].transitions {
-            let Some(final_weight) = leaf_finals
-                .get(*target as usize)
-                .and_then(Option::as_ref)
-            else {
-                continue;
-            };
-            let pushed = edge_weight.intersection(final_weight);
-            if pushed.is_empty() {
-                remove.push(label);
-            } else {
-                *target = sink;
-                *edge_weight = pushed;
-            }
-            changed = true;
+    let changed_count = if rayon::current_num_threads() > 1 && sink as usize >= 16_384 {
+        use rayon::prelude::*;
+        dwa.states_mut()[..sink as usize]
+            .par_iter_mut()
+            .map_init(ScopedWeightOpCache::default, |weight_ops, state| {
+                let mut changed = 0usize;
+                state.transitions.retain(|_, (target, edge_weight)| {
+                    let Some(final_weight) = leaf_finals
+                        .get(*target as usize)
+                        .and_then(Option::as_ref)
+                    else {
+                        return true;
+                    };
+                    let pushed = weight_ops.intersection(edge_weight, final_weight);
+                    changed += 1;
+                    if pushed.is_empty() {
+                        false
+                    } else {
+                        *target = sink;
+                        *edge_weight = pushed;
+                        true
+                    }
+                });
+                changed
+            })
+            .sum::<usize>()
+    } else {
+        let mut changed = 0usize;
+        let mut weight_ops = ScopedWeightOpCache::default();
+        for state_id in 0..sink as usize {
+            dwa.states_mut()[state_id].transitions.retain(|_, (target, edge_weight)| {
+                let Some(final_weight) = leaf_finals
+                    .get(*target as usize)
+                    .and_then(Option::as_ref)
+                else {
+                    return true;
+                };
+                let pushed = weight_ops.intersection(edge_weight, final_weight);
+                changed += 1;
+                if pushed.is_empty() {
+                    false
+                } else {
+                    *target = sink;
+                    *edge_weight = pushed;
+                    true
+                }
+            });
         }
-        for label in remove {
-            dwa.states_mut()[state_id].transitions.remove(&label);
-        }
-    }
-    if !changed {
+        changed
+    };
+    if changed_count == 0 {
         dwa.states_mut().pop();
         return dwa;
     }
@@ -1483,18 +1622,20 @@ fn local_epsilon_closure_canonical(
     }
 }
 
-fn determinize_with_supports(
+fn determinize_with_supports_mode(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
+    defer_edge_unions_override: Option<bool>,
+    normalize_singletons_override: Option<bool>,
+    normalize_subsets_override: Option<bool>,
 ) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
-    #[derive(Default)]
-    struct UnionAllCache {
+      #[derive(Default)]
+      struct UnionAllCache {
         entries: FxHashMap<SmallVec<[usize; 16]>, Weight>,
-        bulk_ops: ScopedWeightOpCache,
         ordered_keys: bool,
         profile_enabled: bool,
         hits: usize,
@@ -1560,13 +1701,39 @@ fn determinize_with_supports(
             }
 
             self.misses += 1;
-            let weight = self.bulk_ops.union_all(meaningful.into_iter());
+            let direct_union =
+                std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_DIRECT_UNION").is_none()
+                    && (std::env::var_os("GLRMASK_PARSER_SUPPORT_DIRECT_UNION").is_some()
+                        || meaningful.len() >= 5);
+            let weight = if direct_union {
+                Weight::union_all_direct(meaningful.into_iter())
+            } else {
+                Weight::union_all(meaningful.into_iter())
+            };
             self.entries.insert(key, weight.clone());
             self.record_elapsed(started);
             weight
         }
     }
 
+    #[derive(Clone)]
+    enum DeferredEdgeWeight {
+        Immediate(Weight),
+        Job(usize),
+    }
+
+    #[derive(Clone)]
+    struct DeferredClosure {
+        to_state: u32,
+        edge_weight: DeferredEdgeWeight,
+    }
+
+    struct DeferredTransition {
+        from_state: u32,
+        label: i32,
+        to_state: u32,
+        edge_weight: DeferredEdgeWeight,
+    }
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -1666,12 +1833,32 @@ fn determinize_with_supports(
     canonicalize_into(&start_subset, &mut canon_buf);
     supports[0] = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
 
+    let normalize_singletons = normalize_singletons_override.unwrap_or_else(|| {
+        if std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_some() {
+            return false;
+        }
+        if std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_some() {
+            return true;
+        }
+        let min_states = std::env::var("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETON_MIN_NWA_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384);
+        nwa.states().len() >= min_states
+    });
+    let normalized_singleton_weight = Weight::all();
+    let normalized_singleton_key = normalized_singleton_weight.ptr_key();
+    let normalize_subsets = normalize_subsets_override.unwrap_or_else(|| {
+        std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_some()
+            && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_none()
+    });
+
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    let mut singleton_subsets = ParserSingletonSubsetCache::new(nwa.states().len());
     let start_key = subset_key(&canon_buf);
     subset_map.insert(start_key, dwa.start_state());
     if let [(state_id, weight)] = canon_buf.as_slice() {
-        singleton_subsets.insert((*state_id, weight.ptr_key()), dwa.start_state());
+        singleton_subsets.insert(*state_id, weight.ptr_key(), dwa.start_state());
     }
     let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
     worklist.push_back((dwa.start_state(), canon_buf.clone()));
@@ -1689,6 +1876,7 @@ fn determinize_with_supports(
         std::env::var_os("GLRMASK_DISABLE_PARSER_EPSILON_CLOSURE_WEIGHT_CACHE").is_none();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
+    let mut singleton_closure_cache: FxHashMap<(u32, usize), CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut closure_touched_states: Vec<u32> = Vec::new();
     let mut closure_canon: Vec<(u32, Weight)> = Vec::new();
@@ -1700,28 +1888,335 @@ fn determinize_with_supports(
         .unwrap_or(true);
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
-    let mut profile_transition_weight_edges = 0usize;
-    let mut profile_transition_weight_runs = 0usize;
+    let mut profiled_component_pairs = detail.as_ref().map(|_| FxHashSet::<(u32, usize)>::default());
+    let mut profiled_component_entries = 0usize;
+    let mut profiled_unique_component_transition_scans = 0usize;
+    let component_row_cache_enabled = detail.is_none()
+        && nwa.states().len() >= std::env::var("GLRMASK_PARSER_SUPPORT_COMPONENT_CACHE_MIN_NWA_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384)
+        && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_COMPONENT_CACHE").is_none();
+    let mut component_row_cache =
+        FxHashMap::<(u32, usize), Arc<Vec<(i32, u32, Weight)>>>::default();
     let mut union_cache = UnionAllCache {
         ordered_keys: std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_none(),
         profile_enabled: detail.is_some(),
         ..UnionAllCache::default()
     };
-    let large_parser_nwa = num_nwa_states >= LARGE_PARSER_NWA_ALGEBRA_OPT_MIN_STATES;
-    let use_local_transition_weight_cache = large_parser_nwa
-        && std::env::var_os("GLRMASK_DISABLE_PARSER_LOCAL_TRANSITION_WEIGHT_CACHE").is_none();
-    let defer_edge_weight_unions = large_parser_nwa
-        && std::env::var_os("GLRMASK_DISABLE_PARSER_DEFER_EDGE_WEIGHT_UNIONS").is_none()
-        && rayon::current_num_threads() > 1;
-    let mut deferred_edge_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
-    let mut deferred_edge_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
-    let mut deferred_edge_weight_patches = Vec::<DeferredEdgeWeightPatch>::new();
+
+    let defer_edge_unions = defer_edge_unions_override
+        .unwrap_or_else(|| parser_support_defer_edge_unions_enabled(nwa.states().len()));
+    let mut deferred_union_ids = FxHashMap::<SmallVec<[usize; 16]>, usize>::default();
+    let mut deferred_union_jobs = Vec::<SmallVec<[Weight; 8]>>::new();
+    let mut deferred_closure_cache =
+        FxHashMap::<Vec<(u32, usize)>, DeferredClosure>::default();
+    let mut deferred_singleton_closure_cache =
+        FxHashMap::<(u32, usize), DeferredClosure>::default();
+    let mut deferred_transitions = Vec::<DeferredTransition>::new();
+    let mut deferred_hits = 0usize;
+    let mut deferred_misses = 0usize;
+    let mut deferred_key_len_sum = 0usize;
+    let mut deferred_key_len_max = 0usize;
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
     let mut deferred_final_entries: Vec<(u32, DeferredFinalEntries)> = Vec::new();
 
-    while let Some((from_state, subset_entries)) = worklist.pop_front() {
+    // The expensive support determinization is a graph fixed point only at the
+    // target-subset interning boundary. Expanding already-interned states is
+    // embarrassingly parallel: each state independently scans its NWA support
+    // and computes label -> weighted-target contributions. Keep interning and
+    // transition insertion serial/deterministic, but batch the scan phase so the
+    // millions of weight intersections can use the full compile pool.
+    let parallel_frontier_scan = detail.is_none()
+        && rayon::current_num_threads() > 1
+        && nwa.states().len() >= std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_MIN_NWA_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384)
+        && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_PARALLEL_FRONTIER").is_none();
+    let parallel_frontier_min = std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_MIN_FRONTIER")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(16);
+    let parallel_frontier_wave = std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_WAVE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(2_048);
+    let fast_support_profile = compile_profile_enabled() && detail.is_none();
+    let mut fast_wave_count = 0usize;
+    let mut fast_wave_states = 0usize;
+    let mut fast_component_refs = 0usize;
+    let mut fast_component_rows_computed = 0usize;
+    let mut fast_component_row_edges = 0usize;
+    let mut fast_component_key_ms = 0.0f64;
+    let mut fast_component_compute_ms = 0.0f64;
+    let mut fast_state_aggregate_ms = 0.0f64;
+    let mut fast_serial_scan_ms = 0.0f64;
+    let mut fast_label_process_ms = 0.0f64;
+    let mut fast_deferred_union_ms = 0.0f64;
+    let mut fast_transition_materialize_ms = 0.0f64;
+    let mut fast_final_weights_ms = 0.0f64;
+    let mut fast_labels = 0usize;
+    let mut fast_label_contribs = 0usize;
+    let mut fast_singleton_no_epsilon = 0usize;
+    let mut fast_closure_hits = 0usize;
+    let mut fast_closure_misses = 0usize;
+    let mut fast_subset_hits = 0usize;
+    let mut fast_subset_misses = 0usize;
+    struct PrescannedSupportState {
+        from_state: u32,
+        subset_entries: Vec<(u32, Weight)>,
+        cached_transitions: Vec<DeferredTransition>,
+        pending_labels: Vec<(i32, TargetContribs)>,
+        parallel_closure_hits: usize,
+        parallel_subset_hits: usize,
+    }
+    let mut prescanned_states: VecDeque<PrescannedSupportState> = VecDeque::new();
+    let mut fast_parallel_closure_hits = 0usize;
+    let mut fast_parallel_subset_hits = 0usize;
+
+    let mut defer_edge_weight = |contribs: &TargetContribs| -> DeferredEdgeWeight {
+        debug_assert!(!contribs.is_empty());
+        if contribs.iter().any(|(_, weight)| weight.is_full()) {
+            return DeferredEdgeWeight::Immediate(Weight::all());
+        }
+        if contribs.len() == 1 {
+            return DeferredEdgeWeight::Immediate(contribs[0].1.clone());
+        }
+        let key: SmallVec<[usize; 16]> =
+            contribs.iter().map(|(_, weight)| weight.ptr_key()).collect();
+        deferred_key_len_sum += key.len();
+        deferred_key_len_max = deferred_key_len_max.max(key.len());
+        if let Some(&job) = deferred_union_ids.get(&key) {
+            deferred_hits += 1;
+            return DeferredEdgeWeight::Job(job);
+        }
+        deferred_misses += 1;
+        let job = deferred_union_jobs.len();
+        deferred_union_ids.insert(key, job);
+        deferred_union_jobs.push(
+            contribs
+                .iter()
+                .map(|(_, weight)| weight.clone())
+                .collect::<SmallVec<[Weight; 8]>>(),
+        );
+        DeferredEdgeWeight::Job(job)
+    };
+
+    while !worklist.is_empty() || !prescanned_states.is_empty() {
+        if prescanned_states.is_empty()
+            && parallel_frontier_scan
+            && worklist.len() >= parallel_frontier_min
+        {
+            use rayon::prelude::*;
+            let wave_len = worklist.len().min(parallel_frontier_wave);
+            let wave = worklist.drain(..wave_len).collect::<Vec<_>>();
+            if fast_support_profile {
+                fast_wave_count += 1;
+                fast_wave_states += wave.len();
+                fast_component_refs += wave.iter().map(|(_, entries)| entries.len()).sum::<usize>();
+            }
+
+            // Materialize each distinct weighted NWA row at most once globally.
+            // The wave itself often reuses the same component hundreds of times,
+            // so computing missing rows in parallel before state aggregation turns
+            // the expensive intersection work into a compact, cacheable frontier.
+            if component_row_cache_enabled {
+                let key_started = fast_support_profile.then(Instant::now);
+                let mut missing = FxHashMap::<(u32, usize), (u32, Weight)>::default();
+                for (_, subset_entries) in &wave {
+                    for (nwa_state_id, path_weight) in subset_entries {
+                        let key = (*nwa_state_id, path_weight.ptr_key());
+                        if !component_row_cache.contains_key(&key) {
+                            missing.entry(key).or_insert_with(|| (*nwa_state_id, path_weight.clone()));
+                        }
+                    }
+                }
+                if let Some(started) = key_started {
+                    fast_component_key_ms += elapsed_ms(started);
+                }
+                let compute_started = fast_support_profile.then(Instant::now);
+                let computed = missing
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .into_par_iter()
+                    .map_init(ScopedWeightOpCache::default, |intersection_cache, (key, (nwa_state_id, path_weight))| {
+                        let state = &nwa.states()[nwa_state_id as usize];
+                        let mut row = Vec::new();
+                        for (&label, targets) in &state.transitions {
+                            for (target, transition_weight) in targets {
+                                let next_weight = intersection_cache.intersection(&path_weight, transition_weight);
+                                if !next_weight.is_empty() {
+                                    row.push((label, *target, next_weight));
+                                }
+                            }
+                        }
+                        (key, Arc::new(row))
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(started) = compute_started {
+                    fast_component_compute_ms += elapsed_ms(started);
+                }
+                if fast_support_profile {
+                    fast_component_rows_computed += computed.len();
+                    fast_component_row_edges += computed.iter().map(|(_, row)| row.len()).sum::<usize>();
+                }
+                for (key, row) in computed {
+                    component_row_cache.entry(key).or_insert(row);
+                }
+            }
+
+            let component_rows = &component_row_cache;
+            let closure_cache_ref = &deferred_closure_cache;
+            let singleton_closure_cache_ref = &deferred_singleton_closure_cache;
+            let singleton_subsets_ref = &singleton_subsets;
+            let aggregate_started = fast_support_profile.then(Instant::now);
+            let scanned = wave
+                .into_par_iter()
+                .map_init(
+                    || ParallelSupportScanScratch::new(dense_label_limit),
+                    |scratch, (from_state, subset_entries)| {
+                    for (nwa_state_id, path_weight) in &subset_entries {
+                        if component_row_cache_enabled {
+                            let key = (*nwa_state_id, path_weight.ptr_key());
+                            let row = component_rows
+                                .get(&key)
+                                .expect("parallel support component row must be precomputed");
+                            for (label, target, next_weight) in row.iter() {
+                                scratch.push(*label, *target, next_weight.clone());
+                            }
+                            continue;
+                        }
+
+                        let state = &nwa.states()[*nwa_state_id as usize];
+                        for (&label, targets) in &state.transitions {
+                            for (target, transition_weight) in targets {
+                                let next_weight = scratch
+                                    .weight_ops
+                                    .intersection(path_weight, transition_weight);
+                                if !next_weight.is_empty() {
+                                    scratch.push(label, *target, next_weight);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut cached_transitions = Vec::new();
+                    let mut pending_labels = Vec::new();
+                    let mut parallel_closure_hits = 0usize;
+                    let mut parallel_subset_hits = 0usize;
+                    for (label, mut contribs) in scratch.take_labels() {
+                        if contribs.len() > 1 {
+                            contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+                            merge_sorted_target_contributions(&mut contribs, None);
+                        }
+
+                        // Existing direct singleton states can be resolved
+                        // against the immutable wave-start cache in parallel.
+                        // Only genuine singleton misses need serial interning.
+                        if let [(state_id, weight)] = contribs.as_slice()
+                            && nwa.states()[*state_id as usize].epsilons.is_empty()
+                        {
+                            let subset_weight_key = if normalize_singletons {
+                                normalized_singleton_key
+                            } else {
+                                weight.ptr_key()
+                            };
+                            if let Some(to_state) =
+                                singleton_subsets_ref.get(*state_id, subset_weight_key)
+                            {
+                                cached_transitions.push(DeferredTransition {
+                                    from_state,
+                                    label,
+                                    to_state,
+                                    edge_weight: DeferredEdgeWeight::Immediate(weight.clone()),
+                                });
+                                parallel_subset_hits += 1;
+                            } else {
+                                pending_labels.push((label, contribs));
+                            }
+                            continue;
+                        }
+
+                        let cached = match contribs.as_slice() {
+                            [(state_id, weight)] => singleton_closure_cache_ref
+                                .get(&(*state_id, weight.ptr_key()))
+                                .cloned(),
+                            _ => {
+                                let key = contribs
+                                    .iter()
+                                    .map(|(state_id, weight)| (*state_id, weight.ptr_key()))
+                                    .collect::<Vec<_>>();
+                                closure_cache_ref.get(&key).cloned()
+                            }
+                        };
+                        if let Some(cached) = cached {
+                            cached_transitions.push(DeferredTransition {
+                                from_state,
+                                label,
+                                to_state: cached.to_state,
+                                edge_weight: cached.edge_weight,
+                            });
+                            parallel_closure_hits += 1;
+                        } else {
+                            pending_labels.push((label, contribs));
+                        }
+                    }
+                    pending_labels.sort_unstable_by_key(|(label, _)| *label);
+                    cached_transitions.sort_unstable_by_key(|transition| transition.label);
+                    PrescannedSupportState {
+                        from_state,
+                        subset_entries,
+                        cached_transitions,
+                        pending_labels,
+                        parallel_closure_hits,
+                        parallel_subset_hits,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(started) = aggregate_started {
+                fast_state_aggregate_ms += elapsed_ms(started);
+            }
+            if fast_support_profile {
+                fast_parallel_closure_hits += scanned
+                    .iter()
+                    .map(|state| state.parallel_closure_hits)
+                    .sum::<usize>();
+                fast_parallel_subset_hits += scanned
+                    .iter()
+                    .map(|state| state.parallel_subset_hits)
+                    .sum::<usize>();
+                fast_closure_hits += scanned
+                    .iter()
+                    .map(|state| state.parallel_closure_hits)
+                    .sum::<usize>();
+                fast_subset_hits += scanned
+                    .iter()
+                    .map(|state| state.parallel_subset_hits)
+                    .sum::<usize>();
+            }
+            prescanned_states.extend(scanned);
+        }
+
+        let (from_state, subset_entries, prescanned_cached, prescanned_labels) =
+            if let Some(state) = prescanned_states.pop_front() {
+                (
+                    state.from_state,
+                    state.subset_entries,
+                    Some(state.cached_transitions),
+                    Some(state.pending_labels),
+                )
+            } else {
+                let (from_state, subset_entries) = worklist
+                    .pop_front()
+                    .expect("support determinizer worklist unexpectedly empty");
+                (from_state, subset_entries, None, None)
+            };
+
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
         }
@@ -1736,86 +2231,117 @@ fn determinize_with_supports(
             deferred_final_entries.push((from_state, has_finals));
         }
 
-        let scan_started = detail.as_ref().map(|_| Instant::now());
-        for (nwa_state_id, path_weight) in &subset_entries {
-            let state = &nwa.states()[*nwa_state_id as usize];
-            let mut previous_transition_weight = None::<usize>;
-            let mut previous_intersection = None::<Weight>;
-            let mut local_transition_intersections = SmallVec::<[(usize, Weight); 8]>::new();
-            for (&label, targets) in &state.transitions {
-                for (target, transition_weight) in targets {
-                    let transition_key = transition_weight.ptr_key();
-                    if detail.is_some() {
-                        profile_transition_weight_edges += 1;
-                        if previous_transition_weight != Some(transition_key) {
-                            profile_transition_weight_runs += 1;
-                        }
+        if prescanned_labels.is_none() {
+            if fast_support_profile {
+                fast_component_refs += subset_entries.len();
+            }
+            let scan_started = (detail.is_some() || fast_support_profile).then(Instant::now);
+            for (nwa_state_id, path_weight) in &subset_entries {
+                let state = &nwa.states()[*nwa_state_id as usize];
+                if let Some(component_pairs) = profiled_component_pairs.as_mut() {
+                    profiled_component_entries += 1;
+                    if component_pairs.insert((*nwa_state_id, path_weight.ptr_key())) {
+                        profiled_unique_component_transition_scans +=
+                            state.transitions.values().map(Vec::len).sum::<usize>();
                     }
-                    if let Some(detail) = detail.as_mut() {
-                        detail.outgoing_transitions_scanned += 1;
+                }
+
+                let cache_key = (*nwa_state_id, path_weight.ptr_key());
+                let cached_row = component_row_cache_enabled.then(|| {
+                    if let Some(row) = component_row_cache.get(&cache_key) {
+                        return Arc::clone(row);
                     }
-                    let next_weight = if previous_transition_weight == Some(transition_key) {
-                        previous_intersection
-                            .as_ref()
-                            .expect("cached transition intersection must exist")
-                            .clone()
-                    } else if use_local_transition_weight_cache {
-                        if let Some((_, cached)) = local_transition_intersections
-                            .iter()
-                            .find(|(key, _)| *key == transition_key)
-                        {
-                            cached.clone()
-                        } else {
-                            if let Some(detail) = detail.as_mut() {
-                                detail.intersection_calls += 1;
+                    let mut row = Vec::new();
+                    for (&label, targets) in &state.transitions {
+                        for (target, transition_weight) in targets {
+                            let next_weight =
+                                intersection_cache.intersection(path_weight, transition_weight);
+                            if !next_weight.is_empty() {
+                                row.push((label, *target, next_weight));
                             }
-                            let weight = intersection_cache.intersection(path_weight, transition_weight);
-                            local_transition_intersections.push((transition_key, weight.clone()));
-                            weight
                         }
-                    } else {
+                    }
+                    let row = Arc::new(row);
+                    component_row_cache.insert(cache_key, Arc::clone(&row));
+                    row
+                });
+
+                if let Some(row) = cached_row {
+                    for (label, target, next_weight) in row.iter() {
+                        let target_weights = if *label >= 0 && (*label as usize) < dense_label_limit {
+                            let label_idx = *label as usize;
+                            if !dense_label_touched[label_idx] {
+                                dense_label_touched[label_idx] = true;
+                                touched_dense_labels.push(label_idx);
+                            }
+                            &mut dense_raw_targets[label_idx]
+                        } else if *label == DEFAULT_LABEL {
+                            default_touched = true;
+                            &mut default_raw_targets
+                        } else {
+                            sparse_raw_targets.entry(*label).or_default()
+                        };
+                        target_weights.push((*target, next_weight.clone()));
+                    }
+                    continue;
+                }
+
+                for (&label, targets) in &state.transitions {
+                    for (target, transition_weight) in targets {
                         if let Some(detail) = detail.as_mut() {
+                            detail.outgoing_transitions_scanned += 1;
                             detail.intersection_calls += 1;
                         }
-                        intersection_cache.intersection(path_weight, transition_weight)
-                    };
-                    previous_intersection = Some(next_weight.clone());
-                    previous_transition_weight = Some(transition_key);
-                    if next_weight.is_empty() {
-                        continue;
-                    }
-                    if let Some(detail) = detail.as_mut() {
-                        detail.nonempty_intersections += 1;
-                    }
-
-                    let target_weights = if label >= 0 && (label as usize) < dense_label_limit {
-                        let label_idx = label as usize;
-                        if !dense_label_touched[label_idx] {
-                            dense_label_touched[label_idx] = true;
-                            touched_dense_labels.push(label_idx);
+                        let next_weight =
+                            intersection_cache.intersection(path_weight, transition_weight);
+                        if next_weight.is_empty() {
+                            continue;
                         }
-                        &mut dense_raw_targets[label_idx]
-                    } else if label == DEFAULT_LABEL {
-                        default_touched = true;
-                        &mut default_raw_targets
-                    } else {
-                        sparse_raw_targets.entry(label).or_default()
-                    };
-                    push_target_contribution_profiled(
-                        target_weights,
-                        *target,
-                        next_weight,
-                        detail.as_mut(),
-                    );
+                        if let Some(detail) = detail.as_mut() {
+                            detail.nonempty_intersections += 1;
+                        }
+
+                        let target_weights = if label >= 0 && (label as usize) < dense_label_limit {
+                            let label_idx = label as usize;
+                            if !dense_label_touched[label_idx] {
+                                dense_label_touched[label_idx] = true;
+                                touched_dense_labels.push(label_idx);
+                            }
+                            &mut dense_raw_targets[label_idx]
+                        } else if label == DEFAULT_LABEL {
+                            default_touched = true;
+                            &mut default_raw_targets
+                        } else {
+                            sparse_raw_targets.entry(label).or_default()
+                        };
+                        push_target_contribution_profiled(
+                            target_weights,
+                            *target,
+                            next_weight,
+                            detail.as_mut(),
+                        );
+                    }
+                }
+            }
+            if let Some(started_at) = scan_started {
+                let ms = elapsed_ms(started_at);
+                if let Some(detail) = detail.as_mut() {
+                    detail.intersection_scan_ms += ms;
+                } else if fast_support_profile {
+                    fast_serial_scan_ms += ms;
                 }
             }
         }
-        if let (Some(detail), Some(started_at)) = (detail.as_mut(), scan_started) {
-            detail.intersection_scan_ms += elapsed_ms(started_at);
+
+        if let Some(cached) = prescanned_cached {
+            if fast_support_profile {
+                fast_labels += cached.len();
+            }
+            deferred_transitions.extend(cached);
         }
 
         let mut pre_closure_key: Vec<(u32, usize)> = Vec::new();
-        let label_started = detail.as_ref().map(|_| Instant::now());
+        let label_started = (detail.is_some() || fast_support_profile).then(Instant::now);
 
         let mut process_label = |label: i32, mut contribs: TargetContribs| {
             if contribs.is_empty() {
@@ -1823,6 +2349,10 @@ fn determinize_with_supports(
             }
 
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
+            if fast_support_profile {
+                fast_labels += 1;
+                fast_label_contribs += contribs.len();
+            }
 
             if let Some(detail) = detail.as_mut() {
                 detail.labels_processed += 1;
@@ -1830,8 +2360,10 @@ fn determinize_with_supports(
                 detail.label_contribs_max = detail.label_contribs_max.max(contribs.len());
             }
             let sort_started = detail.as_ref().map(|_| Instant::now());
-            contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
-            merge_sorted_target_contributions(&mut contribs, detail.as_mut());
+            if contribs.len() > 1 {
+                contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+                merge_sorted_target_contributions(&mut contribs, detail.as_mut());
+            }
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
                 detail.contribution_sort_ms += elapsed_ms(started_at);
             }
@@ -1839,21 +2371,47 @@ fn determinize_with_supports(
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
                 if nwa.states()[*only_state as usize].epsilons.is_empty() {
-                    let singleton_key = (*only_state, only_weight.ptr_key());
+                    if fast_support_profile {
+                        fast_singleton_no_epsilon += 1;
+                    }
+                    let singleton_key = (
+                        *only_state,
+                        if normalize_singletons {
+                            normalized_singleton_key
+                        } else {
+                            only_weight.ptr_key()
+                        },
+                    );
                     let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
-                    let to_state = if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
+                    let to_state = if let Some(existing) = singleton_subsets.get(singleton_key.0, singleton_key.1) {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
+                        }
+                        if fast_support_profile {
+                            fast_subset_hits += 1;
                         }
                         existing
                     } else {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_misses += 1;
                         }
+                        if fast_support_profile {
+                            fast_subset_misses += 1;
+                        }
                         let new_state = dwa.add_state();
                         subset_map.insert(vec![singleton_key], new_state);
-                        singleton_subsets.insert(singleton_key, new_state);
-                        worklist.push_back((new_state, vec![(*only_state, only_weight.clone())]));
+                        singleton_subsets.insert(singleton_key.0, singleton_key.1, new_state);
+                        worklist.push_back((
+                            new_state,
+                            vec![(
+                                *only_state,
+                                if normalize_singletons {
+                                    normalized_singleton_weight.clone()
+                                } else {
+                                    only_weight.clone()
+                                },
+                            )],
+                        ));
                         supports.push(vec![*only_state]);
                         new_state
                     };
@@ -1862,8 +2420,83 @@ fn determinize_with_supports(
                     {
                         detail.subset_map_lookup_ms += elapsed_ms(started_at);
                     }
+                    if defer_edge_unions {
+                        deferred_transitions.push(DeferredTransition {
+                            from_state,
+                            label,
+                            to_state,
+                            edge_weight: DeferredEdgeWeight::Immediate(only_weight.clone()),
+                        });
+                    } else {
+                        let add_transition_started = detail.as_ref().map(|_| Instant::now());
+                        dwa.add_transition(from_state, label, to_state, only_weight.clone());
+                        if let (Some(detail), Some(started_at)) =
+                            (detail.as_mut(), add_transition_started)
+                        {
+                            detail.add_transition_ms += elapsed_ms(started_at);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            let closure_key_started = detail.as_ref().map(|_| Instant::now());
+            let singleton_closure_key = match contribs.as_slice() {
+                [(state_id, weight)] => Some((*state_id, weight.ptr_key())),
+                _ => None,
+            };
+            if singleton_closure_key.is_none() {
+                pre_closure_key.clear();
+                pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
+                if let Some(detail) = detail.as_mut() {
+                    detail.subset_key_constructions += 1;
+                }
+            }
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_key_started) {
+                detail.closure_key_ms += elapsed_ms(started_at);
+            }
+
+            let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
+            if defer_edge_unions {
+                let cached = match singleton_closure_key {
+                    Some(key) => deferred_singleton_closure_cache.get(&key).cloned(),
+                    None => deferred_closure_cache.get(&pre_closure_key).cloned(),
+                };
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                    detail.closure_lookup_ms += elapsed_ms(started_at);
+                }
+                if let Some(cached) = cached {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.closure_cache_hits += 1;
+                    }
+                    if fast_support_profile {
+                        fast_closure_hits += 1;
+                    }
+                    deferred_transitions.push(DeferredTransition {
+                        from_state,
+                        label,
+                        to_state: cached.to_state,
+                        edge_weight: cached.edge_weight,
+                    });
+                    return;
+                }
+            } else {
+                let cached = match singleton_closure_key {
+                    Some(key) => singleton_closure_cache.get(&key).cloned(),
+                    None => closure_cache.get(&pre_closure_key).cloned(),
+                };
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                    detail.closure_lookup_ms += elapsed_ms(started_at);
+                }
+                if let Some(cached) = cached {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.closure_cache_hits += 1;
+                    }
+                    if fast_support_profile {
+                        fast_closure_hits += 1;
+                    }
                     let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                    dwa.add_transition(from_state, label, to_state, only_weight.clone());
+                    dwa.add_transition(from_state, label, cached.to_state, cached.edge_weight);
                     if let (Some(detail), Some(started_at)) =
                         (detail.as_mut(), add_transition_started)
                     {
@@ -1873,88 +2506,26 @@ fn determinize_with_supports(
                 }
             }
 
-            let closure_key_started = detail.as_ref().map(|_| Instant::now());
-            pre_closure_key.clear();
-            pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
-            if let Some(detail) = detail.as_mut() {
-                detail.subset_key_constructions += 1;
-            }
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_key_started) {
-                detail.closure_key_ms += elapsed_ms(started_at);
-            }
-
-            let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
-            let cached = closure_cache.get(&pre_closure_key).cloned();
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
-                detail.closure_lookup_ms += elapsed_ms(started_at);
-            }
-            if let Some(cached) = cached {
-                if let Some(detail) = detail.as_mut() {
-                    detail.closure_cache_hits += 1;
-                }
-                let add_transition_started = detail.as_ref().map(|_| Instant::now());
-                match cached.edge_weight {
-                    PendingEdgeWeight::Immediate(weight) => {
-                        dwa.add_transition(from_state, label, cached.to_state, weight);
-                    }
-                    PendingEdgeWeight::Deferred(job) => {
-                        dwa.add_transition(from_state, label, cached.to_state, Weight::empty());
-                        deferred_edge_weight_patches.push(DeferredEdgeWeightPatch {
-                            state: from_state,
-                            label,
-                            job,
-                        });
-                    }
-                }
-                if let (Some(detail), Some(started_at)) =
-                    (detail.as_mut(), add_transition_started)
-                {
-                    detail.add_transition_ms += elapsed_ms(started_at);
-                }
-                return;
-            }
-
             if let Some(detail) = detail.as_mut() {
                 detail.closure_cache_misses += 1;
             }
-            let edge_weight_started = detail.as_ref().map(|_| Instant::now());
-            let edge_weight = if defer_edge_weight_unions && contribs.len() > 1 {
-                if let Some((_, full_weight)) = contribs.iter().find(|(_, weight)| weight.is_full()) {
-                    PendingEdgeWeight::Immediate(full_weight.clone())
-                } else {
-                    let mut key = contribs
-                        .iter()
-                        .map(|(_, weight)| weight.ptr_key())
-                        .collect::<SmallVec<[usize; 16]>>();
-                    if !union_cache.ordered_keys {
-                        key.sort_unstable();
-                        key.dedup();
-                    }
-                    let job = if let Some(&job) = deferred_edge_union_ids.get(&key) {
-                        job
-                    } else {
-                        let job = deferred_edge_union_jobs.len();
-                        deferred_edge_union_ids.insert(key, job);
-                        deferred_edge_union_jobs.push(
-                            contribs
-                                .iter()
-                                .map(|(_, weight)| weight.clone())
-                                .collect::<SmallVec<[Weight; 8]>>(),
-                        );
-                        job
-                    };
-                    PendingEdgeWeight::Deferred(job)
-                }
+            if fast_support_profile {
+                fast_closure_misses += 1;
+            }
+            let deferred_edge_weight = defer_edge_unions.then(|| defer_edge_weight(&contribs));
+            let edge_weight = if defer_edge_unions {
+                None
             } else {
-                let weight = union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
-                if weight.is_empty() {
+                let edge_weight_started = detail.as_ref().map(|_| Instant::now());
+                let edge_weight = union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), edge_weight_started) {
+                    detail.edge_weight_union_ms += elapsed_ms(started_at);
+                }
+                if edge_weight.is_empty() {
                     return;
                 }
-                PendingEdgeWeight::Immediate(weight)
+                Some(edge_weight)
             };
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), edge_weight_started) {
-                detail.edge_weight_union_ms += elapsed_ms(started_at);
-            }
             let closure_started = detail.as_ref().map(|_| Instant::now());
             let mut owned_canon = Vec::new();
             if use_flat_canonical_closure {
@@ -1989,31 +2560,87 @@ fn determinize_with_supports(
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
                 detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
             }
-            let canon = if use_flat_canonical_closure {
+            let raw_canon = if use_flat_canonical_closure {
                 closure_canon.as_slice()
             } else {
                 owned_canon.as_slice()
             };
-            if canon.is_empty() {
+            if raw_canon.is_empty() {
                 return;
             }
 
+            // Weighted subset normalization: factor the union of residuals onto
+            // the incoming edge. For E=union(w_i), replacing each residual w_i
+            // by w_i union !E is exact because E intersect (w_i union !E)=w_i.
+            // The singleton case reduces to the cheaper `(q,w)->(q,all)` rule.
+            let mut normalized_canon_owned = Vec::<(u32, Weight)>::new();
+            let mut normalized_closure_edge_weight: Option<Weight> = None;
+            let canon = if normalize_subsets && raw_canon.len() > 1 {
+                let factored_edge = Weight::union_all_direct(raw_canon.iter().map(|(_, weight)| weight));
+                if factored_edge.is_empty() {
+                    return;
+                }
+                let outside = factored_edge.complement();
+                normalized_canon_owned.reserve(raw_canon.len());
+                if outside.is_empty() {
+                    normalized_canon_owned.extend(raw_canon.iter().cloned());
+                } else {
+                    normalized_canon_owned.extend(
+                        raw_canon
+                            .iter()
+                            .map(|(state_id, weight)| (*state_id, weight.union(&outside))),
+                    );
+                }
+                normalized_closure_edge_weight = Some(factored_edge);
+                normalized_canon_owned.as_slice()
+            } else {
+                raw_canon
+            };
+
             let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
             let to_state = if let [(only_state, only_weight)] = canon {
-                let singleton_key = (*only_state, only_weight.ptr_key());
-                if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
+                let singleton_key = (
+                    *only_state,
+                    if normalize_singletons {
+                        normalized_singleton_key
+                    } else {
+                        only_weight.ptr_key()
+                    },
+                );
+                if normalize_singletons {
+                    // The closure residual belongs on the incoming DWA edge if
+                    // the singleton state itself is canonicalized to `(q, all)`.
+                    normalized_closure_edge_weight = Some(only_weight.clone());
+                }
+                if let Some(existing) = singleton_subsets.get(singleton_key.0, singleton_key.1) {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
+                    }
+                    if fast_support_profile {
+                        fast_subset_hits += 1;
                     }
                     existing
                 } else {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_misses += 1;
                     }
+                    if fast_support_profile {
+                        fast_subset_misses += 1;
+                    }
                     let new_state = dwa.add_state();
                     subset_map.insert(vec![singleton_key], new_state);
-                    singleton_subsets.insert(singleton_key, new_state);
-                    worklist.push_back((new_state, canon.to_vec()));
+                    singleton_subsets.insert(singleton_key.0, singleton_key.1, new_state);
+                    worklist.push_back((
+                        new_state,
+                        vec![(
+                            *only_state,
+                            if normalize_singletons {
+                                normalized_singleton_weight.clone()
+                            } else {
+                                only_weight.clone()
+                            },
+                        )],
+                    ));
                     supports.push(vec![*only_state]);
                     new_state
                 }
@@ -2031,10 +2658,16 @@ fn determinize_with_supports(
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
                     }
+                    if fast_support_profile {
+                        fast_subset_hits += 1;
+                    }
                     existing
                 } else {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_misses += 1;
+                    }
+                    if fast_support_profile {
+                        fast_subset_misses += 1;
                     }
                     let new_state = dwa.add_state();
                     subset_map.insert(key_buf.clone(), new_state);
@@ -2046,134 +2679,246 @@ fn determinize_with_supports(
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
                 detail.subset_map_lookup_ms += elapsed_ms(started_at);
             }
-            closure_cache.insert(
-                pre_closure_key.clone(),
-                CachedClosure {
+            if defer_edge_unions {
+                let edge_weight = if let Some(weight) = normalized_closure_edge_weight.clone() {
+                    DeferredEdgeWeight::Immediate(weight)
+                } else {
+                    deferred_edge_weight
+                        .expect("deferred parser support edge must retain its union job")
+                };
+                let cached = DeferredClosure {
                     to_state,
                     edge_weight: edge_weight.clone(),
-                },
-            );
-            let add_transition_started = detail.as_ref().map(|_| Instant::now());
-            match edge_weight {
-                PendingEdgeWeight::Immediate(weight) => {
-                    dwa.add_transition(from_state, label, to_state, weight);
+                };
+                if let Some(key) = singleton_closure_key {
+                    deferred_singleton_closure_cache.insert(key, cached);
+                } else {
+                    deferred_closure_cache.insert(pre_closure_key.clone(), cached);
                 }
-                PendingEdgeWeight::Deferred(job) => {
-                    dwa.add_transition(from_state, label, to_state, Weight::empty());
-                    deferred_edge_weight_patches.push(DeferredEdgeWeightPatch {
-                        state: from_state,
-                        label,
-                        job,
-                    });
+                deferred_transitions.push(DeferredTransition {
+                    from_state,
+                    label,
+                    to_state,
+                    edge_weight,
+                });
+            } else {
+                let edge_weight = normalized_closure_edge_weight
+                    .clone()
+                    .or(edge_weight)
+                    .expect("eager support edge union must exist");
+                let cached = CachedClosure {
+                    to_state,
+                    edge_weight: edge_weight.clone(),
+                };
+                if let Some(key) = singleton_closure_key {
+                    singleton_closure_cache.insert(key, cached);
+                } else {
+                    closure_cache.insert(pre_closure_key.clone(), cached);
                 }
-            }
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
-                detail.add_transition_ms += elapsed_ms(started_at);
+                let add_transition_started = detail.as_ref().map(|_| Instant::now());
+                dwa.add_transition(from_state, label, to_state, edge_weight);
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
+                    detail.add_transition_ms += elapsed_ms(started_at);
+                }
             }
         };
 
-        for label_idx in touched_dense_labels.drain(..) {
-            dense_label_touched[label_idx] = false;
-            process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
-        }
+        if let Some(labels) = prescanned_labels {
+            for (label, contribs) in labels {
+                process_label(label, contribs);
+            }
+        } else {
+            for label_idx in touched_dense_labels.drain(..) {
+                dense_label_touched[label_idx] = false;
+                process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
+            }
 
-        if default_touched {
-            default_touched = false;
-            process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets));
-        }
+            if default_touched {
+                default_touched = false;
+                process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets));
+            }
 
-        for (label, contribs) in sparse_raw_targets.drain() {
-            process_label(label, contribs);
+            for (label, contribs) in sparse_raw_targets.drain() {
+                process_label(label, contribs);
+            }
         }
-        if let (Some(detail), Some(started_at)) = (detail.as_mut(), label_started) {
-            detail.label_processing_ms += elapsed_ms(started_at);
+        if let Some(started_at) = label_started {
+            let ms = elapsed_ms(started_at);
+            if let Some(detail) = detail.as_mut() {
+                detail.label_processing_ms += ms;
+            } else if fast_support_profile {
+                fast_label_process_ms += ms;
+            }
         }
     }
 
-    if !deferred_edge_union_jobs.is_empty() {
+    if defer_edge_unions {
         use rayon::prelude::*;
-        let deferred_started_at = Instant::now();
-        let patch_count = deferred_edge_weight_patches.len();
-        let results = deferred_edge_union_jobs
+        let union_started = (detail.is_some() || fast_support_profile).then(Instant::now);
+        let union_results = deferred_union_jobs
             .par_iter()
-            .map_init(ScopedWeightOpCache::default, |weight_ops, weights| {
-                weight_ops.union_all(weights.iter())
+            .map(|weights| Weight::union_all_direct(weights.iter()))
+            .collect::<Vec<_>>();
+        if let Some(started_at) = union_started {
+            let ms = elapsed_ms(started_at);
+            if let Some(detail) = detail.as_mut() {
+                detail.edge_weight_union_ms += ms;
+                detail.union_cache_ms += ms;
+            } else if fast_support_profile {
+                fast_deferred_union_ms += ms;
+            }
+        }
+        let add_started = (detail.is_some() || fast_support_profile).then(Instant::now);
+        let resolved = deferred_transitions
+            .into_par_iter()
+            .map(|transition| {
+                let edge_weight = match transition.edge_weight {
+                    DeferredEdgeWeight::Immediate(weight) => weight,
+                    DeferredEdgeWeight::Job(job) => union_results[job].clone(),
+                };
+                debug_assert!(!edge_weight.is_empty());
+                (
+                    transition.from_state,
+                    transition.label,
+                    transition.to_state,
+                    edge_weight,
+                )
             })
             .collect::<Vec<_>>();
-        let union_ms = elapsed_ms(deferred_started_at);
-        let patch_started_at = Instant::now();
-        for patch in deferred_edge_weight_patches {
-            let weight = results[patch.job].clone();
-            debug_assert!(!weight.is_empty());
-            let row = &mut dwa.states_mut()[patch.state as usize].transitions;
-            let (_, edge_weight) = row
-                .get_mut(&patch.label)
-                .expect("deferred parser edge-weight patch must find its transition");
-            *edge_weight = weight;
+
+        let mut rows: Vec<Vec<(i32, (u32, Weight))>> =
+            (0..dwa.states().len()).map(|_| Vec::new()).collect();
+        for (from_state, label, to_state, edge_weight) in resolved {
+            rows[from_state as usize].push((label, (to_state, edge_weight)));
         }
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][parser_support_deferred_edge_unions] jobs={} patches={} union_ms={union_ms:.3} patch_ms={:.3}",
-                results.len(),
-                patch_count,
-                elapsed_ms(patch_started_at),
-            );
+        dwa.states_mut()
+            .par_iter_mut()
+            .zip(rows.into_par_iter())
+            .for_each(|(state, row)| {
+                if !row.is_empty() {
+                    state.transitions = row.into_iter().collect();
+                }
+            });
+        if let Some(started_at) = add_started {
+            let ms = elapsed_ms(started_at);
+            if let Some(detail) = detail.as_mut() {
+                detail.add_transition_ms += ms;
+            } else if fast_support_profile {
+                fast_transition_materialize_ms += ms;
+            }
         }
     }
 
     let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
     let mut final_signature_groups: Vec<FinalGroups> = Vec::new();
     let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
-    let final_grouping_started = detail.as_ref().map(|_| Instant::now());
-    for (state_id, entries) in &deferred_final_entries {
-        if let Some(detail) = detail.as_mut() {
-            detail.final_weight_entries += entries.len();
-            detail.final_weight_entries_max = detail.final_weight_entries_max.max(entries.len());
-        }
+    let final_grouping_started = (detail.is_some() || fast_support_profile).then(Instant::now);
 
-        let mut groups: SmallVec<[(usize, Weight, FinalPathWeights); 4]> = SmallVec::new();
+    let build_signature = |entries: &DeferredFinalEntries| {
+        let mut groups: SmallVec<[(usize, SmallVec<[usize; 4]>); 4]> = SmallVec::new();
         for (nwa_state_id, path_weight) in entries {
-            if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
-                let final_key = state_final.ptr_key();
-                if let Some((_, _, path_weights)) = groups
-                    .iter_mut()
-                    .find(|(existing_final_key, _, _)| *existing_final_key == final_key)
-                {
-                    path_weights.push(path_weight.clone());
-                } else {
-                    let mut path_weights = SmallVec::new();
-                    path_weights.push(path_weight.clone());
-                    groups.push((final_key, state_final.clone(), path_weights));
-                }
+            let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() else {
+                continue;
+            };
+            let final_key = state_final.ptr_key();
+            if let Some((_, path_keys)) = groups
+                .iter_mut()
+                .find(|(existing_final_key, _)| *existing_final_key == final_key)
+            {
+                path_keys.push(path_weight.ptr_key());
+            } else {
+                groups.push((final_key, smallvec::smallvec![path_weight.ptr_key()]));
             }
         }
-        groups.sort_unstable_by_key(|(final_key, _, _)| *final_key);
-        let mut signature: Vec<(usize, Vec<usize>)> = Vec::with_capacity(groups.len());
-        for (final_key, _, path_weights) in &mut groups {
-            path_weights.sort_unstable_by_key(|weight| weight.ptr_key());
-            path_weights.dedup_by_key(|weight| weight.ptr_key());
-            signature.push((
-                *final_key,
-                path_weights.iter().map(|weight| weight.ptr_key()).collect(),
-            ));
-        }
+        groups.sort_unstable_by_key(|(final_key, _)| *final_key);
+        groups
+            .into_iter()
+            .map(|(final_key, mut path_keys)| {
+                path_keys.sort_unstable();
+                path_keys.dedup();
+                (final_key, path_keys.into_vec())
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let parallel_signature_grouping = detail.is_none()
+        && rayon::current_num_threads() > 1
+        && deferred_final_entries.len() >= 4_096
+        && std::env::var_os("GLRMASK_DISABLE_PARSER_FINAL_PARALLEL_SIGNATURES").is_none();
+    let mut prepared_signatures = if parallel_signature_grouping {
+        use rayon::prelude::*;
+        deferred_final_entries
+            .par_iter()
+            .map(|(_, entries)| build_signature(entries))
+            .collect::<Vec<_>>()
+    } else {
+        deferred_final_entries
+            .iter()
+            .map(|(_, entries)| build_signature(entries))
+            .collect::<Vec<_>>()
+    };
+
+    if let Some(detail) = detail.as_mut() {
+        detail.final_weight_entries = deferred_final_entries
+            .iter()
+            .map(|(_, entries)| entries.len())
+            .sum();
+        detail.final_weight_entries_max = deferred_final_entries
+            .iter()
+            .map(|(_, entries)| entries.len())
+            .max()
+            .unwrap_or(0);
+    }
+
+    for (index, (state_id, entries)) in deferred_final_entries.iter().enumerate() {
+        let signature = std::mem::take(&mut prepared_signatures[index]);
         let signature_id = match final_signature_ids.entry(signature) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
+                // Only materialize owned Weight groups for a genuinely new
+                // signature. Most parser-final signatures are repeats.
+                let mut groups: SmallVec<[(usize, Weight, FinalPathWeights); 4]> = SmallVec::new();
+                for (nwa_state_id, path_weight) in entries {
+                    let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() else {
+                        continue;
+                    };
+                    let final_key = state_final.ptr_key();
+                    if let Some((_, _, path_weights)) = groups
+                        .iter_mut()
+                        .find(|(existing_final_key, _, _)| *existing_final_key == final_key)
+                    {
+                        path_weights.push(path_weight.clone());
+                    } else {
+                        groups.push((
+                            final_key,
+                            state_final.clone(),
+                            smallvec::smallvec![path_weight.clone()],
+                        ));
+                    }
+                }
+                groups.sort_unstable_by_key(|(final_key, _, _)| *final_key);
+                for (_, _, path_weights) in &mut groups {
+                    path_weights.sort_unstable_by_key(Weight::ptr_key);
+                    path_weights.dedup_by_key(|weight| weight.ptr_key());
+                }
                 let signature_id = final_signature_groups.len();
-                let owned_groups: FinalGroups = groups
-                    .into_iter()
-                    .map(|(_, state_final, path_weights)| (state_final, path_weights))
-                    .collect();
-                final_signature_groups.push(owned_groups);
+                final_signature_groups.push(
+                    groups
+                        .into_iter()
+                        .map(|(_, state_final, path_weights)| (state_final, path_weights))
+                        .collect(),
+                );
                 entry.insert(signature_id);
                 signature_id
             }
         };
         final_jobs.push((*state_id, signature_id));
     }
-    if let (Some(detail), Some(started_at)) = (detail.as_mut(), final_grouping_started) {
-        detail.final_grouping_ms += elapsed_ms(started_at);
+    if let Some(started_at) = final_grouping_started {
+        let ms = elapsed_ms(started_at);
+        if let Some(detail) = detail.as_mut() {
+            detail.final_grouping_ms += ms;
+        }
     }
     if let Some(detail) = detail.as_mut() {
         detail.final_weight_states = final_jobs.len();
@@ -2183,6 +2928,7 @@ fn determinize_with_supports(
     }
 
     // Compute final weights in parallel once per distinct final-weight signature.
+    let fast_final_started = fast_support_profile.then(Instant::now);
     {
         use rayon::prelude::*;
         let detail_enabled = detail.is_some();
@@ -2264,69 +3010,32 @@ fn determinize_with_supports(
                     component_results.iter().map(|(_, _, ms)| *ms).sum::<f64>();
             }
             let output_started_at = Instant::now();
-            let mut output_signature_ids = FxHashMap::<SmallVec<[usize; 8]>, usize>::default();
-            let mut unique_component_ids = Vec::<SmallVec<[usize; 8]>>::new();
-            let mut jobs = Vec::<usize>::with_capacity(signature_components.len());
-            for component_ids in &signature_components {
-                let mut keyed = component_ids
-                    .iter()
-                    .filter_map(|&component_id| {
-                        component_results[component_id]
-                            .0
-                            .as_ref()
-                            .map(|weight| (weight.ptr_key(), component_id))
-                    })
-                    .collect::<SmallVec<[(usize, usize); 8]>>();
-                keyed.sort_unstable_by_key(|(key, _)| *key);
-                keyed.dedup_by_key(|(key, _)| *key);
-                let key = keyed
-                    .iter()
-                    .map(|(key, _)| *key)
-                    .collect::<SmallVec<[usize; 8]>>();
-                let output_id = if let Some(&existing) = output_signature_ids.get(&key) {
-                    existing
-                } else {
-                    let output_id = unique_component_ids.len();
-                    unique_component_ids.push(
-                        keyed.iter().map(|(_, component_id)| *component_id).collect(),
-                    );
-                    output_signature_ids.insert(key, output_id);
-                    output_id
-                };
-                jobs.push(output_id);
-            }
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_final_output_intern] input_signatures={} output_signatures={} reused={}",
-                    signature_components.len(),
-                    unique_component_ids.len(),
-                    signature_components.len().saturating_sub(unique_component_ids.len()),
-                );
-            }
-            let compute_unique = |weight_ops: &mut ScopedWeightOpCache,
-                                  component_ids: &SmallVec<[usize; 8]>| {
+            let compute_signature = |component_ids: &SmallVec<[usize; 8]>| {
                 let weights = component_ids
                     .iter()
                     .filter_map(|&component_id| component_results[component_id].0.as_ref());
-                let weight = weight_ops.union_all(weights);
+                let direct_final_union =
+                    std::env::var_os("GLRMASK_DISABLE_PARSER_FINAL_DIRECT_UNION").is_none()
+                        && (std::env::var_os("GLRMASK_PARSER_FINAL_DIRECT_UNION").is_some()
+                            || component_ids.len() >= 5);
+                let weight = if direct_final_union {
+                    Weight::union_all_direct(weights)
+                } else {
+                    Weight::union_all(weights)
+                };
                 (!weight.is_empty()).then_some(weight)
             };
-            let unique_results = if use_parallel_final_signatures {
-                unique_component_ids
+            let results = if use_parallel_final_signatures {
+                signature_components
                     .par_iter()
-                    .map_init(ScopedWeightOpCache::default, compute_unique)
+                    .map(compute_signature)
                     .collect::<Vec<_>>()
             } else {
-                let mut weight_ops = ScopedWeightOpCache::default();
-                unique_component_ids
+                signature_components
                     .iter()
-                    .map(|component_ids| compute_unique(&mut weight_ops, component_ids))
+                    .map(compute_signature)
                     .collect::<Vec<_>>()
             };
-            let results = jobs
-                .into_iter()
-                .map(|output_id| unique_results[output_id].clone())
-                .collect::<Vec<_>>();
             if std::env::var_os("GLRMASK_VALIDATE_INTERNED_FINAL_GROUPS").is_some() {
                 let reference = final_signature_groups
                     .iter()
@@ -2369,36 +3078,85 @@ fn determinize_with_supports(
             }
         }
     }
+    if let Some(started) = fast_final_started {
+        fast_final_weights_ms = elapsed_ms(started);
+    }
 
     if let Some(detail) = detail.as_mut() {
-        detail.union_cache_hits = union_cache.hits;
-        detail.union_cache_misses = union_cache.misses;
-        detail.union_cache_key_len_sum = union_cache.key_len_sum;
-        detail.union_cache_key_len_max = union_cache.key_len_max;
-        detail.union_cache_ms = union_cache.total_ms;
+        if defer_edge_unions {
+            detail.union_cache_hits = deferred_hits;
+            detail.union_cache_misses = deferred_misses;
+            detail.union_cache_key_len_sum = deferred_key_len_sum;
+            detail.union_cache_key_len_max = deferred_key_len_max;
+        } else {
+            detail.union_cache_hits = union_cache.hits;
+            detail.union_cache_misses = union_cache.misses;
+            detail.union_cache_key_len_sum = union_cache.key_len_sum;
+            detail.union_cache_key_len_max = union_cache.key_len_max;
+            detail.union_cache_ms = union_cache.total_ms;
+        }
     }
 
-    if detail.is_some() {
+    if fast_support_profile {
         eprintln!(
-            "[glrmask/profile][parser_support_transition_weight_runs] edges={} runs={} adjacent_reuse={} reuse_factor={:.3} intersection_cache_entries={}",
-            profile_transition_weight_edges,
-            profile_transition_weight_runs,
-            profile_transition_weight_edges.saturating_sub(profile_transition_weight_runs),
-            if profile_transition_weight_runs == 0 { 0.0 } else { profile_transition_weight_edges as f64 / profile_transition_weight_runs as f64 },
-            intersection_cache.intersection_entry_count(),
+            "[glrmask/profile][parser_support_fast] nwa_states={} dwa_states={} waves={} wave_states={} component_refs={} component_rows={} component_row_edges={} component_cache_entries={} labels={} label_contribs={} singleton_no_epsilon={} closure_hits={} parallel_closure_hits={} closure_misses={} subset_hits={} parallel_subset_hits={} subset_misses={} component_key_ms={:.3} component_compute_ms={:.3} state_aggregate_ms={:.3} serial_scan_ms={:.3} label_process_ms={:.3} deferred_union_ms={:.3} transition_materialize_ms={:.3} final_weights_ms={:.3}",
+            nwa.states().len(),
+            dwa.states().len(),
+            fast_wave_count,
+            fast_wave_states,
+            fast_component_refs,
+            fast_component_rows_computed,
+            fast_component_row_edges,
+            component_row_cache.len(),
+            fast_labels,
+            fast_label_contribs,
+            fast_singleton_no_epsilon,
+            fast_closure_hits,
+            fast_parallel_closure_hits,
+            fast_closure_misses,
+            fast_subset_hits,
+            fast_parallel_subset_hits,
+            fast_subset_misses,
+            fast_component_key_ms,
+            fast_component_compute_ms,
+            fast_state_aggregate_ms,
+            fast_serial_scan_ms,
+            fast_label_process_ms,
+            fast_deferred_union_ms,
+            fast_transition_materialize_ms,
+            fast_final_weights_ms,
         );
     }
-    if detail.is_some() {
-        eprintln!(
-            "[glrmask/profile][parser_support_bulk_token_union_cache] entries={}",
-            union_cache.bulk_ops.bulk_token_union_entry_count(),
-        );
-    }
+
     if let Some(detail) = detail {
         detail.emit("support");
+        if let Some(component_pairs) = profiled_component_pairs {
+            eprintln!(
+                "[glrmask/profile][parser_support_components] component_entries={} unique_component_pairs={} pair_reuse={} unique_component_transition_scans={} actual_transition_scans={}",
+                profiled_component_entries,
+                component_pairs.len(),
+                profiled_component_entries.saturating_sub(component_pairs.len()),
+                profiled_unique_component_transition_scans,
+                detail.outgoing_transitions_scanned,
+            );
+        }
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
+}
+
+fn parser_support_defer_edge_unions_enabled(nwa_states: usize) -> bool {
+    std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_none()
+        && rayon::current_num_threads() > 1
+        && (std::env::var_os("GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+            || nwa_states >= 512)
+}
+
+fn determinize_with_supports(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_mode(nwa, dense_positive_label_limit, None, None, None)
 }
 
 fn determinize_parser_dwa_with_fallbacks_impl(
@@ -2412,7 +3170,18 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     }
 
     let dense_label_limit = num_parser_states as usize;
-    let mut result = DWA::new(0, 0);
+    let fixed_singleton_ids = normalize_singletons
+        && dwa.states().len() >= std::env::var("GLRMASK_FALLBACK_FIXED_SINGLETON_MIN_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384)
+        && std::env::var_os("GLRMASK_DISABLE_FALLBACK_FIXED_SINGLETON_IDS").is_none();
+    let mut result = if fixed_singleton_ids {
+        DWA::from_parts(vec![DWAState::default(); dwa.states().len()], dwa.start_state())
+    } else {
+        DWA::new(0, 0)
+    };
+    let mut fixed_singleton_scheduled = fixed_singleton_ids.then(|| vec![false; dwa.states().len()]);
 
     let mut start_subset = FxHashMap::default();
     start_subset.insert(dwa.start_state(), Weight::all());
@@ -2437,7 +3206,12 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     subset_map.insert(start_key, result.start_state());
     if let [(state_id, weight)] = canon_buf.as_slice() {
         if normalize_singletons && weight.is_full() {
-            normalized_singleton_subsets.insert(*state_id, result.start_state());
+            if fixed_singleton_ids {
+                debug_assert_eq!(*state_id, result.start_state());
+                fixed_singleton_scheduled.as_mut().unwrap()[*state_id as usize] = true;
+            } else {
+                normalized_singleton_subsets.insert(*state_id, result.start_state());
+            }
         } else {
             weighted_singleton_subsets
                 .insert((*state_id, weight.ptr_key()), result.start_state());
@@ -2460,7 +3234,103 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
 
-    while let Some((from_state, subset_entries)) = worklist.pop_front() {
+    struct PreparedFallbackSingletonRow {
+        from_state: u32,
+        state: DWAState,
+        targets: Vec<u32>,
+    }
+    let parallel_fixed_singletons = fixed_singleton_ids
+        && detail.is_none()
+        && rayon::current_num_threads() > 1
+        && std::env::var_os("GLRMASK_DISABLE_FALLBACK_PARALLEL_SINGLETON_ROWS").is_none();
+    let fallback_parallel_min = std::env::var("GLRMASK_FALLBACK_PARALLEL_MIN_FRONTIER")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(16);
+    let fallback_parallel_wave = std::env::var("GLRMASK_FALLBACK_PARALLEL_WAVE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(2_048);
+    let fallback_profile = compile_profile_enabled() && detail.is_none();
+    let fallback_started = fallback_profile.then(Instant::now);
+    let mut fallback_parallel_waves = 0usize;
+    let mut fallback_parallel_rows = 0usize;
+    let mut prepared_singleton_rows = VecDeque::<PreparedFallbackSingletonRow>::new();
+    let mut serial_pending = VecDeque::<(u32, Vec<(u32, Weight)>)>::new();
+
+    while !worklist.is_empty() || !serial_pending.is_empty() || !prepared_singleton_rows.is_empty() {
+        if prepared_singleton_rows.is_empty()
+            && serial_pending.is_empty()
+            && parallel_fixed_singletons
+            && worklist.len() >= fallback_parallel_min
+        {
+            use rayon::prelude::*;
+            let wave_len = worklist.len().min(fallback_parallel_wave);
+            let wave = worklist.drain(..wave_len).collect::<Vec<_>>();
+            let mut eligible = Vec::<(u32, u32)>::new();
+            for (from_state, subset_entries) in wave {
+                let eligible_state = match subset_entries.as_slice() {
+                    [(dwa_state_id, path_weight)]
+                        if path_weight.is_full()
+                            && from_state == *dwa_state_id
+                            && !dwa.states()[*dwa_state_id as usize]
+                                .transitions
+                                .contains_key(&DEFAULT_LABEL) => Some(*dwa_state_id),
+                    _ => None,
+                };
+                if let Some(dwa_state_id) = eligible_state {
+                    eligible.push((from_state, dwa_state_id));
+                } else {
+                    serial_pending.push_back((from_state, subset_entries));
+                }
+            }
+            if !eligible.is_empty() {
+                fallback_parallel_waves += 1;
+                fallback_parallel_rows += eligible.len();
+                let prepared = eligible
+                    .into_par_iter()
+                    .map(|(from_state, dwa_state_id)| {
+                        let mut state = dwa.states()[dwa_state_id as usize].clone();
+                        state.transitions.retain(|_, (_, weight)| !weight.is_empty());
+                        let targets = state
+                            .transitions
+                            .values()
+                            .map(|(target, _)| *target)
+                            .collect::<Vec<_>>();
+                        PreparedFallbackSingletonRow {
+                            from_state,
+                            state,
+                            targets,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                prepared_singleton_rows.extend(prepared);
+            }
+        }
+
+        if let Some(prepared) = prepared_singleton_rows.pop_front() {
+            let scheduled = fixed_singleton_scheduled
+                .as_mut()
+                .expect("parallel singleton fallback requires fixed state IDs");
+            for input_target in prepared.targets {
+                if !scheduled[input_target as usize] {
+                    scheduled[input_target as usize] = true;
+                    worklist.push_back((
+                        input_target,
+                        vec![(input_target, normalized_singleton_weight.clone())],
+                    ));
+                }
+            }
+            result.states_mut()[prepared.from_state as usize] = prepared.state;
+            continue;
+        }
+
+        let (from_state, subset_entries) = serial_pending
+            .pop_front()
+            .or_else(|| worklist.pop_front())
+            .expect("fallback determinizer work queues unexpectedly empty");
         dense_default_all_raw_targets.clear();
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
@@ -2515,7 +3385,17 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                 if let Some(detail) = detail.as_mut() {
                     detail.nonempty_intersections += 1;
                 }
-                let to_state = if let Some(existing) =
+                let to_state = if fixed_singleton_ids {
+                    let scheduled = fixed_singleton_scheduled.as_mut().unwrap();
+                    if !scheduled[input_target as usize] {
+                        scheduled[input_target as usize] = true;
+                        worklist.push_back((
+                            input_target,
+                            vec![(input_target, normalized_singleton_weight.clone())],
+                        ));
+                    }
+                    input_target
+                } else if let Some(existing) =
                     normalized_singleton_subsets.get(&input_target).copied()
                 {
                     if let Some(detail) = detail.as_mut() {
@@ -2689,7 +3569,19 @@ fn determinize_parser_dwa_with_fallbacks_impl(
 
             let to_state = if let [(only_state, only_weight)] = contribs.as_slice() {
                 if normalize_singletons {
-                    if let Some(existing) = normalized_singleton_subsets.get(only_state).copied() {
+                    if fixed_singleton_ids {
+                        let scheduled = fixed_singleton_scheduled.as_mut().unwrap();
+                        if !scheduled[*only_state as usize] {
+                            scheduled[*only_state as usize] = true;
+                            worklist.push_back((
+                                *only_state,
+                                vec![(*only_state, normalized_singleton_weight.clone())],
+                            ));
+                        }
+                        *only_state
+                    } else if let Some(existing) =
+                        normalized_singleton_subsets.get(only_state).copied()
+                    {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
                         }
@@ -2776,6 +3668,16 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         }
     }
 
+    if let Some(started) = fallback_started {
+        eprintln!(
+            "[glrmask/profile][fallback_fast] input_states={} output_states={} parallel_waves={} parallel_rows={} total_ms={:.3}",
+            dwa.states().len(),
+            result.states().len(),
+            fallback_parallel_waves,
+            fallback_parallel_rows,
+            elapsed_ms(started),
+        );
+    }
     if let Some(detail) = detail {
         detail.emit("fallback");
     }
@@ -2986,8 +3888,94 @@ fn optimize_parser_dwa_defaults(
 }
 
 fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) {
+    if std::env::var_os("GLRMASK_PROFILE_FINAL_SUBTRACTION_DETAIL").is_some() {
+        let mut pairs = FxHashSet::<(usize, usize)>::default();
+        let mut calls = 0usize;
+        let mut states_with_final = 0usize;
+        let mut final_weights = FxHashSet::<usize>::default();
+        let mut edge_weights = FxHashSet::<usize>::default();
+        for state in dwa.states() {
+            let Some(final_weight) = state.final_weight.as_ref() else {
+                continue;
+            };
+            if final_weight.is_empty() {
+                continue;
+            }
+            states_with_final += 1;
+            final_weights.insert(final_weight.ptr_key());
+            for (_, weight) in state.transitions.values() {
+                calls += 1;
+                edge_weights.insert(weight.ptr_key());
+                pairs.insert((weight.ptr_key(), final_weight.ptr_key()));
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][final_subtraction_detail] states={} states_with_final={} calls={} unique_pairs={} pair_reuse={} unique_final_weights={} unique_edge_weights={}",
+            dwa.states().len(),
+            states_with_final,
+            calls,
+            pairs.len(),
+            calls.saturating_sub(pairs.len()),
+            final_weights.len(),
+            edge_weights.len(),
+        );
+    }
     if parallel {
         use rayon::prelude::*;
+
+        let global_pair_cache = dwa.states().len()
+            >= std::env::var("GLRMASK_FINAL_SUBTRACTION_GLOBAL_CACHE_MIN_STATES")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(16_384)
+            && std::env::var_os("GLRMASK_DISABLE_FINAL_SUBTRACTION_GLOBAL_CACHE").is_none();
+        if global_pair_cache {
+            // The same edge/final weight pair recurs across many states. Build
+            // the exact difference once per live pointer pair, in parallel, then
+            // make the multi-million-edge rewrite a lookup-only pass. All operand
+            // Arcs remain live for this scope, so pointer identity is stable.
+            let mut unique_pairs =
+                FxHashMap::<(usize, usize), (Weight, Weight)>::default();
+            for state in dwa.states() {
+                let Some(final_weight) = state.final_weight.as_ref() else {
+                    continue;
+                };
+                if final_weight.is_empty() {
+                    continue;
+                }
+                for (_, edge_weight) in state.transitions.values() {
+                    unique_pairs
+                        .entry((edge_weight.ptr_key(), final_weight.ptr_key()))
+                        .or_insert_with(|| (edge_weight.clone(), final_weight.clone()));
+                }
+            }
+            let differences = unique_pairs
+                .into_par_iter()
+                .map(|(key, (edge_weight, final_weight))| {
+                    (key, edge_weight.difference(&final_weight))
+                })
+                .collect::<FxHashMap<_, _>>();
+            dwa.states_mut().par_iter_mut().for_each(|state| {
+                let Some(final_weight) = state.final_weight.as_ref() else {
+                    return;
+                };
+                if final_weight.is_empty() {
+                    return;
+                }
+                let final_key = final_weight.ptr_key();
+                state.transitions.retain(|_, (_, weight)| {
+                    let key = (weight.ptr_key(), final_key);
+                    let new_weight = differences
+                        .get(&key)
+                        .expect("final-subtraction difference pair was not precomputed");
+                    if new_weight != weight {
+                        *weight = new_weight.clone();
+                    }
+                    !weight.is_empty()
+                });
+            });
+            return;
+        }
 
         dwa.states_mut().par_iter_mut().for_each_init(
             ScopedWeightOpCache::default,
@@ -3035,103 +4023,8 @@ fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) 
     }
 }
 
-
-fn subtract_final_weights_from_outgoing_dwa_global_pairs(dwa: &mut DWA) {
-    use rayon::prelude::*;
-
-    let collect_started = Instant::now();
-    let mut operands = FxHashMap::<(usize, usize), (Weight, Weight)>::default();
-    for state in dwa.states() {
-        let Some(final_weight) = state.final_weight.as_ref() else {
-            continue;
-        };
-        if final_weight.is_empty() {
-            continue;
-        }
-        let final_key = final_weight.ptr_key();
-        for (_, edge_weight) in state.transitions.values() {
-            let key = (edge_weight.ptr_key(), final_key);
-            operands
-                .entry(key)
-                .or_insert_with(|| (edge_weight.clone(), final_weight.clone()));
-        }
-    }
-    let collect_ms = elapsed_ms(collect_started);
-
-    let compute_started = Instant::now();
-    let results = operands
-        .into_par_iter()
-        .map(|(key, (edge_weight, final_weight))| {
-            (key, edge_weight.difference(&final_weight))
-        })
-        .collect::<FxHashMap<_, _>>();
-    let compute_ms = elapsed_ms(compute_started);
-
-    let rewrite_started = Instant::now();
-    dwa.states_mut().par_iter_mut().for_each(|state| {
-        let Some(final_weight) = state.final_weight.as_ref() else {
-            return;
-        };
-        if final_weight.is_empty() {
-            return;
-        }
-        let final_key = final_weight.ptr_key();
-        state.transitions.retain(|_, (_, edge_weight)| {
-            let key = (edge_weight.ptr_key(), final_key);
-            let new_weight = results
-                .get(&key)
-                .expect("every outgoing/final weight pair must be precomputed");
-            if new_weight != edge_weight {
-                *edge_weight = new_weight.clone();
-            }
-            !edge_weight.is_empty()
-        });
-    });
-    let rewrite_ms = elapsed_ms(rewrite_started);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][subtract_final_global_pairs] pairs={} collect_ms={collect_ms:.3} compute_ms={compute_ms:.3} rewrite_ms={rewrite_ms:.3} total_ms={:.3}",
-            results.len(),
-            collect_ms + compute_ms + rewrite_ms,
-        );
-    }
-}
-
 fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
-    if std::env::var_os("GLRMASK_PROFILE_SUBTRACT_FINAL_PAIRS").is_some() {
-        let started = Instant::now();
-        let mut calls = 0usize;
-        let mut pairs = FxHashSet::<(usize, usize)>::default();
-        let mut edge_weights = FxHashSet::<usize>::default();
-        let mut final_weights = FxHashSet::<usize>::default();
-        for state in dwa.states() {
-            let Some(final_weight) = state.final_weight.as_ref() else { continue; };
-            if final_weight.is_empty() { continue; }
-            let final_key = final_weight.ptr_key();
-            final_weights.insert(final_key);
-            for (_, weight) in state.transitions.values() {
-                calls += 1;
-                let edge_key = weight.ptr_key();
-                edge_weights.insert(edge_key);
-                pairs.insert((edge_key, final_key));
-            }
-        }
-        eprintln!(
-            "[glrmask/profile][subtract_final_pairs] calls={} unique_pairs={} unique_edge_weights={} unique_final_weights={} reuse={:.3} collect_ms={:.3}",
-            calls,
-            pairs.len(),
-            edge_weights.len(),
-            final_weights.len(),
-            if pairs.is_empty() { 0.0 } else { calls as f64 / pairs.len() as f64 },
-            elapsed_ms(started),
-        );
-    }
-    const GLOBAL_PAIR_MIN_TRANSITIONS: usize = 131_072;
-    if dwa.num_transitions() >= GLOBAL_PAIR_MIN_TRANSITIONS {
-        subtract_final_weights_from_outgoing_dwa_global_pairs(dwa);
-    } else {
-        subtract_final_weights_from_outgoing_dwa_impl(dwa, rayon::current_num_threads() > 1);
-    }
+    subtract_final_weights_from_outgoing_dwa_impl(dwa, rayon::current_num_threads() > 1);
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
@@ -3259,7 +4152,6 @@ fn append_branch_fragment(
     arena: &mut NWA,
     summaries: &StateSummaries,
     templates: &Templates,
-    group_dfa_cache: &BundleGroupDfaCache,
     built_bundle_cache: &mut [Option<Arc<NWA>>],
     bundle_id: usize,
     continuation_state: u32,
@@ -3303,8 +4195,7 @@ fn append_branch_fragment(
     // downstream.
     if built_bundle_cache[bundle_id].is_none() {
         if let Some(detail) = compose_detail {
-            let (bundle_nwa, bundle_profile) =
-                templates.build_bundle_profiled_cached(bundle, group_dfa_cache);
+            let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
             detail.bundle_profile_total_ms += bundle_profile.total_ms;
             detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
             detail.bundle_profile_union_groups_ms += bundle_profile.union_groups_ms;
@@ -3316,15 +4207,13 @@ fn append_branch_fragment(
             detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
             detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
             eprintln!(
-                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} group_cache_hits={} group_cache_misses={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
                 bundle_id,
                 bundle_profile.input_terminals,
                 bundle_profile.weight_groups,
                 bundle_profile.single_entry_weights,
                 bundle_profile.single_tsid_weights,
                 bundle_profile.total_weight_outer_ranges,
-                bundle_profile.group_dfa_cache_hits,
-                bundle_profile.group_dfa_cache_misses,
                 bundle_profile.build_group_dfas_ms,
                 bundle_profile.union_groups_ms,
                 bundle_profile.determinize_bundle_ms,
@@ -3354,8 +4243,7 @@ fn append_branch_fragment(
             );
             built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
         } else {
-            built_bundle_cache[bundle_id] =
-                Some(Arc::new(templates.build_bundle_cached(bundle, group_dfa_cache)));
+            built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
         }
     }
     let bundle_nwa = built_bundle_cache[bundle_id]
@@ -3372,6 +4260,7 @@ fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     templates: &Templates,
+    table: &GLRTable,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
@@ -3379,6 +4268,98 @@ fn build_parser_nwa_from_terminal_dwa(
     let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
+    if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE").is_some() {
+        let mut contexts = 0usize;
+        let mut skipped_epsilon = 0usize;
+        let mut future_terminal_total = 0usize;
+        let mut allowed_top_total = 0usize;
+        let mut accepting_negative_edges = 0usize;
+        let mut future_invalid_edges = 0usize;
+        let mut fully_prunable_weighted_edges = 0usize;
+        let mut restricted_weighted_edges = 0usize;
+        let mut unchanged_weighted_edges = 0usize;
+        let mut current_terminal_refs = 0usize;
+        let mut original_outer_ranges = 0usize;
+        let mut restricted_outer_ranges = 0usize;
+        for state in states {
+            for branch in &state.branches {
+                let Some(target) = states.get(branch.target as usize) else { continue };
+                if !target.epsilon_branches.is_empty() {
+                    skipped_epsilon += 1;
+                    continue;
+                }
+                let mut future_terminals = std::collections::BTreeSet::<TerminalID>::new();
+                for future_branch in &target.branches {
+                    if let Some(bundle) = summaries.unique_bundles.get(future_branch.bundle_id) {
+                        future_terminals.extend(bundle.keys().copied());
+                    }
+                }
+                if future_terminals.is_empty() {
+                    continue;
+                }
+                contexts += 1;
+                future_terminal_total += future_terminals.len();
+                let mut allowed_tops = vec![false; table.num_states as usize];
+                for top in 0..table.num_states {
+                    allowed_tops[top as usize] = future_terminals
+                        .iter()
+                        .any(|&terminal| table.action(top, terminal).is_some());
+                }
+                allowed_top_total += allowed_tops.iter().filter(|&&allowed| allowed).count();
+                let Some(current_bundle) = summaries.unique_bundles.get(branch.bundle_id) else {
+                    continue;
+                };
+                current_terminal_refs += current_bundle.len();
+                for (&terminal, branch_weight) in current_bundle {
+                    let Some(dfa) = templates.by_terminal.get(&terminal) else { continue };
+                    for dfa_state in &dfa.states {
+                        for (&label, &target_state) in &dfa_state.transitions {
+                            if !is_negative_label(label)
+                                || !dfa.states.get(target_state as usize).is_some_and(|state| state.is_accepting)
+                            {
+                                continue;
+                            }
+                            accepting_negative_edges += 1;
+                            let top = negative_to_positive_label(label) as usize;
+                            if top < allowed_tops.len() && allowed_tops[top] {
+                                continue;
+                            }
+                            future_invalid_edges += 1;
+                            original_outer_ranges += branch_weight.outer_range_count();
+                            let restricted = match target.final_weight.as_ref() {
+                                Some(final_weight) => branch_weight.intersection(final_weight),
+                                None => Weight::empty(),
+                            };
+                            restricted_outer_ranges += restricted.outer_range_count();
+                            if restricted.is_empty() {
+                                fully_prunable_weighted_edges += 1;
+                            } else if restricted == *branch_weight {
+                                unchanged_weighted_edges += 1;
+                            } else {
+                                restricted_weighted_edges += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][future_template_prune_potential] contexts={} skipped_epsilon={} current_terminal_refs={} avg_future_terminals={:.2} avg_allowed_tops={:.2} parser_states={} accepting_negative_edges={} future_invalid_edges={} fully_prunable_weighted_edges={} restricted_weighted_edges={} unchanged_weighted_edges={} original_outer_ranges={} restricted_outer_ranges={}",
+            contexts,
+            skipped_epsilon,
+            current_terminal_refs,
+            if contexts == 0 { 0.0 } else { future_terminal_total as f64 / contexts as f64 },
+            if contexts == 0 { 0.0 } else { allowed_top_total as f64 / contexts as f64 },
+            table.num_states,
+            accepting_negative_edges,
+            future_invalid_edges,
+            fully_prunable_weighted_edges,
+            restricted_weighted_edges,
+            unchanged_weighted_edges,
+            original_outer_ranges,
+            restricted_outer_ranges,
+        );
+    }
     let compose_detail_enabled = parser_dwa_compose_detail_enabled();
     let mut compose_detail = ParserDwaComposeDetailProfile {
         total_states: states.len(),
@@ -3445,32 +4426,6 @@ fn build_parser_nwa_from_terminal_dwa(
         }
     }
 
-    let used_bundle_refs = summaries
-        .unique_bundles
-        .iter()
-        .enumerate()
-        .filter_map(|(bundle_id, bundle)| used_multi_bundle[bundle_id].then_some(bundle))
-        .collect::<Vec<_>>();
-    let group_cache_started_at = Instant::now();
-    let bundle_group_dfa_cache = if std::env::var_os(
-        "GLRMASK_DISABLE_PARSER_BUNDLE_GROUP_CACHE",
-    )
-    .is_some()
-    {
-        BundleGroupDfaCache::default()
-    } else {
-        templates.build_bundle_group_dfa_cache(&used_bundle_refs)
-    };
-    let group_cache_ms = elapsed_ms(group_cache_started_at);
-    if compile_profile_enabled() || compose_detail_enabled {
-        eprintln!(
-            "[glrmask/profile][parser_bundle_group_cache] used_multi_bundles={} repeated_groups={} build_ms={:.3}",
-            used_bundle_refs.len(),
-            bundle_group_dfa_cache.len(),
-            group_cache_ms,
-        );
-    }
-
     use rayon::prelude::*;
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
@@ -3481,7 +4436,7 @@ fn build_parser_nwa_from_terminal_dwa(
             .enumerate()
             .map(|(bundle_id, bundle)| {
                 used_multi_bundle[bundle_id]
-                    .then(|| Arc::new(templates.build_bundle_cached(bundle, &bundle_group_dfa_cache)))
+                    .then(|| Arc::new(templates.build_bundle(bundle)))
             })
             .collect();
     }
@@ -3554,7 +4509,6 @@ fn build_parser_nwa_from_terminal_dwa(
                     &mut arena,
                     &summaries,
                     &templates,
-                    &bundle_group_dfa_cache,
                     &mut built_bundle_cache,
                     branch.bundle_id,
                     target_continuation,
@@ -3635,7 +4589,6 @@ fn build_parser_nwa_from_terminal_dwa(
         },
     ))
 }
-
 
 // Exact compile-time parser-stack domain algebra used by the compiled-subgrammar linker.
 fn determinize_boolean_domain_with_supports(domain: &NWA) -> DeterminizedDwaWithSupports {
@@ -5192,6 +6145,8 @@ impl SharedBooleanParserDomains {
 }
 
 
+
+
 pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -5211,7 +6166,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     } else {
         (0, 0)
     };
-    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates, table) else {
         if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
@@ -5235,6 +6190,74 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
+    if std::env::var_os("GLRMASK_VALIDATE_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_some()
+        && std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETONS").is_some()
+    {
+        let reference = determinize_with_supports_mode(
+            &parser_nwa,
+            Some(num_parser_states),
+            None,
+            Some(false),
+            Some(false),
+        );
+        let difference = find_difference(&determinized.dwa, &reference.dwa)
+            .expect("parser support singleton-normalization equivalence checker failed");
+        assert!(
+            difference.is_none(),
+            "normalized parser support DWA differs from weighted-singleton reference on labels {difference:?}",
+        );
+        eprintln!(
+            "[glrmask/validate][parser_support_normalize_singletons] normalized_states={} reference_states={} result=equivalent",
+            determinized.dwa.num_states(),
+            reference.dwa.num_states(),
+        );
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_some()
+        && std::env::var_os("GLRMASK_PARSER_SUPPORT_NORMALIZE_SUBSETS").is_some()
+    {
+        let reference = determinize_with_supports_mode(
+            &parser_nwa,
+            Some(num_parser_states),
+            None,
+            Some(false),
+            Some(false),
+        );
+        let difference = find_difference(&determinized.dwa, &reference.dwa)
+            .expect("parser support subset-normalization equivalence checker failed");
+        assert!(
+            difference.is_none(),
+            "normalized parser support subsets differ from reference on labels {difference:?}",
+        );
+        eprintln!(
+            "[glrmask/validate][parser_support_normalize_subsets] normalized_states={} reference_states={} result=equivalent",
+            determinized.dwa.num_states(),
+            reference.dwa.num_states(),
+        );
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_PARSER_SUPPORT_DEFER_EDGE_UNIONS").is_some()
+        && parser_support_defer_edge_unions_enabled(parser_nwa.states().len())
+    {
+        let reference = determinize_with_supports_mode(
+            &parser_nwa,
+            Some(num_parser_states),
+            Some(false),
+            None,
+            None,
+        );
+        assert_eq!(
+            determinized.supports, reference.supports,
+            "deferred parser support unions changed NWA support sets",
+        );
+        let difference = find_difference(&determinized.dwa, &reference.dwa)
+            .expect("parser support equivalence checker failed");
+        assert!(
+            difference.is_none(),
+            "deferred parser support unions changed the weighted language: {difference:?}",
+        );
+        eprintln!(
+            "[glrmask/profile][parser_support_deferred_union_equivalence] result=equivalent"
+        );
+    }
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
     let guaranteed_read_started_at = Instant::now();
@@ -5418,7 +6441,6 @@ mod tests {
         try_build_direct_regular_parser_top_accept_parts,
         try_build_direct_regular_parser_top_accept_parts_table_product_reference,
         try_build_immediate_parser_top_accept_parts,
-        subtract_final_weights_from_outgoing_dwa_global_pairs,
         subtract_final_weights_from_outgoing_dwa_impl,
     };
     use crate::automata::weighted::dwa::DWA;
@@ -5704,6 +6726,7 @@ mod tests {
             &terminal_automaton,
             &grammar,
             &templates,
+            &table,
         )
         .expect("generic parser NWA should build for direct templates");
         resolve_negative_codes_in_nwa(&mut generic_nwa, false);
@@ -5750,45 +6773,6 @@ mod tests {
                 "direct product mismatch at parser top {parser_top}",
             );
         }
-    }
-
-    #[test]
-    fn global_pair_final_subtraction_matches_serial_rows() {
-        let mut source = DWA::new(3, 63);
-        let states = (0..8).map(|_| source.add_state()).collect::<Vec<_>>();
-        let finals = [
-            weight(4..=17),
-            weight(8..=21),
-            weight(12..=27),
-            weight(2..=13),
-        ];
-        let edges = [
-            weight(0..=31),
-            weight(8..=39),
-            weight(16..=47),
-            weight(24..=55),
-        ];
-        for state_id in 0..source.states().len() {
-            if state_id % 2 == 0 {
-                source.set_final_weight(state_id as u32, finals[state_id % finals.len()].clone());
-            }
-            for offset in 0..4usize {
-                let target = states[(state_id + offset) % states.len()];
-                source.add_transition(
-                    state_id as u32,
-                    (offset + 1) as i32,
-                    target,
-                    edges[(state_id + offset) % edges.len()].clone(),
-                );
-            }
-        }
-
-        let mut serial = source.clone();
-        let mut global = source;
-        subtract_final_weights_from_outgoing_dwa_impl(&mut serial, false);
-        subtract_final_weights_from_outgoing_dwa_global_pairs(&mut global);
-        assert_eq!(serial.start_state(), global.start_state());
-        assert_eq!(serial.states(), global.states());
     }
 
     #[test]

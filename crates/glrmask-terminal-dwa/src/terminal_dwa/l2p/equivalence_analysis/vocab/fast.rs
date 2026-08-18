@@ -782,12 +782,46 @@ fn first_transition_factor_min_bucket_tokens() -> usize {
         .unwrap_or(2)
 }
 
-fn first_transition_factor_max_work_ratio() -> f64 {
+fn first_transition_factor_max_work_ratio_override() -> Option<f64> {
     std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO")
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT)
+}
+
+fn first_transition_factor_moderate_extension_enabled(
+    num_tokens: usize,
+    num_states: usize,
+    num_groups: usize,
+) -> bool {
+    (FIRST_TRANSITION_FACTOR_MODERATE_MIN_TOKENS
+        ..=FIRST_TRANSITION_FACTOR_MODERATE_MAX_TOKENS)
+        .contains(&num_tokens)
+        && default_vocab_batch_size(num_states, num_groups, num_tokens) >= num_states
+}
+
+fn first_transition_factor_max_work_ratio(
+    num_tokens: usize,
+    num_states: usize,
+    num_groups: usize,
+) -> f64 {
+    if let Some(value) = first_transition_factor_max_work_ratio_override() {
+        return value;
+    }
+
+    // The first-transition prepartition has a second exact authority pass, so
+    // its useful break-even point depends strongly on vocabulary size. Keep
+    // the established conservative policy everywhere except moderate
+    // vocabularies whose ordinary authority fits in one state batch. In that
+    // shape the fixed authority cost is small enough that a 10% preliminary
+    // state×token domain still gives a substantial reduction in trie work.
+    // Multi-batch authorities already amortize/refine their trie work and do
+    // not consistently repay the extra factor pass.
+    if first_transition_factor_moderate_extension_enabled(num_tokens, num_states, num_groups) {
+        FIRST_TRANSITION_FACTOR_MODERATE_MAX_WORK_RATIO
+    } else {
+        FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT
+    }
 }
 
 fn first_transition_factor_parallel_buckets_override() -> Option<bool> {
@@ -3289,9 +3323,22 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     let full_state_token_pairs = strings.len().saturating_mul(initial_states.len());
     let preliminary_ratio = preliminary_state_token_pairs as f64
         / full_state_token_pairs.max(1) as f64;
-    if enforce_work_ratio && preliminary_ratio > first_transition_factor_max_work_ratio() {
+    let max_work_ratio = first_transition_factor_max_work_ratio(
+        strings.len(),
+        initial_states.len(),
+        dfa.num_groups,
+    );
+    if enforce_work_ratio && preliminary_ratio > max_work_ratio {
         return None;
     }
+    let uses_moderate_ratio_extension = enforce_work_ratio
+        && first_transition_factor_max_work_ratio_override().is_none()
+        && first_transition_factor_moderate_extension_enabled(
+            strings.len(),
+            initial_states.len(),
+            dfa.num_groups,
+        )
+        && preliminary_ratio > FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT;
 
     // Suffix sorting is required only for an accepted plan. Deferring it until
     // after the structural work-ratio test keeps default-off/rejected attempts
@@ -3352,17 +3399,18 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     };
 
     // The factor pass normally runs inside the partition-level Rayon DAG.
-    // Small and moderate pools benefit from nested bucket parallelism because
-    // one sequential factor task otherwise monopolizes an outer worker. On
-    // larger pools, very large source-state domains instead benefit from one
-    // sequential factor task, leaving the remaining workers to the outer DAG.
-    // Keep an explicit override for diagnostics and future scheduler studies.
+    // Preserve the existing scheduler for factors admitted by the established
+    // 5% work-ratio gate. The moderate-vocabulary extension deliberately
+    // admits more preliminary work; keeping those buckets sequential avoids
+    // consuming the same Rayon workers that are concurrently building sibling
+    // vocabulary partitions. Keep the explicit override for diagnostics.
     let parallel_buckets = buckets.len() > 1
         && first_transition_factor_parallel_buckets_override().unwrap_or_else(|| {
-            first_transition_factor_parallel_buckets_default(
-                rayon::current_num_threads(),
-                initial_states.len(),
-            )
+            !uses_moderate_ratio_extension
+                && first_transition_factor_parallel_buckets_default(
+                    rayon::current_num_threads(),
+                    initial_states.len(),
+                )
         });
     let bucket_results = if parallel_buckets {
         buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
@@ -3434,6 +3482,9 @@ const SINGLETON_PROBE_STATES: usize = 16;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
 const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
+const FIRST_TRANSITION_FACTOR_MODERATE_MIN_TOKENS: usize = 1_024;
+const FIRST_TRANSITION_FACTOR_MODERATE_MAX_TOKENS: usize = 8_192;
+const FIRST_TRANSITION_FACTOR_MODERATE_MAX_WORK_RATIO: f64 = 0.10;
 const FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES: usize = 10_000;
 
 fn first_transition_factor_parallel_buckets_default(
@@ -5764,6 +5815,22 @@ mod shared_base_tests {
         assert_eq!(default_vocab_batch_size(10_000, usize::MAX, 1_000), 1);
         assert_eq!(default_vocab_batch_size(1_999, 100, 20_000), 1_999);
         assert_eq!(default_vocab_batch_size(5_241, 259, 15_155), 759);
+    }
+
+    #[test]
+    fn moderate_first_transition_factor_extension_requires_single_batch_authority() {
+        assert!(first_transition_factor_moderate_extension_enabled(
+            2_879, 1_662, 1,
+        ));
+        assert!(!first_transition_factor_moderate_extension_enabled(
+            1_023, 1_662, 1,
+        ));
+        assert!(!first_transition_factor_moderate_extension_enabled(
+            8_193, 1_662, 1,
+        ));
+        assert!(!first_transition_factor_moderate_extension_enabled(
+            2_879, 4_001, 1,
+        ));
     }
 
     #[test]

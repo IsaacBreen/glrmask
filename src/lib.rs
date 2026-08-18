@@ -210,6 +210,14 @@ pub mod __private {
         fn table_has_ambiguity(&self) -> bool;
         fn terminal_display_names(&self) -> &[String];
         fn terminal_display_name(&self, terminal_id: u32) -> Option<&str>;
+        /// Internal benchmark/debug bridge for linking already-compiled
+        /// subgrammar artifacts after the legacy public composition API was
+        /// removed.  Production callers should express subgrammars in GLRM.
+        fn compose_compiled_subgrammars(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
     }
 
     impl ConstraintExt for Constraint {
@@ -227,6 +235,43 @@ pub mod __private {
 
         fn warm_ti_pool() {
             crate::warm_ti_pool();
+        }
+
+        fn compose_compiled_subgrammars(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, compose_constraints_owned_parent,
+            };
+            use std::collections::BTreeSet;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| {
+                        Error::Compilation(format!(
+                            "parent has no subgrammar placeholder terminal {name:?}",
+                        ))
+                    })? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent(self, &inputs, vocab)
+                .map(|composition| composition.constraint)
+                .map_err(Error::Compilation)
         }
 
         fn clear_stale_weights() {

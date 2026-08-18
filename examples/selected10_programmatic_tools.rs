@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use glrmask::{Constraint, Vocab};
+use glrmask::__private::ConstraintExt;
 use serde_json::Value;
 
 const DEFAULT_CFA_ROOT: &str = "/Users/isaacbreen/Projects2/constraint-framework-analysis";
@@ -206,7 +207,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         }
         let refs = bindings.iter().map(|(name, child)| (name.as_str(), *child)).collect::<Vec<_>>();
         let started = Instant::now();
-        let dispatch = parent.compose_subgrammars_owned(&refs, vocab).unwrap();
+        let dispatch = parent.compose_compiled_subgrammars(&refs, vocab).unwrap();
         eprintln!("[selected10] dispatcher 20-child compose: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
         save_constraint(&dispatch_path, &dispatch);
     }
@@ -254,7 +255,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
         eprintln!("[selected10/debug] run={} before_compose", run + 1);
         let compose_started = Instant::now();
         let composed = core
-            .compose_subgrammars_owned(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], vocab)
+            .compose_compiled_subgrammars(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], vocab)
             .unwrap();
         let compose = compose_started.elapsed();
 

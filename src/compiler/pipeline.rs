@@ -122,6 +122,7 @@ fn terminal_coloring_enabled() -> bool {
 enum DwaPossibleMatchesMode {
     TerminalReconcile,
     TerminalReconcileAndCompact,
+    TerminalReconcileAndPreParserCompact,
     TerminalReconcileAndParserCompact,
     TerminalReconcileAndTerminalCompactAndParserCompact,
     ParserReconcile,
@@ -134,6 +135,7 @@ impl DwaPossibleMatchesMode {
             self,
             Self::TerminalReconcile
                 | Self::TerminalReconcileAndCompact
+                | Self::TerminalReconcileAndPreParserCompact
                 | Self::TerminalReconcileAndParserCompact
                 | Self::TerminalReconcileAndTerminalCompactAndParserCompact
         )
@@ -143,6 +145,15 @@ impl DwaPossibleMatchesMode {
         matches!(
             self,
             Self::TerminalReconcileAndCompact
+                | Self::TerminalReconcileAndPreParserCompact
+                | Self::TerminalReconcileAndTerminalCompactAndParserCompact
+        )
+    }
+
+    fn does_pre_parser_compact(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalReconcileAndPreParserCompact
                 | Self::TerminalReconcileAndTerminalCompactAndParserCompact
         )
     }
@@ -167,6 +178,10 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             "term_compact" | "terminal_compact" | "term_pm_compact"
             | "terminal_pm_compact" | "term_pm_reconcile_compact"
             | "terminal_pm_reconcile_compact" => DwaPossibleMatchesMode::TerminalReconcileAndCompact,
+            "preparser" | "pre_parser" | "preparser_compact" | "pre_parser_compact"
+            | "parser_build_compact" | "terminal_preparser_compact" => {
+                DwaPossibleMatchesMode::TerminalReconcileAndPreParserCompact
+            }
             "parser_compact" | "term_parser_compact" | "terminal_parser_compact"
             | "term_pm_reconcile_parser_pm_compact"
             | "terminal_pm_reconcile_parser_pm_compact" => {
@@ -209,6 +224,9 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+#[cfg(target_os = "windows")]
+const DEFAULT_COMPILE_THREAD_CAP: usize = 6;
+#[cfg(not(target_os = "windows"))]
 const DEFAULT_COMPILE_THREAD_CAP: usize = 10;
 
 #[cfg(target_os = "windows")]
@@ -3873,7 +3891,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     terminal_pm_pair.plan_dimensions_compaction(true, true);
                 profile.compact_ms += elapsed_ms(compact_plan_started_at);
 
-                if dwa_pm_mode.does_parser_compact() {
+                if dwa_pm_mode.does_pre_parser_compact() {
                     let compact_apply_started_at = Instant::now();
                     terminal_pm_pair.apply_compaction_plan(&terminal_compaction_plan);
                     profile.compact_ms += elapsed_ms(compact_apply_started_at);

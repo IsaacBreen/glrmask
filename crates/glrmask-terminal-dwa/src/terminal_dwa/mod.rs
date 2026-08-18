@@ -1309,6 +1309,11 @@ fn build_char_type_sub_vocabs(
 }
 
 pub fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
+    // Thread-pool construction is pure process setup and the speculative p2
+    // pool is reused across compiles. Build it alongside other reusable vocab
+    // artifacts so first-schema latency does not pay worker startup after the
+    // p2 witness fires.
+    partition::prepare_speculative_p2_pool();
     classify::prepare_vocab_for_terminal_classification(vocab);
     l1::prepare_l1_identity_vocab_order(vocab);
     l1::prepare_l1_token_bounded_analysis_trie(vocab);

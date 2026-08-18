@@ -23,7 +23,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
 
@@ -946,6 +946,213 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
     Some(other)
 }
 
+
+/// Exact weighted union specialized for two deterministic, epsilon-free DWAs.
+///
+/// A singleton determinized subset `(q, w)` is normalized by its incoming edge
+/// to `(q, all)`, so it has exactly the same continuation language as the
+/// original source state `q`. Reuse those source rows directly and construct
+/// only states where both inputs remain simultaneously live. This is the same
+/// weighted subset construction as the generic NWA determinizer, specialized to
+/// the invariant that a subset contains at most one state from each input.
+fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
+    type PairKey = (u32, u32, Weight, Weight);
+
+    fn intern_pair(
+        left_state: u32,
+        right_state: u32,
+        left_weight: Weight,
+        right_weight: Weight,
+        source_state_count: u32,
+        pair_states: &mut Vec<DWAState>,
+        pairs: &mut FxHashMap<PairKey, u32>,
+        worklist: &mut VecDeque<(u32, u32, u32, Weight, Weight)>,
+    ) -> u32 {
+        let key = (
+            left_state,
+            right_state,
+            left_weight.clone(),
+            right_weight.clone(),
+        );
+        if let Some(&state) = pairs.get(&key) {
+            return state;
+        }
+        let state = source_state_count + pair_states.len() as u32;
+        pair_states.push(DWAState::default());
+        pairs.insert(key, state);
+        worklist.push_back((
+            state,
+            left_state,
+            right_state,
+            left_weight,
+            right_weight,
+        ));
+        state
+    }
+
+    let left_start = left.start_state();
+    let right_start = right.start_state();
+    let left_states = std::mem::take(left.states_mut());
+    let mut right_states = std::mem::take(right.states_mut());
+    let right_offset = left_states.len() as u32;
+    let source_state_count = right_offset + right_states.len() as u32;
+    let mut pair_states = Vec::<DWAState>::new();
+
+    let mut pairs = FxHashMap::<PairKey, u32>::default();
+    let mut worklist = VecDeque::<(u32, u32, u32, Weight, Weight)>::new();
+    let start = intern_pair(
+        left_start,
+        right_start,
+        Weight::all(),
+        Weight::all(),
+        source_state_count,
+        &mut pair_states,
+        &mut pairs,
+        &mut worklist,
+    );
+    let mut weight_ops = ScopedWeightOpCache::default();
+
+    while let Some((out_state, left_id, right_id, left_residual, right_residual)) =
+        worklist.pop_front()
+    {
+        let left_state = &left_states[left_id as usize];
+        let right_state = &right_states[right_id as usize];
+        let mut output = DWAState::default();
+
+        if let Some(final_weight) = &left_state.final_weight {
+            let contribution = weight_ops.intersection(&left_residual, final_weight);
+            if !contribution.is_empty() {
+                output.final_weight = Some(contribution);
+            }
+        }
+        if let Some(final_weight) = &right_state.final_weight {
+            let contribution = weight_ops.intersection(&right_residual, final_weight);
+            if !contribution.is_empty() {
+                output.final_weight = Some(match output.final_weight.take() {
+                    Some(existing) => weight_ops.union(&existing, &contribution),
+                    None => contribution,
+                });
+            }
+        }
+
+        let mut left_transitions = left_state.transitions.iter().peekable();
+        let mut right_transitions = right_state.transitions.iter().peekable();
+        loop {
+            let label = match (left_transitions.peek(), right_transitions.peek()) {
+                (Some((left_label, _)), Some((right_label, _))) => {
+                    Some((**left_label).min(**right_label))
+                }
+                (Some((left_label, _)), None) => Some(**left_label),
+                (None, Some((right_label, _))) => Some(**right_label),
+                (None, None) => None,
+            };
+            let Some(label) = label else { break };
+
+            let left_edge = if left_transitions
+                .peek()
+                .is_some_and(|(candidate, _)| **candidate == label)
+            {
+                left_transitions.next().map(|(_, edge)| edge)
+            } else {
+                None
+            };
+            let right_edge = if right_transitions
+                .peek()
+                .is_some_and(|(candidate, _)| **candidate == label)
+            {
+                right_transitions.next().map(|(_, edge)| edge)
+            } else {
+                None
+            };
+
+            let left_contribution = left_edge.and_then(|(target, weight)| {
+                let contribution = weight_ops.intersection(&left_residual, weight);
+                (!contribution.is_empty()).then_some((*target, contribution))
+            });
+            let right_contribution = right_edge.and_then(|(target, weight)| {
+                let contribution = weight_ops.intersection(&right_residual, weight);
+                (!contribution.is_empty()).then_some((*target, contribution))
+            });
+
+            let transition = match (left_contribution, right_contribution) {
+                (None, None) => None,
+                (Some((target, weight)), None) => Some((target, weight)),
+                (None, Some((target, weight))) => Some((right_offset + target, weight)),
+                (Some((left_target, left_weight)), Some((right_target, right_weight))) => {
+                    let edge_weight = weight_ops.union(&left_weight, &right_weight);
+                    let target = intern_pair(
+                        left_target,
+                        right_target,
+                        left_weight,
+                        right_weight,
+                        source_state_count,
+                        &mut pair_states,
+                        &mut pairs,
+                        &mut worklist,
+                    );
+                    Some((target, edge_weight))
+                }
+            };
+            if let Some((target, weight)) = transition {
+                output.transitions.insert(label, (target, weight));
+            }
+        }
+        pair_states[(out_state - source_state_count) as usize] = output;
+    }
+
+    // Move source rows into the union with stable singleton IDs. Only right-side
+    // source targets need the fixed offset; left-side IDs already match.
+    for state in &mut right_states {
+        for (target, _) in state.transitions.values_mut() {
+            *target += right_offset;
+        }
+    }
+    let mut states = left_states;
+    states.reserve(right_states.len() + pair_states.len());
+    states.extend(right_states);
+    states.extend(pair_states);
+
+    // Not every copied singleton row is reachable from the paired start. Compact
+    // by moving the live rows; no BTreeMap/Weight cloning is needed.
+    let mut reachable = vec![false; states.len()];
+    let mut reachable_queue = VecDeque::new();
+    reachable[start as usize] = true;
+    reachable_queue.push_back(start);
+    while let Some(state_id) = reachable_queue.pop_front() {
+        for (target, _) in states[state_id as usize].transitions.values() {
+            let target_idx = *target as usize;
+            if !reachable[target_idx] {
+                reachable[target_idx] = true;
+                reachable_queue.push_back(*target);
+            }
+        }
+    }
+
+    let mut remap = vec![u32::MAX; states.len()];
+    let mut next_state = 0u32;
+    for (state_id, &is_reachable) in reachable.iter().enumerate() {
+        if is_reachable {
+            remap[state_id] = next_state;
+            next_state += 1;
+        }
+    }
+    let new_start = remap[start as usize];
+    let mut compact = Vec::with_capacity(next_state as usize);
+    for (state_id, mut state) in states.into_iter().enumerate() {
+        if !reachable[state_id] {
+            continue;
+        }
+        for (target, _) in state.transitions.values_mut() {
+            let mapped = remap[*target as usize];
+            debug_assert_ne!(mapped, u32::MAX);
+            *target = mapped;
+        }
+        compact.push(state);
+    }
+
+    DWA::from_parts(compact, new_start)
+}
+
 /// Merge parser-family DWAs without paying for an unnecessary second global
 /// weighted minimization.
 ///
@@ -994,6 +1201,52 @@ pub fn merge_mapped_parser_dwas(
         };
         let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
         let (dwas, common_id_map) = reconciled.into_parts();
+
+        if std::env::var_os("GLRMASK_EXPERIMENTAL_DIRECT_TWO_PARSER_UNION").is_some() {
+            let reference = if std::env::var_os("GLRMASK_VALIDATE_DIRECT_TWO_PARSER_UNION").is_some() {
+                let mut reference_nwa = NWA::new(
+                    common_id_map.num_tsids(),
+                    common_id_map.max_internal_token_id(),
+                );
+                let mut body = reference_nwa.body();
+                for source in &dwas {
+                    body = reference_nwa.union_in_place(&source.to_nwa(), &body);
+                }
+                reference_nwa.set_start_states(body.start_states);
+                Some(
+                    determinize(&reference_nwa)
+                        .expect("parser-family reference NWA union must determinize"),
+                )
+            } else {
+                None
+            };
+            let union_started_at = Instant::now();
+            let mut iter = dwas.into_iter();
+            let dwa = union_two_parser_dwas_direct(
+                iter.next().expect("two parser DWAs have a left input"),
+                iter.next().expect("two parser DWAs have a right input"),
+            );
+            let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
+            if let Some(reference) = reference {
+                let difference = find_difference(&dwa, &reference)
+                    .expect("direct parser-family union equivalence check failed");
+                assert!(
+                    difference.is_none(),
+                    "direct parser-family union differs from generic union on labels {difference:?}",
+                );
+            }
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=direct_two_dwa reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
+                    reconcile_ms,
+                    union_ms,
+                    dwa.num_states(),
+                    dwa.num_transitions(),
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return MappedArtifact::new(dwa, common_id_map);
+        }
 
         let union_started_at = Instant::now();
         let mut union = NWA::new(

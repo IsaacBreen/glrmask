@@ -14,7 +14,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 
 | Variable | Valid values | Default |
 |---|---|---|
-| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (rayon/macOS logic) |
+| `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (available parallelism capped at 6 on Windows, 10 elsewhere) |
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |
@@ -30,6 +30,44 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_DISABLE_TRIE_WALK` | truthy bool | off |
 | `GLRMASK_VOCAB_UNGROUPED_BATCH` | truthy bool | off |
 | `GLRMASK_VOCAB_EQUIV_BATCH_SIZE` | positive integer (`usize > 0`) | auto |
+
+### Adaptive exact compile optimizations
+
+These paths are exact language-preserving optimizations. The positive-name
+variables below remain force-on/debug controls; production normally relies on
+the automatic gates. `DISABLE_...` variables are presence toggles and are
+intended as diagnostic kill switches.
+
+| Variable | Valid values | Default behavior |
+|---|---|---|
+| `GLRMASK_DETERMINIZE_PARALLEL_DIRECT_WAVES` | presence toggle | auto: on with >1 Rayon worker for NWAs with at least 128 states |
+| `GLRMASK_DISABLE_DETERMINIZE_PARALLEL_DIRECT_WAVES` | presence toggle | off |
+| `GLRMASK_DETERMINIZE_WAVE_MAX` | positive integer (`usize > 0`) | `1000` |
+| `GLRMASK_L2P_PARALLEL_ROOT_TRIE` | presence toggle | auto: on with >1 Rayon worker for L2P tries with at least 512 reachable tokens and at least 2 root children |
+| `GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE` | presence toggle | off |
+| `GLRMASK_L2P_ROOT_TRIE_TASKS` | positive integer (`usize > 0`) | current Rayon worker count, capped by root-child count |
+| `GLRMASK_DISABLE_L2P_DEFER_UNCOLORED_FUTURE_LEAVES` | presence toggle | off; exact uncolored future-leaf token contributions are batched per NWA source/scanner state and expanded once during flush |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR` | truthy bool | on; exact first-transition vocabulary prepartitioning uses a 5% preliminary-work limit normally, or 10% for 1024–8192-token vocabularies whose ordinary authority fits in one state batch |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO` | positive finite float | adaptive as above; explicit value overrides the automatic 5%/10% limit |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS` | integer (`usize >= 2`) | `2` |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS` | truthy bool | auto; factors admitted only by the moderate-vocabulary 10% extension use sequential buckets to avoid nested Rayon contention |
+| `GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STRICT_REFERENCE` | truthy bool | off; recompute the ordinary exact partition and require equality |
+| `GLRMASK_ENABLE_L2P_COMMON_ATOM_PRECLASS` | truthy-ish bool (`0`/`false` disable) | on |
+| `GLRMASK_L2P_COMMON_ATOM_MAX_TOKENS` | integer (`usize >= 4096`) | `100000` |
+| `GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX` | presence toggle | auto: prepare vocabularies with 16384–100000 entries |
+| `GLRMASK_DISABLE_PREPARE_COMMON_ATOM_SUFFIX_INDEX` | presence toggle | off |
+| `GLRMASK_COMMON_ATOM_PARALLEL_PHASED` | presence toggle | auto: phased path with >1 worker for at least 32768 eligible tokens |
+| `GLRMASK_DISABLE_COMMON_ATOM_PARALLEL_PHASED` | presence toggle | off |
+| `GLRMASK_DISABLE_COMMON_ATOM_CUT_FILTERED_ROOT` | presence toggle | off; cut-filtered root semantics are on by default |
+| `GLRMASK_DISABLE_COMMON_ATOM_PARALLEL_GROUP` | presence toggle | off; exact grouping is parallel for sufficiently large groups with >1 worker |
+| `GLRMASK_PARSER_SUPPORT_DIRECT_UNION` | presence toggle | auto: direct multiway union for at least 5 meaningful operands |
+| `GLRMASK_DISABLE_PARSER_SUPPORT_DIRECT_UNION` | presence toggle | off |
+| `GLRMASK_PARSER_SUPPORT_DEFER_EDGE_UNIONS` | presence toggle | auto: defer independent edge unions with >1 worker for parser NWAs with at least 512 states |
+| `GLRMASK_DISABLE_PARSER_SUPPORT_DEFER_EDGE_UNIONS` | presence toggle | off |
+| `GLRMASK_PARSER_FINAL_DIRECT_UNION` | presence toggle | auto: direct multiway final union for at least 5 components |
+| `GLRMASK_DISABLE_PARSER_FINAL_DIRECT_UNION` | presence toggle | off |
+| `GLRMASK_SPECULATIVE_P2_L2P` | presence toggle | off; experimental/explicit only |
+| `GLRMASK_SPECULATIVE_P2_POOL_THREADS` | positive integer (`usize > 0`) | unset; no dedicated speculative pool unless configured |
 
 ### Minimize strategy vars
 
