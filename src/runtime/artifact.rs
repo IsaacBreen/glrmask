@@ -1940,6 +1940,14 @@ pub struct Constraint {
     /// envelope so V12 constraints remain loadable unchanged.
     #[serde(skip, default)]
     pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    /// Composition-time parser stack-effect templates retained from the
+    /// original compile. These are the unspecialized per-terminal DFAs used to
+    /// build parser DWAs, so a later linker can transport unchanged component
+    /// behavior instead of re-characterizing the component LR table.
+    /// Stored in the outer versioned artifact envelope for compatibility with
+    /// older inner `Constraint` bincode layouts.
+    #[serde(skip, default)]
+    pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     /// Runtime-only inverse lexer-metadata index used by compiled-constraint
     /// composition. Row `t` lists exactly the raw tokenizer states whose
     /// epsilon closure has terminal `t` matched or still reachable.

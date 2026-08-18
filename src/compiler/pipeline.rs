@@ -2270,7 +2270,7 @@ fn build_and_merge_parser_dwa_families(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     _ignore_terminal: Option<u32>,
-    templates: Templates,
+    templates: &Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     final_id_map: Option<&std::sync::OnceLock<InternalIdMap>>,
@@ -2822,7 +2822,7 @@ fn launch_parser_dag_if_ready<'scope>(
                             &table,
                             &analysis.analyzed_grammar,
                             ignore_terminal,
-                            templates,
+                            &templates,
                             &tokenizer.tokenizer,
                             vocab,
                             parser_final_id_map_target,
@@ -2862,7 +2862,7 @@ fn launch_parser_dag_if_ready<'scope>(
                 let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
                 let parser_dwa_finished_ms = elapsed_ms(compile_started_at);
                 (
-                    None,
+                    Some(templates),
                     Some((
                         parser_dwa,
                         parser_dwa_ms,
@@ -3878,7 +3878,7 @@ fn compile_prepared_with_profile_and_table_construction(
         } else {
             let parser_dwa_started_at = Instant::now();
             let retained_templates = templates
-                .take()
+                .as_ref()
                 .expect("terminal reconciliation mode retains templates");
             let (family_vec, family_layout) = reconcile_terminal_dwa_families(terminal_dwas);
             let shared_id_reconcile_started_at = Instant::now();
@@ -4314,6 +4314,19 @@ fn compile_prepared_with_profile_and_table_construction(
         } else {
             crate::runtime::FastTokenizerTransitions::default()
         };
+        let composition_parser_templates_by_terminal = templates
+            .take()
+            .map(|templates| {
+                let mut by_terminal =
+                    vec![None; analyzed_grammar.num_terminals as usize];
+                for (terminal, dfa) in templates.by_terminal {
+                    if let Some(slot) = by_terminal.get_mut(terminal as usize) {
+                        *slot = Some(dfa);
+                    }
+                }
+                by_terminal
+            })
+            .unwrap_or_default();
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
@@ -4341,6 +4354,7 @@ fn compile_prepared_with_profile_and_table_construction(
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
             composition_reset_tokens_by_terminal: Vec::new(),
+            composition_parser_templates_by_terminal,
         terminal_live_states: Vec::new(),
             // Unless optional runtime full-adaptive product states were selected,
             // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw

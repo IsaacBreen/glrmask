@@ -392,6 +392,7 @@ impl DynamicConstraint {
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
             composition_reset_tokens_by_terminal: Vec::new(),
+            composition_parser_templates_by_terminal: Vec::new(),
         terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),
