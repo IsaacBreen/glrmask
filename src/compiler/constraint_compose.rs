@@ -12128,23 +12128,25 @@ pub(crate) fn compose_constraints_owned_parent(
     let preparation_started_at = Instant::now();
     let (prepared_components_result, (boundary_result, boundary_ms)) = rayon::join(
             || {
-                let state_started_at = Instant::now();
-                let state_result = build_direct_component_state_coordinates(
-                    &parser_components,
-                    merged_tokenizer_state_count,
-                );
-                let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
-                let published_state_map = state_result
-                    .as_ref()
-                    .map(|coordinates| coordinates.tokenizer_states.clone())
-                    .map_err(Clone::clone);
-                assert!(
-                    state_map_cell.set(published_state_map).is_ok(),
-                    "component state map published twice",
-                );
-                let state_coordinates = state_result?;
-                let ((token_coordinate_result, token_coordinate_ms), (unmapped_result, parser_extract_ms)) =
+                let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (unmapped_result, parser_extract_ms))) =
                     rayon::join(
+                        || {
+                            let started_at = Instant::now();
+                            let result = build_direct_component_state_coordinates(
+                                &parser_components,
+                                merged_tokenizer_state_count,
+                            );
+                            let published_state_map = result
+                                .as_ref()
+                                .map(|coordinates| coordinates.tokenizer_states.clone())
+                                .map_err(Clone::clone);
+                            assert!(
+                                state_map_cell.set(published_state_map).is_ok(),
+                                "component state map published twice",
+                            );
+                            (result, started_at.elapsed().as_secs_f64() * 1000.0)
+                        },
+                        || rayon::join(
                         || {
                             let started_at = Instant::now();
                             let result = build_direct_component_token_coordinates(
@@ -12163,7 +12165,13 @@ pub(crate) fn compose_constraints_owned_parent(
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
+                    ));
+                let state_coordinates = state_result?;
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][constraint_owned_component_coordinates] state_ms={component_state_ms:.3} token_ms={token_coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3}",
                     );
+                }
                 let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
                 let component_maps = state_coordinates
                     .local_to_global_tsids
@@ -12233,7 +12241,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 };
                 Ok::<_, String>((
                     prepared,
-                    component_state_ms + token_coordinate_ms,
+                    component_state_ms.max(token_coordinate_ms),
                     parser_extract_ms,
                 ))
             },
