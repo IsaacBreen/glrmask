@@ -445,6 +445,24 @@ struct DirectComponentStateCoordinates {
     local_to_global_tsids: Vec<Vec<Vec<u32>>>,
 }
 
+fn invert_singleton_parser_state_relation(
+    relation: &[Vec<u32>],
+    global_state_count: usize,
+) -> Option<Vec<u32>> {
+    let mut inverse = vec![u32::MAX; global_state_count];
+    for (local_state, targets) in relation.iter().enumerate() {
+        let [global_state] = targets.as_slice() else {
+            return None;
+        };
+        let slot = inverse.get_mut(*global_state as usize)?;
+        if *slot != u32::MAX && *slot != local_state as u32 {
+            return None;
+        }
+        *slot = local_state as u32;
+    }
+    Some(inverse)
+}
+
 #[inline]
 fn tokenizer_tsid_relation_is_singleton(constraint: &Constraint) -> bool {
     constraint.state_internal_tsid_offsets.as_slice() == [u32::MAX]
@@ -11504,6 +11522,7 @@ fn build_static_dynamic_overlay_metadata(
             tokenizer_state_offsets: tokenizer_state_offsets.to_vec(),
             repair_terminals,
             non_parent_only_parser_states,
+            segmented_parser_components: Vec::new(),
         },
         template_dfas_by_terminal,
     ))
@@ -12800,6 +12819,29 @@ pub(crate) fn compose_constraints_owned_parent(
         return compose_constraints(&parent, children, vocab);
     }
     let total_started_at = Instant::now();
+    let mut segmented_source_constraints =
+        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some() {
+        let started = Instant::now();
+            let mut sources = Vec::with_capacity(children.len() + 1);
+            sources.push(parent.clone());
+            sources.extend(children
+            .iter()
+                .map(|child| child.constraint.clone()));
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_segment_clone] components={} parser_states={} total_ms={:.3}",
+                    sources.len(),
+                    sources
+                        .iter()
+                        .map(|constraint| constraint.parser_dwa.num_states() as usize)
+                        .sum::<usize>(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            Some(sources)
+        } else {
+            None
+        };
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
@@ -12853,6 +12895,39 @@ pub(crate) fn compose_constraints_owned_parent(
     }
 
     let global_ignores = component_ignores_are_globally_erasable(&parent, children);
+    if !global_ignores
+        && let Some(sources) = segmented_source_constraints.as_mut()
+    {
+        let sanitize_started_at = Instant::now();
+        sources.par_iter_mut().for_each(|source| {
+            let Some(ignore_terminal) = source.ignore_terminal else {
+                return;
+            };
+            let Some(ignore_weight) = source.possible_matches.get(&ignore_terminal).cloned() else {
+                return;
+            };
+            let start = source.parser_dwa.start_state() as usize;
+            let Some(final_weight) = source
+                .parser_dwa
+                .states()
+                .get(start)
+                .and_then(|state| state.final_weight.as_ref())
+                .cloned()
+            else {
+                return;
+            };
+            let retained = final_weight.difference(&ignore_weight);
+            source.parser_dwa.states_mut()[start].final_weight =
+                (!retained.is_empty()).then_some(retained);
+        });
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_segment_sanitize] components={} total_ms={:.3}",
+                sources.len(),
+                sanitize_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
     if compose_profile_enabled() {
         eprintln!("[glrmask/profile][constraint_linker_inputs] global_ignores={} parent_controls={} child_controls={:?} eof_rewrites_clean={} all_children_nonnullable={} legacy_follow_safe={} child_count={}",
             global_ignores,
@@ -13451,6 +13526,53 @@ pub(crate) fn compose_constraints_owned_parent(
     result.constraint.composition_parser_templates_by_terminal =
         composition_parser_templates_by_terminal;
 
+    if let Some(source_constraints) = segmented_source_constraints.take() {
+        let global_state_count = result.constraint.table.num_states as usize;
+        let mut segmented_components = Vec::with_capacity(source_constraints.len());
+        let mut exact = source_constraints.len() == result.parser_state_relations.len()
+            && source_constraints.len() == result.tokenizer_state_offsets.len()
+            && source_constraints.len() == result.terminal_offsets.len();
+        if exact {
+            for (component_index, source) in source_constraints.into_iter().enumerate() {
+                let Some(global_to_local_parser_state) = invert_singleton_parser_state_relation(
+                    &result.parser_state_relations[component_index],
+                    global_state_count,
+                ) else {
+                    exact = false;
+                    break;
+                };
+                segmented_components.push(crate::runtime::SegmentedParserComponent {
+                    constraint: Box::new(source),
+                    tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
+                    terminal_offset: result.terminal_offsets[component_index],
+                    global_to_local_parser_state,
+                });
+            }
+        }
+        if exact {
+            let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
+                crate::runtime::StaticDynamicOverlayMetadata {
+                    terminal_offsets: result.terminal_offsets.clone(),
+                    tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
+                    repair_terminals: vec![false; num_terminals],
+                    non_parent_only_parser_states: vec![false; global_state_count],
+                    segmented_parser_components: Vec::new(),
+                }
+            });
+            overlay.segmented_parser_components = segmented_components;
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true",
+                    overlay.segmented_parser_components.len(),
+                );
+            }
+        } else if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_segmented_parser_runtime] exact_singleton_relations=false fallback=flattened"
+            );
+        }
+    }
+
     let parser_default_domain_labels = parser_default_domains
         .component_domains
         .iter()
@@ -13459,7 +13581,23 @@ pub(crate) fn compose_constraints_owned_parent(
         .collect::<Vec<_>>();
     let boundary_work = boundary_work
         .map(|work| work.materialize(&result.constraint.table, vocab).into_parts());
-    let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
+    let segmented_skip_flatten = std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN")
+        .is_some()
+        && boundary_work.is_none()
+        && result
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty());
+    let (parser_union_result, token_cache_prebuild_ms) = if segmented_skip_flatten {
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_segmented_parser_flatten] skipped=true component_materialize_ms=0 deferred_component_remap_ms=0 direct_ms=0"
+            );
+        }
+        (Ok(DWA::new(id_num_tsids, id_max_internal_token)), 0.0)
+    } else {
+        rayon::join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
             let component_materialize_started_at = Instant::now();
@@ -13640,12 +13778,16 @@ pub(crate) fn compose_constraints_owned_parent(
             result.constraint.prebuild_token_mask_caches();
             started_at.elapsed().as_secs_f64() * 1000.0
         },
-    );
+    )
+    };
     result.constraint.parser_dwa = parser_union_result?;
-    let parser_runtime_cache_started_at = Instant::now();
-    result.constraint.prebuild_parser_runtime_caches();
-    let parser_runtime_cache_ms =
-        parser_runtime_cache_started_at.elapsed().as_secs_f64() * 1000.0;
+    let parser_runtime_cache_ms = if segmented_skip_flatten {
+        0.0
+    } else {
+        let parser_runtime_cache_started_at = Instant::now();
+        result.constraint.prebuild_parser_runtime_caches();
+        parser_runtime_cache_started_at.elapsed().as_secs_f64() * 1000.0
+    };
     let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();

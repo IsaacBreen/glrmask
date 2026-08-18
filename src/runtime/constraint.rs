@@ -2454,6 +2454,17 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_scoped_ignore_runtime_tokens(&mut self) {
+        // This cache is consumed only by the opt-in exact scoped-ignore mask
+        // overlay. Building it eagerly can require a vocabulary-wide fusion
+        // scan (tens of milliseconds on selected10) even when that runtime
+        // path is disabled. Keep ordinary/static constraints at zero cost.
+        if self.static_dynamic_overlay.is_none()
+            || std::env::var_os("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY").is_none()
+        {
+            self.scoped_ignore_only_tokens.clear();
+            self.scoped_ignore_prefix_fusions.clear();
+            return;
+        }
         let (tokens, fusions) = self.compute_scoped_ignore_runtime_tokens();
         self.scoped_ignore_only_tokens = tokens;
         self.scoped_ignore_prefix_fusions = fusions;

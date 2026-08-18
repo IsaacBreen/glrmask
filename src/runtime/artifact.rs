@@ -1820,6 +1820,21 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// region; ordinary parent reductions must not pay for that machinery.
     #[serde(default)]
     pub(crate) non_parent_only_parser_states: Vec<bool>,
+    /// Experimental exact segmented parser backend. Each source constraint
+    /// retains its own parser-DWA/token coordinate and is projected from the
+    /// composed tokenizer/LR coordinates at mask time. This deliberately stays
+    /// runtime-only until the representation is validated and compacted; the
+    /// ordinary flattened parser artifact remains the serialization fallback.
+    #[serde(skip, default)]
+    pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SegmentedParserComponent {
+    pub(crate) constraint: Box<Constraint>,
+    pub(crate) tokenizer_state_offset: u32,
+    pub(crate) terminal_offset: u32,
+    pub(crate) global_to_local_parser_state: Vec<u32>,
 }
 
 /// Fully compiled, immutable grammar constraint.

@@ -1,6 +1,7 @@
 pub(crate) mod profile;
 pub(crate) mod queue;
 
+use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
@@ -17,11 +18,11 @@ use crate::ds::leveled_gss::{
 use crate::ds::weight::Weight;
 use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
 use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
-use crate::runtime::state::{ConstraintState, MaskCacheData};
+use crate::runtime::state::{ConstraintState, MaskCacheData, MaskScratch, ParserStateMap};
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use self::profile::{
@@ -2231,6 +2232,152 @@ fn enqueue_parser_state_transition(
 }
 
 impl<'a> ConstraintState<'a> {
+    fn segmented_local_tokenizer_state(
+        &self,
+        component: &crate::runtime::SegmentedParserComponent,
+        global_state: u32,
+    ) -> Option<u32> {
+        if global_state == self.constraint.runtime_commit_initial_state() {
+            return Some(component.constraint.tokenizer.start_state());
+        }
+        let local = global_state.checked_sub(component.tokenizer_state_offset)?;
+        (local < component.constraint.tokenizer.num_states()).then_some(local)
+    }
+
+    fn segmented_local_disallowed(
+        &self,
+        component: &crate::runtime::SegmentedParserComponent,
+        source: &TerminalsDisallowed,
+    ) -> TerminalsDisallowed {
+        let terminal_start = component.terminal_offset;
+        let terminal_end = terminal_start.saturating_add(component.constraint.table.num_terminals);
+        let mut result = TerminalsDisallowed::new();
+        for (global_tokenizer_state, terminals) in source.iter() {
+            let Some(local_tokenizer_state) =
+                self.segmented_local_tokenizer_state(component, *global_tokenizer_state)
+            else {
+                continue;
+            };
+            for &terminal in terminals.iter() {
+                if terminal_start <= terminal && terminal < terminal_end {
+                    result = result.with_insert(
+                        local_tokenizer_state,
+                        terminal - terminal_start,
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    /// Exact common-case evaluator for a segmented component parser union.
+    ///
+    /// Each retained component keeps its original token/TSID coordinate and
+    /// therefore its existing dense mask caches.  For a concrete parser stack,
+    /// read the maximal top-first prefix whose composed LR states have a local
+    /// preimage in that component.  The standalone component DWA has no
+    /// transition for the first foreign state, so deeper values are semantically
+    /// irrelevant; truncating there preserves every accepting prefix exactly.
+    /// Ambiguous GSSes deliberately decline this fast path for now.
+    fn try_fill_mask_segmented_single_paths(&self, buf: &mut [u32]) -> bool {
+        let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let total_started_at = profile.then(Instant::now);
+        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
+            return false;
+        };
+        if overlay.segmented_parser_components.is_empty() {
+            return false;
+        }
+
+        let mut projected_states = Vec::<ParserStateMap>::with_capacity(
+            overlay.segmented_parser_components.len(),
+        );
+        projected_states.resize_with(
+            overlay.segmented_parser_components.len(),
+            ParserStateMap::default,
+        );
+
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                for (component_index, component) in
+                    overlay.segmented_parser_components.iter().enumerate()
+                {
+                    let Some(local_tokenizer_state) =
+                        self.segmented_local_tokenizer_state(component, global_tokenizer_state)
+                    else {
+                        continue;
+                    };
+
+                    let mut local_top_first = SmallVec::<[u32; 64]>::new();
+                    for &global_parser_state in top_first {
+                        let local = component
+                            .global_to_local_parser_state
+                            .get(global_parser_state as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        if local == u32::MAX {
+                            break;
+                        }
+                        local_top_first.push(local);
+                    }
+                    local_top_first.reverse();
+                    let local_disallowed = self.segmented_local_disallowed(component, acc);
+                    let local_gss = ParserGSS::from_single_stack(
+                        local_top_first.into_vec(),
+                        local_disallowed,
+                    );
+                    projected_states[component_index]
+                        .merge_insert(local_tokenizer_state, local_gss);
+                }
+            });
+            if !complete {
+                return false;
+            }
+        }
+
+        buf.fill(0);
+        let mut component_buf = vec![0u32; buf.len()];
+        let mut component_times = SmallVec::<[u64; 4]>::new();
+        for (component, state) in overlay
+            .segmented_parser_components
+            .iter()
+            .zip(projected_states)
+        {
+            if state.is_empty() {
+                component_times.push(0);
+                continue;
+            }
+            let component_started_at = profile.then(Instant::now);
+            component_buf.fill(0);
+            let shadow = ConstraintState {
+                constraint: component.constraint.as_ref(),
+                state,
+                buffers: Default::default(),
+                generation: self.generation,
+                mask_cache: Mutex::new(None),
+                mask_scratch: Mutex::new(MaskScratch::for_constraint(
+                    component.constraint.as_ref(),
+                )),
+                max_rollback_tokens: 0,
+                history: Default::default(),
+            };
+            shadow.fill_mask_uncached(&mut component_buf);
+            shadow.update_control_special_token_mask(&mut component_buf);
+            for (output, component_word) in buf.iter_mut().zip(&component_buf) {
+                *output |= *component_word;
+            }
+            component_times.push(component_started_at.map_or(0, elapsed_ns));
+        }
+        if let Some(started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} total_ns={}",
+                overlay.segmented_parser_components.len(),
+                elapsed_ns(started_at),
+            );
+        }
+        true
+    }
+
     /// Exact overlay for an out-of-vocabulary special token reached only after
     /// a linker control chain. Ordinary parser-DWA weights remain the fast path;
     /// constraints without explicit controls pay nothing here.
@@ -4306,6 +4453,15 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn prefill_mask_cache(&self) {
+        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
+            && self
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
+        {
+            return;
+        }
         let cache = self.mask_cache.lock().unwrap();
         if cache
             .as_ref()
@@ -4556,6 +4712,47 @@ impl<'a> ConstraintState<'a> {
                 self.store_mask_cache_reuse_dense(mask);
             }
             return;
+        }
+        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
+            && self
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
+        {
+            if self.try_fill_mask_segmented_single_paths(mask) {
+                self.update_control_special_token_mask(mask);
+                if std::env::var_os("GLRMASK_VALIDATE_SEGMENTED_PARSER_MASK").is_some() {
+                    let mut reference = vec![0u32; mask.len()];
+                    self.fill_mask_uncached(&mut reference);
+                    self.update_control_special_token_mask(&mut reference);
+                    if reference != mask {
+                        let reference_only = (0..mask.len() * 32)
+                            .filter(|&token| {
+                                let word = token / 32;
+                                let bit = token % 32;
+                                ((reference[word] >> bit) & 1) != 0
+                                    && ((mask[word] >> bit) & 1) == 0
+                            })
+                            .take(32)
+                            .collect::<Vec<_>>();
+                        let segmented_only = (0..mask.len() * 32)
+                            .filter(|&token| {
+                                let word = token / 32;
+                                let bit = token % 32;
+                                ((reference[word] >> bit) & 1) == 0
+                                    && ((mask[word] >> bit) & 1) != 0
+                            })
+                            .take(32)
+                            .collect::<Vec<_>>();
+                        panic!(
+                            "segmented component parser mask differs from flattened reference; reference_only={reference_only:?} segmented_only={segmented_only:?}"
+                        );
+                    }
+                }
+                self.store_mask_cache_reuse_dense(mask);
+                return;
+            }
         }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
