@@ -4430,13 +4430,22 @@ fn build_parser_nwa_from_terminal_dwa(
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
     if !compose_detail_enabled {
+        let repeated_group_cache = {
+            let used_bundles = summaries
+                .unique_bundles
+                .iter()
+                .enumerate()
+                .filter_map(|(bundle_id, bundle)| used_multi_bundle[bundle_id].then_some(bundle))
+                .collect::<Vec<_>>();
+            templates.build_bundle_group_dfa_cache(&used_bundles)
+        };
         built_bundle_cache = summaries
             .unique_bundles
             .par_iter()
             .enumerate()
             .map(|(bundle_id, bundle)| {
                 used_multi_bundle[bundle_id]
-                    .then(|| Arc::new(templates.build_bundle(bundle)))
+                    .then(|| Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache)))
             })
             .collect();
     }
