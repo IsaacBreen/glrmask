@@ -4322,7 +4322,8 @@ fn compile_prepared_with_profile_and_table_construction(
             possible_matches_complete,
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
-            terminal_live_states: Vec::new(),
+            composition_reset_tokens_by_terminal: Vec::new(),
+        terminal_live_states: Vec::new(),
             // Unless optional runtime full-adaptive product states were selected,
             // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw
             // runtime tokenizer state has exactly one internal TSID. Runtime

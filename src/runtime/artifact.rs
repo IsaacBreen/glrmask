@@ -1933,6 +1933,13 @@ pub struct Constraint {
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Composition-preparation cache: row `t` lists original model-token IDs
+    /// which, from this component's lexer reset, complete terminal `t` exactly
+    /// at the end of the model token.  This is not part of the historical inner
+    /// `Constraint` bincode layout; artifact V13 stores it in the outer
+    /// envelope so V12 constraints remain loadable unchanged.
+    #[serde(skip, default)]
+    pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
     /// Runtime-only inverse lexer-metadata index used by compiled-constraint
     /// composition. Row `t` lists exactly the raw tokenizer states whose
     /// epsilon closure has terminal `t` matched or still reachable.

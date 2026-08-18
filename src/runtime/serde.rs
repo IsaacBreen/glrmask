@@ -8,7 +8,8 @@ const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
 const PREVIOUS_EXPRLESS_CONSTRAINT_VERSION: u16 = 10;
 const PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION: u16 = 11;
-const CONSTRAINT_VERSION: u16 = 12;
+const PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION: u16 = 12;
+const CONSTRAINT_VERSION: u16 = 13;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -54,6 +55,24 @@ struct ConstraintArtifactV12 {
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
     parser_state_domain_labels: Vec<i32>,
+}
+
+#[derive(Serialize)]
+struct ConstraintArtifactV13Ref<'a> {
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+    terminal_exprs: Option<&'a [Expr]>,
+    parser_state_domain_labels: &'a [i32],
+    composition_reset_tokens_by_terminal: &'a [Vec<u32>],
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV13 {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    terminal_exprs: Option<Vec<Expr>>,
+    parser_state_domain_labels: Vec<i32>,
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
 }
 
 struct CountingWriter<W> {
@@ -118,11 +137,12 @@ impl Constraint {
                 );
                 bincode::serialize_into(
                     &mut buffered,
-                    &ConstraintArtifactV12Ref {
+                    &ConstraintArtifactV13Ref {
                         constraint: self,
                         ignore_expr: &self.ignore_expr,
                         terminal_exprs: self.tokenizer.terminal_exprs(),
                         parser_state_domain_labels: &self.parser_state_domain_labels,
+                        composition_reset_tokens_by_terminal: &self.composition_reset_tokens_by_terminal,
                     },
                 )
                     .expect("Constraint serialization should succeed");
@@ -158,6 +178,7 @@ impl Constraint {
                 | PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
                 | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
                 | PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION
+                | PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -186,6 +207,7 @@ impl Constraint {
             PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
                 | PREVIOUS_EXPRLESS_CONSTRAINT_VERSION
                 | PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION
+                | PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
@@ -238,6 +260,19 @@ impl Constraint {
             payload
         };
         let mut constraint = if version == CONSTRAINT_VERSION {
+            let artifact: ConstraintArtifactV13 = bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            let mut constraint = artifact.constraint;
+            constraint.ignore_expr = artifact.ignore_expr;
+            constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
+            constraint.composition_reset_tokens_by_terminal =
+                artifact.composition_reset_tokens_by_terminal;
+            constraint
+                .tokenizer
+                .restore_terminal_exprs(artifact.terminal_exprs)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            constraint
+        } else if version == PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION {
             let artifact: ConstraintArtifactV12 = bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             let mut constraint = artifact.constraint;
@@ -304,6 +339,7 @@ impl Constraint {
 mod tests {
     use super::*;
     use crate::Vocab;
+    use crate::automata::lexer::Lexer;
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::runtime::CommitTemplateDfas;
     use std::sync::Arc;
@@ -422,6 +458,52 @@ mod tests {
 
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
         assert!(loaded.tokenizer.terminal_exprs().is_none());
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_composition_reset_tokens() {
+        let mut constraint = tiny_constraint();
+        constraint.ensure_composition_reset_tokens_by_terminal();
+        assert_eq!(
+            constraint.composition_reset_tokens_by_terminal.len(),
+            constraint.tokenizer.num_terminals() as usize,
+        );
+        assert!(constraint
+            .composition_reset_tokens_by_terminal
+            .iter()
+            .any(|row| !row.is_empty()));
+
+        let expected = constraint.composition_reset_tokens_by_terminal.clone();
+        let loaded = Constraint::load(&constraint.save()).unwrap();
+        assert_eq!(loaded.composition_reset_tokens_by_terminal, expected);
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn constraint_envelope_loads_previous_v12_without_composition_reset_cache() {
+        let mut constraint = tiny_constraint();
+        constraint.ensure_composition_reset_tokens_by_terminal();
+        assert!(!constraint.composition_reset_tokens_by_terminal.is_empty());
+
+        let raw = bincode::serialize(&ConstraintArtifactV12Ref {
+            constraint: &constraint,
+            ignore_expr: &constraint.ignore_expr,
+            terminal_exprs: constraint.tokenizer.terminal_exprs(),
+            parser_state_domain_labels: &constraint.parser_state_domain_labels,
+        })
+        .unwrap();
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
+        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
+        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let loaded = Constraint::load(&envelope(
+            PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION,
+            &payload,
+        ))
+        .expect("v12 artifact should remain loadable without the outer reset cache");
+        assert!(loaded.composition_reset_tokens_by_terminal.is_empty());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

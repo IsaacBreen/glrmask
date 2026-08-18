@@ -6784,31 +6784,68 @@ fn boundary_delta_reset_relations(
         selected_by_component.push(selected);
     }
 
-    let pairs = vocab
-        .entries_map()
-        .par_iter()
-        .filter(|(_, bytes)| !bytes.is_empty())
-        .fold(Vec::<(u32, u32)>::new, |mut output, (&token_id, bytes)| {
-            for (component_index, component) in components.iter().enumerate() {
-                let selected = &selected_by_component[component_index];
-                if selected.is_empty() {
-                    continue;
-                }
-                let (_, matches) = component
-                    .tokenizer
-                    .execute_summary_from_state(bytes, component.tokenizer.start_state());
-                for (local_terminal, width) in matches {
-                    if width == bytes.len() && selected.contains(local_terminal as usize) {
-                        output.push((terminal_offsets[component_index] + local_terminal, token_id));
-                    }
+    let mut pairs = Vec::<(u32, u32)>::new();
+    let mut fallback_components = Vec::<usize>::new();
+    let mut cached_components = 0usize;
+    for (component_index, component) in components.iter().enumerate() {
+        let selected = &selected_by_component[component_index];
+        if selected.is_empty() {
+            continue;
+        }
+        if component.composition_reset_tokens_by_terminal.len()
+            == component.tokenizer.num_terminals() as usize
+        {
+            cached_components += 1;
+            let terminal_offset = terminal_offsets[component_index];
+            for local_terminal in selected.iter() {
+                if let Some(tokens) = component
+                    .composition_reset_tokens_by_terminal
+                    .get(local_terminal)
+                {
+                    pairs.extend(
+                        tokens
+                            .iter()
+                            .copied()
+                            .map(|token| (terminal_offset + local_terminal as u32, token)),
+                    );
                 }
             }
-            output
-        })
-        .reduce(Vec::new, |mut left, mut right| {
-            left.append(&mut right);
-            left
-        });
+        } else {
+            fallback_components.push(component_index);
+        }
+    }
+
+    // Old/unprepared artifacts remain exact. Scan only those components; a
+    // current composition-ready cache never touches the vocabulary here.
+    if !fallback_components.is_empty() {
+        let mut fallback_pairs = vocab
+            .entries_map()
+            .par_iter()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .fold(Vec::<(u32, u32)>::new, |mut output, (&token_id, bytes)| {
+                for &component_index in &fallback_components {
+                    let component = components[component_index];
+                    let selected = &selected_by_component[component_index];
+                    let (_, matches) = component
+                        .tokenizer
+                        .execute_summary_from_state(bytes, component.tokenizer.start_state());
+                    for (local_terminal, width) in matches {
+                        if width == bytes.len() && selected.contains(local_terminal as usize) {
+                            output.push((
+                                terminal_offsets[component_index] + local_terminal,
+                                token_id,
+                            ));
+                        }
+                    }
+                }
+                output
+            })
+            .reduce(Vec::new, |mut left, mut right| {
+                left.append(&mut right);
+                left
+            });
+        pairs.append(&mut fallback_pairs);
+    }
 
     let mut result = BTreeMap::<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>::new();
     for (terminal, token) in pairs {
@@ -6826,9 +6863,11 @@ fn boundary_delta_reset_relations(
             .map(BTreeSet::len)
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][constraint_boundary_delta_reset_relations] terminals={} token_cells={} ms={:.3}",
+            "[glrmask/profile][constraint_boundary_delta_reset_relations] terminals={} token_cells={} cached_components={} fallback_components={} ms={:.3}",
             result.len(),
             token_cells,
+            cached_components,
+            fallback_components.len(),
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -10158,6 +10197,7 @@ fn build_composed_constraint_unfinalized(
         possible_matches_complete: true,
         state_to_internal_tsid,
         internal_tsid_to_states,
+        composition_reset_tokens_by_terminal: Vec::new(),
         terminal_live_states,
         state_internal_tsid_offsets,
         state_internal_tsids,
@@ -13060,12 +13100,35 @@ mod tests {
         let composed = parent
             .compose_subgrammars(&[("SUB", &child)], &vocab)
             .unwrap();
+        let mut prepared_parent = parent.clone();
+        let mut prepared_child = child.clone();
+        prepared_parent.ensure_composition_reset_tokens_by_terminal();
+        prepared_child.ensure_composition_reset_tokens_by_terminal();
+        let prepared_parent = Constraint::load(&prepared_parent.save()).unwrap();
+        let prepared_child = Constraint::load(&prepared_child.save()).unwrap();
+        assert_eq!(
+            prepared_parent.composition_reset_tokens_by_terminal.len(),
+            prepared_parent.tokenizer.num_terminals() as usize,
+        );
+        assert_eq!(
+            prepared_child.composition_reset_tokens_by_terminal.len(),
+            prepared_child.tokenizer.num_terminals() as usize,
+        );
+        let cached_composed = prepared_parent
+            .compose_subgrammars(&[("SUB", &prepared_child)], &vocab)
+            .unwrap();
         for sequence in [[0u32, 1, 2].as_slice(), [3u32, 4, 5].as_slice()] {
             let mut actual = composed.start();
+            let mut cached = cached_composed.start();
             let mut expected = monolithic.start();
             for &token in sequence {
                 let actual_mask = actual.mask();
+                let cached_mask = cached.mask();
                 let expected_mask = expected.mask();
+                assert_eq!(
+                    cached_mask, expected_mask,
+                    "prepared-cache mask mismatch before token {token} in sequence {sequence:?}",
+                );
                 if actual_mask != expected_mask {
                     eprintln!(
                         "IGNORE_FUSION_STATE sequence={sequence:?} before_token={token} actual={:?} expected={:?}",
@@ -13091,12 +13154,17 @@ mod tests {
                 actual.commit_token(token).unwrap_or_else(|error| {
                     panic!("composed rejected token {token} in {sequence:?}: {error}")
                 });
+                cached.commit_token(token).unwrap_or_else(|error| {
+                    panic!("prepared-cache composed rejected token {token} in {sequence:?}: {error}")
+                });
                 expected.commit_token(token).unwrap_or_else(|error| {
                     panic!("monolithic rejected token {token} in {sequence:?}: {error}")
                 });
             }
             assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(cached.mask(), expected.mask());
             assert_eq!(actual.is_finished(), expected.is_finished());
+            assert_eq!(cached.is_finished(), expected.is_finished());
             assert!(actual.is_finished(), "sequence {sequence:?} should finish");
         }
     }

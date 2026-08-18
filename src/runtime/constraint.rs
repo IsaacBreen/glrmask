@@ -2052,6 +2052,52 @@ impl Constraint {
         .collect()
     }
 
+    pub(crate) fn compute_composition_reset_tokens_by_terminal(&self) -> Vec<Vec<u32>> {
+        let terminal_count = self.tokenizer.num_terminals() as usize;
+        let empty = || (0..terminal_count).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+        if terminal_count == 0 || self.token_bytes.is_empty() {
+            return empty();
+        }
+        let start = self.tokenizer.start_state();
+        let mut rows = self
+            .token_bytes
+            .par_iter()
+            .fold(empty, |mut rows, (&token_id, bytes)| {
+                if bytes.is_empty() {
+                    return rows;
+                }
+                let (_, matches) = self.tokenizer.execute_summary_from_state(bytes, start);
+                for (terminal, width) in matches {
+                    if width == bytes.len() {
+                        if let Some(row) = rows.get_mut(terminal as usize) {
+                            row.push(token_id);
+                        }
+                    }
+                }
+                rows
+            })
+            .reduce(empty, |mut left, mut right| {
+                for (left_row, right_row) in left.iter_mut().zip(&mut right) {
+                    left_row.append(right_row);
+                }
+                left
+            });
+        for row in &mut rows {
+            row.sort_unstable();
+            row.dedup();
+        }
+        rows
+    }
+
+    pub(crate) fn ensure_composition_reset_tokens_by_terminal(&mut self) {
+        if self.composition_reset_tokens_by_terminal.len()
+            != self.tokenizer.num_terminals() as usize
+        {
+            self.composition_reset_tokens_by_terminal =
+                self.compute_composition_reset_tokens_by_terminal();
+        }
+    }
+
     fn compute_terminal_live_states(&self) -> Vec<Vec<u32>> {
         let terminal_count = self.tokenizer.num_terminals() as usize;
         if terminal_count == 0 {
@@ -2425,6 +2471,31 @@ impl Constraint {
         }
         let terminal_live_ms = terminal_live_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let prepare_composition_cache = std::env::var_os(
+            "GLRMASK_EXPERIMENT_COMPONENT_ONLY_BUILD_DELTA_METADATA",
+        )
+        .is_some()
+            || std::env::var_os("GLRMASK_PREPARE_COMPOSITION_CACHE").is_some();
+        if prepare_composition_cache {
+            let reset_started_at = profile.then(std::time::Instant::now);
+            self.ensure_composition_reset_tokens_by_terminal();
+            if profile {
+                let token_pairs = self
+                    .composition_reset_tokens_by_terminal
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>();
+                eprintln!(
+                    "[glrmask/profile][composition_reset_tokens] terminals={} token_pairs={} ms={:.3}",
+                    self.composition_reset_tokens_by_terminal
+                        .iter()
+                        .filter(|row| !row.is_empty())
+                        .count(),
+                    token_pairs,
+                    reset_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+        }
         let scoped_ignore_started_at = profile.then(std::time::Instant::now);
         self.rebuild_scoped_ignore_runtime_tokens();
         let scoped_ignore_ms = scoped_ignore_started_at
