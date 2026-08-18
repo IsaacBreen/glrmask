@@ -52,7 +52,7 @@ impl Constraint {
 		}
 		if self.internal_token_buf_offsets.len() > 1
 			&& self.internal_token_buf_offsets.last().copied().map(|end| end as usize)
-				== Some(self.internal_token_buf_flat.len())
+				== Some(self.internal_token_buf_flat_len())
 		{
 			return self.internal_token_buf_offsets.len() - 1;
 		}

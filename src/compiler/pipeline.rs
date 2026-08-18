@@ -4546,6 +4546,7 @@ fn compile_prepared_with_profile_and_table_construction(
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),
+            backed_internal_token_buf_flat: None,
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
             heavy_total_cost: 0,

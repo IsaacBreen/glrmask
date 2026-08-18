@@ -133,6 +133,86 @@ pub(crate) fn empty_dense_words() -> DenseWords {
 }
 
 pub(crate) type InternalTokenBufMasks = Vec<(u16, u32)>;
+/// Runtime-native fixed-width form of one sparse output-mask entry. The two-byte
+/// pad makes the layout exactly eight bytes while keeping the hot fields at
+/// their natural offsets; current artifacts can therefore bulk-copy the slab
+/// without making commit pay bit shifts on every sparse replay.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PackedInternalTokenBufMask {
+    pub(crate) word_idx: u16,
+    pub(crate) _pad: u16,
+    pub(crate) mask: u32,
+}
+const _: () = assert!(std::mem::size_of::<PackedInternalTokenBufMask>() == 8);
+
+#[derive(Debug, Clone)]
+pub(crate) struct BackedInternalTokenBufMasks {
+    backing: Arc<Vec<u8>>,
+    entries_start: usize,
+    len: usize,
+}
+
+impl BackedInternalTokenBufMasks {
+    pub(crate) fn new(
+        backing: Arc<Vec<u8>>,
+        entries_start: usize,
+        len: usize,
+    ) -> Result<Self, String> {
+        let bytes = len
+            .checked_mul(std::mem::size_of::<PackedInternalTokenBufMask>())
+            .ok_or_else(|| "backed internal-token buffer-mask length overflow".to_owned())?;
+        let end = entries_start
+            .checked_add(bytes)
+            .ok_or_else(|| "backed internal-token buffer-mask range overflow".to_owned())?;
+        if end > backing.len() {
+            return Err("backed internal-token buffer-mask range is outside artifact".to_owned());
+        }
+        Ok(Self {
+            backing,
+            entries_start,
+            len,
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn append_wire_bytes(&self, out: &mut Vec<u8>) {
+        let byte_len = self.len * std::mem::size_of::<PackedInternalTokenBufMask>();
+        out.extend_from_slice(&self.backing[self.entries_start..self.entries_start + byte_len]);
+    }
+
+    #[inline(always)]
+    pub(crate) fn for_each_range(
+        &self,
+        start: usize,
+        end: usize,
+        mut visit: impl FnMut(u16, u32),
+    ) {
+        debug_assert!(start <= end && end <= self.len);
+        if start > end || end > self.len {
+            return;
+        }
+        let entry_bytes = std::mem::size_of::<PackedInternalTokenBufMask>();
+        let base = unsafe { self.backing.as_ptr().add(self.entries_start + start * entry_bytes) };
+        for index in 0..(end - start) {
+            let entry = unsafe {
+                std::ptr::read_unaligned(
+                    base.add(index * entry_bytes)
+                        .cast::<PackedInternalTokenBufMask>(),
+                )
+            };
+            if cfg!(target_endian = "little") {
+                visit(entry.word_idx, entry.mask);
+            } else {
+                visit(u16::from_le(entry.word_idx), u32::from_le(entry.mask));
+            }
+        }
+    }
+}
 pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
@@ -3395,7 +3475,11 @@ pub struct Constraint {
     /// All tokens' (word_index, or_mask) pairs concatenated in token order.
     /// Improves cache locality vs separate Vec allocations per token.
     #[serde(skip)]
-    pub(crate) internal_token_buf_flat: Box<[(u16, u32)]>,
+    pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
+    /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
+    /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
+    #[serde(skip, default)]
+    pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
     /// Offsets into `internal_token_buf_flat` for each internal token.
     /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
     /// Length = n_internal + 1 (sentinel at end).

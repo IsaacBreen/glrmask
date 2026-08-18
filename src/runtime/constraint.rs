@@ -35,7 +35,7 @@ use super::artifact::{
     FastTemplateDfasByTerminal, FastTokenizerTransitions,
     IndexedDagDenseMask, IndexedDagDenseTransition, IndexedDagDenseTransitionMasks,
     IndexedDagDenseTransitionRow, IndexedDagDenseTransitions,
-    InternalTokenBufMasks,
+    InternalTokenBufMasks, PackedInternalTokenBufMask,
     SeedTerminalDenseMasks,
     SparseWeightBufMaskCache,
 };
@@ -287,6 +287,42 @@ fn andnot_sparse_buf_entries(buf: &mut [u32], entries: &[(u16, u32)]) {
 }
 
 #[inline(always)]
+fn pack_internal_token_buf_entry(word_idx: u16, mask: u32) -> PackedInternalTokenBufMask {
+    PackedInternalTokenBufMask {
+        word_idx,
+        _pad: 0,
+        mask,
+    }
+}
+
+#[inline(always)]
+fn unpack_internal_token_buf_entry(entry: PackedInternalTokenBufMask) -> (u16, u32) {
+    (entry.word_idx, entry.mask)
+}
+
+#[inline(always)]
+fn or_packed_sparse_buf_entries(buf: &mut [u32], entries: &[PackedInternalTokenBufMask]) {
+    for &entry in entries {
+        let (word_idx, mask) = unpack_internal_token_buf_entry(entry);
+        unsafe {
+            let slot = buf.get_unchecked_mut(word_idx as usize);
+            *slot |= mask;
+        }
+    }
+}
+
+#[inline(always)]
+fn andnot_packed_sparse_buf_entries(buf: &mut [u32], entries: &[PackedInternalTokenBufMask]) {
+    for &entry in entries {
+        let (word_idx, mask) = unpack_internal_token_buf_entry(entry);
+        unsafe {
+            let slot = buf.get_unchecked_mut(word_idx as usize);
+            *slot &= !mask;
+        }
+    }
+}
+
+#[inline(always)]
 fn group_buf_mask_cost(sparse: &[(u16, u32)], dense: Option<&[u32]>) -> usize {
     dense.map_or(sparse.len(), <[u32]>::len)
 }
@@ -395,7 +431,7 @@ pub(crate) struct TokenMaskCachePrebuild {
     word_group_sparse_max_entries: usize,
     all_tokens_buf_mask: Box<[u32]>,
     heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
-    internal_token_buf_flat: Box<[(u16, u32)]>,
+    internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
     internal_token_buf_offsets: Box<[u32]>,
     total_internal_buf_cost: usize,
     heavy_token_indices: Vec<usize>,
@@ -677,6 +713,7 @@ impl TokenMaskCachePrebuild {
         constraint.all_tokens_buf_mask = self.all_tokens_buf_mask;
         constraint.heavy_token_dense_masks = self.heavy_token_dense_masks;
         constraint.internal_token_buf_flat = self.internal_token_buf_flat;
+        constraint.backed_internal_token_buf_flat = None;
         constraint.internal_token_buf_offsets = self.internal_token_buf_offsets;
         constraint.total_internal_buf_cost = self.total_internal_buf_cost;
         constraint.heavy_token_indices = self.heavy_token_indices;
@@ -1753,7 +1790,6 @@ impl Constraint {
     ) -> DeltaReplayProfileStats {
         let mut stats = DeltaReplayProfileStats::default();
         let offsets = &self.internal_token_buf_offsets;
-        let flat = &self.internal_token_buf_flat;
         let heavy = &self.heavy_token_dense_masks;
         let n_internal = if offsets.len() > 1 { offsets.len() - 1 } else { 0 };
 
@@ -1833,7 +1869,7 @@ impl Constraint {
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.added_token_entries += (end - start) as u64;
-                or_sparse_buf_entries(buf, &flat[start..end]);
+                self.or_internal_token_buf_range(start, end, buf);
                 added &= added - 1;
             }
 
@@ -1910,7 +1946,7 @@ impl Constraint {
                 let start = offsets[internal_token] as usize;
                 let end = offsets[internal_token + 1] as usize;
                 stats.removed_token_entries += (end - start) as u64;
-                andnot_sparse_buf_entries(buf, &flat[start..end]);
+                self.andnot_internal_token_buf_range(start, end, buf);
                 removed &= removed - 1;
             }
         }
@@ -2558,7 +2594,7 @@ impl Constraint {
     fn internal_token_buf_mask_count(&self) -> usize {
         if self.internal_token_buf_offsets.len() > 1
             && self.internal_token_buf_offsets.last().copied().map(|end| end as usize)
-                == Some(self.internal_token_buf_flat.len())
+                == Some(self.internal_token_buf_flat_len())
         {
             self.internal_token_buf_offsets.len() - 1
         } else {
@@ -2567,18 +2603,93 @@ impl Constraint {
     }
 
     #[inline]
-    fn internal_token_buf_mask_slice(&self, internal_token: usize) -> &[(u16, u32)] {
+    fn internal_token_buf_packed_slice(
+        &self,
+        internal_token: usize,
+    ) -> Option<&[PackedInternalTokenBufMask]> {
         if let (Some(&start), Some(&end)) = (
             self.internal_token_buf_offsets.get(internal_token),
             self.internal_token_buf_offsets.get(internal_token + 1),
         ) && let Some(mask) = self.internal_token_buf_flat.get(start as usize..end as usize)
         {
-            return mask;
+            return Some(mask);
+        }
+        None
+    }
+
+    #[inline]
+    pub(crate) fn internal_token_buf_flat_len(&self) -> usize {
+        if !self.internal_token_buf_flat.is_empty() {
+            self.internal_token_buf_flat.len()
+        } else {
+            self.backed_internal_token_buf_flat
+                .as_ref()
+                .map_or(0, |backed| backed.len())
+        }
+    }
+
+    #[inline]
+    fn internal_token_buf_mask_len(&self, internal_token: usize) -> usize {
+        self.internal_token_buf_packed_slice(internal_token)
+            .map(<[PackedInternalTokenBufMask]>::len)
+            .unwrap_or_else(|| {
+                self.internal_token_buf_masks
+                    .get(internal_token)
+                    .map(Vec::len)
+                    .unwrap_or(0)
+            })
+    }
+
+    #[inline]
+    fn for_each_internal_token_buf_mask_entry(
+        &self,
+        internal_token: usize,
+        mut visit: impl FnMut(u16, u32),
+    ) {
+        if let Some(mask) = self.internal_token_buf_packed_slice(internal_token) {
+            for &entry in mask {
+                let (word, bits) = unpack_internal_token_buf_entry(entry);
+                visit(word, bits);
+            }
+            return;
+        }
+        if let (Some(backed), Some(&start), Some(&end)) = (
+            self.backed_internal_token_buf_flat.as_ref(),
+            self.internal_token_buf_offsets.get(internal_token),
+            self.internal_token_buf_offsets.get(internal_token + 1),
+        ) {
+            backed.for_each_range(start as usize, end as usize, visit);
+            return;
         }
         self.internal_token_buf_masks
             .get(internal_token)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .into_iter()
+            .flatten()
+            .for_each(|&(word, bits)| visit(word, bits));
+    }
+
+    #[inline(always)]
+    fn or_internal_token_buf_range(&self, start: usize, end: usize, buf: &mut [u32]) {
+        if let Some(entries) = self.internal_token_buf_flat.get(start..end) {
+            or_packed_sparse_buf_entries(buf, entries);
+        } else if let Some(backed) = self.backed_internal_token_buf_flat.as_ref() {
+            backed.for_each_range(start, end, |word_idx, mask| unsafe {
+                let slot = buf.get_unchecked_mut(word_idx as usize);
+                *slot |= mask;
+            });
+        }
+    }
+
+    #[inline(always)]
+    fn andnot_internal_token_buf_range(&self, start: usize, end: usize, buf: &mut [u32]) {
+        if let Some(entries) = self.internal_token_buf_flat.get(start..end) {
+            andnot_packed_sparse_buf_entries(buf, entries);
+        } else if let Some(backed) = self.backed_internal_token_buf_flat.as_ref() {
+            backed.for_each_range(start, end, |word_idx, mask| unsafe {
+                let slot = buf.get_unchecked_mut(word_idx as usize);
+                *slot &= !mask;
+            });
+        }
     }
 
     pub(crate) fn prebuild_token_mask_caches(&mut self) {
@@ -2753,10 +2864,11 @@ impl Constraint {
             && self
                 .internal_token_buf_offsets
                 .last()
-                .is_some_and(|&end| end as usize == self.internal_token_buf_flat.len());
+                .is_some_and(|&end| end as usize == self.internal_token_buf_flat_len());
         if !flat_ready {
             let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
             self.internal_token_buf_flat = flat;
+            self.backed_internal_token_buf_flat = None;
             self.internal_token_buf_offsets = offsets;
         }
         let flat_ms = if flat_ready {
@@ -3153,7 +3265,7 @@ impl Constraint {
                 && self
                     .internal_token_buf_offsets
                     .last()
-                    .is_some_and(|&end| end as usize == self.internal_token_buf_flat.len());
+                    .is_some_and(|&end| end as usize == self.internal_token_buf_flat_len());
         let mut prebuilt_internal_token_buf_masks =
             (self.internal_token_buf_masks.len() == internal_token_count)
                 .then(|| std::mem::take(&mut self.internal_token_buf_masks));
@@ -3687,14 +3799,16 @@ impl Constraint {
                 let mut dense = vec![0u32; mask_words];
                 let mut touched = Vec::<u16>::new();
                 for internal_token in group_start..group_end {
-                    let token_masks = self.internal_token_buf_mask_slice(internal_token);
-                    for &(word_idx, mask) in token_masks {
+                    self.for_each_internal_token_buf_mask_entry(
+                        internal_token,
+                        |word_idx, mask| {
                         let slot = &mut dense[word_idx as usize];
                         if *slot == 0 {
                             touched.push(word_idx);
                         }
                         *slot |= mask;
-                    }
+                        },
+                    );
                 }
                 touched.sort_unstable();
                 touched
@@ -3858,13 +3972,16 @@ impl Constraint {
     ) -> Box<[(u16, u32)]> {
         debug_assert!(touched.is_empty());
         for internal_token in internal_tokens.iter() {
-            for &(word, mask) in self.internal_token_buf_mask_slice(internal_token as usize) {
+            self.for_each_internal_token_buf_mask_entry(
+                internal_token as usize,
+                |word, mask| {
                 let slot = &mut scratch[word as usize];
                 if *slot == 0 {
                     touched.push(word);
                 }
                 *slot |= mask;
-            }
+                },
+            );
         }
         touched.sort_unstable();
         let sparse = touched
@@ -3915,11 +4032,11 @@ impl Constraint {
         let mut prefix = Vec::with_capacity(count + 1);
         prefix.push(0u64);
         for internal_token in 0..count {
-            let mask = self.internal_token_buf_mask_slice(internal_token);
-            let mask_work = if mask.len() > heavy_threshold {
+            let mask_len = self.internal_token_buf_mask_len(internal_token);
+            let mask_work = if mask_len > heavy_threshold {
                 buf_words as u64
             } else {
-                mask.len() as u64
+                mask_len as u64
             };
             prefix.push(
                 prefix
@@ -4547,17 +4664,16 @@ impl Constraint {
         // so we only go dense when entries exceed half the buffer size.
         let threshold = buf_words / 4;
         let build = |internal_token: usize| {
-            let sparse = self.internal_token_buf_mask_slice(internal_token);
-                if sparse.len() > threshold {
-                    let mut dense = vec![0u32; buf_words];
-                    for &(word_idx, mask) in sparse {
-                        dense[word_idx as usize] |= mask;
-                    }
-                    Some(dense.into_boxed_slice())
-                } else {
-                    None
-                }
-            };
+            if self.internal_token_buf_mask_len(internal_token) > threshold {
+                let mut dense = vec![0u32; buf_words];
+                self.for_each_internal_token_buf_mask_entry(internal_token, |word_idx, mask| {
+                    dense[word_idx as usize] |= mask;
+                });
+                Some(dense.into_boxed_slice())
+            } else {
+                None
+            }
+        };
         if rayon::current_num_threads() == 1 {
             (0..self.internal_token_buf_mask_count()).map(build).collect()
         } else {
@@ -4650,13 +4766,18 @@ impl Constraint {
 
     /// Flatten all per-token sparse entries into a single contiguous array
     /// with an offset table. Improves cache locality during convert phase.
-    fn compute_flat_buf_masks(masks: &[InternalTokenBufMasks]) -> (Box<[(u16, u32)]>, Box<[u32]>) {
+    fn compute_flat_buf_masks(
+        masks: &[InternalTokenBufMasks],
+    ) -> (Box<[PackedInternalTokenBufMask]>, Box<[u32]>) {
         let total: usize = masks.iter().map(|m| m.len()).sum();
         let mut flat = Vec::with_capacity(total);
         let mut offsets = Vec::with_capacity(masks.len() + 1);
         for m in masks {
             offsets.push(flat.len() as u32);
-            flat.extend_from_slice(m);
+            flat.extend(
+                m.iter()
+                    .map(|&(word_idx, mask)| pack_internal_token_buf_entry(word_idx, mask)),
+            );
         }
         offsets.push(flat.len() as u32);
         (flat.into_boxed_slice(), offsets.into_boxed_slice())
@@ -5079,10 +5200,11 @@ impl Constraint {
             && self
                 .internal_token_buf_offsets
                 .last()
-                .is_some_and(|&end| end as usize == self.internal_token_buf_flat.len());
+                .is_some_and(|&end| end as usize == self.internal_token_buf_flat_len());
         if !flat_ready {
             let (flat, offsets) = Self::compute_flat_buf_masks(&self.internal_token_buf_masks);
             self.internal_token_buf_flat = flat;
+            self.backed_internal_token_buf_flat = None;
             self.internal_token_buf_offsets = offsets;
         }
         self.internal_token_buf_op_costs = Self::compute_internal_token_buf_op_costs(
@@ -6072,10 +6194,9 @@ impl Constraint {
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {
-        let masks = self.internal_token_buf_mask_slice(internal_token);
-        for &(word_idx, mask) in masks {
+        self.for_each_internal_token_buf_mask_entry(internal_token, |word_idx, mask| {
             buf[word_idx as usize] |= mask;
-        }
+        });
     }
 
     fn sparse_word_group_entries_in(&self, start: usize, len: usize) -> usize {
@@ -6594,7 +6715,7 @@ impl Constraint {
         if PROFILE {
             *stats_entries += end.saturating_sub(start) as u64;
         }
-        or_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
+        self.or_internal_token_buf_range(start, end, buf);
     }
 
     #[inline(always)]
@@ -6618,7 +6739,7 @@ impl Constraint {
         if PROFILE {
             *stats_entries += end.saturating_sub(start) as u64;
         }
-        andnot_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
+        self.andnot_internal_token_buf_range(start, end, buf);
     }
 
     fn or_internal_bits_to_buf_grouped<const PROFILE: bool>(

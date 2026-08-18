@@ -1,5 +1,7 @@
 use crate::runtime::Constraint;
-use crate::runtime::artifact::InternalTokenBufMasks;
+use crate::runtime::artifact::{
+    BackedInternalTokenBufMasks, InternalTokenBufMasks, PackedInternalTokenBufMask,
+};
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
 use serde::{Deserialize, Serialize};
@@ -696,34 +698,81 @@ fn install_token_mask_cache(
     }
 }
 
-fn encode_internal_token_buf_masks(masks: &[InternalTokenBufMasks]) -> Vec<u8> {
-    const MAGIC: &[u8; 4] = b"IBM1";
-    let entry_count = masks.iter().map(Vec::len).sum::<usize>();
+fn encode_internal_token_buf_masks(constraint: &Constraint) -> Vec<u8> {
+    const MAGIC: &[u8; 4] = b"IBM2";
+    const ENTRY_BYTES: usize = std::mem::size_of::<PackedInternalTokenBufMask>();
+    let flat_len = constraint.internal_token_buf_flat_len();
+    let packed_ready = constraint.internal_token_buf_offsets.len()
+        == constraint.internal_token_count().saturating_add(1)
+        && constraint
+            .internal_token_buf_offsets
+            .last()
+            .is_some_and(|&end| end as usize == flat_len);
+    let group_count = if packed_ready {
+        constraint.internal_token_buf_offsets.len().saturating_sub(1)
+    } else {
+        constraint.internal_token_buf_masks.len()
+    };
+    let entry_count = if packed_ready {
+        flat_len
+    } else {
+        constraint
+            .internal_token_buf_masks
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+    };
     let mut out = Vec::with_capacity(
         12usize
-            .saturating_add((masks.len() + 1).saturating_mul(4))
-            .saturating_add(entry_count.saturating_mul(6)),
+            .saturating_add((group_count + 1).saturating_mul(4))
+            .saturating_add(entry_count.saturating_mul(ENTRY_BYTES)),
     );
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(masks.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(group_count as u32).to_le_bytes());
     out.extend_from_slice(&(entry_count as u32).to_le_bytes());
-    let mut end = 0u32;
-    out.extend_from_slice(&end.to_le_bytes());
-    for mask in masks {
-        end = end.saturating_add(mask.len() as u32);
+    if packed_ready {
+        for &offset in constraint.internal_token_buf_offsets.iter() {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        if let Some(backed) = constraint.backed_internal_token_buf_flat.as_ref() {
+            backed.append_wire_bytes(&mut out);
+        } else if cfg!(target_endian = "little") {
+            let byte_len = entry_count * ENTRY_BYTES;
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    constraint.internal_token_buf_flat.as_ptr().cast::<u8>(),
+                    byte_len,
+                )
+            };
+            out.extend_from_slice(bytes);
+        } else {
+            for entry in constraint.internal_token_buf_flat.iter() {
+                out.extend_from_slice(&entry.word_idx.to_le_bytes());
+                out.extend_from_slice(&0u16.to_le_bytes());
+                out.extend_from_slice(&entry.mask.to_le_bytes());
+            }
+        }
+    } else {
+        let mut end = 0u32;
         out.extend_from_slice(&end.to_le_bytes());
-    }
-    for mask in masks {
-        for &(word, bits) in mask {
-            out.extend_from_slice(&word.to_le_bytes());
-            out.extend_from_slice(&bits.to_le_bytes());
+        for mask in &constraint.internal_token_buf_masks {
+            end = end.saturating_add(mask.len() as u32);
+            out.extend_from_slice(&end.to_le_bytes());
+        }
+        for mask in &constraint.internal_token_buf_masks {
+            for &(word, bits) in mask {
+                out.extend_from_slice(&word.to_le_bytes());
+                out.extend_from_slice(&0u16.to_le_bytes());
+                out.extend_from_slice(&bits.to_le_bytes());
+            }
         }
     }
     out
 }
 
 struct DecodedInternalTokenBufMasks {
-    flat: Box<[(u16, u32)]>,
+    flat: Box<[PackedInternalTokenBufMask]>,
+    backed: Option<BackedInternalTokenBufMasks>,
     offsets: Box<[u32]>,
 }
 
@@ -734,9 +783,14 @@ enum DecodedOriginalTokenMap {
     >),
 }
 
-fn decode_internal_token_buf_masks(input: &[u8]) -> Result<DecodedInternalTokenBufMasks, String> {
-    const MAGIC: &[u8; 4] = b"IBM1";
-    if input.len() < 12 || !input.starts_with(MAGIC) {
+fn decode_internal_token_buf_masks(
+    input: &[u8],
+    backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
+) -> Result<DecodedInternalTokenBufMasks, String> {
+    const LEGACY_MAGIC: &[u8; 4] = b"IBM1";
+    const FIXED_MAGIC: &[u8; 4] = b"IBM2";
+    let fixed = input.starts_with(FIXED_MAGIC);
+    if input.len() < 12 || (!fixed && !input.starts_with(LEGACY_MAGIC)) {
         return Err("invalid internal-token buffer-mask section".to_owned());
     }
     let group_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
@@ -744,8 +798,13 @@ fn decode_internal_token_buf_masks(input: &[u8]) -> Result<DecodedInternalTokenB
     let offsets_bytes = (group_count + 1)
         .checked_mul(4)
         .ok_or_else(|| "internal-token buffer-mask offsets overflow".to_owned())?;
+    let entry_width = if fixed {
+        std::mem::size_of::<PackedInternalTokenBufMask>()
+    } else {
+        6
+    };
     let entries_bytes = entry_count
-        .checked_mul(6)
+        .checked_mul(entry_width)
         .ok_or_else(|| "internal-token buffer-mask entries overflow".to_owned())?;
     let expected = 12usize
         .checked_add(offsets_bytes)
@@ -780,16 +839,66 @@ fn decode_internal_token_buf_masks(input: &[u8]) -> Result<DecodedInternalTokenB
     if offsets.windows(2).any(|pair| pair[0] > pair[1]) {
         return Err("non-monotonic internal-token buffer-mask offsets".to_owned());
     }
-    let entries = &input[12 + offsets_bytes..];
-    let mut flat = Vec::with_capacity(entry_count);
-    for entry in 0..entry_count {
-        let pos = entry * 6;
-        let word = u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap());
-        let bits = u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap());
-        flat.push((word, bits));
+    let entries_start = 12 + offsets_bytes;
+    let entries = &input[entries_start..];
+    let backed = if fixed {
+        backing
+            .map(|(backing, section_start)| {
+                BackedInternalTokenBufMasks::new(
+                    backing,
+                    section_start + entries_start,
+                    entry_count,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let mut flat = Vec::<PackedInternalTokenBufMask>::with_capacity(if backed.is_some() {
+        0
+    } else {
+        entry_count
+    });
+    if backed.is_some() {
+        // The retained artifact is the runtime storage; offsets remain owned
+        // because they are tiny and hot to index.
+    } else if fixed && cfg!(target_endian = "little") {
+        unsafe {
+            flat.set_len(entry_count);
+            std::ptr::copy_nonoverlapping(
+                entries.as_ptr(),
+                flat.as_mut_ptr().cast::<u8>(),
+                entries_bytes,
+            );
+        }
+    } else {
+        // The section length was validated above, so every record is present.
+        // IBM1 has six-byte records; IBM2 is eight bytes with a two-byte pad.
+        unsafe {
+            flat.set_len(entry_count);
+            let src = entries.as_ptr();
+            let dst = flat.as_mut_ptr();
+            for entry in 0..entry_count {
+                let pos = entry * entry_width;
+                let word = u16::from_le(std::ptr::read_unaligned(src.add(pos).cast::<u16>()));
+                let bits_offset = if fixed { 4 } else { 2 };
+                let bits = u32::from_le(std::ptr::read_unaligned(
+                    src.add(pos + bits_offset).cast::<u32>(),
+                ));
+                std::ptr::write(
+                    dst.add(entry),
+                    PackedInternalTokenBufMask {
+                        word_idx: word,
+                        _pad: 0,
+                        mask: bits,
+                    },
+                );
+            }
+        }
     }
     Ok(DecodedInternalTokenBufMasks {
         flat: flat.into_boxed_slice(),
+        backed,
         offsets: offsets.into_boxed_slice(),
     })
 }
@@ -1389,7 +1498,7 @@ impl Constraint {
                         },
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = encode_internal_token_buf_masks(&self.internal_token_buf_masks);
+                            let bytes = encode_internal_token_buf_masks(self);
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=internal_token_buf_masks ms={:.3} bytes={}",
@@ -2188,7 +2297,23 @@ impl Constraint {
                                     return Ok(None);
                                 };
                                 let started = profile.then(std::time::Instant::now);
-                                let result = decode_internal_token_buf_masks(section).map(Some);
+                                let backing = current_backing
+                                    .as_ref()
+                                    .map(|backing| {
+                                        let base = backing.as_ptr() as usize;
+                                        let section_start = (section.as_ptr() as usize)
+                                            .checked_sub(base)
+                                            .ok_or_else(|| {
+                                                "internal-token buffer-mask section does not belong to artifact backing"
+                                                    .to_owned()
+                                            })?;
+                                        Ok::<_, String>((
+                                            std::sync::Arc::clone(backing),
+                                            section_start,
+                                        ))
+                                    })
+                                    .transpose()?;
+                                let result = decode_internal_token_buf_masks(section, backing).map(Some);
                                 if let Some(started) = started {
                                     eprintln!(
                                         "[glrmask/profile][constraint_section] name=internal_token_buf_masks ms={:.3}",
@@ -2474,9 +2599,11 @@ impl Constraint {
             if let Some(decoded) = external_internal_token_buf_masks {
                 constraint.internal_token_buf_masks = Vec::new();
                 constraint.internal_token_buf_flat = decoded.flat;
+                constraint.backed_internal_token_buf_flat = decoded.backed;
                 constraint.internal_token_buf_offsets = decoded.offsets;
             } else {
                 constraint.internal_token_buf_masks = artifact.internal_token_buf_masks;
+                constraint.backed_internal_token_buf_flat = None;
             }
             constraint.packed_token_bytes = external_token_bytes.or(deferred_token_bytes);
             if let Some(cache) = token_mask_cache {

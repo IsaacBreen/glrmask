@@ -4924,7 +4924,7 @@ impl<'a> ConstraintState<'a> {
                 self.constraint.word_group_sparse_total_entries,
                 self.constraint.word_group_sparse_max_entries,
                 self.constraint.word_group_sparse_masks.len() * self.constraint.mask_len(),
-                self.constraint.internal_token_buf_flat.len(),
+                self.constraint.internal_token_buf_flat_len(),
                 other_ns,
                 queue_debug.enqueue_calls,
                 queue_debug.merge_hit_count,

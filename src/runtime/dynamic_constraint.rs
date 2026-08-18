@@ -448,6 +448,7 @@ impl DynamicConstraint {
             tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             internal_token_buf_flat: Box::new([]),
+            backed_internal_token_buf_flat: None,
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
             heavy_token_indices: Vec::new(),
