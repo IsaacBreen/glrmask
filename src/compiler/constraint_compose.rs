@@ -2572,6 +2572,7 @@ fn direct_boundary_terminal_automaton(
     num_states: usize,
     component_state_map: Option<&ManyToOneIdMap>,
     vocab: &Vocab,
+    coordinate_original_tokens: &[u32],
     seed_relations: BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
     one_byte_ms: f64,
     discovery: &BoundaryTokenDiscovery,
@@ -2583,13 +2584,23 @@ fn direct_boundary_terminal_automaton(
 ) -> Result<MappedArtifact<TerminalAutomaton>, String> {
     let total_started_at = Instant::now();
 
-    let selected_original_tokens = seed_relations
-        .values()
-        .flat_map(|by_state| by_state.values())
-        .flat_map(|tokens| tokens.iter().copied())
-        .chain(discovery.token_ids.iter().copied())
+    // Keep the token coordinate published to the owned component-preparation
+    // lane exactly, even when later semantic factoring proves some candidates
+    // redundant.  The coordinate may contain unused token classes; changing it
+    // after publication would invalidate the concurrently prepared remap.
+    let selected_original_tokens = coordinate_original_tokens
+        .iter()
+        .copied()
         .collect::<BTreeSet<_>>();
-    let max_original_token = vocab.entries_map().keys().next_back().copied().unwrap_or(0);
+    let max_original_token = vocab
+        .entries_map()
+        .keys()
+        .next_back()
+        .copied()
+        .into_iter()
+        .chain(selected_original_tokens.iter().copied())
+        .max()
+        .unwrap_or(0);
     let mut original_to_internal = vec![u32::MAX; max_original_token as usize + 1];
     let mut internal_to_originals = Vec::with_capacity(selected_original_tokens.len());
     let mut token_representatives = Vec::with_capacity(selected_original_tokens.len());
@@ -6162,6 +6173,10 @@ struct ConcreteBoundaryDeltaPlan {
     original_num_terminals: u32,
     synthetic_num_terminals: u32,
     by_global_terminal: BTreeMap<u32, ConcreteBoundaryDeltaEntry>,
+    /// Active ordinary terminals for which both the transported component
+    /// template and composed template were available and compared.  Absence
+    /// from `by_global_terminal` means Old == New only for this set.
+    compared_terminals: BTreeSet<u32>,
     /// Scoped component ignores whose standalone cached parser artifacts had
     /// only their unqualified empty-word identity branch stripped.  They are
     /// not ordinary template deltas: ignore-bearing paths that also commit a
@@ -6197,6 +6212,7 @@ fn prepare_concrete_boundary_delta_plan(
         active_terminals,
     );
     let mut by_global_terminal = BTreeMap::new();
+    let mut compared_terminals = BTreeSet::new();
     let mut unsafe_terminals = BTreeSet::new();
     let scoped_ignore_terminals = stripped_scoped_ignore_terminals
         .iter()
@@ -6251,6 +6267,7 @@ fn prepare_concrete_boundary_delta_plan(
             unsafe_terminals.insert(terminal);
             continue;
         };
+        compared_terminals.insert(terminal);
         let removed = unweighted_dfa_difference(old, new);
         if !unweighted_dfa_language_is_empty(&removed) {
             unsafe_terminals.insert(terminal);
@@ -6298,10 +6315,265 @@ fn prepare_concrete_boundary_delta_plan(
         original_num_terminals,
         synthetic_num_terminals: next_terminal,
         by_global_terminal,
+        compared_terminals,
         scoped_ignore_terminals,
         stripped_identity_terminals,
         unsafe_terminals,
     }
+}
+
+
+
+/// Exact reset/base-case support for a one-terminal parser-template delta.
+///
+/// `collect_one_byte_seed_relations*` covers arbitrary lexer states but only
+/// one-byte model tokens.  This companion relation covers arbitrary-length
+/// model tokens that can complete one selected grammar terminal exactly at the
+/// lexer reset.  The parser word is still length one, so it is governed by the
+/// same Old/New/Delta factorization.
+fn boundary_delta_reset_relations(
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    vocab: &Vocab,
+    selected_terminals: &[bool],
+    control_terminals: &BTreeSet<u32>,
+) -> BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>> {
+    debug_assert_eq!(components.len(), terminal_offsets.len());
+    let started_at = Instant::now();
+
+    let mut selected_by_component = Vec::<BitSet>::with_capacity(components.len());
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index];
+        let mut selected = BitSet::new(component.tokenizer.num_terminals() as usize);
+        for local in 0..component.tokenizer.num_terminals() {
+            let global = terminal_offset + local;
+            if selected_terminals
+                .get(global as usize)
+                .copied()
+                .unwrap_or(false)
+                && !control_terminals.contains(&global)
+            {
+                selected.set(local as usize);
+            }
+        }
+        selected_by_component.push(selected);
+    }
+
+    let pairs = vocab
+        .entries_map()
+        .par_iter()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .fold(Vec::<(u32, u32)>::new, |mut output, (&token_id, bytes)| {
+            for (component_index, component) in components.iter().enumerate() {
+                let selected = &selected_by_component[component_index];
+                if selected.is_empty() {
+                    continue;
+                }
+                let (_, matches) = component
+                    .tokenizer
+                    .execute_summary_from_state(bytes, component.tokenizer.start_state());
+                for (local_terminal, width) in matches {
+                    if width == bytes.len() && selected.contains(local_terminal as usize) {
+                        output.push((terminal_offsets[component_index] + local_terminal, token_id));
+                    }
+                }
+            }
+            output
+        })
+        .reduce(Vec::new, |mut left, mut right| {
+            left.append(&mut right);
+            left
+        });
+
+    let mut result = BTreeMap::<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>::new();
+    for (terminal, token) in pairs {
+        result
+            .entry(vec![terminal])
+            .or_default()
+            .entry(0)
+            .or_default()
+            .insert(token);
+    }
+    if compose_profile_enabled() {
+        let token_cells = result
+            .values()
+            .flat_map(|by_state| by_state.values())
+            .map(BTreeSet::len)
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_delta_reset_relations] terminals={} token_cells={} ms={:.3}",
+            result.len(),
+            token_cells,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
+}
+
+fn merge_one_terminal_relations(
+    into: &mut BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
+    from: BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
+) {
+    for (sequence, by_state) in from {
+        let target_by_state = into.entry(sequence).or_default();
+        for (state, tokens) in by_state {
+            target_by_state.entry(state).or_default().extend(tokens);
+        }
+    }
+}
+
+/// Rewrite one-terminal boundary seeds into the exact additive parser-template
+/// novelty supplied by composition.  A transported component normally already
+/// supplies Old_t, so a safe changed terminal contributes only
+/// Delta_t = New_t \\ Old_t and an unchanged compared terminal contributes
+/// nothing.  The exception is support shadowed by the normalized component
+/// parser's start-final acceptance: prefix-final subtraction removed Old_t's
+/// outgoing branch for that exact (lexer-state, model-token) support cell, so
+/// the boundary must retain full New_t there.
+fn factor_one_terminal_seed_relations(
+    relations: BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
+    plan: &ConcreteBoundaryDeltaPlan,
+    components: &[&Constraint],
+    tokenizer_state_offsets: &[u32],
+    terminal_offsets: &[u32],
+) -> BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>> {
+    debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
+    debug_assert_eq!(components.len(), terminal_offsets.len());
+
+    let owner_for_terminal = |terminal: u32| -> Option<usize> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        let local = terminal.checked_sub(*terminal_offsets.get(component)?)?;
+        (local < components.get(component)?.tokenizer.num_terminals()).then_some(component)
+    };
+
+    let support_shadowed_at_component_start =
+        |terminal: u32, raw_state: u32, original_token: u32| -> Option<bool> {
+            let component_index = owner_for_terminal(terminal)?;
+            let component = *components.get(component_index)?;
+            let state_offset = *tokenizer_state_offsets.get(component_index)?;
+            let local_state = if raw_state == 0 {
+                component.tokenizer.start_state()
+            } else {
+                let local = raw_state.checked_sub(state_offset)?;
+                (local < component.tokenizer.num_states()).then_some(local)?
+            };
+            let internal_token = component
+                .original_token_to_internal
+                .get(original_token as usize)
+                .copied()?;
+            if internal_token == u32::MAX {
+                return None;
+            }
+            let start_final = component
+                .parser_dwa
+                .states()
+                .get(component.parser_dwa.start_state() as usize)?
+                .final_weight
+                .as_ref();
+            let Some(start_final) = start_final else {
+                return Some(false);
+            };
+            Some(
+                component
+                    .internal_tsids_for_state(local_state)
+                    .iter()
+                    .copied()
+                    .any(|tsid| start_final.tokens_for_tsid(tsid).contains(internal_token)),
+            )
+        };
+
+    fn insert_relation(
+        factored: &mut BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
+        label: u32,
+        state: u32,
+        token: u32,
+    ) {
+        factored
+            .entry(vec![label])
+            .or_default()
+            .entry(state)
+            .or_default()
+            .insert(token);
+    }
+
+    let mut factored = BTreeMap::<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>::new();
+    let mut promoted_shadow_cells = 0usize;
+    let mut promoted_shadow_tokens = BTreeSet::<u32>::new();
+    let mut dropped_cells = 0usize;
+    let mut delta_cells = 0usize;
+    let mut conservative_cells = 0usize;
+
+    for (sequence, by_state) in relations {
+        if sequence.len() != 1 {
+            // This helper is deliberately only the n=1 base case of the
+            // first-delta decomposition.  Preserve any future non-unit caller
+            // conservatively rather than silently changing its language.
+            factored.insert(sequence, by_state);
+            continue;
+        }
+        let terminal = sequence[0];
+        let entry = plan.by_global_terminal.get(&terminal);
+        let ordinary_delta = entry.filter(|entry| entry.old_terminal.is_some());
+        let scoped_full_delta = entry.filter(|entry| entry.old_terminal.is_none());
+        let unsafe_or_unclassified = plan.unsafe_terminals.contains(&terminal)
+            || (!plan.compared_terminals.contains(&terminal) && entry.is_none());
+
+        for (state, tokens) in by_state {
+            for token in tokens {
+                if unsafe_or_unclassified {
+                    conservative_cells += 1;
+                    insert_relation(&mut factored, terminal, state, token);
+                    continue;
+                }
+                if let Some(entry) = scoped_full_delta {
+                    // For a stripped scoped ignore the synthetic delta template
+                    // is exactly full New_t (the reusable old identity is empty).
+                    delta_cells += 1;
+                    insert_relation(&mut factored, entry.delta_terminal, state, token);
+                    continue;
+                }
+
+                match support_shadowed_at_component_start(terminal, state, token) {
+                    Some(true) => {
+                        promoted_shadow_cells += 1;
+                        promoted_shadow_tokens.insert(token);
+                        insert_relation(&mut factored, terminal, state, token);
+                    }
+                    Some(false) => {
+                        if let Some(entry) = ordinary_delta {
+                            delta_cells += 1;
+                            insert_relation(&mut factored, entry.delta_terminal, state, token);
+                        } else {
+                            // Compared and absent from the delta map means
+                            // Old_t == New_t; the component already supplies it.
+                            dropped_cells += 1;
+                        }
+                    }
+                    None => {
+                        // If ownership/coordinate provenance cannot be proved,
+                        // keep full New_t.  Correctness beats the optimization.
+                        conservative_cells += 1;
+                        insert_relation(&mut factored, terminal, state, token);
+                    }
+                }
+            }
+        }
+    }
+
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_factor_one_terminal] rows={} promoted_shadow_cells={} promoted_shadow_tokens={} delta_cells={} dropped_cells={} conservative_cells={}",
+            factored.len(),
+            promoted_shadow_cells,
+            promoted_shadow_tokens.len(),
+            delta_cells,
+            dropped_cells,
+            conservative_cells,
+        );
+    }
+    factored
 }
 
 fn unweighted_dfa_to_template_nwa(dfa: &UnweightedDfa) -> NWA {
@@ -8351,6 +8623,22 @@ fn build_boundary_repair(
             *active = true;
         }
     }
+    // Reset-complete one-terminal model tokens must be part of the published
+    // boundary token coordinate before the owned path prepares its token map.
+    // Discover them against the active terminal superset here; the concrete
+    // delta factor below will later drop unchanged compared terminals.
+    let mut seed_relations = seed_relations;
+    merge_one_terminal_relations(
+        &mut seed_relations,
+        boundary_delta_reset_relations(
+            components,
+            &composed_table.terminal_offsets,
+            vocab,
+            &active_terminals,
+            &composed_table.control_terminals,
+        ),
+    );
+
     let mut boundary_special_token_terminals = special_token_terminals
         .iter()
         .copied()
@@ -8415,7 +8703,7 @@ fn build_boundary_repair(
         return Err(error);
     }
     if let Some(selected_boundary_tokens) = selected_boundary_tokens {
-        let _ = selected_boundary_tokens.set(Ok(Some(selected_original_tokens)));
+        let _ = selected_boundary_tokens.set(Ok(Some(selected_original_tokens.clone())));
     }
 
     let owned_component_state_map = if precomputed_component_state_map.is_none()
@@ -8482,11 +8770,27 @@ fn build_boundary_repair(
                 analyzed.num_terminals,
             );
             install_concrete_boundary_delta_templates(&mut templates, &plan);
+            let seed_relations = if std::env::var_os(
+                "GLRMASK_DISABLE_FACTOR_ONE_TERMINAL_SEEDS",
+            )
+            .is_some()
+            {
+                seed_relations
+            } else {
+                factor_one_terminal_seed_relations(
+                    seed_relations,
+                    &plan,
+                    components,
+                    tokenizer_state_offsets,
+                    &composed_table.terminal_offsets,
+                )
+            };
             let started_at = Instant::now();
             let result = direct_boundary_terminal_automaton(
                 merged_tokenizer_state_count,
                 Some(component_state_map),
                 vocab,
+                &selected_original_tokens,
                 seed_relations,
                 one_byte_ms,
                 &boundary_paths,
@@ -8579,6 +8883,7 @@ fn build_boundary_repair(
                             merged_tokenizer_state_count,
                             Some(component_state_map),
                             vocab,
+                            &selected_original_tokens,
                             seed_relations,
                             one_byte_ms,
                             &boundary_paths,
