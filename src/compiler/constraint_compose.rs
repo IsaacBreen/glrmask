@@ -18237,6 +18237,372 @@ mod tests {
                 hybrid_templates.by_terminal.values().flat_map(|dfa| dfa.states.iter()).map(|state| state.transitions.len()).sum::<usize>(),
                 hybrid_started.elapsed().as_secs_f64() * 1000.0,
             );
+            let direct_delta_started = Instant::now();
+            let parent_relation_is_identity = composed_table.state_relations[0]
+                .iter()
+                .enumerate()
+                .all(|(local, targets)| targets.as_slice() == [local as u32]);
+            assert!(
+                parent_relation_is_identity,
+                "selected10 direct parent-delta oracle currently requires identity parent state transport",
+            );
+            let mut action_seeds =
+                vec![Vec::<u32>::new(); concrete_grammar.num_terminals as usize];
+            let mut removed_parent_actions = Vec::<(u32, u32)>::new();
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                for state in 0..composed_table.table.num_states {
+                    let new_action = composed_table.table.action(state, terminal);
+                    let old_action = if state < core.table.num_states {
+                        core.table.action(state, terminal)
+                    } else {
+                        None
+                    };
+                    let new_forwarded = composed_table
+                        .table
+                        .forwarded_shifts
+                        .contains(&(state, terminal));
+                    let old_forwarded = state < core.table.num_states
+                        && core.table.forwarded_shifts.contains(&(state, terminal));
+                    if new_action != old_action || new_forwarded != old_forwarded {
+                        if new_action.is_some() {
+                            action_seeds[terminal as usize].push(state);
+                        } else if old_action.is_some() {
+                            removed_parent_actions.push((state, terminal));
+                        }
+                    }
+                }
+            }
+            let seed_count = action_seeds.iter().map(Vec::len).sum::<usize>();
+            let seed_terminals = action_seeds.iter().filter(|states| !states.is_empty()).count();
+            let seed_characterize_started = Instant::now();
+            let seeded_characterizations = crate::compiler::stages::templates::characterize::characterize_terminal_action_state_seeds(
+                &composed_table.table,
+                &concrete_grammar,
+                &action_seeds,
+            );
+            let seed_characterize_ms =
+                seed_characterize_started.elapsed().as_secs_f64() * 1000.0;
+            let seed_template_started = Instant::now();
+            let seeded_templates = Templates::from_characterizations(&seeded_characterizations);
+            let seed_template_ms = seed_template_started.elapsed().as_secs_f64() * 1000.0;
+            let empty_dfa = UnweightedDfa::new();
+            let mut delta_mismatches = Vec::<u32>::new();
+            let mut delta_mismatch_witnesses = Vec::<(u32, Option<Vec<i32>>, Option<Vec<i32>>)>::new();
+            let mut seeded_delta_states = 0usize;
+            let mut exact_delta_states = 0usize;
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                let old = old_transported
+                    .get(&terminal)
+                    .expect("active parent terminal has transported old template");
+                let seeded = seeded_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .unwrap_or(&empty_dfa);
+                let seeded_delta = trim_unweighted_dfa_productive(
+                    unweighted_dfa_difference(seeded, old),
+                );
+                let exact_delta = tight_delta_plan
+                    .by_global_terminal
+                    .get(&terminal)
+                    .map(|entry| &entry.delta_template)
+                    .unwrap_or(&empty_dfa);
+                seeded_delta_states += seeded_delta.states.len();
+                exact_delta_states += exact_delta.states.len();
+                let seeded_minus_exact = unweighted_dfa_difference(&seeded_delta, exact_delta);
+                let exact_minus_seeded = unweighted_dfa_difference(exact_delta, &seeded_delta);
+                if !unweighted_dfa_language_is_empty(&seeded_minus_exact)
+                    || !unweighted_dfa_language_is_empty(&exact_minus_seeded)
+                {
+                    delta_mismatches.push(terminal);
+                    if delta_mismatch_witnesses.len() < 8 {
+                        delta_mismatch_witnesses.push((
+                            terminal,
+                            unweighted_dfa_shortest_word(&seeded_minus_exact),
+                            unweighted_dfa_shortest_word(&exact_minus_seeded),
+                        ));
+                    }
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_DIRECT_PARENT_DELTA parent_active={} seed_terminals={} seed_states={} removed_parent_actions={} seeded_delta_states={} exact_delta_states={} mismatches={} mismatch_ids={:?} witnesses={:?} characterize_ms={seed_characterize_ms:.3} template_ms={seed_template_ms:.3} total_ms={:.3}",
+                parent_selected.iter().filter(|&&selected| selected).count(),
+                seed_terminals,
+                seed_count,
+                removed_parent_actions.len(),
+                seeded_delta_states,
+                exact_delta_states,
+                delta_mismatches.len(),
+                delta_mismatches,
+                delta_mismatch_witnesses,
+                direct_delta_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let symbolic_delta_started = Instant::now();
+            let core_augmented_start = core.table.rules[0].lhs;
+            let core_analyzed = AnalyzedGrammar::from_composed_rules(
+                core.table.rules.clone(),
+                core.table.num_terminals,
+                core.terminal_display_names().to_vec(),
+                core.table.nonterminal_display_names.clone(),
+                core_augmented_start,
+            );
+            let mut core_selected = vec![false; core.table.num_terminals as usize];
+            for terminal in 0..parent_terminal_end as usize {
+                core_selected[terminal] = tight_selected[terminal];
+            }
+            let core_characterize_started = Instant::now();
+            let core_characterizations = characterize_selected_terminals(
+                &core.table,
+                &core_analyzed,
+                &core_selected,
+            );
+            let core_characterize_ms =
+                core_characterize_started.elapsed().as_secs_f64() * 1000.0;
+            let composed_parent_characterizations = characterize_selected_terminals(
+                &composed_table.table,
+                &concrete_grammar,
+                &parent_selected,
+            );
+            fn sorted_vec_difference<T: Ord + Clone>(new: &[T], old: &[T]) -> Vec<T> {
+                let old = old.iter().cloned().collect::<BTreeSet<_>>();
+                new.iter()
+                    .filter(|value| !old.contains(*value))
+                    .cloned()
+                    .collect()
+            }
+            let mut symbolic_deltas = BTreeMap::new();
+            let mut symbolic_removed = 0usize;
+            let mut symbolic_delta_items = [0usize; 4];
+            let mut symbolic_rereduce_examples = Vec::new();
+            let mut symbolic_reduce_examples = Vec::new();
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                let old = core_characterizations
+                    .get(&terminal)
+                    .expect("active core terminal has characterization");
+                let new = composed_parent_characterizations
+                    .get(&terminal)
+                    .expect("active composed parent terminal has characterization");
+                symbolic_removed += old
+                    .escapes
+                    .iter()
+                    .filter(|item| !new.escapes.contains(item))
+                    .count();
+                symbolic_removed += old
+                    .reduces
+                    .iter()
+                    .filter(|item| !new.reduces.contains(item))
+                    .count();
+                symbolic_removed += old
+                    .nt_escapes
+                    .iter()
+                    .filter(|item| !new.nt_escapes.contains(item))
+                    .count();
+                symbolic_removed += old
+                    .nt_rereduces
+                    .iter()
+                    .filter(|item| !new.nt_rereduces.contains(item))
+                    .count();
+                let escapes = sorted_vec_difference(&new.escapes, &old.escapes);
+                let reduces = sorted_vec_difference(&new.reduces, &old.reduces);
+                let nt_escapes = sorted_vec_difference(&new.nt_escapes, &old.nt_escapes);
+                let nt_rereduces = sorted_vec_difference(&new.nt_rereduces, &old.nt_rereduces);
+                symbolic_delta_items[0] += escapes.len();
+                symbolic_delta_items[1] += reduces.len();
+                symbolic_delta_items[2] += nt_escapes.len();
+                symbolic_delta_items[3] += nt_rereduces.len();
+                if symbolic_rereduce_examples.len() < 12 {
+                    symbolic_rereduce_examples.extend(
+                        nt_rereduces
+                            .iter()
+                            .take(12 - symbolic_rereduce_examples.len())
+                            .cloned()
+                            .map(|item| (terminal, item)),
+                    );
+                }
+                if symbolic_reduce_examples.len() < 12 {
+                    symbolic_reduce_examples.extend(
+                        reduces
+                            .iter()
+                            .take(12 - symbolic_reduce_examples.len())
+                            .cloned()
+                            .map(|item| (terminal, item)),
+                    );
+                }
+                if !escapes.is_empty()
+                    || !reduces.is_empty()
+                    || !nt_escapes.is_empty()
+                    || !nt_rereduces.is_empty()
+                {
+                    symbolic_deltas.insert(
+                        terminal,
+                        crate::compiler::stages::templates::characterize::TerminalCharacterization {
+                            escapes,
+                            reduces,
+                            nt_escapes,
+                            nt_rereduces,
+                            all_nts: new.all_nts.clone(),
+                        },
+                    );
+                }
+            }
+            let symbolic_template_started = Instant::now();
+            let symbolic_delta_templates = Templates::from_characterizations(&symbolic_deltas);
+            let symbolic_template_ms =
+                symbolic_template_started.elapsed().as_secs_f64() * 1000.0;
+            let mut symbolic_mismatches = Vec::<u32>::new();
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                let candidate = symbolic_delta_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .unwrap_or(&empty_dfa);
+                let exact = tight_delta_plan
+                    .by_global_terminal
+                    .get(&terminal)
+                    .map(|entry| &entry.delta_template)
+                    .unwrap_or(&empty_dfa);
+                if !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(candidate, exact))
+                    || !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(exact, candidate))
+                {
+                    symbolic_mismatches.push(terminal);
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_SYMBOLIC_PARENT_DELTA core_characterize_ms={core_characterize_ms:.3} symbolic_removed={} delta_escapes={} delta_reduces={} delta_nt_escapes={} delta_nt_rereduces={} delta_terminals={} rereduce_examples={:?} reduce_examples={:?} template_ms={symbolic_template_ms:.3} mismatches={} mismatch_ids={:?} total_ms={:.3}",
+                symbolic_removed,
+                symbolic_delta_items[0],
+                symbolic_delta_items[1],
+                symbolic_delta_items[2],
+                symbolic_delta_items[3],
+                symbolic_deltas.len(),
+                symbolic_rereduce_examples,
+                symbolic_reduce_examples,
+                symbolic_mismatches.len(),
+                symbolic_mismatches,
+                symbolic_delta_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let patched_characterization_started = Instant::now();
+            let mut patched_characterizations = BTreeMap::new();
+            for (&terminal, delta) in &symbolic_deltas {
+                let mut patched = core_characterizations
+                    .get(&terminal)
+                    .expect("changed parent terminal has cached characterization source")
+                    .clone();
+                patched.escapes.extend(delta.escapes.iter().cloned());
+                patched.reduces.extend(delta.reduces.iter().cloned());
+                patched.nt_escapes.extend(delta.nt_escapes.iter().cloned());
+                patched.nt_rereduces.extend(delta.nt_rereduces.iter().cloned());
+                patched.escapes.sort();
+                patched.escapes.dedup();
+                patched.reduces.sort();
+                patched.reduces.dedup();
+                patched.nt_escapes.sort();
+                patched.nt_escapes.dedup();
+                patched.nt_rereduces.sort();
+                patched.nt_rereduces.dedup();
+                patched.all_nts.extend(delta.all_nts.iter().copied());
+                patched_characterizations.insert(terminal, patched);
+            }
+            let patched_assembly_ms =
+                patched_characterization_started.elapsed().as_secs_f64() * 1000.0;
+            let patched_template_started = Instant::now();
+            let patched_templates = Templates::from_characterizations(&patched_characterizations);
+            let patched_template_ms =
+                patched_template_started.elapsed().as_secs_f64() * 1000.0;
+            let mut patched_mismatches = Vec::<u32>::new();
+            for (&terminal, candidate) in &patched_templates.by_terminal {
+                let reference = tight_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .expect("changed parent terminal has full template");
+                if !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(candidate, reference))
+                    || !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(reference, candidate))
+                {
+                    patched_mismatches.push(terminal);
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_PATCHED_PARENT_CHARACTERIZATIONS changed={} assembly_ms={patched_assembly_ms:.3} template_ms={patched_template_ms:.3} mismatches={} mismatch_ids={:?} total_ms={:.3}",
+                patched_characterizations.len(),
+                patched_mismatches.len(),
+                patched_mismatches,
+                patched_characterization_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let prefix_factor_started = Instant::now();
+            let mut prefix_counts = BTreeMap::<Vec<i32>, usize>::new();
+            let mut residual_subset_old = 0usize;
+            let mut residual_equal_old = 0usize;
+            let mut residual_total_states = 0usize;
+            let mut residual_examples = Vec::<(
+                u32,
+                Vec<i32>,
+                Option<Vec<i32>>,
+                Option<Vec<i32>>,
+            )>::new();
+            for (&terminal, entry) in &tight_delta_plan.by_global_terminal {
+                if terminal >= parent_terminal_end {
+                    continue;
+                }
+                let mut state = entry.delta_template.start_state;
+                let mut prefix = Vec::<i32>::new();
+                loop {
+                    let node = &entry.delta_template.states[state as usize];
+                    if node.is_accepting || node.transitions.len() != 1 {
+                        break;
+                    }
+                    let (&label, &target) = node.transitions.iter().next().unwrap();
+                    prefix.push(label);
+                    state = target;
+                    if prefix.len() >= 32 {
+                        break;
+                    }
+                }
+                *prefix_counts.entry(prefix.clone()).or_default() += 1;
+                let mut residual = entry.delta_template.clone();
+                residual.start_state = state;
+                residual_total_states += residual.states.len();
+                let residual_minus_old =
+                    unweighted_dfa_difference(&residual, &entry.old_template);
+                let old_minus_residual =
+                    unweighted_dfa_difference(&entry.old_template, &residual);
+                let subset = unweighted_dfa_language_is_empty(&residual_minus_old);
+                let reverse_subset = unweighted_dfa_language_is_empty(&old_minus_residual);
+                residual_subset_old += usize::from(subset);
+                residual_equal_old += usize::from(subset && reverse_subset);
+                if residual_examples.len() < 8 {
+                    residual_examples.push((
+                        terminal,
+                        prefix,
+                        unweighted_dfa_shortest_word(&residual_minus_old),
+                        unweighted_dfa_shortest_word(&old_minus_residual),
+                    ));
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_PARENT_DELTA_PREFIX_FACTORS changed={} distinct_forced_prefixes={} prefix_counts={:?} residual_subset_old={} residual_equal_old={} residual_total_states={} examples={:?} ms={:.3}",
+                tight_delta_plan
+                    .by_global_terminal
+                    .keys()
+                    .filter(|&&terminal| terminal < parent_terminal_end)
+                    .count(),
+                prefix_counts.len(),
+                prefix_counts,
+                residual_subset_old,
+                residual_equal_old,
+                residual_total_states,
+                residual_examples,
+                prefix_factor_started.elapsed().as_secs_f64() * 1000.0,
+            );
             if std::env::var_os("GLRMASK_MINBOUND_TEMPLATE_STORAGE").is_some() {
                 let active_raw = bincode::serialize(&old_transported)
                     .expect("serialize active transported parser templates");

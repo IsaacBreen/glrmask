@@ -1059,6 +1059,35 @@ pub fn characterize_selected_terminals(
     result
 }
 
+/// Characterize terminal behavior starting only from caller-supplied LR action
+/// states. The full composed goto/reduction graph is still used after each
+/// seed, so this computes the exact closure attributable to those initial
+/// action sites. Composition uses this to isolate behavior introduced by a
+/// table splice without re-characterizing the unchanged component action
+/// sites already represented by cached parser templates.
+pub fn characterize_terminal_action_state_seeds(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    action_states_by_terminal: &[Vec<u32>],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    assert_eq!(
+        action_states_by_terminal.len(),
+        grammar.num_terminals as usize,
+        "seeded template action-state rows must cover the terminal domain",
+    );
+    let mut index = build_characterization_index(table, grammar);
+    index.action_states_by_terminal = action_states_by_terminal.to_vec();
+    action_states_by_terminal
+        .par_iter()
+        .enumerate()
+        .filter(|(_, states)| !states.is_empty())
+        .map(|(terminal, _)| {
+            let terminal = terminal as TerminalID;
+            (terminal, characterize_terminal(table, &index, terminal))
+        })
+        .collect()
+}
+
 fn characterize_terminals_unquotiented(
     index: &CharacterizationIndex,
     table: &GLRTable,
