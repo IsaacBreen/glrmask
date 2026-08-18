@@ -649,6 +649,96 @@ fn build_direct_component_token_coordinates(
         })
         .collect::<Vec<_>>();
 
+    // The overwhelmingly common subgrammar link is parent + one composed
+    // child. Its exact common vocabulary partition is keyed by one child class
+    // inside each parent class; avoid allocating a temporary Vec tuple for
+    // every original token and using that Vec as a tree key.
+    if components.len() == 2 {
+        let parent = components[0].constraint;
+        let child = components[1].constraint;
+        let mut add_pair_class =
+            |originals: Vec<u32>, parent_local: u32, child_local: u32| -> Result<(), String> {
+                if originals.is_empty()
+                    || (parent_local == u32::MAX && child_local == u32::MAX)
+                {
+                    return Ok(());
+                }
+                let global = global_to_tokens.len() as u32;
+                for &original in &originals {
+                    token_to_global[original as usize] = global;
+                }
+                for (component_index, local) in [parent_local, child_local].into_iter().enumerate() {
+                    if local == u32::MAX {
+                        continue;
+                    }
+                    let Some(destinations) = local_to_global_tokens
+                        .get_mut(component_index)
+                        .and_then(|classes| classes.get_mut(local as usize))
+                    else {
+                        return Err(format!(
+                            "component {component_index} token class {local} lies outside its internal token domain"
+                        ));
+                    };
+                    destinations.push(global);
+                }
+                token_representatives.push(originals[0]);
+                global_to_tokens.push(originals);
+                Ok(())
+            };
+
+        for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+            let mut groups = BTreeMap::<u32, Vec<u32>>::new();
+            for &original in originals {
+                if !selected_original
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let child_local = child
+                    .original_token_to_internal
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                groups.entry(child_local).or_default().push(original);
+            }
+            for (child_local, originals) in groups {
+                add_pair_class(originals, parent_local as u32, child_local)?;
+            }
+        }
+
+        let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
+        for &original in original_token_ids {
+            let parent_local = parent
+                .original_token_to_internal
+                .get(original as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if parent_local != u32::MAX {
+                continue;
+            }
+            let child_local = child
+                .original_token_to_internal
+                .get(original as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            parent_unmapped.entry(child_local).or_default().push(original);
+        }
+        for (child_local, originals) in parent_unmapped {
+            add_pair_class(originals, u32::MAX, child_local)?;
+        }
+
+        return Ok((
+            ManyToOneIdMap {
+                original_to_internal: token_to_global,
+                internal_to_originals: global_to_tokens,
+                representative_original_ids: token_representatives,
+            },
+            local_to_global_tokens,
+        ));
+    }
+
     let mut add_token_class = |originals: Vec<u32>, tuple: Vec<u32>| -> Result<(), String> {
         if originals.is_empty() || tuple.iter().all(|&local| local == u32::MAX) {
             return Ok(());
