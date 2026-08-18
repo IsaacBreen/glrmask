@@ -5935,11 +5935,68 @@ struct BoundaryRefinementPlan {
 
 struct PreparedOwnedComponentArtifacts {
     automata: Vec<NWA>,
+    /// Per-automaton maps into `id_map`. Parser weights deliberately remain in
+    /// their cached component-local coordinates until the final
+    /// component+boundary union consumes them. This keeps component linking a
+    /// structural operation; only the tiny PossibleMatches table is eagerly
+    /// published in the final coordinate space.
+    automata_maps: Vec<DirectComponentCoordinateMaps>,
     possible_matches: PossibleMatches,
     id_map: InternalIdMap,
     boundary_tsid_map: Option<Vec<Vec<u32>>>,
     boundary_token_map: Option<Vec<Vec<u32>>>,
     remap_ms: f64,
+}
+
+fn prepare_deferred_component_artifacts(
+    artifacts: Vec<UnmappedComponentParserArtifact>,
+    component_maps: Vec<DirectComponentCoordinateMaps>,
+    base_to_common_tokens: Option<&[Vec<u32>]>,
+    common_tsid_count: usize,
+) -> Result<(Vec<NWA>, Vec<DirectComponentCoordinateMaps>, PossibleMatches, f64), String> {
+    if artifacts.len() != component_maps.len() {
+        return Err("component artifact/map count mismatch".into());
+    }
+    let started_at = Instant::now();
+    let prepared = artifacts
+        .into_par_iter()
+        .zip(component_maps.into_par_iter())
+        .map(|(artifact, mut maps)| {
+            if let Some(base_to_common) = base_to_common_tokens {
+                maps.local_to_global_tokens =
+                    compose_local_id_map(&maps.local_to_global_tokens, base_to_common);
+            }
+            let mut possible_matches = artifact.possible_matches;
+            let mut weights = possible_matches.weight_refs_mut();
+            remap_weights_with_maps(
+                &mut weights,
+                &maps.local_to_global_tsids,
+                &maps.local_to_global_tokens,
+                common_tsid_count,
+            );
+            drop(weights);
+            Ok::<_, String>((artifact.automaton, maps, possible_matches))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut automata = Vec::with_capacity(prepared.len());
+    let mut maps = Vec::with_capacity(prepared.len());
+    let mut possible_matches = PossibleMatches::new();
+    for (automaton, map, component_possible_matches) in prepared {
+        automata.push(automaton);
+        maps.push(map);
+        for (terminal, weight) in component_possible_matches {
+            possible_matches
+                .entry(terminal)
+                .and_modify(|existing| *existing = existing.union(&weight))
+                .or_insert(weight);
+        }
+    }
+    Ok((
+        automata,
+        maps,
+        possible_matches,
+        started_at.elapsed().as_secs_f64() * 1000.0,
+    ))
 }
 
 fn build_boundary_refinement_plan(
@@ -6098,6 +6155,13 @@ fn remap_unmapped_component_artifacts(
                 },
             );
             let mut pair = (artifact.automaton, artifact.possible_matches);
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_component_weight_ref_shape] parser_refs={} possible_match_refs={}",
+                    pair.0.weight_refs().len(),
+                    pair.1.weight_refs().len(),
+                );
+            }
             let mut weights = pair.weight_refs_mut();
             remap_weights_with_maps(
                 &mut weights,
@@ -12133,8 +12197,8 @@ pub(crate) fn compose_constraints_owned_parent(
                         .ok_or_else(|| {
                             "component coordinate map does not cover boundary repair".to_string()
                         })?;
-                    let (automata, possible_matches, remap_ms) =
-                        remap_unmapped_component_artifacts(
+                    let (automata, automata_maps, possible_matches, remap_ms) =
+                        prepare_deferred_component_artifacts(
                             unmapped_components,
                             component_maps,
                             Some(&plan.component_token_map),
@@ -12142,6 +12206,7 @@ pub(crate) fn compose_constraints_owned_parent(
                         )?;
                     PreparedOwnedComponentArtifacts {
                         automata,
+                        automata_maps,
                         possible_matches,
                         id_map: plan.common_map,
                         boundary_tsid_map: Some(plan.boundary_tsid_map),
@@ -12149,8 +12214,8 @@ pub(crate) fn compose_constraints_owned_parent(
                         remap_ms,
                     }
                 } else {
-                    let (automata, possible_matches, remap_ms) =
-                        remap_unmapped_component_artifacts(
+                    let (automata, automata_maps, possible_matches, remap_ms) =
+                        prepare_deferred_component_artifacts(
                             unmapped_components,
                             component_maps,
                             None,
@@ -12158,6 +12223,7 @@ pub(crate) fn compose_constraints_owned_parent(
                         )?;
                     PreparedOwnedComponentArtifacts {
                         automata,
+                        automata_maps,
                         possible_matches,
                         id_map: component_id_map,
                         boundary_tsid_map: None,
@@ -12270,6 +12336,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let num_terminals = composed_table.table.num_terminals as usize;
     let PreparedOwnedComponentArtifacts {
         automata,
+        automata_maps,
         mut possible_matches,
         id_map,
         boundary_tsid_map,
@@ -12333,7 +12400,24 @@ pub(crate) fn compose_constraints_owned_parent(
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
-            let mut automata = automata;
+            let deferred_remap_started_at = Instant::now();
+            let mut automata = automata
+                .into_par_iter()
+                .zip(automata_maps.into_par_iter())
+                .map(|(mut automaton, maps)| {
+                    let mut weights = automaton.weight_refs_mut();
+                    remap_weights_with_maps(
+                        &mut weights,
+                        &maps.local_to_global_tsids,
+                        &maps.local_to_global_tokens,
+                        id_num_tsids as usize,
+                    );
+                    drop(weights);
+                    automaton
+                })
+                .collect::<Vec<_>>();
+            let deferred_component_remap_ms =
+                deferred_remap_started_at.elapsed().as_secs_f64() * 1000.0;
             match boundary_work {
                 Some((mut boundary_dwa, boundary_id_map)) => {
                     let boundary_tsid_map = boundary_tsid_map.ok_or_else(|| {
@@ -12430,7 +12514,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     }
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
@@ -12468,7 +12552,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} component_remap_ms={component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
