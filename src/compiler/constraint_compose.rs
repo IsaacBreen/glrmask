@@ -8326,7 +8326,7 @@ fn build_composition_templates(
 /// characterization, and recompiled only for genuinely changed terminals.
 struct CachedCompositionTemplatePlan {
     reused_dfas: BTreeMap<u32, UnweightedDfa>,
-    patched_characterizations: BTreeMap<
+    characterization_deltas: BTreeMap<
         u32,
         crate::compiler::stages::templates::characterize::TerminalCharacterization,
     >,
@@ -8338,9 +8338,32 @@ struct CachedCompositionTemplatePlan {
 }
 
 impl CachedCompositionTemplatePlan {
-    fn materialize(self) -> Templates {
+    fn materialize(self, parent: &Constraint) -> Templates {
         let mut templates = Templates::from_terminal_dfas(self.reused_dfas);
-        let patched = Templates::from_characterizations(&self.patched_characterizations);
+        let mut patched_characterizations = BTreeMap::new();
+        for (terminal, delta) in self.characterization_deltas {
+            let mut patched = parent
+                .composition_parser_characterizations_by_terminal
+                .get(terminal as usize)
+                .and_then(Option::as_ref)
+                .expect("cached composition plan requires its parent characterization")
+                .clone();
+            patched.escapes.extend(delta.escapes);
+            patched.reduces.extend(delta.reduces);
+            patched.nt_escapes.extend(delta.nt_escapes);
+            patched.nt_rereduces.extend(delta.nt_rereduces);
+            patched.all_nts.extend(delta.all_nts);
+            patched.escapes.sort();
+            patched.escapes.dedup();
+            patched.reduces.sort();
+            patched.reduces.dedup();
+            patched.nt_escapes.sort();
+            patched.nt_escapes.dedup();
+            patched.nt_rereduces.sort();
+            patched.nt_rereduces.dedup();
+            patched_characterizations.insert(terminal, patched);
+        }
+        let patched = Templates::from_characterizations(&patched_characterizations);
         templates.by_terminal.extend(patched.by_terminal);
         templates.by_terminal_nwa.extend(patched.by_terminal_nwa);
         let fresh = Templates::from_characterizations(&self.fresh_characterizations);
@@ -8367,6 +8390,7 @@ fn try_prepare_cached_composition_template_plan(
     selected: &[bool],
     scoped_ignore_terminals: &BitSet,
 ) -> Option<CachedCompositionTemplatePlan> {
+    let total_started_at = Instant::now();
     if std::env::var_os("GLRMASK_DISABLE_CACHED_BOUNDARY_TEMPLATES").is_some() {
         return None;
     }
@@ -8392,6 +8416,7 @@ fn try_prepare_cached_composition_template_plan(
         return None;
     }
 
+    let action_seed_started_at = Instant::now();
     let mut action_seeds = vec![Vec::<u32>::new(); analyzed.num_terminals as usize];
     for terminal in 0..parent_terminal_end {
         if !selected[terminal as usize] {
@@ -8420,9 +8445,14 @@ fn try_prepare_cached_composition_template_plan(
             }
         }
     }
+    let action_seed_ms = action_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let action_characterize_started_at = Instant::now();
     let action_deltas = crate::compiler::stages::templates::characterize::
         characterize_terminal_action_state_seeds(&composed_table.table, analyzed, &action_seeds);
+    let action_characterize_ms =
+        action_characterize_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let nt_seed_started_at = Instant::now();
     let mut nt_predecessor_seeds =
         vec![Vec::<(u32, u32, u32, bool)>::new(); analyzed.num_terminals as usize];
     for (revealed_state, row) in composed_table.table.goto.iter().enumerate() {
@@ -8448,14 +8478,19 @@ fn try_prepare_cached_composition_template_plan(
         seeds.sort_unstable();
         seeds.dedup();
     }
+    let nt_seed_ms = nt_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let nt_characterize_started_at = Instant::now();
     let nt_deltas = crate::compiler::stages::templates::characterize::
         characterize_terminal_nt_predecessor_seeds(
             &composed_table.table,
             analyzed,
             &nt_predecessor_seeds,
         );
+    let nt_characterize_ms =
+        nt_characterize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let mut patched_characterizations = BTreeMap::new();
+    let patch_started_at = Instant::now();
+    let mut characterization_deltas = BTreeMap::new();
     let mut changed_parent = vec![false; selected.len()];
     for terminal in 0..parent_terminal_end {
         if !selected[terminal as usize] {
@@ -8472,29 +8507,37 @@ fn try_prepare_cached_composition_template_plan(
         if !has_delta {
             continue;
         }
-        let mut patched = parent
-            .composition_parser_characterizations_by_terminal
-            .get(terminal as usize)
-            .and_then(Option::as_ref)?
-            .clone();
-        for delta in [action_delta, nt_delta].into_iter().flatten() {
-            patched.escapes.extend(delta.escapes.iter().cloned());
-            patched.reduces.extend(delta.reduces.iter().cloned());
-            patched.nt_escapes.extend(delta.nt_escapes.iter().cloned());
-            patched.nt_rereduces.extend(delta.nt_rereduces.iter().cloned());
-            patched.all_nts.extend(delta.all_nts.iter().copied());
+        let mut delta = crate::compiler::stages::templates::characterize::TerminalCharacterization {
+            escapes: Vec::new(),
+            reduces: Vec::new(),
+            nt_escapes: Vec::new(),
+            nt_rereduces: Vec::new(),
+            all_nts: BTreeSet::new(),
+        };
+        for part in [action_delta, nt_delta].into_iter().flatten() {
+            // These seeded characterizations are additive by construction.
+            // Keep only the tiny delta here; cloning/merging the cached parent
+            // characterization belongs to parser-template materialization.
+            delta.escapes.extend(part.escapes.iter().cloned());
+            delta.reduces.extend(part.reduces.iter().cloned());
+            delta.nt_escapes.extend(part.nt_escapes.iter().cloned());
+            delta
+                .nt_rereduces
+                .extend(part.nt_rereduces.iter().cloned());
+            delta.all_nts.extend(part.all_nts.iter().copied());
         }
-        patched.escapes.sort();
-        patched.escapes.dedup();
-        patched.reduces.sort();
-        patched.reduces.dedup();
-        patched.nt_escapes.sort();
-        patched.nt_escapes.dedup();
-        patched.nt_rereduces.sort();
-        patched.nt_rereduces.dedup();
+        delta.escapes.sort();
+        delta.escapes.dedup();
+        delta.reduces.sort();
+        delta.reduces.dedup();
+        delta.nt_escapes.sort();
+        delta.nt_escapes.dedup();
+        delta.nt_rereduces.sort();
+        delta.nt_rereduces.dedup();
         changed_parent[terminal as usize] = true;
-        patched_characterizations.insert(terminal, patched);
+        characterization_deltas.insert(terminal, delta);
     }
+    let patch_ms = patch_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut reuse_selected = selected.to_vec();
     for (terminal, changed) in changed_parent.iter().copied().enumerate() {
@@ -8516,11 +8559,13 @@ fn try_prepare_cached_composition_template_plan(
         }
     }
 
+    let transport_started_at = Instant::now();
     let reused_dfas = rebuild_transported_component_templates(
         composed_table,
         components,
         &reuse_selected,
     );
+    let transport_ms = transport_started_at.elapsed().as_secs_f64() * 1000.0;
     for (terminal, &active) in selected.iter().enumerate() {
         if active
             && !changed_parent[terminal]
@@ -8529,23 +8574,35 @@ fn try_prepare_cached_composition_template_plan(
             fresh_selected[terminal] = true;
         }
     }
+    let fresh_started_at = Instant::now();
     let fresh_characterizations = if fresh_selected.iter().any(|&fresh| fresh) {
         characterize_selected_terminals(&composed_table.table, analyzed, &fresh_selected)
     } else {
         BTreeMap::new()
     };
+    let fresh_ms = fresh_started_at.elapsed().as_secs_f64() * 1000.0;
     if selected.iter().enumerate().any(|(terminal, &active)| {
         active
             && !reused_dfas.contains_key(&(terminal as u32))
-            && !patched_characterizations.contains_key(&(terminal as u32))
+            && !characterization_deltas.contains_key(&(terminal as u32))
             && !fresh_characterizations.contains_key(&(terminal as u32))
     }) {
         return None;
     }
 
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_cached_template_plan] selected={} action_seed_ms={action_seed_ms:.3} action_characterize_ms={action_characterize_ms:.3} nt_seed_ms={nt_seed_ms:.3} nt_characterize_ms={nt_characterize_ms:.3} patch_ms={patch_ms:.3} transport_ms={transport_ms:.3} fresh_ms={fresh_ms:.3} reused={} patched={} fresh={} total_ms={:.3}",
+            selected.iter().filter(|&&value| value).count(),
+            reused_dfas.len(),
+            characterization_deltas.len(),
+            fresh_characterizations.len(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Some(CachedCompositionTemplatePlan {
         reused_dfas,
-        patched_characterizations,
+        characterization_deltas,
         fresh_characterizations,
         num_terminals: analyzed.num_terminals as usize,
     })
@@ -8570,12 +8627,12 @@ fn try_build_cached_composition_templates(
         selected,
         scoped_ignore_terminals,
     )?;
-    let changed_parent = plan.patched_characterizations.len();
+    let changed_parent = plan.characterization_deltas.len();
     let fresh = plan.fresh_characterizations.len();
     let reused = plan.reused_dfas.len();
     debug_assert_eq!(plan.num_terminals, analyzed.num_terminals as usize);
 
-    let templates = plan.materialize();
+    let templates = plan.materialize(components[0]);
     let raw_templates = CachedCompositionTemplatePlan::raw_template_cache(
         &templates,
         analyzed.num_terminals as usize,
@@ -18692,10 +18749,10 @@ mod tests {
             .expect("ideal selected10 boundary should admit cached-template plan");
             let deferred_plan_ms = deferred_plan_started.elapsed().as_secs_f64() * 1000.0;
             let deferred_reused = deferred_plan.reused_dfas.len();
-            let deferred_patched = deferred_plan.patched_characterizations.len();
+            let deferred_patched = deferred_plan.characterization_deltas.len();
             let deferred_fresh = deferred_plan.fresh_characterizations.len();
             let deferred_materialize_started = Instant::now();
-            let deferred_templates = deferred_plan.materialize();
+            let deferred_templates = deferred_plan.materialize(&core);
             let deferred_materialize_ms =
                 deferred_materialize_started.elapsed().as_secs_f64() * 1000.0;
             let mut deferred_mismatches = Vec::new();
