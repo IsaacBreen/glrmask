@@ -17936,6 +17936,124 @@ mod tests {
                     .saturating_sub(tight_delta_plan.unsafe_terminals.len()),
                 tight_delta_started.elapsed().as_secs_f64() * 1000.0,
             );
+            let split_reuse_started = Instant::now();
+            let old_transported = rebuild_transported_component_templates(
+                &composed_table,
+                &tight_delta_components,
+                &tight_selected,
+            );
+            let mut split_present = 0usize;
+            let mut split_exact = 0usize;
+            let mut split_exact_changed = 0usize;
+            let mut split_exact_unchanged = 0usize;
+            let mut split_mismatches = Vec::<u32>::new();
+            let mut split_missing = Vec::<u32>::new();
+            for (terminal, &active) in tight_selected.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let terminal = terminal as u32;
+                let component_index = composed_table
+                    .terminal_offsets
+                    .partition_point(|&offset| offset <= terminal)
+                    .saturating_sub(1);
+                let Some(component) = tight_delta_components.get(component_index).copied() else {
+                    split_missing.push(terminal);
+                    continue;
+                };
+                let local = terminal - composed_table.terminal_offsets[component_index];
+                let Some(split) = component
+                    .template_dfas_by_terminal
+                    .get(local as usize)
+                    .and_then(|entry| entry.as_deref())
+                else {
+                    split_missing.push(terminal);
+                    continue;
+                };
+                split_present += 1;
+                let reconstructed = crate::compiler::stages::templates::compile_dfa::recombine_split_commit_template_dfa(split);
+                let Some(transported) = transport_composition_template_dfa(
+                    reconstructed,
+                    &composed_table.state_relations[component_index],
+                ) else {
+                    split_mismatches.push(terminal);
+                    continue;
+                };
+                let Some(reference) = old_transported.get(&terminal) else {
+                    split_mismatches.push(terminal);
+                    continue;
+                };
+                let reconstructed_minus_reference =
+                    unweighted_dfa_difference(&transported, reference);
+                let reference_minus_reconstructed =
+                    unweighted_dfa_difference(reference, &transported);
+                if unweighted_dfa_language_is_empty(&reconstructed_minus_reference)
+                    && unweighted_dfa_language_is_empty(&reference_minus_reconstructed)
+                {
+                    split_exact += 1;
+                    if tight_delta_plan.by_global_terminal.contains_key(&terminal) {
+                        split_exact_changed += 1;
+                    } else {
+                        split_exact_unchanged += 1;
+                    }
+                } else {
+                    split_mismatches.push(terminal);
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_SERIALIZED_TEMPLATE_REUSE active={} split_present={} split_exact={} split_exact_changed={} split_exact_unchanged={} split_missing={} split_mismatches={} mismatch_ids={:?} missing_ids={:?} ms={:.3}",
+                tight_active_terminals,
+                split_present,
+                split_exact,
+                split_exact_changed,
+                split_exact_unchanged,
+                split_missing.len(),
+                split_mismatches.len(),
+                split_mismatches,
+                split_missing,
+                split_reuse_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            if std::env::var_os("GLRMASK_MINBOUND_TEMPLATE_STORAGE").is_some() {
+                let active_raw = bincode::serialize(&old_transported)
+                    .expect("serialize active transported parser templates");
+                let active_zstd = zstd::stream::encode_all(active_raw.as_slice(), 1)
+                    .expect("compress active transported parser templates");
+                let all_started = Instant::now();
+                let all_selected = vec![true; composed_table.table.num_terminals as usize];
+                let all_transported = rebuild_transported_component_templates(
+                    &composed_table,
+                    &tight_delta_components,
+                    &all_selected,
+                );
+                let all_states = all_transported
+                    .values()
+                    .map(|dfa| dfa.states.len())
+                    .sum::<usize>();
+                let all_transitions = all_transported
+                    .values()
+                    .flat_map(|dfa| dfa.states.iter())
+                    .map(|state| state.transitions.len())
+                    .sum::<usize>();
+                let all_raw = bincode::serialize(&all_transported)
+                    .expect("serialize all transported parser templates");
+                let all_zstd = zstd::stream::encode_all(all_raw.as_slice(), 1)
+                    .expect("compress all transported parser templates");
+                eprintln!(
+                    "MINBOUND OUTER_TEMPLATE_STORAGE active_templates={} active_raw_bytes={} active_zstd_bytes={} all_templates={} all_states={} all_transitions={} all_raw_bytes={} all_zstd_bytes={} rebuild_all_ms={:.3}",
+                    old_transported.len(),
+                    active_raw.len(),
+                    active_zstd.len(),
+                    all_transported.len(),
+                    all_states,
+                    all_transitions,
+                    all_raw.len(),
+                    all_zstd.len(),
+                    all_started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            if std::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_TEMPLATE_REUSE").is_some() {
+                return;
+            }
             let tight_parser_started = Instant::now();
             let tight_parser_raw = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
                 &composed_table.table,

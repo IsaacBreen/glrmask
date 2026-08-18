@@ -605,6 +605,13 @@ fn recombine_split_commit_template_language(split: &CommitTemplateDfas) -> NFA {
     nfa
 }
 
+/// Reconstruct the unsplit stack-effect language carried by a persisted split
+/// commit template. This is primarily useful to test whether the serialized
+/// runtime template can double as an exact composition-time parser template.
+pub fn recombine_split_commit_template_dfa(split: &CommitTemplateDfas) -> UnweightedDfa {
+    determinize(&recombine_split_commit_template_language(split))
+}
+
 fn find_split_commit_language_mismatch(
     unsplit: &UnweightedDfa,
     split: &CommitTemplateDfas,
