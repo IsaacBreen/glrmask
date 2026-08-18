@@ -1231,10 +1231,53 @@ fn strip_unscoped_ignore_identity(
 type PossibleMatches = BTreeMap<u32, Weight>;
 
 struct BoundaryRepair {
-    parser_dwa: MappedArtifact<DWA>,
+    parser: BoundaryParserWork,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     active_terminals: Vec<bool>,
+}
+
+enum BoundaryParserWork {
+    Materialized(MappedArtifact<DWA>),
+    Deferred {
+        terminal_automaton: TerminalAutomaton,
+        id_map: InternalIdMap,
+        analyzed: AnalyzedGrammar,
+        templates: Templates,
+    },
+}
+
+impl BoundaryParserWork {
+    fn materialize(self, table: &crate::compiler::glr::table::GLRTable, vocab: &Vocab) -> MappedArtifact<DWA> {
+        match self {
+            Self::Materialized(parser) => parser,
+            Self::Deferred {
+                terminal_automaton,
+                id_map,
+                analyzed,
+                templates,
+            } => {
+                let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                    table,
+                    &analyzed,
+                    &terminal_automaton,
+                    &templates,
+                    vocab,
+                    &id_map,
+                    false,
+                );
+                let parser_dwa = if parser_dwa.num_states() >= boundary_parser_minimize_min_states()
+                    && parser_builder_skips_internal_minimization()
+                    && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
+                {
+                    minimize_owned(reverse_hashcons_owned(parser_dwa))
+                } else {
+                    parser_dwa
+                };
+                MappedArtifact::new(parser_dwa, id_map)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -10379,6 +10422,46 @@ fn build_boundary_repair(
             dwa,
         );
     }
+    let mut parser_analyzed = analyzed.clone();
+    if let Some(plan) = concrete_delta_plan.as_ref() {
+        debug_assert_eq!(plan.original_num_terminals, analyzed.num_terminals);
+        parser_analyzed.num_terminals = plan.synthetic_num_terminals;
+        parser_analyzed
+            .terminal_display_names
+            .resize(plan.synthetic_num_terminals as usize, "<boundary-delta>".to_string());
+    }
+    let use_direct_parser =
+        std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
+    let validate_direct_parser =
+        std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
+    if std::env::var_os("GLRMASK_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some()
+        && !use_direct_parser
+        && !validate_direct_parser
+    {
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_deferred=true parser_ms={:.3} total_ms={:.3}",
+                active_terminals.iter().filter(|&&active| active).count(),
+                seed_terminals.iter().filter(|&&active| active).count(),
+                discovered_boundary_terminals.count_ones(),
+                boundary_paths.token_ids.len(),
+                boundary_special_token_terminals.len(),
+                parser_started_at.elapsed().as_secs_f64() * 1000.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Ok(Some(BoundaryRepair {
+            parser: BoundaryParserWork::Deferred {
+                terminal_automaton,
+                id_map,
+                analyzed: parser_analyzed,
+                templates,
+            },
+            template_dfas_by_terminal,
+            composition_parser_templates_by_terminal,
+            active_terminals,
+        }));
+    }
     let terminal_domain_candidate = match &terminal_automaton {
         TerminalAutomaton::Dwa(dwa) => build_boundary_parser_from_weighted_terminal_dwa(
             &composed_table.table,
@@ -10406,18 +10489,6 @@ fn build_boundary_repair(
         None
     };
     let direct_parser_candidate = terminal_domain_candidate.or(lazy_parser_candidate);
-    let mut parser_analyzed = analyzed.clone();
-    if let Some(plan) = concrete_delta_plan.as_ref() {
-        debug_assert_eq!(plan.original_num_terminals, analyzed.num_terminals);
-        parser_analyzed.num_terminals = plan.synthetic_num_terminals;
-        parser_analyzed
-            .terminal_display_names
-            .resize(plan.synthetic_num_terminals as usize, "<boundary-delta>".to_string());
-    }
-    let use_direct_parser =
-        std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
-    let validate_direct_parser =
-        std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
     let mut generic_parser_dwa = if !use_direct_parser
         || validate_direct_parser
         || direct_parser_candidate.is_none()
@@ -10543,7 +10614,7 @@ fn build_boundary_repair(
         );
     }
     Ok(Some(BoundaryRepair {
-        parser_dwa: MappedArtifact::new(parser_dwa, id_map),
+        parser: BoundaryParserWork::Materialized(MappedArtifact::new(parser_dwa, id_map)),
         template_dfas_by_terminal,
         composition_parser_templates_by_terminal,
         active_terminals,
@@ -11945,10 +12016,13 @@ pub(crate) fn compose_constraints(
             Ok(match boundary_repair {
                 Some(boundary) => {
                     debug_assert!(boundary.active_terminals.iter().any(|&active| active));
+                    let boundary_parser = boundary
+                        .parser
+                        .materialize(&composed_table.table, vocab);
                     (
                         union_boundary_parser_dwa(
                             parser_artifacts,
-                            boundary.parser_dwa,
+                            boundary_parser,
                             composed_table.table.num_states,
                         )?,
                         boundary.template_dfas_by_terminal,
@@ -12591,9 +12665,8 @@ pub(crate) fn compose_constraints_owned_parent(
     ) = match boundary_repair {
         Some(boundary) => {
             debug_assert!(boundary.active_terminals.iter().any(|&active| active));
-            let (boundary_dwa, boundary_id_map) = boundary.parser_dwa.into_parts();
             (
-                Some((boundary_dwa, boundary_id_map)),
+                Some(boundary.parser),
                 boundary.template_dfas_by_terminal,
                 boundary.composition_parser_templates_by_terminal,
             )
@@ -12662,6 +12735,8 @@ pub(crate) fn compose_constraints_owned_parent(
         .flatten()
         .flat_map(ParserDefaultDomain::output_labels)
         .collect::<Vec<_>>();
+    let boundary_work = boundary_work
+        .map(|work| work.materialize(&result.constraint.table, vocab).into_parts());
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
