@@ -11121,6 +11121,7 @@ fn build_composed_constraint_unfinalized(
         internal_tsid_to_states,
         composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
+        composition_parser_characterizations_by_terminal: Vec::new(),
         terminal_live_states,
         state_internal_tsid_offsets,
         state_internal_tsids,
@@ -18491,6 +18492,197 @@ mod tests {
                 symbolic_mismatches,
                 symbolic_delta_started.elapsed().as_secs_f64() * 1000.0,
             );
+            let direct_symbolic_started = Instant::now();
+            let mut nt_predecessor_seeds =
+                vec![Vec::<(u32, u32, u32, bool)>::new(); concrete_grammar.num_terminals as usize];
+            for (revealed_state, row) in composed_table.table.goto.iter().enumerate() {
+                for &boundary_nonterminal in &composed_table.boundary_nonterminals {
+                    let Some(&(top_state, goto_replace)) = row.get(&boundary_nonterminal) else {
+                        continue;
+                    };
+                    for terminal in 0..parent_terminal_end {
+                        if !tight_selected[terminal as usize]
+                            || composed_table.table.action(top_state, terminal).is_none()
+                        {
+                            continue;
+                        }
+                        nt_predecessor_seeds[terminal as usize].push((
+                            top_state,
+                            revealed_state as u32,
+                            boundary_nonterminal,
+                            goto_replace,
+                        ));
+                    }
+                }
+            }
+            for seeds in &mut nt_predecessor_seeds {
+                seeds.sort_unstable();
+                seeds.dedup();
+            }
+            let nt_seed_count = nt_predecessor_seeds.iter().map(Vec::len).sum::<usize>();
+            let nt_seed_characterizations = crate::compiler::stages::templates::characterize::
+                characterize_terminal_nt_predecessor_seeds(
+                    &composed_table.table,
+                    &concrete_grammar,
+                    &nt_predecessor_seeds,
+                );
+            let mut direct_symbolic = BTreeMap::new();
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                let initial = seeded_characterizations.get(&terminal);
+                let nonterminal = nt_seed_characterizations.get(&terminal);
+                if initial.is_none() && nonterminal.is_none() {
+                    continue;
+                }
+                let mut escapes = Vec::new();
+                let mut reduces = Vec::new();
+                let mut nt_escapes = Vec::new();
+                let mut nt_rereduces = Vec::new();
+                let mut all_nts = BTreeSet::new();
+                for characterization in [initial, nonterminal].into_iter().flatten() {
+                    escapes.extend(characterization.escapes.iter().cloned());
+                    reduces.extend(characterization.reduces.iter().cloned());
+                    nt_escapes.extend(characterization.nt_escapes.iter().cloned());
+                    nt_rereduces.extend(characterization.nt_rereduces.iter().cloned());
+                    all_nts.extend(characterization.all_nts.iter().copied());
+                }
+                escapes.sort();
+                escapes.dedup();
+                reduces.sort();
+                reduces.dedup();
+                nt_escapes.sort();
+                nt_escapes.dedup();
+                nt_rereduces.sort();
+                nt_rereduces.dedup();
+                direct_symbolic.insert(
+                    terminal,
+                    crate::compiler::stages::templates::characterize::TerminalCharacterization {
+                        escapes,
+                        reduces,
+                        nt_escapes,
+                        nt_rereduces,
+                        all_nts,
+                    },
+                );
+            }
+            let mut direct_symbolic_mismatches = Vec::new();
+            let mut direct_symbolic_examples = Vec::new();
+            for terminal in 0..parent_terminal_end {
+                if !tight_selected[terminal as usize] {
+                    continue;
+                }
+                let reference = symbolic_deltas.get(&terminal);
+                let candidate = direct_symbolic.get(&terminal);
+                if candidate != reference {
+                    direct_symbolic_mismatches.push(terminal);
+                    if direct_symbolic_examples.len() < 3 {
+                        direct_symbolic_examples.push((terminal, candidate.cloned(), reference.cloned()));
+                    }
+                }
+            }
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_DIRECT_SYMBOLIC_PATCH action_seed_states={} nt_predecessor_seeds={} terminals={} mismatches={} mismatch_ids={:?} examples={:?} total_ms={:.3}",
+                seed_count,
+                nt_seed_count,
+                direct_symbolic.len(),
+                direct_symbolic_mismatches.len(),
+                direct_symbolic_mismatches,
+                direct_symbolic_examples,
+                direct_symbolic_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let fast_template_path_started = Instant::now();
+            let mut reuse_selected = tight_selected.clone();
+            for terminal in 0..parent_terminal_end {
+                if direct_symbolic.contains_key(&terminal) {
+                    reuse_selected[terminal as usize] = false;
+                }
+            }
+            let fast_transport_started = Instant::now();
+            let mut fast_dfas = rebuild_transported_component_templates(
+                &composed_table,
+                &tight_delta_components,
+                &reuse_selected,
+            );
+            let fast_transport_ms =
+                fast_transport_started.elapsed().as_secs_f64() * 1000.0;
+            let fast_patch_assembly_started = Instant::now();
+            let mut fast_patched_characterizations = BTreeMap::new();
+            for (&terminal, delta) in &direct_symbolic {
+                let mut patched = core_characterizations
+                    .get(&terminal)
+                    .expect("changed parent terminal has cached characterization source")
+                    .clone();
+                patched.escapes.extend(delta.escapes.iter().cloned());
+                patched.reduces.extend(delta.reduces.iter().cloned());
+                patched.nt_escapes.extend(delta.nt_escapes.iter().cloned());
+                patched.nt_rereduces.extend(delta.nt_rereduces.iter().cloned());
+                patched.escapes.sort();
+                patched.escapes.dedup();
+                patched.reduces.sort();
+                patched.reduces.dedup();
+                patched.nt_escapes.sort();
+                patched.nt_escapes.dedup();
+                patched.nt_rereduces.sort();
+                patched.nt_rereduces.dedup();
+                patched.all_nts.extend(delta.all_nts.iter().copied());
+                fast_patched_characterizations.insert(terminal, patched);
+            }
+            let fast_patch_assembly_ms =
+                fast_patch_assembly_started.elapsed().as_secs_f64() * 1000.0;
+            let fast_patch_compile_started = Instant::now();
+            let fast_patched_templates =
+                Templates::from_characterizations(&fast_patched_characterizations);
+            let fast_patch_compile_ms =
+                fast_patch_compile_started.elapsed().as_secs_f64() * 1000.0;
+            fast_dfas.extend(fast_patched_templates.by_terminal);
+            let fast_skeleton_started = Instant::now();
+            let fast_templates = Templates::from_terminal_dfas(fast_dfas);
+            let fast_skeleton_ms = fast_skeleton_started.elapsed().as_secs_f64() * 1000.0;
+            let fast_validate_started = Instant::now();
+            let mut fast_template_mismatches = Vec::new();
+            for (terminal, &active) in tight_selected.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let terminal = terminal as u32;
+                let candidate = fast_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .expect("fast ideal template path covers every active terminal");
+                let reference = tight_templates
+                    .by_terminal
+                    .get(&terminal)
+                    .expect("reference ideal template covers every active terminal");
+                if !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(candidate, reference))
+                    || !unweighted_dfa_language_is_empty(&unweighted_dfa_difference(reference, candidate))
+                {
+                    fast_template_mismatches.push(terminal);
+                }
+            }
+            let fast_validate_ms = fast_validate_started.elapsed().as_secs_f64() * 1000.0;
+            let fast_nwa_started = Instant::now();
+            let fast_parser_nwa = crate::compiler::stages::parser_dwa::
+                build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
+                    &TerminalAutomaton::Dwa(concrete_grammar_tight.clone()),
+                    &concrete_grammar,
+                    &fast_templates,
+                    &composed_table.table,
+                )
+                .expect("fast ideal templates should induce a parser NWA");
+            let fast_nwa_ms = fast_nwa_started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_FAST_TEMPLATE_NWA active={} reused={} patched={} transport_ms={fast_transport_ms:.3} patch_assembly_ms={fast_patch_assembly_ms:.3} patch_compile_ms={fast_patch_compile_ms:.3} skeleton_ms={fast_skeleton_ms:.3} validate_ms={fast_validate_ms:.3} mismatches={} nwa_states={} nwa_transitions={} nwa_ms={fast_nwa_ms:.3} counted_total_ms={:.3} total_with_validation_ms={:.3}",
+                tight_active_terminals,
+                reuse_selected.iter().filter(|&&selected| selected).count(),
+                fast_patched_characterizations.len(),
+                fast_template_mismatches.len(),
+                fast_parser_nwa.states().len(),
+                fast_parser_nwa.states().iter().map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>()).sum::<usize>(),
+                fast_transport_ms + fast_patch_assembly_ms + fast_patch_compile_ms + fast_skeleton_ms + fast_nwa_ms,
+                fast_template_path_started.elapsed().as_secs_f64() * 1000.0,
+            );
             let patched_characterization_started = Instant::now();
             let mut patched_characterizations = BTreeMap::new();
             for (&terminal, delta) in &symbolic_deltas {
@@ -18641,6 +18833,43 @@ mod tests {
                     all_started.elapsed().as_secs_f64() * 1000.0,
                 );
             }
+            let tight_parser_nwa_started = Instant::now();
+            let tight_parser_nwa = crate::compiler::stages::parser_dwa::
+                build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
+                &TerminalAutomaton::Dwa(concrete_grammar_tight.clone()),
+                &concrete_grammar,
+                &tight_templates,
+                &composed_table.table,
+            )
+            .expect("ideal boundary terminal DWA should induce a parser NWA");
+            let tight_parser_nwa_ms =
+                tight_parser_nwa_started.elapsed().as_secs_f64() * 1000.0;
+            let tight_parser_nwa_transitions = tight_parser_nwa
+                .states()
+                .iter()
+                .map(|state| {
+                    state.epsilons.len()
+                        + state
+                            .transitions
+                            .values()
+                            .map(Vec::len)
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+            let tight_parser_nwa_negative_edges = tight_parser_nwa
+                .states()
+                .iter()
+                .flat_map(|state| state.transitions.iter())
+                .filter(|(label, _)| is_negative_label(**label))
+                .map(|(_, targets)| targets.len())
+                .sum::<usize>();
+            eprintln!(
+                "MINBOUND OUTER_IDEAL_BOUNDARY_PARSER_NWA states={} starts={} transitions={} negative_edges={} build_ms={tight_parser_nwa_ms:.3}",
+                tight_parser_nwa.states().len(),
+                tight_parser_nwa.start_states().len(),
+                tight_parser_nwa_transitions,
+                tight_parser_nwa_negative_edges,
+            );
             if std::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_TEMPLATE_REUSE").is_some() {
                 return;
             }

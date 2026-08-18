@@ -40,40 +40,40 @@ use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StackMatcher {
     Any,
     State(u32),
     States(Vec<u32>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InitialEscape {
     pub pop: Vec<StackMatcher>,
     pub pushes: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InitialReduce {
     pub pop: Vec<StackMatcher>,
     pub nonterminal: NonterminalID,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NtEscape {
     pub source_nonterminal: NonterminalID,
     pub pop: Vec<StackMatcher>,
     pub pushes: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NtRereduce {
     pub source_nonterminal: NonterminalID,
     pub pop: Vec<StackMatcher>,
     pub target_nonterminal: NonterminalID,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCharacterization {
     pub escapes: Vec<InitialEscape>,
     pub reduces: Vec<InitialReduce>,
@@ -1084,6 +1084,76 @@ pub fn characterize_terminal_action_state_seeds(
         .map(|(terminal, _)| {
             let terminal = terminal as TerminalID;
             (terminal, characterize_terminal(table, &index, terminal))
+        })
+        .collect()
+}
+
+/// Characterize terminal behavior introduced by caller-supplied goto
+/// predecessor contexts. Each seed is `(top_state, revealed_state,
+/// source_nonterminal, goto_replace)` and starts exactly where the ordinary
+/// nonterminal-continuation characterization would start after that goto.
+///
+/// This is useful for composition: a linker can reuse a component's cached
+/// characterization and compute only the extra nonterminal continuations made
+/// reachable by newly grafted boundary gotos.
+pub fn characterize_terminal_nt_predecessor_seeds(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    assert_eq!(
+        seeds_by_terminal.len(),
+        grammar.num_terminals as usize,
+        "seeded template relation must cover the merged terminal domain",
+    );
+
+    seeds_by_terminal
+        .par_iter()
+        .enumerate()
+        .filter(|(_, seeds)| !seeds.is_empty())
+        .map(|(terminal, seeds)| {
+            let terminal = terminal as TerminalID;
+            let mut output = CharacterizationOutput::default();
+            for &(top_state, revealed_state, source_nonterminal, goto_replace) in seeds {
+                let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
+                let mut seen = FxHashSet::default();
+                seen.insert(config.clone());
+                let mut worklist = VecDeque::from([config]);
+                drain_nonconsuming_worklist(
+                    table,
+                    terminal,
+                    CharacterizationSource::Nonterminal(source_nonterminal),
+                    &mut output,
+                    &mut seen,
+                    &mut worklist,
+                );
+            }
+
+            let mut referenced_nts = BTreeSet::new();
+            for reduce in &output.reduces {
+                referenced_nts.insert(reduce.nonterminal);
+            }
+            for nt_escape in &output.nt_escapes {
+                referenced_nts.insert(nt_escape.source_nonterminal);
+            }
+            for nt_rereduce in &output.nt_rereduces {
+                referenced_nts.insert(nt_rereduce.source_nonterminal);
+                referenced_nts.insert(nt_rereduce.target_nonterminal);
+            }
+            let characterization = TerminalCharacterization {
+                escapes: output.escapes.into_iter().collect(),
+                reduces: output.reduces.into_iter().collect(),
+                nt_escapes: output.nt_escapes.into_iter().collect(),
+                nt_rereduces: output.nt_rereduces.into_iter().collect(),
+                all_nts: referenced_nts,
+            };
+            if let Some(cycle) = characterization.find_cycle() {
+                panic!(
+                    "seeded nonterminal characterization for terminal {} contains a reduction cycle: {:?}",
+                    terminal, cycle
+                );
+            }
+            (terminal, characterization)
         })
         .collect()
 }

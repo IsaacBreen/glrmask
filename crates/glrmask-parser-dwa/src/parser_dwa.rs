@@ -4590,6 +4590,22 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
+/// Build the exact parser-stack NWA induced by a terminal automaton without
+/// resolving negative stack-effect labels or determinizing/minimizing it.
+///
+/// Composition can carry this representation directly into a later union and
+/// perform those global normalization steps once, after all parser languages
+/// have been combined.
+pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+    table: &GLRTable,
+) -> Option<NWA> {
+    build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates, table)
+        .map(|(nwa, _)| nwa)
+}
+
 // Exact compile-time parser-stack domain algebra used by the compiled-subgrammar linker.
 fn determinize_boolean_domain_with_supports(domain: &NWA) -> DeterminizedDwaWithSupports {
     fn epsilon_closure(domain: &NWA, seeds: &[u32]) -> Vec<u32> {

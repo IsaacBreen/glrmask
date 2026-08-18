@@ -68,7 +68,9 @@ use crate::compiler::stages::parser_dwa::{
     try_build_immediate_terminal_completion_weights,
 };
 use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
-use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
+use crate::compiler::stages::templates::characterize::{
+    TerminalCharacterization, characterize_terminals_profiled,
+};
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
     try_split_commit_template_dfas,
@@ -1820,6 +1822,7 @@ fn build_templates_for_compile(
 ) -> (
     Templates,
     Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    Vec<Option<TerminalCharacterization>>,
     f64,
 ) {
     let templates_started_at = Instant::now();
@@ -1836,6 +1839,7 @@ fn build_templates_for_compile(
         }
         return (
             Templates::default(),
+            vec![None; analyzed_grammar.num_terminals as usize],
             vec![None; analyzed_grammar.num_terminals as usize],
             templates_ms,
         );
@@ -1883,13 +1887,27 @@ fn build_templates_for_compile(
                 templates_ms,
             );
         }
-        return (templates, template_dfas_by_terminal, templates_ms);
+        return (
+            templates,
+            template_dfas_by_terminal,
+            vec![None; analyzed_grammar.num_terminals as usize],
+            templates_ms,
+        );
     }
 
     let (characterizations, characterization_profile) =
         characterize_terminals_profiled(table, analyzed_grammar);
     let (templates, template_profile) =
         Templates::from_characterizations_profiled(&characterizations);
+    let mut composition_parser_characterizations_by_terminal =
+        vec![None; analyzed_grammar.num_terminals as usize];
+    for (terminal, characterization) in characterizations {
+        if let Some(slot) = composition_parser_characterizations_by_terminal
+            .get_mut(terminal as usize)
+        {
+            *slot = Some(characterization);
+        }
+    }
     let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
     let commit_template_dfas_enabled = commit_template_dfas_enabled();
     let mut commit_template_dfas_built = 0usize;
@@ -1957,6 +1975,7 @@ fn build_templates_for_compile(
     (
         templates,
         template_dfas_by_terminal,
+        composition_parser_characterizations_by_terminal,
         elapsed_ms(templates_started_at),
     )
 }
@@ -2059,6 +2078,8 @@ struct TemplatesDagResult {
     glr_ready_ms: f64,
     templates: Templates,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    composition_parser_characterizations_by_terminal:
+        Vec<Option<TerminalCharacterization>>,
     templates_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
@@ -2094,6 +2115,8 @@ struct CompileDagResult {
     terminal_phase_profile: TerminalDwaPhaseProfile,
     templates: Option<Templates>,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    composition_parser_characterizations_by_terminal:
+        Vec<Option<TerminalCharacterization>>,
     templates_ms: f64,
     classify_ms: f64,
     flat_trans: Arc<[u32]>,
@@ -2773,6 +2796,7 @@ fn launch_parser_dag_if_ready<'scope>(
             glr_ready_ms,
             templates,
             template_dfas_by_terminal,
+            composition_parser_characterizations_by_terminal,
             templates_ms,
             templates_started_ms,
             templates_finished_ms,
@@ -2895,6 +2919,7 @@ fn launch_parser_dag_if_ready<'scope>(
             terminal_phase_profile,
             templates,
             template_dfas_by_terminal,
+            composition_parser_characterizations_by_terminal,
             templates_ms,
             classify_ms,
             flat_trans,
@@ -3639,8 +3664,12 @@ fn compile_prepared_with_profile_and_table_construction(
                     let compile_started_for_templates = compile_started_for_glr;
                     scope.spawn(move |scope| {
                         let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
-                        let (templates, template_dfas_by_terminal, templates_ms) =
-                            build_templates_for_compile(
+                        let (
+                            templates,
+                            template_dfas_by_terminal,
+                            composition_parser_characterizations_by_terminal,
+                            templates_ms,
+                        ) = build_templates_for_compile(
                                 &templates_table,
                                 &templates_analyzed_grammar,
                                 prepared_grammar_ref.ignore_terminal,
@@ -3655,6 +3684,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             glr_ready_ms,
                             templates,
                             template_dfas_by_terminal,
+                            composition_parser_characterizations_by_terminal,
                             templates_ms,
                             templates_started_ms,
                             templates_finished_ms,
@@ -3752,6 +3782,7 @@ fn compile_prepared_with_profile_and_table_construction(
             mut terminal_phase_profile,
             mut templates,
             template_dfas_by_terminal,
+            composition_parser_characterizations_by_terminal,
             templates_ms,
             classify_ms,
             flat_trans,
@@ -4355,6 +4386,7 @@ fn compile_prepared_with_profile_and_table_construction(
             internal_tsid_to_states: runtime_internal_tsid_to_states,
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal,
+            composition_parser_characterizations_by_terminal,
         terminal_live_states: Vec::new(),
             // Unless optional runtime full-adaptive product states were selected,
             // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw

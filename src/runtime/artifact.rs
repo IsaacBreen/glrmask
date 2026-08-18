@@ -13,6 +13,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
+use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
@@ -1948,6 +1949,13 @@ pub struct Constraint {
     /// older inner `Constraint` bincode layouts.
     #[serde(skip, default)]
     pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
+    /// Composition-time symbolic parser characterizations retained from the
+    /// original compile. A later linker can append only the boundary-induced
+    /// reductions/rereductions and recompile affected terminal templates,
+    /// rather than re-solving the component's reduction closure from scratch.
+    #[serde(skip, default)]
+    pub(crate) composition_parser_characterizations_by_terminal:
+        Vec<Option<TerminalCharacterization>>,
     /// Runtime-only inverse lexer-metadata index used by compiled-constraint
     /// composition. Row `t` lists exactly the raw tokenizer states whose
     /// epsilon closure has terminal `t` matched or still reachable.
