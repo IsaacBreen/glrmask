@@ -10727,7 +10727,7 @@ fn build_boundary_repair(
         std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
     let validate_direct_parser =
         std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
-    if std::env::var_os("GLRMASK_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some()
+    if std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && !use_direct_parser
         && !validate_direct_parser
     {
