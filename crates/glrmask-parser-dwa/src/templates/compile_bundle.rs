@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -28,7 +29,23 @@ const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 /// deterministic bundle.
 enum BundleGroupDfa<'a> {
     Borrowed(&'a UnweightedDfa),
+    Cached(Arc<UnweightedDfa>),
     Owned(UnweightedDfa),
+}
+
+/// Immutable topology cache shared by all bundles in one parser-DWA build.
+/// The key is the exact sorted terminal set in one equal-weight group. The
+/// weights themselves deliberately are not part of the cache: each bundle
+/// still performs its own weighted product/determinization.
+#[derive(Default)]
+pub(crate) struct BundleGroupDfaCache {
+    multi_terminal_groups: FxHashMap<Vec<TerminalID>, Arc<UnweightedDfa>>,
+}
+
+impl BundleGroupDfaCache {
+    pub(crate) fn len(&self) -> usize {
+        self.multi_terminal_groups.len()
+    }
 }
 
 impl BundleGroupDfa<'_> {
@@ -36,6 +53,7 @@ impl BundleGroupDfa<'_> {
     fn dfa(&self) -> &UnweightedDfa {
         match self {
             Self::Borrowed(dfa) => dfa,
+            Self::Cached(dfa) => dfa.as_ref(),
             Self::Owned(dfa) => dfa,
         }
     }
@@ -279,6 +297,8 @@ pub struct BundleBuildProfile {
     pub slowest_group_dfa_states: usize,
     pub slowest_group_dfa_transitions: usize,
     pub slowest_group_ms: f64,
+    pub group_dfa_cache_hits: usize,
+    pub group_dfa_cache_misses: usize,
     pub determinize_bundle_ms: f64,
     pub determinize_pop_state_ms: f64,
     pub determinize_alive_groups_ms: f64,
@@ -374,9 +394,42 @@ impl Templates {
         groups
     }
 
+    pub(crate) fn build_bundle_group_dfa_cache(
+        &self,
+        bundles: &[&BTreeMap<TerminalID, Weight>],
+    ) -> BundleGroupDfaCache {
+        let mut counts = BTreeMap::<Vec<TerminalID>, usize>::new();
+        for bundle in bundles {
+            for (_, terminals) in self.group_terminals_by_weight(bundle) {
+                if terminals.len() > 1 {
+                    *counts.entry(terminals).or_default() += 1;
+                }
+            }
+        }
+        let repeated = counts
+            .into_iter()
+            .filter_map(|(terminals, count)| (count > 1).then_some(terminals))
+            .collect::<Vec<_>>();
+        let entries = repeated
+            .into_par_iter()
+            .map(|terminals| {
+                let merged = union_unweighted_dfas(
+                    terminals
+                        .iter()
+                        .filter_map(|terminal| self.by_terminal.get(terminal)),
+                );
+                (terminals, Arc::new(merged))
+            })
+            .collect::<Vec<_>>();
+        BundleGroupDfaCache {
+            multi_terminal_groups: entries.into_iter().collect(),
+        }
+    }
+
     fn build_group_dfas_profiled<'a>(
         &'a self,
         weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
+        group_cache: Option<&BundleGroupDfaCache>,
         profile: &mut BundleBuildProfile,
     ) -> Vec<(&'a Weight, BundleGroupDfa<'a>)> {
         let build_started_at = Instant::now();
@@ -393,6 +446,15 @@ impl Templates {
             }
 
             profile.multi_terminal_groups += 1;
+            if let Some(cached) = group_cache
+                .and_then(|cache| cache.multi_terminal_groups.get(terminals))
+            {
+                profile.group_dfa_cache_hits += 1;
+                group_dfas.push((*weight, BundleGroupDfa::Cached(Arc::clone(cached))));
+                continue;
+            }
+
+            profile.group_dfa_cache_misses += usize::from(group_cache.is_some());
             let group_started_at = Instant::now();
             let merged = union_unweighted_dfas(
                 terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
@@ -416,6 +478,7 @@ impl Templates {
     fn build_group_dfas<'a>(
         &'a self,
         weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
+        group_cache: Option<&BundleGroupDfaCache>,
     ) -> Vec<(&'a Weight, BundleGroupDfa<'a>)> {
         let mut group_dfas = Vec::with_capacity(weight_groups.len());
         for (weight, terminals) in weight_groups {
@@ -423,6 +486,10 @@ impl Templates {
                 if let Some(template) = self.by_terminal.get(&terminals[0]) {
                     group_dfas.push((*weight, BundleGroupDfa::Borrowed(template)));
                 }
+            } else if let Some(cached) = group_cache
+                .and_then(|cache| cache.multi_terminal_groups.get(terminals))
+            {
+                group_dfas.push((*weight, BundleGroupDfa::Cached(Arc::clone(cached))));
             } else {
                 let merged = union_unweighted_dfas(
                     terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
@@ -436,6 +503,22 @@ impl Templates {
     pub fn build_bundle_profiled(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
+    ) -> (NWA, BundleBuildProfile) {
+        self.build_bundle_profiled_with_group_cache(terminal_weights, None)
+    }
+
+    pub(crate) fn build_bundle_profiled_cached(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        group_cache: &BundleGroupDfaCache,
+    ) -> (NWA, BundleBuildProfile) {
+        self.build_bundle_profiled_with_group_cache(terminal_weights, Some(group_cache))
+    }
+
+    fn build_bundle_profiled_with_group_cache(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        group_cache: Option<&BundleGroupDfaCache>,
     ) -> (NWA, BundleBuildProfile) {
         let total_started_at = Instant::now();
         let mut profile = BundleBuildProfile {
@@ -462,7 +545,7 @@ impl Templates {
                 profile.single_tsid_weights += 1;
             }
         }
-        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, group_cache, &mut profile);
 
         // STICKY NOTE: NEVER REMOVE THIS NOTE.
         // These parser bundles must be determinized before they are converted
@@ -534,12 +617,28 @@ impl Templates {
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {
+        self.build_bundle_with_group_cache(terminal_weights, None)
+    }
+
+    pub(crate) fn build_bundle_cached(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        group_cache: &BundleGroupDfaCache,
+    ) -> NWA {
+        self.build_bundle_with_group_cache(terminal_weights, Some(group_cache))
+    }
+
+    fn build_bundle_with_group_cache(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        group_cache: Option<&BundleGroupDfaCache>,
+    ) -> NWA {
         if let Some(bundle) = self.build_single_terminal_bundle(terminal_weights) {
             return bundle;
         }
 
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
-        let group_dfas = self.build_group_dfas(&weight_groups);
+        let group_dfas = self.build_group_dfas(&weight_groups, group_cache);
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
         let minimized = if weight_groups.len() > 1 && minimize_template_bundles_enabled() {
             minimize(&bundle_dwa)
@@ -1033,6 +1132,117 @@ mod tests {
             visit_words(alphabet, remaining - 1, word, visit);
             word.pop();
         }
+    }
+
+    #[test]
+    fn repeated_group_dfa_cache_preserves_bundle_structure() {
+        fn template(first: i32, second: i32) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let middle = dfa.add_state();
+            let accept = dfa.add_state();
+            dfa.add_transition(0, first, middle);
+            dfa.add_transition(middle, second, accept);
+            dfa.set_accepting(accept, true);
+            dfa
+        }
+
+        let templates = Templates {
+            by_terminal: BTreeMap::from([
+                (0, template(1, 10)),
+                (1, template(1, 11)),
+                (2, template(2, 12)),
+            ]),
+            by_terminal_nwa: BTreeMap::new(),
+        };
+        let first_shared = weight(0..=7);
+        let first_other = weight(8..=15);
+        let second_shared = weight(16..=23);
+        let second_other = weight(24..=31);
+        let first = BTreeMap::from([
+            (0, first_shared.clone()),
+            (1, first_shared),
+            (2, first_other),
+        ]);
+        let second = BTreeMap::from([
+            (0, second_shared.clone()),
+            (1, second_shared),
+            (2, second_other),
+        ]);
+        let cache = templates.build_bundle_group_dfa_cache(&[&first, &second]);
+        assert_eq!(cache.len(), 1, "only terminal group [0,1] repeats");
+
+        for bundle in [&first, &second] {
+            let uncached = templates.build_bundle(bundle);
+            let cached = templates.build_bundle_cached(bundle, &cache);
+            assert_eq!(cached.start_states(), uncached.start_states());
+            assert_eq!(cached.states(), uncached.states());
+            let (_, profile) = templates.build_bundle_profiled_cached(bundle, &cache);
+            assert_eq!(profile.group_dfa_cache_hits, 1);
+            assert_eq!(profile.group_dfa_cache_misses, 0);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn repeated_group_dfa_cache_benchmark_probe() {
+        fn long_template(terminal: i32) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let mut state = 0u32;
+            for depth in 0..30i32 {
+                let next = dfa.add_state();
+                dfa.add_transition(state, 1000 + depth, next);
+                state = next;
+            }
+            let accept = dfa.add_state();
+            dfa.add_transition(state, 2000 + terminal, accept);
+            dfa.set_accepting(accept, true);
+            dfa
+        }
+
+        let templates = Templates {
+            by_terminal: (0..16u32)
+                .map(|terminal| (terminal, long_template(terminal as i32)))
+                .collect(),
+            by_terminal_nwa: BTreeMap::new(),
+        };
+        let bundles = (0..20u32)
+            .map(|index| {
+                let shared = weight((index * 32)..=(index * 32 + 15));
+                (0..16u32)
+                    .map(|terminal| (terminal, shared.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .collect::<Vec<_>>();
+        let refs = bundles.iter().collect::<Vec<_>>();
+
+        let uncached_started = Instant::now();
+        let mut uncached_union_ms = 0.0;
+        for bundle in &bundles {
+            let (_, profile) = templates.build_bundle_profiled(bundle);
+            uncached_union_ms += profile.union_groups_ms;
+        }
+        let uncached_ms = elapsed_ms(uncached_started);
+
+        let cache_started = Instant::now();
+        let cache = templates.build_bundle_group_dfa_cache(&refs);
+        let cache_build_ms = elapsed_ms(cache_started);
+        assert_eq!(cache.len(), 1);
+        let cached_started = Instant::now();
+        let mut cached_union_ms = 0.0;
+        let mut cache_hits = 0usize;
+        for bundle in &bundles {
+            let (_, profile) = templates.build_bundle_profiled_cached(bundle, &cache);
+            cached_union_ms += profile.union_groups_ms;
+            cache_hits += profile.group_dfa_cache_hits;
+        }
+        let cached_ms = elapsed_ms(cached_started);
+        assert_eq!(cache_hits, bundles.len());
+        assert_eq!(cached_union_ms, 0.0);
+        eprintln!(
+            "repeated group DFA cache benchmark: bundles={} terminals_per_group=16 uncached_ms={uncached_ms:.3} uncached_union_ms={uncached_union_ms:.3} cache_build_ms={cache_build_ms:.3} cached_bundle_ms={cached_ms:.3} cached_total_ms={:.3}",
+            bundles.len(),
+            cache_build_ms + cached_ms,
+        );
     }
 
     #[test]

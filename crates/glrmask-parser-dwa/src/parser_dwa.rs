@@ -22,6 +22,7 @@ use crate::compiler::stages::resolve_negatives::{
     apply_finality_fixpoint, resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::compile_bundle::BundleGroupDfaCache;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
@@ -3258,6 +3259,7 @@ fn append_branch_fragment(
     arena: &mut NWA,
     summaries: &StateSummaries,
     templates: &Templates,
+    group_dfa_cache: &BundleGroupDfaCache,
     built_bundle_cache: &mut [Option<Arc<NWA>>],
     bundle_id: usize,
     continuation_state: u32,
@@ -3301,7 +3303,8 @@ fn append_branch_fragment(
     // downstream.
     if built_bundle_cache[bundle_id].is_none() {
         if let Some(detail) = compose_detail {
-            let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
+            let (bundle_nwa, bundle_profile) =
+                templates.build_bundle_profiled_cached(bundle, group_dfa_cache);
             detail.bundle_profile_total_ms += bundle_profile.total_ms;
             detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
             detail.bundle_profile_union_groups_ms += bundle_profile.union_groups_ms;
@@ -3313,13 +3316,15 @@ fn append_branch_fragment(
             detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
             detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
             eprintln!(
-                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} group_cache_hits={} group_cache_misses={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
                 bundle_id,
                 bundle_profile.input_terminals,
                 bundle_profile.weight_groups,
                 bundle_profile.single_entry_weights,
                 bundle_profile.single_tsid_weights,
                 bundle_profile.total_weight_outer_ranges,
+                bundle_profile.group_dfa_cache_hits,
+                bundle_profile.group_dfa_cache_misses,
                 bundle_profile.build_group_dfas_ms,
                 bundle_profile.union_groups_ms,
                 bundle_profile.determinize_bundle_ms,
@@ -3349,7 +3354,8 @@ fn append_branch_fragment(
             );
             built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
         } else {
-            built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+            built_bundle_cache[bundle_id] =
+                Some(Arc::new(templates.build_bundle_cached(bundle, group_dfa_cache)));
         }
     }
     let bundle_nwa = built_bundle_cache[bundle_id]
@@ -3439,6 +3445,32 @@ fn build_parser_nwa_from_terminal_dwa(
         }
     }
 
+    let used_bundle_refs = summaries
+        .unique_bundles
+        .iter()
+        .enumerate()
+        .filter_map(|(bundle_id, bundle)| used_multi_bundle[bundle_id].then_some(bundle))
+        .collect::<Vec<_>>();
+    let group_cache_started_at = Instant::now();
+    let bundle_group_dfa_cache = if std::env::var_os(
+        "GLRMASK_DISABLE_PARSER_BUNDLE_GROUP_CACHE",
+    )
+    .is_some()
+    {
+        BundleGroupDfaCache::default()
+    } else {
+        templates.build_bundle_group_dfa_cache(&used_bundle_refs)
+    };
+    let group_cache_ms = elapsed_ms(group_cache_started_at);
+    if compile_profile_enabled() || compose_detail_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_bundle_group_cache] used_multi_bundles={} repeated_groups={} build_ms={:.3}",
+            used_bundle_refs.len(),
+            bundle_group_dfa_cache.len(),
+            group_cache_ms,
+        );
+    }
+
     use rayon::prelude::*;
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
@@ -3449,7 +3481,7 @@ fn build_parser_nwa_from_terminal_dwa(
             .enumerate()
             .map(|(bundle_id, bundle)| {
                 used_multi_bundle[bundle_id]
-                    .then(|| Arc::new(templates.build_bundle(bundle)))
+                    .then(|| Arc::new(templates.build_bundle_cached(bundle, &bundle_group_dfa_cache)))
             })
             .collect();
     }
@@ -3522,6 +3554,7 @@ fn build_parser_nwa_from_terminal_dwa(
                     &mut arena,
                     &summaries,
                     &templates,
+                    &bundle_group_dfa_cache,
                     &mut built_bundle_cache,
                     branch.bundle_id,
                     target_continuation,
