@@ -6110,6 +6110,163 @@ fn prepare_unmapped_component_parser_automata(
         .collect()
 }
 
+/// Exact deferred union of already-compiled component parser DWAs.
+///
+/// The semantic union is represented by multiple NWA start components; no
+/// parser row, parser weight, or mapped transition is copied while constructing
+/// the view.  In the overwhelmingly common composition case every local LR
+/// state has exactly one composed-state image, so retain that relation as one
+/// flat `u32` per local state.  The eventual component+boundary parser consumer
+/// may materialize the view and determinize the combined NWA in one pass.
+///
+/// This intentionally makes the *component union itself* the cheap operation:
+/// expensive parser-state label transport and weight-coordinate publication are
+/// properties of later realization, not of forming the union language.
+enum DeferredParserStateRelation {
+    Singleton(Vec<u32>),
+    General(Vec<Vec<u32>>),
+}
+
+impl DeferredParserStateRelation {
+    fn from_relation(relation: &[Vec<u32>]) -> Self {
+        if relation.iter().all(|targets| targets.len() == 1) {
+            Self::Singleton(relation.iter().map(|targets| targets[0]).collect())
+        } else {
+            Self::General(relation.to_vec())
+        }
+    }
+
+    fn materialize(&self) -> std::borrow::Cow<'_, [Vec<u32>]> {
+        match self {
+            Self::Singleton(targets) => std::borrow::Cow::Owned(
+                targets.iter().map(|&target| vec![target]).collect(),
+            ),
+            Self::General(relation) => std::borrow::Cow::Borrowed(relation),
+        }
+    }
+
+    fn is_singleton(&self) -> bool {
+        matches!(self, Self::Singleton(_))
+    }
+}
+
+struct DeferredComponentParserUnionComponent<'a> {
+    constraint: &'a Constraint,
+    parser_state_relation: DeferredParserStateRelation,
+    tokenizer_state_offset: u32,
+    terminal_offset: u32,
+    default_domain: Option<ParserDefaultDomain>,
+}
+
+struct DeferredComponentParserUnionView<'a> {
+    components: Vec<DeferredComponentParserUnionComponent<'a>>,
+    strip_scoped_ignore_identity: bool,
+}
+
+enum ComponentParserUnionWork<'a> {
+    Deferred(DeferredComponentParserUnionView<'a>),
+    Materialized(Vec<NWA>),
+}
+
+impl ComponentParserUnionWork<'_> {
+    fn materialize_automata(self) -> Result<Vec<NWA>, String> {
+        match self {
+            Self::Deferred(view) => view.materialize_automata(),
+            Self::Materialized(automata) => Ok(automata),
+        }
+    }
+
+    fn view_shape(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Deferred(view) => Some((
+                view.component_count(),
+                view.singleton_relation_count(),
+            )),
+            Self::Materialized(_) => None,
+        }
+    }
+}
+
+impl<'a> DeferredComponentParserUnionView<'a> {
+    fn new(
+        constraints: &[&'a Constraint],
+        parser_state_relations: &[Vec<Vec<u32>>],
+        tokenizer_state_offsets: &[u32],
+        terminal_offsets: &[u32],
+        default_domains: &[Option<ParserDefaultDomain>],
+        strip_scoped_ignore_identity: bool,
+    ) -> Option<Self> {
+        if constraints.len() != parser_state_relations.len()
+            || constraints.len() != tokenizer_state_offsets.len()
+            || constraints.len() != terminal_offsets.len()
+            || constraints.len() != default_domains.len()
+            || std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
+        {
+            return None;
+        }
+        Some(Self {
+            components: constraints
+                .iter()
+                .copied()
+                .zip(parser_state_relations)
+                .zip(tokenizer_state_offsets.iter().copied())
+                .zip(terminal_offsets.iter().copied())
+                .zip(default_domains.iter().cloned())
+                .map(
+                    |((((constraint, relation), tokenizer_state_offset), terminal_offset), default_domain)| DeferredComponentParserUnionComponent {
+                    constraint,
+                    parser_state_relation: DeferredParserStateRelation::from_relation(
+                        relation,
+                    ),
+                    tokenizer_state_offset,
+                    terminal_offset,
+                    default_domain,
+                },
+                )
+                .collect(),
+            strip_scoped_ignore_identity,
+        })
+    }
+
+    fn materialize_automata(self) -> Result<Vec<NWA>, String> {
+        let strip_scoped_ignore_identity = self.strip_scoped_ignore_identity;
+        self.components
+            .into_par_iter()
+            .map(|component| {
+                let relation = component.parser_state_relation.materialize();
+                let parser_component = ParserDwaComponent {
+                    constraint: component.constraint,
+                    parser_state_relation: relation.as_ref(),
+                    tokenizer_state_offset: component.tokenizer_state_offset,
+                    terminal_offset: component.terminal_offset,
+                    composed_table: None,
+                };
+                let mut automaton =
+                    component_parser_nwa(&parser_component, component.default_domain.as_ref())?;
+                if strip_scoped_ignore_identity {
+                    let ignore_weight = component
+                        .constraint
+                        .ignore_terminal
+                        .and_then(|ignore| component.constraint.possible_matches.get(&ignore));
+                    strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
+                }
+                Ok(automaton)
+            })
+            .collect()
+    }
+
+    fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    fn singleton_relation_count(&self) -> usize {
+        self.components
+            .iter()
+            .filter(|component| component.parser_state_relation.is_singleton())
+            .count()
+    }
+}
+
 fn prepare_unmapped_component_possible_matches(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
@@ -13239,12 +13396,36 @@ pub(crate) fn compose_constraints_owned_parent(
             composed_table: Some(&composed_table.table),
         })
         .collect::<Vec<_>>();
-    let automata = prepare_unmapped_component_parser_automata(
-        &union_parser_components,
+    let component_union_work = if let Some(view) = DeferredComponentParserUnionView::new(
+        &union_component_constraints,
+        &composed_table.state_relations,
+        &expected_tokenizer_state_offsets,
+        &composed_table.terminal_offsets,
         &parser_default_domains.component_domains,
         !global_ignores,
-    )?;
+    ) {
+        ComponentParserUnionWork::Deferred(view)
+    } else {
+        ComponentParserUnionWork::Materialized(prepare_unmapped_component_parser_automata(
+            &union_parser_components,
+            &parser_default_domains.component_domains,
+            !global_ignores,
+        )?)
+    };
     let parser_extract_ms = parser_extract_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        if let Some((components, singleton_relations)) = component_union_work.view_shape() {
+            eprintln!(
+                "[glrmask/profile][constraint_component_parser_union_view] components={} singleton_relations={} build_ms={parser_extract_ms:.3}",
+                components,
+                singleton_relations,
+            );
+        } else {
+            eprintln!(
+                "[glrmask/profile][constraint_component_parser_union_view] fallback=materialized build_ms={parser_extract_ms:.3}"
+            );
+        }
+    }
     drop(union_parser_components);
     drop(union_component_constraints);
 
@@ -13281,6 +13462,10 @@ pub(crate) fn compose_constraints_owned_parent(
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
+            let component_materialize_started_at = Instant::now();
+            let automata = component_union_work.materialize_automata()?;
+            let component_materialize_ms =
+                component_materialize_started_at.elapsed().as_secs_f64() * 1000.0;
             let deferred_remap_started_at = Instant::now();
             let mut automata = automata
                 .into_par_iter()
@@ -13395,7 +13580,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     }
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} component_materialize_ms={component_materialize_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
@@ -13433,7 +13618,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
+                            "[glrmask/profile][constraint_single_pass_parser_union] path={} automata={} eager_component_remap_ms={component_remap_ms:.3} component_materialize_ms={component_materialize_ms:.3} deferred_component_remap_ms={deferred_component_remap_ms:.3} direct_ms={direct_ms:.3} synthetic_states={} result_states={} result_transitions={} total_ms={:.3}",
                             union_path,
                             automata_len,
                             synthetic_states,
