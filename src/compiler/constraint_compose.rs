@@ -17316,6 +17316,75 @@ mod tests {
                 &common_id_map,
                 &terminal_names,
             );
+
+            // The grammar-factor and parser-stack-domain filters are distinct
+            // necessary conditions.  Measure their exact weighted overlap
+            // rather than assuming either subsumes the other.
+            let factor_minus_parser =
+                exact_weighted_difference(&concrete_factor_tight, &concrete_grammar_tight);
+            let parser_minus_factor =
+                exact_weighted_difference(&concrete_grammar_tight, &concrete_factor_tight);
+            let concrete_ideal =
+                exact_weighted_difference(&concrete_factor_tight, &factor_minus_parser);
+            let factor_general_minimized = minimize_owned(concrete_factor_tight.clone());
+            let concrete_ideal_minimized = minimize_owned(concrete_ideal.clone());
+            let factor_accepted_tokens =
+                accepted_original_tokens(&factor_general_minimized, &common_id_map);
+            let ideal_accepted_tokens =
+                accepted_original_tokens(&concrete_ideal_minimized, &common_id_map);
+            let nonempty_finals = |dwa: &DWA| {
+                dwa.states()
+                    .iter()
+                    .filter(|state| {
+                        state
+                            .final_weight
+                            .as_ref()
+                            .is_some_and(|weight| !weight.is_empty())
+                    })
+                    .count()
+            };
+            eprintln!(
+                "MINBOUND OUTER_CONCRETE_FILTER_RELATION factor_minus_parser_states={} factor_minus_parser_transitions={} factor_minus_parser_finals={} parser_minus_factor_states={} parser_minus_factor_transitions={} parser_minus_factor_finals={} intersection_states={} intersection_transitions={} factor_general_states={} factor_general_transitions={} factor_accepted_tokens={} ideal_general_states={} ideal_general_transitions={} ideal_accepted_tokens={}",
+                factor_minus_parser.num_states(),
+                factor_minus_parser.num_transitions(),
+                nonempty_finals(&factor_minus_parser),
+                parser_minus_factor.num_states(),
+                parser_minus_factor.num_transitions(),
+                nonempty_finals(&parser_minus_factor),
+                concrete_ideal.num_states(),
+                concrete_ideal.num_transitions(),
+                factor_general_minimized.num_states(),
+                factor_general_minimized.num_transitions(),
+                factor_accepted_tokens.len(),
+                concrete_ideal_minimized.num_states(),
+                concrete_ideal_minimized.num_transitions(),
+                ideal_accepted_tokens.len(),
+            );
+            acyclic_path_stats(
+                "outer_exact_concrete_B_minus_A_ideal_intersection",
+                &concrete_ideal_minimized,
+            );
+            residual_diagnostics(
+                "outer_exact_concrete_B_minus_A_ideal_intersection",
+                &concrete_ideal_minimized,
+                &common_id_map,
+                &terminal_names,
+            );
+            eprintln!(
+                "MINBOUND OUTER_CONCRETE_IDEAL_ACCEPTED_TOKENS {:?}",
+                ideal_accepted_tokens,
+            );
+            save_terminal_capture(
+                std::path::Path::new(&root)
+                    .join("tdwa_outer_exact_concrete_B_minus_A_ideal_intersection.cap")
+                    .to_str()
+                    .unwrap(),
+                &MappedArtifact::new(concrete_ideal_minimized.clone(), common_id_map.clone()),
+                &terminal_names,
+            );
+            if std::env::var_os("GLRMASK_MINBOUND_STOP_AFTER_FACTOR_COMPARE").is_some() {
+                return;
+            }
             let concrete_tight_weight = Weight::union_all(
                 concrete_grammar_tight
                     .states()
