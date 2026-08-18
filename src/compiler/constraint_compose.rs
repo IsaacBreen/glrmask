@@ -11008,6 +11008,7 @@ fn build_composed_constraint_unfinalized(
         seed_terminal_dense_fallback: Default::default(),
         seed_universe_dense: Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
         dwa_fast_transitions: Vec::new(),
+        parser_runtime_caches_prebuilt: false,
         indexed_dag_dense_transitions: Vec::new(),
         indexed_dag_dense_finals: Vec::new(),
         tokenizer_fast_transitions,
@@ -12584,6 +12585,10 @@ pub(crate) fn compose_constraints_owned_parent(
         },
     );
     result.constraint.parser_dwa = parser_union_result?;
+    let parser_runtime_cache_started_at = Instant::now();
+    result.constraint.prebuild_parser_runtime_caches();
+    let parser_runtime_cache_ms =
+        parser_runtime_cache_started_at.elapsed().as_secs_f64() * 1000.0;
     let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
@@ -12612,7 +12617,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} parser_runtime_cache_ms={parser_runtime_cache_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
             children.len() + 1,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );

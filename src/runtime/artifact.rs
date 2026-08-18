@@ -2080,6 +2080,12 @@ pub struct Constraint {
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Runtime-only readiness marker for caches derived from the final parser
+    /// DWA and final internal-token coordinate. Composition may build these at
+    /// the final parser-union boundary so generic post-link finalization does
+    /// not rescan the same parser artifact.
+    #[serde(skip, default)]
+    pub(crate) parser_runtime_caches_prebuilt: bool,
     /// Runtime-only parser-DWA transitions with exact dense masks materialized
     /// for the final internal tokenizer states present in each transition
     /// weight; absent states are implicitly empty. Indexed-DAG masking uses

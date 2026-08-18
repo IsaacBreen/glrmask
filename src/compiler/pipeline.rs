@@ -4392,6 +4392,7 @@ fn compile_prepared_with_profile_and_table_construction(
             seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
+            parser_runtime_caches_prebuilt: false,
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),
             tokenizer_fast_transitions: prebuilt_tokenizer_fast_transitions,
@@ -4727,4 +4728,3 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
 }
-
