@@ -372,6 +372,63 @@ fn compute_topo_order(dwa: &DWA) -> Option<Vec<usize>> {
 /// incoming edge weights. Determinization emits cumulative path weights on
 /// edges; for such a DWA, all incoming weights to a state describe exactly the
 /// token contexts in which that residual is reachable.
+
+/// Exact reverse structural hash-cons for an acyclic weighted DWA.
+///
+/// States are merged only when their complete weighted suffix representation is
+/// identical after targets have already been hash-consed: same final weight and
+/// the same ordered `label -> (target, weight)` row. This performs no weight
+/// pushing or compatibility reasoning; it is a pure DAG quotient and therefore
+/// preserves the weighted language exactly.
+pub fn reverse_hashcons_acyclic_owned(dwa: DWA) -> DWA {
+    if dwa.states().len() <= 1 {
+        return dwa;
+    }
+    let Some(topo) = compute_topo_order(&dwa) else {
+        return dwa;
+    };
+
+    type Signature = (Option<Weight>, Vec<(Label, u32, Weight)>);
+    let old_start = dwa.start_state() as usize;
+    let mut old_to_new = vec![UNMAPPED; dwa.states().len()];
+    let mut intern = FxHashMap::<Signature, u32>::default();
+    let mut new_states = Vec::<DWAState>::new();
+
+    for &old_id in topo.iter().rev() {
+        let old = &dwa.states()[old_id];
+        let transitions = old
+            .transitions
+            .iter()
+            .map(|(&label, (target, weight))| {
+                let mapped = old_to_new[*target as usize];
+                debug_assert_ne!(mapped, UNMAPPED, "reverse topo target must be mapped");
+                (label, mapped, weight.clone())
+            })
+            .collect::<Vec<_>>();
+        let signature = (old.final_weight.clone(), transitions.clone());
+        if let Some(&existing) = intern.get(&signature) {
+            old_to_new[old_id] = existing;
+            continue;
+        }
+
+        let new_id = new_states.len() as u32;
+        let state = DWAState {
+            transitions: transitions
+                .into_iter()
+                .map(|(label, target, weight)| (label, (target, weight)))
+                .collect(),
+            final_weight: old.final_weight.clone(),
+        };
+        new_states.push(state);
+        intern.insert(signature, new_id);
+        old_to_new[old_id] = new_id;
+    }
+
+    let start_state = old_to_new.get(old_start).copied().unwrap_or(UNMAPPED);
+    debug_assert_ne!(start_state, UNMAPPED);
+    DWA::from_parts(new_states, start_state)
+}
+
 fn compute_forward_path_domains(dwa: &DWA) -> Option<(Vec<usize>, Vec<Weight>)> {
     let topo = compute_topo_order(dwa)?;
     let n = dwa.states().len();
@@ -4634,6 +4691,7 @@ mod tests {
     use super::{
         batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
         find_difference, memberwise_group_compatible, minimize_acyclic,
+        reverse_hashcons_acyclic_owned,
         minimize_acyclic_owned_path_conditioned, push_weights, try_minimize_small_pairwise_direct,
         overlay_compatible_token_behavior_ranges,
         sorted_weights_compatible_on_domain,
@@ -4660,6 +4718,33 @@ mod tests {
                 .copied()
                 .map(|(tsid, ranges)| (tsid, token_set(ranges))),
         )
+    }
+
+    #[test]
+    fn reverse_hashcons_merges_only_identical_weighted_suffixes() {
+        let mut states = vec![DWAState::default(); 4];
+        states[0]
+            .transitions
+            .insert(1, (1, Weight::all()));
+        states[0]
+            .transitions
+            .insert(2, (2, Weight::all()));
+        let shared_edge = weight(&[(0, &[(1, 7)])]);
+        states[1]
+            .transitions
+            .insert(3, (3, shared_edge.clone()));
+        states[2]
+            .transitions
+            .insert(3, (3, shared_edge));
+        states[3].final_weight = Some(weight(&[(0, &[(2, 6)])]));
+        let original = DWA::from_parts(states, 0);
+
+        let hashconsed = reverse_hashcons_acyclic_owned(original.clone());
+        assert_eq!(hashconsed.num_states(), 3);
+        assert_eq!(
+            find_difference(&original, &hashconsed).expect("acyclic equivalence must be decidable"),
+            None,
+        );
     }
 
     #[test]

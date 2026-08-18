@@ -33,6 +33,12 @@ pub fn minimize_owned(dwa: DWA) -> DWA {
     minimize_owned_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_owned)
 }
 
+/// Merge only exactly identical weighted suffix rows in an acyclic DWA.
+/// Cyclic inputs are returned unchanged.
+pub fn reverse_hashcons_owned(dwa: DWA) -> DWA {
+    minimize_owned_if_acyclic(dwa, super::minimize_acyclic::reverse_hashcons_acyclic_owned)
+}
+
 /// Minimize an acyclic DWA whose edge weights already encode cumulative live
 /// path domains from an upstream backward-pushed construction.
 pub fn minimize_owned_path_conditioned(dwa: DWA) -> DWA {

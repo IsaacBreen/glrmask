@@ -23,7 +23,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::compile::compile_terminal_expr_dfa;
 use crate::automata::weighted_u32::determinize::determinize;
-use crate::automata::weighted_u32::minimize::minimize_owned;
+use crate::automata::weighted_u32::minimize::{minimize_owned, reverse_hashcons_owned};
 use crate::automata::weighted_u32::equivalence::find_difference;
 use crate::automata::weighted_u32::dwa::{DWA, DWAState};
 use crate::automata::weighted_u32::nwa::{NWA, NWAState};
@@ -82,6 +82,28 @@ use structural_sharing::{
 fn compose_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+}
+
+/// The generic parser-DWA builder currently skips weighted minimization unless
+/// explicitly overridden. Boundary overlays are different: leaving their large
+/// intermediate DWA unminimized makes the subsequent component union explode.
+fn parser_builder_skips_internal_minimization() -> bool {
+    std::env::var("GLRMASK_SKIP_PARSER_DWA_MINIMIZE")
+        .ok()
+        .map(|value| {
+            let trimmed = value.trim();
+            !(trimmed.is_empty()
+                || trimmed == "0"
+                || trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+}
+
+fn boundary_parser_minimize_min_states() -> u32 {
+    std::env::var("GLRMASK_BOUNDARY_PARSER_MINIMIZE_MIN_STATES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(64)
 }
 
 fn eliminate_composed_runtime_controls(
@@ -9133,15 +9155,39 @@ fn build_boundary_repair(
             .take()
             .expect("generic boundary parser must be built when direct path is disabled")
     };
+    let pre_hashcons_states = parser_dwa.num_states();
+    let pre_hashcons_transitions = parser_dwa.num_transitions();
+    let mut hashcons_ms = 0.0;
+    let mut boundary_minimize_ms = 0.0;
+    let parser_dwa = if pre_hashcons_states >= boundary_parser_minimize_min_states()
+        && parser_builder_skips_internal_minimization()
+        && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARSER_MINIMIZE").is_none()
+    {
+        let hashcons_started_at = Instant::now();
+        let hashconsed = reverse_hashcons_owned(parser_dwa);
+        hashcons_ms = hashcons_started_at.elapsed().as_secs_f64() * 1000.0;
+        let minimize_started_at = Instant::now();
+        let minimized = minimize_owned(hashconsed);
+        boundary_minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+        minimized
+    } else {
+        parser_dwa
+    };
+    let post_minimize_states = parser_dwa.num_states();
+    let post_minimize_transitions = parser_dwa.num_transitions();
     let parser_ms = parser_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_ms={parser_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_pre_states={} parser_pre_transitions={} hashcons_ms={hashcons_ms:.3} boundary_minimize_ms={boundary_minimize_ms:.3} parser_post_states={} parser_post_transitions={} parser_ms={parser_ms:.3} total_ms={:.3}",
             active_terminals.iter().filter(|&&active| active).count(),
             seed_terminals.iter().filter(|&&active| active).count(),
             discovered_boundary_terminals.count_ones(),
             boundary_paths.token_ids.len(),
             boundary_special_token_terminals.len(),
+            pre_hashcons_states,
+            pre_hashcons_transitions,
+            post_minimize_states,
+            post_minimize_transitions,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
