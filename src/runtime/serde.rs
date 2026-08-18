@@ -204,9 +204,99 @@ struct TokenMaskCacheTail {
     word_group_buf_op_costs: Vec<usize>,
 }
 
-struct TokenMaskCacheArtifact {
-    tail: TokenMaskCacheTail,
-    word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+enum TokenMaskCacheArtifact {
+    Full {
+        tail: TokenMaskCacheTail,
+        word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    },
+    WordSparse(Vec<InternalTokenBufMasks>),
+}
+
+fn encode_word_sparse_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
+    const MAGIC: &[u8; 4] = b"TWS1";
+    const MAX_BYTES: usize = 512 * 1024;
+    let expected_groups = constraint.internal_token_count().div_ceil(64);
+    if constraint.word_group_sparse_masks.len() != expected_groups {
+        return Vec::new();
+    }
+    let entry_count = constraint
+        .word_group_sparse_masks
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    let encoded_len = 12usize
+        .saturating_add((expected_groups + 1).saturating_mul(4))
+        .saturating_add(entry_count.saturating_mul(6));
+    if encoded_len > MAX_BYTES {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(encoded_len);
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&(expected_groups as u32).to_le_bytes());
+    out.extend_from_slice(&(entry_count as u32).to_le_bytes());
+    let mut end = 0u32;
+    out.extend_from_slice(&end.to_le_bytes());
+    for group in &constraint.word_group_sparse_masks {
+        end = end.saturating_add(group.len() as u32);
+        out.extend_from_slice(&end.to_le_bytes());
+    }
+    for group in &constraint.word_group_sparse_masks {
+        for &(word, bits) in group {
+            out.extend_from_slice(&word.to_le_bytes());
+            out.extend_from_slice(&bits.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(out.len(), encoded_len);
+    out
+}
+
+fn decode_word_sparse_token_mask_cache(input: &[u8]) -> Result<Vec<InternalTokenBufMasks>, String> {
+    const HEADER_LEN: usize = 12;
+    if input.len() < HEADER_LEN || !input.starts_with(b"TWS1") {
+        return Err("invalid sparse word-group cache header".to_owned());
+    }
+    let group_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+    let entry_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
+    let offsets_bytes = (group_count + 1)
+        .checked_mul(4)
+        .ok_or_else(|| "sparse word-group cache offsets overflow".to_owned())?;
+    let entries_bytes = entry_count
+        .checked_mul(6)
+        .ok_or_else(|| "sparse word-group cache entries overflow".to_owned())?;
+    let expected = HEADER_LEN
+        .checked_add(offsets_bytes)
+        .and_then(|n| n.checked_add(entries_bytes))
+        .ok_or_else(|| "sparse word-group cache length overflow".to_owned())?;
+    if input.len() != expected {
+        return Err("invalid sparse word-group cache length".to_owned());
+    }
+    let offsets_body = &input[HEADER_LEN..HEADER_LEN + offsets_bytes];
+    let mut offsets = Vec::<u32>::with_capacity(group_count + 1);
+    for bytes in offsets_body.chunks_exact(4) {
+        offsets.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+    }
+    if offsets.first().copied() != Some(0)
+        || offsets.last().copied() != Some(entry_count as u32)
+        || offsets.windows(2).any(|pair| pair[0] > pair[1])
+    {
+        return Err("invalid sparse word-group cache offsets".to_owned());
+    }
+    let entries = &input[HEADER_LEN + offsets_bytes..];
+    let mut groups = Vec::with_capacity(group_count);
+    for group in 0..group_count {
+        let start = offsets[group] as usize;
+        let end = offsets[group + 1] as usize;
+        let mut decoded = Vec::with_capacity(end - start);
+        for entry in start..end {
+            let pos = entry * 6;
+            decoded.push((
+                u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap()),
+                u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
+            ));
+        }
+        groups.push(decoded);
+    }
+    Ok(groups)
 }
 
 #[inline]
@@ -263,7 +353,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
         .saturating_mul(mask_words)
         .saturating_mul(std::mem::size_of::<u32>());
     if prefix_bytes > MAX_PREFIX_BYTES {
-        return Vec::new();
+        return encode_word_sparse_token_mask_cache(constraint);
     }
     let mut tail = Vec::with_capacity(320 * 1024);
     bincode::serialize_into(
@@ -302,7 +392,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
         .saturating_add(prefix_bytes)
         > MAX_CACHE_BYTES
     {
-        return Vec::new();
+        return encode_word_sparse_token_mask_cache(constraint);
     }
     let mut out = Vec::with_capacity(
         16usize
@@ -335,6 +425,9 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
 fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, String> {
     const MAGIC: &[u8; 4] = b"TMC3";
     const HEADER_LEN: usize = 16;
+    if input.starts_with(b"TWS1") {
+        return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
+    }
     if input.len() < HEADER_LEN || !input.starts_with(MAGIC) {
         return Err("invalid token-mask cache header".to_owned());
     }
@@ -361,7 +454,7 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
     if pos != input.len() {
         return Err("trailing bytes in token-mask cache".to_owned());
     }
-    Ok(TokenMaskCacheArtifact {
+    Ok(TokenMaskCacheArtifact::Full {
         tail,
         word_group_prefix_buf_masks,
     })
@@ -371,10 +464,17 @@ fn install_token_mask_cache(
     constraint: &mut Constraint,
     cache: TokenMaskCacheArtifact,
 ) -> Result<(), String> {
-    let TokenMaskCacheArtifact {
+    let TokenMaskCacheArtifact::Full {
         tail: cache,
         word_group_prefix_buf_masks,
-    } = cache;
+    } = cache
+    else {
+        let TokenMaskCacheArtifact::WordSparse(groups) = cache else {
+            unreachable!();
+        };
+        constraint.word_group_sparse_masks = groups;
+        return Ok(());
+    };
     constraint.table.guarded_shift_index = cache.guarded_shift_index;
     constraint.seed_terminal_dense = cache.seed_terminal_dense;
     constraint.seed_universe_dense = cache.seed_universe_dense.into();
@@ -1595,7 +1695,9 @@ impl Constraint {
                                 || version == PREVIOUS_FAST_RUNTIME_CONSTRAINT_VERSION
                                 || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
                             {
-                                let decoded = if dwa_section.starts_with(b"DWF1") {
+                                let decoded = if dwa_section.starts_with(b"DWF1")
+                                    || dwa_section.starts_with(b"DWF2")
+                                {
                                     crate::automata::weighted::dwa::PackedRuntimeDwa::from_fast_wire_bytes(
                                         dwa_section,
                                     )

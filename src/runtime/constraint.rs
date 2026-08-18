@@ -2556,10 +2556,24 @@ impl Constraint {
                 value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
             })
             .unwrap_or(true);
+        let expected_word_groups = self.internal_token_buf_mask_count().div_ceil(64);
+        let prebuilt_word_blocks =
+            (self.word_group_sparse_masks.len() == expected_word_groups).then(|| {
+                let groups = std::mem::take(&mut self.word_group_sparse_masks);
+                let total_entries = groups.iter().map(Vec::len).sum::<usize>();
+                let max_entries = groups.iter().map(Vec::len).max().unwrap_or(0);
+                (groups, total_entries, max_entries)
+            });
         let build_word_blocks = || {
             let started = profile.then(std::time::Instant::now);
-            let result = self.compute_token_block_sparse_masks(64);
-            let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let reused = prebuilt_word_blocks.is_some();
+            let result = prebuilt_word_blocks
+                .unwrap_or_else(|| self.compute_token_block_sparse_masks(64));
+            let ms = if reused {
+                0.0
+            } else {
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+            };
             (result, ms)
         };
         let build_quad_blocks = || {
@@ -3143,7 +3157,11 @@ impl Constraint {
         self.fast_template_dfas_by_terminal = fast_template_dfas_by_terminal;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let seed_started_at = profile.then(std::time::Instant::now);
-        let seed_dense_prebuilt = self.seed_universe_dense.len() == self.internal_token_dense_words;
+        let seed_dense_prebuilt = self.seed_universe_dense.len() == self.internal_token_dense_words
+            && self
+                .seed_terminal_dense
+                .values()
+                .all(|mask| mask.len() == self.internal_token_dense_words);
         if !seed_dense_prebuilt {
             self.build_seed_dense_masks();
         }
