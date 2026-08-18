@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use rayon::prelude::*;
+
 use super::row::{ActionRow, GotoRow};
 use super::{
     Action, AdmissionPolicy, GLRTable, GlrTableConstruction, GuardedStackShift, StackShift,
@@ -624,11 +626,16 @@ pub fn compose_subgrammar_tables(
         }
         state_relations.push(child_relation);
 
-        for child_state in 0..child.num_states {
-            if child_state == child_start || child_state == child_accept {
-                continue;
-            }
+        if let Some(local_ignore) = child_input.ignore_terminal {
+            skip_terminals.insert(local_ignore + terminal_offset);
+        }
+        let mapped_child_rows = (0..child.num_states)
+            .into_par_iter()
+            .filter(|&child_state| child_state != child_start && child_state != child_accept)
+            .map(|child_state| {
             let merged_state = child_state_map[child_state as usize] as usize;
+            let mut mapped_action_row = ActionRow::default();
+            let mut mapped_goto_row = GotoRow::default();
             for (terminal, child_action) in child.action[child_state as usize].iter() {
                 let mapped_action = remap_action(
                     child_action,
@@ -643,14 +650,14 @@ pub fn compose_subgrammar_tables(
                 if terminal == EOF {
                     for &continuation in &continuation_terminals {
                         merge_action_cell(
-                            &mut action[merged_state],
+                            &mut mapped_action_row,
                             continuation,
                             mapped_action.clone(),
                         )?;
                     }
                 } else {
                     merge_action_cell(
-                        &mut action[merged_state],
+                        &mut mapped_action_row,
                         terminal + terminal_offset,
                         mapped_action,
                     )?;
@@ -658,11 +665,10 @@ pub fn compose_subgrammar_tables(
             }
             if let Some(local_ignore) = child_input.ignore_terminal {
                 merge_action_cell(
-                    &mut action[merged_state],
+                    &mut mapped_action_row,
                     local_ignore + terminal_offset,
                     identity_skip_action(),
                 )?;
-                skip_terminals.insert(local_ignore + terminal_offset);
             }
             for (nonterminal, &(target, replace)) in child.goto[child_state as usize].iter() {
                 let target = remap_state(
@@ -673,8 +679,14 @@ pub fn compose_subgrammar_tables(
                     child_start,
                     child_accept,
                 )?;
-                goto[merged_state].insert(nonterminal + nonterminal_offset, (target, replace));
+                mapped_goto_row.insert(nonterminal + nonterminal_offset, (target, replace));
             }
+            Ok::<_, String>((merged_state, mapped_action_row, mapped_goto_row))
+        })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (merged_state, mapped_action_row, mapped_goto_row) in mapped_child_rows {
+            action[merged_state] = mapped_action_row;
+            goto[merged_state] = mapped_goto_row;
         }
 
         for &(caller_state, placeholder_target, placeholder_replace) in &call_sites {
