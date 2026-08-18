@@ -1233,8 +1233,33 @@ type PossibleMatches = BTreeMap<u32, Weight>;
 struct BoundaryRepair {
     parser: BoundaryParserWork,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    commit_templates_deferred: bool,
     composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     active_terminals: Vec<bool>,
+}
+
+fn build_commit_templates_from_raw_templates(
+    raw_templates: &[Option<UnweightedDfa>],
+) -> Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>> {
+    let split_templates = raw_templates
+        .par_iter()
+        .enumerate()
+        .filter_map(|(terminal, dfa)| {
+            let dfa = dfa.as_ref()?;
+            let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+            try_split_commit_template_dfas(&commit_dfa)
+                .map(|split| (terminal, Arc::new(split)))
+        })
+        .collect::<Vec<_>>();
+    let mut result = vec![None; raw_templates.len()];
+    for (terminal, split) in split_templates {
+        result[terminal] = Some(split);
+    }
+    result
+}
+
+fn defer_boundary_commit_templates() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_COMMIT_TEMPLATES").is_none()
 }
 
 enum BoundaryParserWork {
@@ -8171,18 +8196,20 @@ fn build_composition_templates(
     let from_characterizations_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
     let commit_started_at = Instant::now();
     let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
-    let split_templates = templates
-        .by_terminal
-        .par_iter()
-        .filter_map(|(&terminal, dfa)| {
-            let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-            try_split_commit_template_dfas(&commit_dfa)
-                .map(|split| (terminal, Arc::new(split)))
-        })
-        .collect::<Vec<_>>();
-    for (terminal, split) in split_templates {
-        if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-            *slot = Some(split);
+    if !defer_boundary_commit_templates() {
+        let split_templates = templates
+            .by_terminal
+            .par_iter()
+            .filter_map(|(&terminal, dfa)| {
+                let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                try_split_commit_template_dfas(&commit_dfa)
+                    .map(|split| (terminal, Arc::new(split)))
+            })
+            .collect::<Vec<_>>();
+        for (terminal, split) in split_templates {
+            if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                *slot = Some(split);
+            }
         }
     }
     let commit_ms = commit_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -8427,19 +8454,21 @@ fn try_build_cached_composition_templates(
     templates
         .by_terminal_nwa
         .extend(fresh_templates.by_terminal_nwa);
-    let split_templates = templates
-        .by_terminal
-        .par_iter()
-        .filter_map(|(&terminal, dfa)| {
-            let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-            try_split_commit_template_dfas(&commit_dfa)
-                .map(|split| (terminal, Arc::new(split)))
-        })
-        .collect::<Vec<_>>();
     let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
-    for (terminal, split) in split_templates {
-        if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-            *slot = Some(split);
+    if !defer_boundary_commit_templates() {
+        let split_templates = templates
+            .by_terminal
+            .par_iter()
+            .filter_map(|(&terminal, dfa)| {
+                let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                try_split_commit_template_dfas(&commit_dfa)
+                    .map(|split| (terminal, Arc::new(split)))
+            })
+            .collect::<Vec<_>>();
+        for (terminal, split) in split_templates {
+            if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                *slot = Some(split);
+            }
         }
     }
     if std::env::var_os("GLRMASK_VALIDATE_CACHED_BOUNDARY_TEMPLATES").is_some() {
@@ -10768,6 +10797,7 @@ fn build_boundary_repair(
                 templates,
             },
             template_dfas_by_terminal,
+            commit_templates_deferred: defer_boundary_commit_templates(),
             composition_parser_templates_by_terminal,
             active_terminals,
         }));
@@ -10926,6 +10956,7 @@ fn build_boundary_repair(
     Ok(Some(BoundaryRepair {
         parser: BoundaryParserWork::Materialized(MappedArtifact::new(parser_dwa, id_map)),
         template_dfas_by_terminal,
+        commit_templates_deferred: defer_boundary_commit_templates(),
         composition_parser_templates_by_terminal,
         active_terminals,
     }))
@@ -12326,17 +12357,27 @@ pub(crate) fn compose_constraints(
             Ok(match boundary_repair {
                 Some(boundary) => {
                     debug_assert!(boundary.active_terminals.iter().any(|&active| active));
-                    let boundary_parser = boundary
-                        .parser
-                        .materialize(&composed_table.table, vocab);
+                    let BoundaryRepair {
+                        parser,
+                        mut template_dfas_by_terminal,
+                        commit_templates_deferred,
+                        composition_parser_templates_by_terminal,
+                        ..
+                    } = boundary;
+                    let boundary_parser = parser.materialize(&composed_table.table, vocab);
+                    if commit_templates_deferred {
+                        template_dfas_by_terminal = build_commit_templates_from_raw_templates(
+                            &composition_parser_templates_by_terminal,
+                        );
+                    }
                     (
                         union_boundary_parser_dwa(
                             parser_artifacts,
                             boundary_parser,
                             composed_table.table.num_states,
                         )?,
-                        boundary.template_dfas_by_terminal,
-                        boundary.composition_parser_templates_by_terminal,
+                        template_dfas_by_terminal,
+                        composition_parser_templates_by_terminal,
                     )
                 }
                 None => (
@@ -12970,8 +13011,9 @@ pub(crate) fn compose_constraints_owned_parent(
     let id_max_internal_token = id_map.max_internal_token_id();
     let (
         boundary_work,
-        template_dfas_by_terminal,
+        mut template_dfas_by_terminal,
         composition_parser_templates_by_terminal,
+        commit_templates_deferred,
     ) = match boundary_repair {
         Some(boundary) => {
             debug_assert!(boundary.active_terminals.iter().any(|&active| active));
@@ -12979,6 +13021,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 Some(boundary.parser),
                 boundary.template_dfas_by_terminal,
                 boundary.composition_parser_templates_by_terminal,
+                boundary.commit_templates_deferred,
             )
         }
         None => {
@@ -12988,11 +13031,16 @@ pub(crate) fn compose_constraints_owned_parent(
                         .to_string(),
                 );
             }
-            (None, vec![None; num_terminals], Vec::new())
+            (None, vec![None; num_terminals], Vec::new(), false)
         }
     };
 
     let union_started_at = Instant::now();
+    if commit_templates_deferred {
+        template_dfas_by_terminal = build_commit_templates_from_raw_templates(
+            &composition_parser_templates_by_terminal,
+        );
+    }
     let parser_extract_started_at = Instant::now();
     let union_component_constraints = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
