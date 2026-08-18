@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use rayon::prelude::*;
 
@@ -371,6 +372,16 @@ fn reduction_only(action: &Action) -> bool {
     }
 }
 
+fn table_has_guarded_stack_shifts(table: &GLRTable) -> bool {
+    if table.guarded_shift_index.len() == table.num_states as usize {
+        return table.guarded_shift_index.iter().any(|row| !row.is_empty());
+    }
+    table.action.iter().any(|row| {
+        row.values()
+            .any(|action| matches!(action, Action::GuardedStackShifts(_)))
+    })
+}
+
 fn accept_state(table: &GLRTable) -> Result<u32, String> {
     let states = table
         .action
@@ -406,6 +417,12 @@ pub fn compose_subgrammar_tables(
     parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let total_started_at = profile.then(Instant::now);
+    let source_has_guarded_stack_shifts = table_has_guarded_stack_shifts(parent)
+        || children
+            .iter()
+            .any(|child| table_has_guarded_stack_shifts(child.table));
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
     terminal_offsets.push(0);
     let mut next_terminal = parent.num_terminals;
@@ -452,6 +469,7 @@ pub fn compose_subgrammar_tables(
     let mut forwarded_shifts = parent.forwarded_shifts.clone();
     let mut direct_regular_wide_frontiers = parent.direct_regular_wide_frontiers.clone();
     let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
+    let mut rows_needing_compress = BTreeSet::<usize>::new();
     let mut skip_terminals = parent.skip_terminals.clone();
     if let Some(ignore) = parent_scoped_ignore_terminal {
         skip_terminals.insert(ignore);
@@ -568,6 +586,7 @@ pub fn compose_subgrammar_tables(
             child_entry_terminals.extend(continuation_terminals.iter().copied());
         }
         for (state, precursor_action) in precursor_actions {
+            rows_needing_compress.insert(state as usize);
             action[state as usize].remove(&child_input.placeholder_terminal);
             for &terminal in &child_entry_terminals {
                 merge_action_cell(
@@ -629,6 +648,7 @@ pub fn compose_subgrammar_tables(
         if let Some(local_ignore) = child_input.ignore_terminal {
             skip_terminals.insert(local_ignore + terminal_offset);
         }
+        let row_transport_started_at = profile.then(Instant::now);
         let mapped_child_rows = (0..child.num_states)
             .into_par_iter()
             .filter(|&child_state| child_state != child_start && child_state != child_accept)
@@ -670,6 +690,7 @@ pub fn compose_subgrammar_tables(
                     identity_skip_action(),
                 )?;
             }
+            mapped_action_row.compress_default(next_terminal);
             for (nonterminal, &(target, replace)) in child.goto[child_state as usize].iter() {
                 let target = remap_state(
                     target,
@@ -688,8 +709,17 @@ pub fn compose_subgrammar_tables(
             action[merged_state] = mapped_action_row;
             goto[merged_state] = mapped_goto_row;
         }
+        if let Some(started_at) = row_transport_started_at {
+            eprintln!(
+                "[glrmask/profile][subgrammar_table_row_transport] child={} states={} ms={:.3}",
+                child_index,
+                child.num_states,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         for &(caller_state, placeholder_target, placeholder_replace) in &call_sites {
+            rows_needing_compress.insert(caller_state as usize);
             action[caller_state as usize].remove(&child_input.placeholder_terminal);
             for (terminal, child_action) in child.action[child_start as usize].iter() {
                 let mapped_action = remap_action(
@@ -754,6 +784,7 @@ pub fn compose_subgrammar_tables(
                 child_input.ignore_terminal,
                 child_scope_phase.get(&caller_state),
             ) {
+                rows_needing_compress.insert(phase_state as usize);
                 let scoped_ignore = local_ignore + terminal_offset;
                 // Consuming the first child-scope ignore refines only the state
                 // identity; it must not change LR stack depth.
@@ -919,11 +950,32 @@ pub fn compose_subgrammar_tables(
         direct_regular_wide_frontiers,
     };
     let _ = terminal_display_suffixes;
+    let advance_started_at = profile.then(Instant::now);
     table.rebuild_advance_rows_from_actions();
+    let advance_ms = advance_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let unconditional_started_at = profile.then(Instant::now);
     table.rebuild_unconditional_advance_rows();
-    table.rebuild_guarded_shift_index();
-    table.compress_default_action_rows();
+    let unconditional_ms = unconditional_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let guarded_started_at = profile.then(Instant::now);
+    if source_has_guarded_stack_shifts {
+        table.rebuild_guarded_shift_index();
+    } else {
+        table.guarded_shift_index = vec![Default::default(); table.num_states as usize];
+    }
+    let guarded_ms = guarded_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let compress_started_at = profile.then(Instant::now);
+    for state in rows_needing_compress {
+        table.action[state].compress_default(table.num_terminals);
+    }
+    let compress_ms = compress_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     table.set_embedded_start_nullable(result_start_nullable);
+    if let Some(started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][subgrammar_table_compose] states={} advance_ms={advance_ms:.3} unconditional_ms={unconditional_ms:.3} guarded_ms={guarded_ms:.3} compress_ms={compress_ms:.3} total_ms={:.3}",
+            table.num_states,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(ComposedTable {
         table,

@@ -364,15 +364,22 @@ impl GLRTable {
     }
 
     pub fn rebuild_advance_rows_from_actions(&mut self) {
-        self.advance = action_presence_rows(&self.action, self.num_terminals);
+        if rayon::current_num_threads() == 1 || self.action.len() < 128 {
+            self.advance = action_presence_rows(&self.action, self.num_terminals);
+        } else {
+            use rayon::prelude::*;
+            let num_terminals = self.num_terminals;
+            self.advance = self
+                .action
+                .par_iter()
+                .map(|row| action_presence_row(row, num_terminals))
+                .collect();
+        }
     }
 
     pub fn rebuild_unconditional_advance_rows(&mut self) {
         let terminal_count = self.num_terminals as usize;
-        self.unconditional_advance = self
-            .action
-            .iter()
-            .map(|row| {
+        let build_row = |row: &ActionRow| {
                 let mut admitted = BitSet::new(terminal_count);
                 for (terminal, action) in row.iter() {
                     let unconditional = match action {
@@ -390,8 +397,13 @@ impl GLRTable {
                     }
                 }
                 admitted
-            })
-            .collect();
+            };
+        if rayon::current_num_threads() == 1 || self.action.len() < 128 {
+            self.unconditional_advance = self.action.iter().map(build_row).collect();
+        } else {
+            use rayon::prelude::*;
+            self.unconditional_advance = self.action.par_iter().map(build_row).collect();
+        }
     }
 
     #[inline]
@@ -402,9 +414,7 @@ impl GLRTable {
     }
 
     pub fn rebuild_guarded_shift_index(&mut self) {
-        self.guarded_shift_index = vec![FxHashMap::default(); self.num_states as usize];
-
-        for (state, row) in self.action.iter().enumerate() {
+        let build_row = |row: &ActionRow| {
             let mut index_row = FxHashMap::default();
 
             for (terminal, action) in row {
@@ -449,7 +459,13 @@ impl GLRTable {
                 );
             }
 
-            self.guarded_shift_index[state] = index_row;
+            index_row
+        };
+        if rayon::current_num_threads() == 1 || self.action.len() < 128 {
+            self.guarded_shift_index = self.action.iter().map(build_row).collect();
+        } else {
+            use rayon::prelude::*;
+            self.guarded_shift_index = self.action.par_iter().map(build_row).collect();
         }
     }
 
