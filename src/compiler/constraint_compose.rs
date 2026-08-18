@@ -139,9 +139,31 @@ const NO_PARSER_DOMAIN_LABEL: i32 = i32::MAX;
 
 #[derive(Debug, Clone)]
 struct ParserDefaultDomain {
+    /// Fallback label for exact component-owned states that had no pre-existing
+    /// symbolic parser-domain label in the cached component.
     label: i32,
+    base_has_states: bool,
+    /// Cached/nested symbolic fallback label -> refined outer fallback label.
+    ///
+    /// A nested constraint already uses lookup order
+    /// `concrete -> nested-domain -> DEFAULT`.  When it is linked again we do
+    /// not need to expand that nested domain back to thousands of concrete LR
+    /// labels.  Instead, split this component's outer DEFAULT domain by the
+    /// cached nested-domain partition.  Every composed parser state still has
+    /// exactly one runtime fallback label; row construction resolves
+    /// nested-domain-over-DEFAULT precedence onto that refined label.
+    nested_labels: BTreeMap<i32, i32>,
     states: BitSet,
     predicted_saved_edges: usize,
+}
+
+impl ParserDefaultDomain {
+    fn output_labels(&self) -> impl Iterator<Item = i32> + '_ {
+        self.base_has_states
+            .then_some(self.label)
+            .into_iter()
+            .chain(self.nested_labels.values().copied())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -279,9 +301,32 @@ fn build_parser_default_domain_plan(
     };
     let symbolic_parent_defaults = force_parent_defaults || child_feature_selected;
     let first_domain_component = usize::from(!symbolic_parent_defaults);
-    let max_domains = components.len().saturating_sub(first_domain_component);
+    let required_domain_labels = (first_domain_component..components.len())
+        .map(|component_index| {
+            let component = components[component_index];
+            let mut nested = BTreeSet::<i32>::new();
+            let mut has_base = false;
+            for (local, &multiplicity) in local_multiplicities[component_index].iter().enumerate() {
+                if multiplicity == 0 {
+                    continue;
+                }
+                let source_domain = component
+                    .constraint
+                    .parser_state_domain_labels
+                    .get(local)
+                    .copied()
+                    .unwrap_or(NO_PARSER_DOMAIN_LABEL);
+                if source_domain == NO_PARSER_DOMAIN_LABEL {
+                    has_base = true;
+                } else {
+                    nested.insert(source_domain);
+                }
+            }
+            nested.len() + usize::from(has_base)
+        })
+        .sum::<usize>();
     let labels_fit = (num_parser_states as i64)
-        .saturating_add(max_domains as i64)
+        .saturating_add(required_domain_labels as i64)
         < DEFAULT_LABEL as i64;
     let mut next_label = num_parser_states as i32;
     let mut component_domains = vec![None; components.len()];
@@ -298,15 +343,57 @@ fn build_parser_default_domain_plan(
             if predicted == 0 {
                 continue;
             }
-            let label = next_label;
-            next_label += 1;
             let mut states = BitSet::new(n);
+            let mut nested_source_labels = BTreeSet::<i32>::new();
+            let mut base_has_states = false;
+            for (local, &multiplicity) in local_multiplicities[component_index].iter().enumerate() {
+                if multiplicity == 0 {
+                    continue;
+                }
+                let source_domain = components[component_index]
+                    .constraint
+                    .parser_state_domain_labels
+                    .get(local)
+                    .copied()
+                    .unwrap_or(NO_PARSER_DOMAIN_LABEL);
+                if source_domain == NO_PARSER_DOMAIN_LABEL {
+                    base_has_states = true;
+                } else {
+                    nested_source_labels.insert(source_domain);
+                }
+            }
+            // Keep one stable base label even when every uniquely-owned state
+            // belongs to a nested domain; it simplifies the transport plan and
+            // is never emitted/installed when `base_has_states` is false.
+            let label = next_label;
+            if base_has_states {
+                next_label += 1;
+            }
+            let mut nested_labels = BTreeMap::<i32, i32>::new();
+            for source_label in nested_source_labels {
+                let output_label = next_label;
+                next_label += 1;
+                nested_labels.insert(source_label, output_label);
+            }
             for state in 0..n {
                 if preimage_count[state] == 1
                     && owner_component[state] == component_index as u32
                 {
                     states.set(state);
-                    parser_state_labels[state] = label;
+                    let local = owner_local[state] as usize;
+                    let source_domain = components[component_index]
+                        .constraint
+                        .parser_state_domain_labels
+                        .get(local)
+                        .copied()
+                        .unwrap_or(NO_PARSER_DOMAIN_LABEL);
+                    parser_state_labels[state] = if source_domain == NO_PARSER_DOMAIN_LABEL {
+                        label
+                    } else {
+                        *nested_labels
+                            .get(&source_domain)
+                            .expect("nested source domain was inventoried above")
+                    };
                 }
             }
             if states.is_empty() {
@@ -315,6 +402,8 @@ fn build_parser_default_domain_plan(
             predicted_saved_edges = predicted_saved_edges.saturating_add(predicted);
             component_domains[component_index] = Some(ParserDefaultDomain {
                 label,
+                base_has_states,
+                nested_labels,
                 states,
                 predicted_saved_edges: predicted,
             });
@@ -866,6 +955,42 @@ fn add_component_parser_state_transitions(
         if label == DEFAULT_LABEL {
             continue;
         }
+        if let Some(domain) = default_domain
+            && let Some(&refined_label) = domain.nested_labels.get(&label)
+        {
+            // Preserve the cached inner symbolic domain for all local states
+            // that remain uniquely owned after this outer composition.
+            nwa.add_transition(
+                source_state,
+                refined_label,
+                *target,
+                weight.clone(),
+            );
+            // Any local member of the inner domain that is not in the exact
+            // outer symbolic domain still needs its ordinary concrete edge.
+            for local_state in concrete_local_parser_states_for_label(
+                label as u32,
+                parser_state_relation,
+                parser_state_domain_labels,
+            )? {
+                for &mapped_state in parser_state_relation
+                    .get(local_state as usize)
+                    .ok_or_else(|| {
+                        format!("parser-state relation omits local state {local_state}")
+                    })?
+                {
+                    if !domain.states.contains(mapped_state as usize) {
+                        nwa.add_transition(
+                            source_state,
+                            encode_positive_label(mapped_state),
+                            *target,
+                            weight.clone(),
+                        );
+                    }
+                }
+            }
+            continue;
+        }
         add_transition_for_mapped_label(
             nwa,
             source_state,
@@ -881,11 +1006,25 @@ fn add_component_parser_state_transitions(
         return Ok(());
     };
     if let Some(domain) = default_domain {
-        // One synthetic positive symbol denotes precisely the unambiguous
-        // composed states owned by this child. Concrete transitions are looked
-        // up before this fallback at runtime, preserving explicit-over-default
-        // precedence exactly.
-        nwa.add_transition(source_state, domain.label, *target, weight.clone());
+        // One refined symbolic label denotes each exact nested-domain class,
+        // plus an optional base class for states with no cached inner domain.
+        // If the source row already has an explicit nested-domain transition,
+        // that transition wins; otherwise the source DEFAULT is installed on
+        // the refined nested label. This compiles the lookup chain
+        // `concrete -> inner domain -> DEFAULT` into a single outer fallback.
+        if domain.base_has_states {
+            nwa.add_transition(source_state, domain.label, *target, weight.clone());
+        }
+        for (&source_domain, &refined_label) in &domain.nested_labels {
+            if !source.transitions.contains_key(&source_domain) {
+                nwa.add_transition(
+                    source_state,
+                    refined_label,
+                    *target,
+                    weight.clone(),
+                );
+            }
+        }
     }
     for local_state in 0..num_local_parser_states {
         if explicit_positive.contains(&local_state) {
@@ -1027,6 +1166,33 @@ fn component_parser_nwa(
             }
             nwa.start_states_mut().push(start);
         }
+    }
+    if compose_profile_enabled() {
+        let stored_domain_counts = constraint
+            .parser_state_domain_labels
+            .iter()
+            .copied()
+            .filter(|&label| label != NO_PARSER_DOMAIN_LABEL)
+            .fold(BTreeMap::<i32, usize>::new(), |mut counts, label| {
+                *counts.entry(label).or_default() += 1;
+                counts
+            });
+        eprintln!(
+            "[glrmask/profile][constraint_component_parser_transport_shape] source_states={} source_transitions={} source_default_states={} stored_domain_states={} stored_domains={:?} mapped_states={} mapped_transitions={} symbolic_default={} relation_singleton={}",
+            source.num_states(),
+            source.num_transitions(),
+            source
+                .states()
+                .iter()
+                .filter(|state| state.transitions.contains_key(&DEFAULT_LABEL))
+                .count(),
+            stored_domain_counts.values().sum::<usize>(),
+            stored_domain_counts,
+            nwa.num_states(),
+            nwa.num_transitions(),
+            default_domain.is_some(),
+            component.parser_state_relation.iter().all(|targets| targets.len() == 1),
+        );
     }
     Ok(nwa)
 }
@@ -12155,7 +12321,7 @@ pub(crate) fn compose_constraints_owned_parent(
         .component_domains
         .iter()
         .flatten()
-        .map(|domain| domain.label)
+        .flat_map(ParserDefaultDomain::output_labels)
         .collect::<Vec<_>>();
     let union_started_at = Instant::now();
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
@@ -12874,6 +13040,8 @@ mod tests {
         }
         let domain = ParserDefaultDomain {
             label: 30,
+            base_has_states: true,
+            nested_labels: BTreeMap::new(),
             states: domain_states,
             predicted_saved_edges: 3,
         };
