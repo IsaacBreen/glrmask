@@ -11143,7 +11143,12 @@ pub(crate) fn compose_constraints(
     };
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
-    let structural_report = if structural_sharing_enabled() {
+    // Structural sharing is an optional exact quotient. With only one child
+    // there are no duplicate sibling parser regions to coalesce, while the
+    // full terminal/nonterminal bisimulation scan is material on large links.
+    // Skip that pure optimization unless at least two child components exist.
+    let attempt_structural_sharing = structural_sharing_enabled() && children.len() > 1;
+    let structural_report = if attempt_structural_sharing {
         let terminal_analysis = composition_terminal_classes(parent, children, &composed_table);
         let nonterminal_classes = structural_nonterminal_classes(
             &composed_table.table,
@@ -11180,7 +11185,7 @@ pub(crate) fn compose_constraints(
     if compose_profile_enabled() {
         eprintln!(
             "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} terminal_structural_matches={} terminal_exact_checks={} terminal_exact_unknown={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
-            structural_sharing_enabled(),
+            attempt_structural_sharing,
             structural_report.terminal_aliases,
             structural_report.terminal_structural_matches,
             structural_report.terminal_exact_checks,
@@ -11852,7 +11857,8 @@ pub(crate) fn compose_constraints_owned_parent(
     };
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
-    let structural_report = if structural_sharing_enabled() {
+    let attempt_structural_sharing = structural_sharing_enabled() && children.len() > 1;
+    let structural_report = if attempt_structural_sharing {
         let terminal_analysis = composition_terminal_classes(&parent, children, &composed_table);
         let nonterminal_classes = structural_nonterminal_classes(
             &composed_table.table,
@@ -11889,7 +11895,7 @@ pub(crate) fn compose_constraints_owned_parent(
     if compose_profile_enabled() {
         eprintln!(
             "[glrmask/profile][constraint_structural_sharing] enabled={} terminal_aliases={} terminal_structural_matches={} terminal_exact_checks={} terminal_exact_unknown={} nonterminals_before={} nonterminal_classes={} contextual_candidate_groups={} contextual_saved_states={} states_before={} states_after={} saved_states={} total_ms={:.3}",
-            structural_sharing_enabled(),
+            attempt_structural_sharing,
             structural_report.terminal_aliases,
             structural_report.terminal_structural_matches,
             structural_report.terminal_exact_checks,
