@@ -1446,77 +1446,92 @@ fn build_possible_outgoing_ids_by_state(
 
     let num_parser_states = num_parser_states as usize;
     let all_parser_states = BitSet::all(num_parser_states);
-    let state_outgoing_ids: Vec<OutgoingIds> = parser_nwa
-        .states()
-        .iter()
-        .map(|state| {
-            let mut ids = Vec::new();
-            for &label in state.transitions.keys() {
-                if label == DEFAULT_LABEL {
-                    return OutgoingIds::All;
-                }
-                if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
-                    ids.push(parser_state_id);
-                }
-            }
-            if ids.is_empty() {
-                OutgoingIds::Empty
-            } else {
-                OutgoingIds::Some(ids)
-            }
-        })
-        .collect();
+    let parallel = rayon::current_num_threads() > 1
+        && parser_nwa.states().len()
+            >= std::env::var("GLRMASK_POSSIBLE_OUTGOING_PARALLEL_MIN_NWA_STATES")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(4_096)
+        && std::env::var_os("GLRMASK_DISABLE_PARALLEL_POSSIBLE_OUTGOING").is_none();
 
-    state_supports
-        .iter()
-        .map(|support| {
-            if support.len() == 1 {
-                let state_id = support[0] as usize;
-                return match state_outgoing_ids.get(state_id) {
-                    Some(OutgoingIds::Empty) => PossibleOutgoingIds::Empty,
-                    Some(OutgoingIds::All) => PossibleOutgoingIds::All,
-                    Some(OutgoingIds::Some(ids)) => {
-                        let mut bitset = BitSet::new(num_parser_states);
-                        for &parser_state_id in ids {
-                            bitset.set(parser_state_id as usize);
-                        }
-                        if bitset == all_parser_states {
-                            PossibleOutgoingIds::All
-                        } else {
-                            PossibleOutgoingIds::Some(bitset)
-                        }
+    let summarize_state = |state: &crate::automata::weighted::nwa::NWAState| {
+        let mut ids = Vec::new();
+        for &label in state.transitions.keys() {
+            if label == DEFAULT_LABEL {
+                return OutgoingIds::All;
+            }
+            if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
+                ids.push(parser_state_id);
+            }
+        }
+        if ids.is_empty() {
+            OutgoingIds::Empty
+        } else {
+            OutgoingIds::Some(ids)
+        }
+    };
+
+    let state_outgoing_ids: Vec<OutgoingIds> = if parallel {
+        use rayon::prelude::*;
+        parser_nwa.states().par_iter().map(summarize_state).collect()
+    } else {
+        parser_nwa.states().iter().map(summarize_state).collect()
+    };
+
+    let summarize_support = |support: &Vec<u32>| {
+        if support.len() == 1 {
+            let state_id = support[0] as usize;
+            return match state_outgoing_ids.get(state_id) {
+                Some(OutgoingIds::Empty) => PossibleOutgoingIds::Empty,
+                Some(OutgoingIds::All) => PossibleOutgoingIds::All,
+                Some(OutgoingIds::Some(ids)) => {
+                    let mut bitset = BitSet::new(num_parser_states);
+                    for &parser_state_id in ids {
+                        bitset.set(parser_state_id as usize);
                     }
-                    None => PossibleOutgoingIds::Empty,
-                };
-            }
-
-            let mut ids = BitSet::new(num_parser_states);
-            for &state_id in support {
-                let Some(state_ids) = state_outgoing_ids.get(state_id as usize) else {
-                    continue;
-                };
-                match state_ids {
-                    OutgoingIds::Empty => {}
-                    OutgoingIds::All => return PossibleOutgoingIds::All,
-                    OutgoingIds::Some(state_ids) => {
-                        for &parser_state_id in state_ids {
-                            ids.set(parser_state_id as usize);
-                        }
-                        if ids == all_parser_states {
-                            break;
-                        }
+                    if bitset == all_parser_states {
+                        PossibleOutgoingIds::All
+                    } else {
+                        PossibleOutgoingIds::Some(bitset)
                     }
                 }
+                None => PossibleOutgoingIds::Empty,
+            };
+        }
+
+        let mut ids = BitSet::new(num_parser_states);
+        for &state_id in support {
+            let Some(state_ids) = state_outgoing_ids.get(state_id as usize) else {
+                continue;
+            };
+            match state_ids {
+                OutgoingIds::Empty => {}
+                OutgoingIds::All => return PossibleOutgoingIds::All,
+                OutgoingIds::Some(state_ids) => {
+                    for &parser_state_id in state_ids {
+                        ids.set(parser_state_id as usize);
+                    }
+                    if ids == all_parser_states {
+                        break;
+                    }
+                }
             }
-            if ids.is_empty() {
-                PossibleOutgoingIds::Empty
-            } else if ids == all_parser_states {
-                PossibleOutgoingIds::All
-            } else {
-                PossibleOutgoingIds::Some(ids)
-            }
-        })
-        .collect()
+        }
+        if ids.is_empty() {
+            PossibleOutgoingIds::Empty
+        } else if ids == all_parser_states {
+            PossibleOutgoingIds::All
+        } else {
+            PossibleOutgoingIds::Some(ids)
+        }
+    };
+
+    if parallel && state_supports.len() >= 1_024 {
+        use rayon::prelude::*;
+        state_supports.par_iter().map(summarize_support).collect()
+    } else {
+        state_supports.iter().map(summarize_support).collect()
+    }
 }
 
 fn local_epsilon_closure(
