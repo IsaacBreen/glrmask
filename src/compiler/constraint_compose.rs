@@ -5013,6 +5013,20 @@ fn direct_boundary_terminal_automaton(
         }
     }
 
+    if let Some(plan) = delta_plan
+        && plan.by_global_terminal.is_empty()
+        && plan.unsafe_terminals.is_empty()
+    {
+        assert_eq!(
+            delta_complex_lane_starts, 0,
+            "empty boundary delta plan must not produce a productive local-complex repair lane",
+        );
+        assert_eq!(
+            delta_single_lane_starts, 0,
+            "empty boundary delta plan must not produce a productive local-delta repair lane",
+        );
+    }
+
     let start_weights_by_canonical = start_tokens_by_canonical
         .into_iter()
         .map(|(canonical, tokens_by_tsid)| {
@@ -9623,6 +9637,7 @@ fn try_build_changed_parent_templates_for_terminal_count(
     components: &[&Constraint],
     num_terminals: u32,
     scoped_ignore_terminals: &BitSet,
+    need_concrete_delta: bool,
 ) -> Option<EagerChangedParentTemplates> {
     let started_at = Instant::now();
     let parent = *components.first()?;
@@ -9740,8 +9755,6 @@ fn try_build_changed_parent_templates_for_terminal_count(
     // than serializing another full DFA-difference pass after the 140 boundary
     // tokens are known.
     let delta_started_at = Instant::now();
-    let need_concrete_delta =
-        std::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none();
     let delta_results = if need_concrete_delta {
         changed_parent
             .par_iter()
@@ -12027,6 +12040,14 @@ fn build_boundary_repair(
         && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()
         && std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+    // In the cross-only factor every accepted repair word has a parser-visible
+    // component ownership switch.  The transported component union A contains
+    // only component-local words, so no per-terminal `New \ Old` factor is
+    // required for B.  Keep an explicit *empty* delta plan (rather than omitting
+    // the plan) so the terminal-factor builder mechanically retains only its
+    // `CrossedFull` lane; with no changed/unsafe terminals both local lanes are
+    // unproductive by construction.
+    let cross_only_trivial_delta = fast_component_grammar_splice;
     let analyzed_started_at = Instant::now();
     let (analyzed, spliced_allowed_follows, spliced_base_interface_pairs) =
         if fast_component_grammar_splice {
@@ -12320,6 +12341,7 @@ fn build_boundary_repair(
                             components,
                             analyzed.num_terminals,
                             &ignore_terminals.scoped,
+                            !cross_only_trivial_delta,
                         )
                     }).flatten(),
                 )
@@ -12581,11 +12603,6 @@ fn build_boundary_repair(
                 }
             }
             let delta_plan_started_at = Instant::now();
-            let cross_only_trivial_delta = std::env::var_os(
-                "GLRMASK_EXPERIMENT_CROSS_ONLY_TRIVIAL_DELTA_PLAN",
-            )
-            .is_some()
-                && cross_only_boundary;
             let plan = if cross_only_trivial_delta {
                 ConcreteBoundaryDeltaPlan {
                     original_num_terminals: analyzed.num_terminals,
