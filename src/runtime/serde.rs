@@ -1719,9 +1719,21 @@ impl Constraint {
             || packed_dwa_wire_len
                 .is_some_and(|len| len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES);
         const DIRECT_TOKENIZER_MIN_BYTES: usize = 400 * 1024;
+        // TKF2 is deliberately load-oriented: one byte label plus a fixed-width
+        // target per transition. That is excellent for normal tokenizers, but
+        // a very large DFA with >u16::MAX states can expand dramatically. Keep
+        // the old packed/varint tokenizer wire as a size-adaptive escape hatch.
+        const FAST_TOKENIZER_MAX_BYTES: usize = 64 * 1024 * 1024;
+        let estimated_fast_tokenizer_len =
+            crate::automata::lexer::tokenizer::artifact_serde::estimated_fast_len(&self.tokenizer);
+        let compact_tokenizer = estimated_fast_tokenizer_len > FAST_TOKENIZER_MAX_BYTES;
+        let fast_tokenizer_len =
+            crate::automata::lexer::tokenizer::artifact_serde::fast_len(&self.tokenizer);
+        let preserve_compressed_tokenizer = compact_tokenizer && fast_tokenizer_len.is_none();
         let direct_tokenizer_len = parallel_assembly_candidate
-            .then(|| crate::automata::lexer::tokenizer::artifact_serde::fast_len(&self.tokenizer))
+            .then_some(fast_tokenizer_len)
             .flatten()
+            .filter(|_| !compact_tokenizer)
             .filter(|&len| len >= DIRECT_TOKENIZER_MIN_BYTES);
         let ((token_bytes, (original_token_map, (tokenizer, internal_token_buf_masks))), ((weight_pool, core), (dwa, table, runtime, token_mask_cache))) = rayon::join(
             || rayon::join(
@@ -1755,7 +1767,15 @@ impl Constraint {
                     || rayon::join(
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = if direct_tokenizer_len.is_some() {
+                            let bytes = if preserve_compressed_tokenizer {
+                                crate::automata::lexer::tokenizer::artifact_serde::to_segment_bytes(
+                                    &self.tokenizer,
+                                )
+                            } else if compact_tokenizer {
+                                crate::automata::lexer::tokenizer::artifact_serde::to_packed_bytes(
+                                    &self.tokenizer,
+                                )
+                            } else if direct_tokenizer_len.is_some() {
                                 Vec::new()
                             } else {
                                 crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(

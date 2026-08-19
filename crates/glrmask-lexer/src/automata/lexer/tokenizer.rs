@@ -1,4 +1,4 @@
-//! Runtime-facing tokenizer API built on top of the lexer DFA.
+﻿//! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
@@ -543,9 +543,47 @@ pub mod artifact_serde {
         }
     }
 
+    /// Estimated eventual TKF2 wire length without materializing compressed
+    /// transition segments. The estimate is exact because compressed segments
+    /// retain their expanded transition counts while all state metadata stays
+    /// resident in the DFA.
+    pub fn estimated_fast_len(tokenizer: &Tokenizer) -> usize {
+        const HEADER_LEN: usize = 32;
+        let states = tokenizer.dfa.states();
+        let state_count = states.len();
+        let transition_count = tokenizer.transition_count();
+        let epsilon_count = states
+            .iter()
+            .map(|state| state.epsilon_transitions.len())
+            .sum::<usize>();
+        let finalizer_count = states
+            .iter()
+            .map(|state| state.finalizers.iter().count())
+            .sum::<usize>();
+        let future_count = states
+            .iter()
+            .map(|state| state.possible_future_group_ids.iter().count())
+            .sum::<usize>();
+        let terminal_count = tokenizer.num_terminals as usize;
+        let state_id_width = if state_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+        let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+        let offsets_bytes = (state_count + 1) * 4;
+        HEADER_LEN
+            + terminal_count * 32
+            + offsets_bytes
+            + transition_count
+            + transition_count * state_id_width
+            + offsets_bytes
+            + epsilon_count * state_id_width
+            + offsets_bytes
+            + finalizer_count * terminal_id_width
+            + offsets_bytes
+            + future_count * terminal_id_width
+    }
+
     /// Exact TKF2 wire length without constructing the wire buffer. Returns
     /// `None` only for the uncommon compressed-segment representation, whose
-    /// exact static wire requires materializing those segments first.
+    /// direct writer requires materialized transition rows.
     pub fn fast_len(tokenizer: &Tokenizer) -> Option<usize> {
         tokenizer
             .compressed_transition_segments
@@ -702,6 +740,337 @@ pub mod artifact_serde {
         out
     }
 
+    const PACKED_WIRE_MAGIC: &[u8; 4] = b"TKP1";
+    const SEGMENT_WIRE_MAGIC: &[u8; 4] = b"TKS2";
+
+    struct PackedWireRef<'a>(&'a Tokenizer);
+
+    impl Serialize for PackedWireRef<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            packed_artifact_serde::serialize(self.0, serializer)
+        }
+    }
+
+    struct PackedWireOwned(Tokenizer);
+
+    impl<'de> Deserialize<'de> for PackedWireOwned {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            packed_artifact_serde::deserialize(deserializer).map(Self)
+        }
+    }
+
+    /// Compact current tokenizer wire for exceptionally large DFAs. The
+    /// historical packed codec interns repeated byte rows and varint-encodes
+    /// targets, avoiding TKF2's fixed-width expansion when state ids require
+    /// four bytes.
+    pub fn to_packed_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PACKED_WIRE_MAGIC);
+        bincode::serialize_into(&mut out, &PackedWireRef(tokenizer))
+            .expect("packed tokenizer serialization should succeed");
+        out
+    }
+
+    fn from_packed_bytes(input: &[u8]) -> Result<Tokenizer, String> {
+        let body = input
+            .strip_prefix(PACKED_WIRE_MAGIC)
+            .ok_or_else(|| "invalid packed tokenizer header".to_owned())?;
+        bincode::deserialize::<PackedWireOwned>(body)
+            .map(|wire| wire.0)
+            .map_err(|err| err.to_string())
+    }
+
+    /// Persist an already-compressed tokenizer without expanding its byte-class
+    /// transition segments. State metadata uses the same flat CSR shape as the
+    /// fast tokenizer wire, while only transition rows outside compressed
+    /// segments are stored explicitly.
+    pub fn to_segment_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
+        const HEADER_LEN: usize = 36;
+        let states = tokenizer.dfa.states();
+        let state_count = states.len();
+        let state_id_width = if state_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+        let terminal_count = tokenizer.num_terminals as usize;
+        let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+
+        let mut compressed = vec![false; state_count];
+        for segment in tokenizer.compressed_transition_segments.iter() {
+            let start = segment.state_offset as usize;
+            let end = start.saturating_add(segment.state_count as usize).min(state_count);
+            compressed[start..end].fill(true);
+        }
+        let residual_transition_count = states
+            .iter()
+            .enumerate()
+            .filter(|(state, _)| !compressed[*state])
+            .map(|(_, state)| state.transitions.len())
+            .sum::<usize>();
+        let epsilon_count = states.iter().map(|state| state.epsilon_transitions.len()).sum::<usize>();
+        let finalizer_count = states
+            .iter()
+            .map(|state| state.finalizers.iter().count())
+            .sum::<usize>();
+        let future_count = states
+            .iter()
+            .map(|state| state.possible_future_group_ids.iter().count())
+            .sum::<usize>();
+        let segment_blob = bincode::serialize(tokenizer.compressed_transition_segments.as_ref())
+            .expect("compressed tokenizer segments should serialize");
+        let offsets_bytes = (state_count + 1) * 4;
+        let len = HEADER_LEN
+            + terminal_count * 32
+            + offsets_bytes
+            + residual_transition_count
+            + residual_transition_count * state_id_width
+            + offsets_bytes
+            + epsilon_count * state_id_width
+            + offsets_bytes
+            + finalizer_count * terminal_id_width
+            + offsets_bytes
+            + future_count * terminal_id_width
+            + segment_blob.len();
+        let mut out = Vec::with_capacity(len);
+        out.extend_from_slice(SEGMENT_WIRE_MAGIC);
+        for value in [
+            tokenizer.num_terminals,
+            state_count as u32,
+            residual_transition_count as u32,
+            epsilon_count as u32,
+            finalizer_count as u32,
+            future_count as u32,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(segment_blob.len() as u64).to_le_bytes());
+        debug_assert_eq!(out.len(), HEADER_LEN);
+        for terminal in 0..terminal_count {
+            for word in tokenizer.dfa.group_id_to_u8set(terminal as u32).to_words() {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let put_id = |out: &mut Vec<u8>, value: u32, width: usize| match width {
+            2 => out.extend_from_slice(&(value as u16).to_le_bytes()),
+            4 => out.extend_from_slice(&value.to_le_bytes()),
+            _ => unreachable!(),
+        };
+        let mut end = 0u32;
+        out.extend_from_slice(&end.to_le_bytes());
+        for (index, state) in states.iter().enumerate() {
+            if !compressed[index] {
+                end += state.transitions.len() as u32;
+            }
+            out.extend_from_slice(&end.to_le_bytes());
+        }
+        for (index, state) in states.iter().enumerate() {
+            if !compressed[index] {
+                out.extend(state.transitions.iter().map(|(byte, _)| byte));
+            }
+        }
+        for (index, state) in states.iter().enumerate() {
+            if !compressed[index] {
+                for &target in state.transitions.values() {
+                    put_id(&mut out, target, state_id_width);
+                }
+            }
+        }
+        let mut put_sparse = |counts: &mut dyn Iterator<Item = usize>, ids: &mut dyn Iterator<Item = u32>, width: usize| {
+            let mut end = 0u32;
+            out.extend_from_slice(&end.to_le_bytes());
+            for count in counts {
+                end += count as u32;
+                out.extend_from_slice(&end.to_le_bytes());
+            }
+            for id in ids {
+                put_id(&mut out, id, width);
+            }
+        };
+        put_sparse(
+            &mut states.iter().map(|state| state.epsilon_transitions.len()),
+            &mut states.iter().flat_map(|state| state.epsilon_transitions.iter().copied()),
+            state_id_width,
+        );
+        put_sparse(
+            &mut states.iter().map(|state| state.finalizers.iter().count()),
+            &mut states.iter().flat_map(|state| state.finalizers.iter().map(|id| id as u32)),
+            terminal_id_width,
+        );
+        put_sparse(
+            &mut states.iter().map(|state| state.possible_future_group_ids.iter().count()),
+            &mut states
+                .iter()
+                .flat_map(|state| state.possible_future_group_ids.iter().map(|id| id as u32)),
+            terminal_id_width,
+        );
+        out.extend_from_slice(&segment_blob);
+        debug_assert_eq!(out.len(), len);
+        out
+    }
+
+    fn from_segment_bytes(input: &[u8]) -> Result<Tokenizer, String> {
+        const HEADER_LEN: usize = 36;
+        if input.len() < HEADER_LEN || !input.starts_with(SEGMENT_WIRE_MAGIC) {
+            return Err("invalid compressed tokenizer header".to_owned());
+        }
+        let mut pos = 4usize;
+        let take_u32 = |input: &[u8], pos: &mut usize| -> Result<u32, String> {
+            let end = pos.checked_add(4).ok_or_else(|| "compressed tokenizer offset overflow".to_owned())?;
+            let bytes = input.get(*pos..end).ok_or_else(|| "truncated compressed tokenizer".to_owned())?;
+            *pos = end;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let num_terminals = take_u32(input, &mut pos)?;
+        let state_count = take_u32(input, &mut pos)? as usize;
+        let residual_transition_count = take_u32(input, &mut pos)? as usize;
+        let epsilon_count = take_u32(input, &mut pos)? as usize;
+        let finalizer_count = take_u32(input, &mut pos)? as usize;
+        let future_count = take_u32(input, &mut pos)? as usize;
+        let segment_len_end = pos + 8;
+        let segment_blob_len = u64::from_le_bytes(
+            input.get(pos..segment_len_end)
+                .ok_or_else(|| "truncated compressed tokenizer segment length".to_owned())?
+                .try_into().unwrap(),
+        ) as usize;
+        pos = segment_len_end;
+        if state_count == 0 {
+            return Err("compressed tokenizer has no states".to_owned());
+        }
+        let state_id_width = if state_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+        let terminal_count = num_terminals as usize;
+        let terminal_id_width = if terminal_count <= u16::MAX as usize + 1 { 2 } else { 4 };
+        let mut group_id_to_u8set = Vec::with_capacity(terminal_count);
+        for _ in 0..terminal_count {
+            let mut words = [0u64; 4];
+            for word in &mut words {
+                let end = pos + 8;
+                *word = u64::from_le_bytes(
+                    input.get(pos..end)
+                        .ok_or_else(|| "truncated compressed tokenizer groups".to_owned())?
+                        .try_into().unwrap(),
+                );
+                pos = end;
+            }
+            group_id_to_u8set.push(U8Set::from_words(words));
+        }
+        let read_u32_vec = |input: &[u8], pos: &mut usize, count: usize| -> Result<Vec<u32>, String> {
+            let bytes_len = count.checked_mul(4).ok_or_else(|| "compressed tokenizer vector overflow".to_owned())?;
+            let end = pos.checked_add(bytes_len).ok_or_else(|| "compressed tokenizer offset overflow".to_owned())?;
+            let bytes = input.get(*pos..end).ok_or_else(|| "truncated compressed tokenizer vector".to_owned())?;
+            let mut out = Vec::with_capacity(count);
+            out.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())));
+            *pos = end;
+            Ok(out)
+        };
+        let read_ids = |input: &[u8], pos: &mut usize, count: usize, width: usize| -> Result<Vec<u32>, String> {
+            let bytes_len = count.checked_mul(width).ok_or_else(|| "compressed tokenizer id vector overflow".to_owned())?;
+            let end = pos.checked_add(bytes_len).ok_or_else(|| "compressed tokenizer offset overflow".to_owned())?;
+            let bytes = input.get(*pos..end).ok_or_else(|| "truncated compressed tokenizer ids".to_owned())?;
+            let out = match width {
+                2 => bytes.chunks_exact(2).map(|b| u16::from_le_bytes(b.try_into().unwrap()) as u32).collect(),
+                4 => bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect(),
+                _ => unreachable!(),
+            };
+            *pos = end;
+            Ok(out)
+        };
+        let validate_offsets = |offsets: &[u32], count: usize, label: &str| -> Result<(), String> {
+            if offsets.len() != state_count + 1
+                || offsets.first().copied() != Some(0)
+                || offsets.last().copied() != Some(count as u32)
+                || offsets.windows(2).any(|pair| pair[0] > pair[1])
+            {
+                return Err(format!("invalid compressed tokenizer {label} offsets"));
+            }
+            Ok(())
+        };
+        let transition_offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
+        validate_offsets(&transition_offsets, residual_transition_count, "transition")?;
+        let transition_bytes_end = pos + residual_transition_count;
+        let transition_bytes = input.get(pos..transition_bytes_end)
+            .ok_or_else(|| "truncated compressed tokenizer transition bytes".to_owned())?;
+        pos = transition_bytes_end;
+        let transition_targets = read_ids(input, &mut pos, residual_transition_count, state_id_width)?;
+        if transition_targets.iter().any(|&target| target as usize >= state_count) {
+            return Err("compressed tokenizer transition target is out of range".to_owned());
+        }
+        let epsilon_offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
+        validate_offsets(&epsilon_offsets, epsilon_count, "epsilon")?;
+        let epsilon_targets = read_ids(input, &mut pos, epsilon_count, state_id_width)?;
+        if epsilon_targets.iter().any(|&target| target as usize >= state_count) {
+            return Err("compressed tokenizer epsilon target is out of range".to_owned());
+        }
+        let finalizer_offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
+        validate_offsets(&finalizer_offsets, finalizer_count, "finalizer")?;
+        let finalizers = read_ids(input, &mut pos, finalizer_count, terminal_id_width)?;
+        let future_offsets = read_u32_vec(input, &mut pos, state_count + 1)?;
+        validate_offsets(&future_offsets, future_count, "future")?;
+        let futures = read_ids(input, &mut pos, future_count, terminal_id_width)?;
+        if finalizers.iter().chain(&futures).any(|&id| id as usize >= terminal_count) {
+            return Err("compressed tokenizer terminal id is out of range".to_owned());
+        }
+        let segment_end = pos.checked_add(segment_blob_len)
+            .ok_or_else(|| "compressed tokenizer segment length overflow".to_owned())?;
+        let segment_blob = input.get(pos..segment_end)
+            .ok_or_else(|| "truncated compressed tokenizer segments".to_owned())?;
+        if segment_end != input.len() {
+            return Err("trailing bytes in compressed tokenizer".to_owned());
+        }
+        let compressed_transition_segments =
+            bincode::deserialize::<Vec<CompressedTransitionSegment>>(segment_blob)
+                .map_err(|err| err.to_string())?;
+        let mut previous_end = 0usize;
+        for segment in &compressed_transition_segments {
+            let start = segment.state_offset as usize;
+            let end = start.checked_add(segment.state_count as usize)
+                .ok_or_else(|| "compressed tokenizer segment state range overflow".to_owned())?;
+            if start < previous_end || end > state_count || segment.row_offsets.len() != segment.state_count as usize + 1 {
+                return Err("invalid compressed tokenizer segment state range".to_owned());
+            }
+            previous_end = end;
+        }
+        let mut dfa = DFA::new_from_sparse_metadata(
+            group_id_to_u8set,
+            &epsilon_offsets,
+            &epsilon_targets,
+            &finalizer_offsets,
+            &finalizers,
+            &future_offsets,
+            &futures,
+        );
+        for state in 0..state_count {
+            let a = transition_offsets[state] as usize;
+            let b = transition_offsets[state + 1] as usize;
+            if a != b {
+                dfa.set_transitions_from_sorted_entries(
+                    state as u32,
+                    transition_bytes[a..b]
+                        .iter()
+                        .copied()
+                        .zip(transition_targets[a..b].iter().copied())
+                        .collect(),
+                );
+            }
+        }
+        Ok(Tokenizer {
+            dfa,
+            num_terminals,
+            packed_runtime_transitions: None,
+            compressed_transition_segments: Arc::from(compressed_transition_segments.into_boxed_slice()),
+            exprs: None,
+            singleton_epsilon_closures: OnceLock::new(),
+            matched_terminals_cache: OnceLock::new(),
+            initial_byte_frontiers: OnceLock::new(),
+            all_self_loop_bytes_cache: OnceLock::new(),
+            transition_count_cache: OnceLock::new(),
+            forced_minimized_state_count_cache: OnceLock::new(),
+            scalar_deterministic_dispatch_cache: OnceLock::new(),
+        })
+    }
+
     pub fn from_fast_bytes(input: &[u8]) -> Result<Tokenizer, String> {
         from_fast_bytes_impl(input, None)
     }
@@ -733,6 +1102,12 @@ pub mod artifact_serde {
     ) -> Result<Tokenizer, String> {
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let total_started = profile.then(std::time::Instant::now);
+        if input.starts_with(PACKED_WIRE_MAGIC) {
+            return from_packed_bytes(input);
+        }
+        if input.starts_with(SEGMENT_WIRE_MAGIC) {
+            return from_segment_bytes(input);
+        }
         let tkf2 = input.starts_with(b"TKF2");
         if input.len() < 28 || (!tkf2 && !input.starts_with(b"TKF1")) {
             return Err("invalid fast tokenizer header".to_owned());
@@ -4422,7 +4797,7 @@ impl Tokenizer {
     /// 3. For each byte:
     ///    - Check if current state's possible futures overlap `remaining`.
     ///      If not, return `(matched, None)`.
-    ///    - Consume byte → next state.
+    ///    - Consume byte â†’ next state.
     ///    - If no transition, return `(matched, None)`.
     ///    - Get finalizers at next state, intersect with `remaining`.
     ///    - Add intersection to `matched`, remove from `remaining`.
@@ -4614,6 +4989,67 @@ mod tests {
         let loaded: Tokenizer = bincode::deserialize(&bytes).unwrap();
         assert!(loaded.exprs.is_none(), "Expr sidecars are intentionally not serialized");
         loaded
+    }
+
+    #[test]
+    fn segment_wire_roundtrips_residual_and_compressed_transitions() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(1);
+        let mut group = U8Set::empty();
+        for byte in [b'a', b'b', b'x'] {
+            group.insert(byte);
+        }
+        dfa.set_group_u8set(0, group);
+        dfa.add_transition(0, b'x', 1);
+        // Covered rows deliberately remain present in the compile-time DFA;
+        // TKS2 must omit them and recover their behavior from the segment.
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_transition(2, b'b', 3);
+        dfa.add_epsilon_transition(0, 1);
+        for state in 0..4u32 {
+            let mut futures = BitSet::new(1);
+            futures.set(0);
+            let mut finalizers = BitSet::new(1);
+            if state == 3 {
+                finalizers.set(0);
+            }
+            dfa.overwrite_state_metadata(state, finalizers, futures);
+        }
+        let mut byte_to_class = vec![u8::MAX; 256];
+        byte_to_class[b'a' as usize] = 0;
+        byte_to_class[b'b' as usize] = 1;
+        let segment = CompressedTransitionSegment {
+            state_offset: 1,
+            state_count: 3,
+            byte_to_class: Arc::from(byte_to_class.into_boxed_slice()),
+            class_members: Arc::from(
+                vec![vec![b'a'].into_boxed_slice(), vec![b'b'].into_boxed_slice()]
+                    .into_boxed_slice(),
+            ),
+            row_offsets: Arc::from(vec![0u32, 1, 2, 2].into_boxed_slice()),
+            entries: CompressedTransitionEntries::from_parts(vec![0, 1], vec![1, 2]),
+            expanded_transition_count: 2,
+        };
+        let original = Tokenizer::from_parts_with_compressed_transitions(
+            dfa,
+            1,
+            None,
+            vec![segment],
+        );
+        let wire = artifact_serde::to_segment_bytes(&original);
+        assert!(wire.starts_with(b"TKS2"));
+        let loaded = artifact_serde::from_fast_bytes(&wire).unwrap();
+        assert_eq!(loaded.compressed_transition_segments.len(), 1);
+        assert_eq!(loaded.transition_count(), original.transition_count());
+        enumerate_bytes(b"abx", 3, |input| {
+            for state in 0..original.num_states() {
+                assert_eq!(
+                    normalized_exec(&loaded, input, state),
+                    normalized_exec(&original, input, state),
+                    "TKS2 mismatch from state {state} on {input:?}",
+                );
+            }
+        });
     }
 
     #[test]
