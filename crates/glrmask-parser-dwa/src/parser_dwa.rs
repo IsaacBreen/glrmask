@@ -39,6 +39,7 @@ type FinalGroups = SmallVec<[(Weight, FinalPathWeights); 4]>;
 
 struct ParallelSupportScanScratch {
     weight_ops: ScopedWeightOpCache,
+    sparse_only: bool,
     dense: Vec<TargetContribs>,
     dense_touched: Vec<bool>,
     touched_dense: Vec<usize>,
@@ -48,10 +49,20 @@ struct ParallelSupportScanScratch {
 
 impl ParallelSupportScanScratch {
     fn new(dense_label_limit: usize) -> Self {
+        let sparse_only = std::env::var_os("GLRMASK_EXPERIMENT_PARSER_SUPPORT_SPARSE_SCAN").is_some();
         Self {
             weight_ops: ScopedWeightOpCache::default(),
-            dense: (0..dense_label_limit).map(|_| TargetContribs::new()).collect(),
-            dense_touched: vec![false; dense_label_limit],
+            sparse_only,
+            dense: if sparse_only {
+                Vec::new()
+            } else {
+                (0..dense_label_limit).map(|_| TargetContribs::new()).collect()
+            },
+            dense_touched: if sparse_only {
+                Vec::new()
+            } else {
+                vec![false; dense_label_limit]
+            },
             touched_dense: Vec::new(),
             default: TargetContribs::new(),
             sparse: FxHashMap::default(),
@@ -60,7 +71,7 @@ impl ParallelSupportScanScratch {
 
     #[inline]
     fn push(&mut self, label: i32, target: u32, weight: Weight) {
-        if label >= 0 && (label as usize) < self.dense.len() {
+        if !self.sparse_only && label >= 0 && (label as usize) < self.dense.len() {
             let index = label as usize;
             if !self.dense_touched[index] {
                 self.dense_touched[index] = true;
@@ -4191,12 +4202,12 @@ fn append_branch_fragment(
 
     // The ordinary parser compiler determinizes every multi-terminal bundle so
     // the subsequent negative-code cancellation step sees one stable local
-    // relation. A segmented runtime which deliberately keeps signed stack
-    // effects unresolved does not need that boundary: its runtime evaluator
-    // carries the NWA alternatives directly. In that mode the exact bundle
-    // language is simply the union of the weighted terminal-template NWAs.
-    // Append those alternatives directly instead of constructing a DFA product
-    // only to convert it back to an NWA.
+    // relation. The optional fast path below is *compile-time only*: it keeps
+    // the exact union of weighted terminal-template NWAs nondeterministic while
+    // this larger parser NWA is assembled, avoiding a local DFA product that is
+    // immediately converted back into an NWA. Callers using this path MUST run
+    // the ordinary negative-code resolution before publishing the automaton to
+    // runtime. Runtime parser automata must contain no negative/PUSH labels.
     if preserve_bundle_nondeterminism {
         let mut starts = Vec::new();
         for (&terminal, weight) in bundle {
@@ -4694,10 +4705,11 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
     .map(|(nwa, _)| nwa)
 }
 
-/// Count-only parser-NWA construction for a runtime which keeps both bundle
-/// nondeterminism and signed stack effects unresolved. This is language-exact
-/// but intentionally bypasses the local bundle determinization required by the
-/// ordinary compile-time negative-resolution pipeline.
+/// Count-only parser-NWA construction with temporary compile-time bundle
+/// nondeterminism. This is language-exact at the bundle-union level, but the
+/// returned NWA still contains the ordinary signed stack-effect alphabet and
+/// MUST be passed through compile-time negative resolution before any runtime
+/// artifact is constructed. It is not a runtime signed-stack representation.
 pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
     terminal_dwa: &TerminalAutomaton,
     num_terminals: u32,
@@ -4866,27 +4878,67 @@ pub fn normalize_parser_stack_domain_nwa_preserving_explicit(
 /// terminal automaton.
 
 pub fn normalize_weighted_parser_stack_nwa(table: &GLRTable, parser_nwa: &NWA) -> DWA {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let total_started_at = profile.then(Instant::now);
     let num_parser_states = table.num_states;
+    let determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(parser_nwa, Some(num_parser_states));
+    let determinize_ms = elapsed_ms(determinize_started_at);
     let mut parser_dwa = determinized.dwa;
+    let possible_started_at = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_state(
         parser_nwa,
         &determinized.supports,
         num_parser_states,
     );
+    let possible_ms = elapsed_ms(possible_started_at);
+    let default_started_at = Instant::now();
     if std::env::var_os("GLRMASK_EXPERIMENT_LAZY_DIRECT_DISABLE_DEFAULT_OPT").is_none() {
         optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
     }
+    let default_ms = elapsed_ms(default_started_at);
+    let subtract_started_at = Instant::now();
     subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
+    let subtract_ms = elapsed_ms(subtract_started_at);
+    let fallback_started_at = Instant::now();
     parser_dwa = determinize_parser_dwa_with_fallbacks(
         &parser_dwa,
         &possible_by_state,
         num_parser_states,
     );
+    let fallback_ms = elapsed_ms(fallback_started_at);
+    let minimize_started_at = Instant::now();
+    let pre_minimize_states = parser_dwa.num_states();
+    let pre_minimize_transitions = parser_dwa.num_transitions();
     if should_skip_parser_dwa_minimization(parser_dwa.states().len(), parser_dwa.num_transitions()) {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][normalize_weighted_parser_stack_nwa] nwa_states={} pre_minimize_states={} pre_minimize_transitions={} post_states={} post_transitions={} minimize_skipped=true determinize_ms={determinize_ms:.3} possible_ms={possible_ms:.3} default_ms={default_ms:.3} subtract_ms={subtract_ms:.3} fallback_ms={fallback_ms:.3} minimize_ms=0.000 total_ms={:.3}",
+                parser_nwa.num_states(),
+                pre_minimize_states,
+                pre_minimize_transitions,
+                parser_dwa.num_states(),
+                parser_dwa.num_transitions(),
+                total_started_at.map_or(0.0, elapsed_ms),
+            );
+        }
         parser_dwa
     } else {
-        minimize(&parser_dwa)
+        let minimized = minimize(&parser_dwa);
+        let minimize_ms = elapsed_ms(minimize_started_at);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][normalize_weighted_parser_stack_nwa] nwa_states={} pre_minimize_states={} pre_minimize_transitions={} post_states={} post_transitions={} minimize_skipped=false determinize_ms={determinize_ms:.3} possible_ms={possible_ms:.3} default_ms={default_ms:.3} subtract_ms={subtract_ms:.3} fallback_ms={fallback_ms:.3} minimize_ms={minimize_ms:.3} total_ms={:.3}",
+                parser_nwa.num_states(),
+                pre_minimize_states,
+                pre_minimize_transitions,
+                minimized.num_states(),
+                minimized.num_transitions(),
+                total_started_at.map_or(0.0, elapsed_ms),
+            );
+        }
+        minimized
     }
 }
 

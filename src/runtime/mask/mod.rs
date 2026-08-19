@@ -4,9 +4,7 @@ pub(crate) mod queue;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
-use crate::compiler::glr::labels::{
-    DEFAULT_LABEL, encode_positive_label, is_negative_label, negative_to_positive_label,
-};
+use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
 use crate::compiler::glr::parser::{
     lookahead_reduction_factor,
     lookahead_reduction_factor_row_subset,
@@ -21,7 +19,6 @@ use crate::ds::weight::Weight;
 use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
 use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
 use crate::runtime::state::{ConstraintState, MaskCacheData, MaskScratch, ParserStateMap};
-use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -2273,6 +2270,152 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
+    /// Evaluate the compressed deterministic union A.  Its synthetic root is
+    /// represented by `segmented_component_union_root_dispatch`; after the
+    /// first parser-state read each concrete stack path is in exactly one
+    /// cached component DWA body.  Root final weights are the union of every
+    /// component start final, so we also project an empty stack into each
+    /// component coordinate for the same branch accumulator.
+    fn try_fill_mask_segmented_deterministic_union(&self, buf: &mut [u32]) -> bool {
+        let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let total_started_at = profile.then(Instant::now);
+        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
+            return false;
+        };
+        let dispatch = &overlay.segmented_component_union_root_dispatch;
+        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+            return false;
+        }
+
+        let mut projected_states = Vec::<ParserStateMap>::with_capacity(
+            overlay.segmented_parser_components.len(),
+        );
+        projected_states.resize_with(
+            overlay.segmented_parser_components.len(),
+            ParserStateMap::default,
+        );
+
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                // Deterministic union-root final = union of component start
+                // finals. Preserve the branch-local disallowed accumulator in
+                // each component coordinate.
+                for (component_index, component) in
+                    overlay.segmented_parser_components.iter().enumerate()
+                {
+                    let Some(local_tokenizer_state) =
+                        self.segmented_local_tokenizer_state(component, global_tokenizer_state)
+                    else {
+                        continue;
+                    };
+                    let local_disallowed = self.segmented_local_disallowed(component, acc);
+                    projected_states[component_index].merge_insert(
+                        local_tokenizer_state,
+                        ParserGSS::from_single_stack(Vec::new(), local_disallowed),
+                    );
+                }
+
+                let Some(&global_top) = top_first.first() else {
+                    return;
+                };
+                let component_index = dispatch
+                    .get(global_top as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if component_index == u32::MAX {
+                    return;
+                }
+                let Some(component) = overlay
+                    .segmented_parser_components
+                    .get(component_index as usize)
+                else {
+                    return;
+                };
+                let Some(local_tokenizer_state) =
+                    self.segmented_local_tokenizer_state(component, global_tokenizer_state)
+                else {
+                    return;
+                };
+
+                let mut local_top_first = SmallVec::<[u32; 64]>::new();
+                for &global_parser_state in top_first {
+                    let local = component
+                        .global_to_local_parser_state
+                        .get(global_parser_state as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    if local == u32::MAX {
+                        break;
+                    }
+                    local_top_first.push(local);
+                }
+                if local_top_first.is_empty() {
+                    return;
+                }
+                local_top_first.reverse();
+                let local_disallowed = self.segmented_local_disallowed(component, acc);
+                projected_states[component_index as usize].merge_insert(
+                    local_tokenizer_state,
+                    ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed),
+                );
+            });
+            if !complete {
+                return false;
+            }
+        }
+
+        buf.fill(0);
+        let mut component_buf = vec![0u32; buf.len()];
+        let mut component_times = SmallVec::<[u64; 4]>::new();
+        for (component, state) in overlay
+            .segmented_parser_components
+            .iter()
+            .zip(projected_states)
+        {
+            if state.is_empty() {
+                component_times.push(0);
+                continue;
+            }
+            let component_started_at = profile.then(Instant::now);
+            component_buf.fill(0);
+            let shadow = ConstraintState {
+                constraint: component.constraint.as_ref(),
+                state,
+                buffers: Default::default(),
+                generation: self.generation,
+                mask_cache: Mutex::new(None),
+                mask_scratch: Mutex::new(MaskScratch::for_constraint(
+                    component.constraint.as_ref(),
+                )),
+                max_rollback_tokens: 0,
+                history: Default::default(),
+            };
+            shadow.fill_mask_uncached(&mut component_buf);
+            shadow.update_control_special_token_mask(&mut component_buf);
+            for (output, component_word) in buf.iter_mut().zip(&component_buf) {
+                *output |= *component_word;
+            }
+            component_times.push(component_started_at.map_or(0, elapsed_ns));
+        }
+
+        let boundary_started_at = profile.then(Instant::now);
+        if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
+            && !self.or_segmented_boundary_parser_mask(boundary, buf)
+        {
+            return false;
+        }
+        let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
+        if let Some(started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][deterministic_two_dwa_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
+                overlay.segmented_parser_components.len(),
+                boundary_ns,
+                elapsed_ns(started_at),
+            );
+        }
+        true
+    }
+
     /// Exact common-case evaluator for a segmented component parser union.
     ///
     /// Each retained component keeps its original token/TSID coordinate and
@@ -2288,6 +2431,9 @@ impl<'a> ConstraintState<'a> {
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
+        if !overlay.segmented_component_union_root_dispatch.is_empty() {
+            return self.try_fill_mask_segmented_deterministic_union(buf);
+        }
         if overlay.segmented_parser_components.is_empty() {
             return false;
         }
@@ -2389,432 +2535,58 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Evaluate the private-coordinate boundary parser NWA directly over the
-    /// current composed parser GSS.  This is the nondeterministic counterpart
-    /// of flattening the boundary parser into the global parser DWA: epsilon
-    /// closure carries weighted NWA alternatives, and an explicit parser-state
-    /// row shadows DEFAULT exactly as it does in the deterministic runtime.
+    /// Evaluate the private-coordinate deterministic boundary parser DWA over
+    /// the current composed parser GSS.  The boundary machine is fully
+    /// determinized and negative-free before publication; only the top-level
+    /// union with the component parser DWA remains segmented at runtime.
     fn or_segmented_boundary_parser_mask(
         &self,
         boundary: &crate::runtime::SegmentedBoundaryParser,
         buf: &mut [u32],
     ) -> bool {
-        let resolved_reference = if boundary.signed_stack_effects
-            && std::env::var_os("GLRMASK_VALIDATE_SEGMENTED_UNRESOLVED_BOUNDARY").is_some()
-        {
-            let mut reference = boundary.parser_nwa.clone();
-            resolve_negative_codes_in_nwa(
-                &mut reference,
-                self.constraint.table.construction
-                    == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
-            );
-            Some(reference)
-        } else {
-            None
-        };
-        fn union_into(
-            map: &mut FxHashMap<u32, Weight>,
-            state: u32,
-            add: Weight,
-            ops: &mut crate::ds::weight::ScopedWeightOpCache,
-        ) -> bool {
-            if add.is_empty() {
-                return false;
-            }
-            match map.get(&state) {
-                Some(existing) => {
-                    let merged = ops.union(existing, &add);
-                    if merged == *existing {
-                        false
-                    } else {
-                        map.insert(state, merged);
-                        true
-                    }
-                }
-                None => {
-                    map.insert(state, add);
-                    true
-                }
-            }
-        }
-
-        fn epsilon_close(
-            nwa: &crate::automata::weighted_u32::nwa::NWA,
-            active: &mut FxHashMap<u32, Weight>,
-            ops: &mut crate::ds::weight::ScopedWeightOpCache,
-        ) {
-            let mut queue = std::collections::VecDeque::from_iter(active.keys().copied());
-            while let Some(source) = queue.pop_front() {
-                let Some(source_weight) = active.get(&source).cloned() else {
-                    continue;
-                };
-                let Some(state) = nwa.states().get(source as usize) else {
-                    continue;
-                };
-                for (target, edge_weight) in &state.epsilons {
-                    let contribution = ops.intersection(&source_weight, edge_weight);
-                    if union_into(active, *target, contribution, ops) {
-                        queue.push_back(*target);
-                    }
-                }
-            }
-        }
-
         fn accepted_for_stack(
-            nwa: &crate::automata::weighted_u32::nwa::NWA,
+            dwa: &crate::automata::weighted_u32::dwa::DWA,
             top_first: &[u32],
         ) -> Weight {
             let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
-            let mut active = FxHashMap::<u32, Weight>::default();
-            for &start in nwa.start_states() {
-                union_into(&mut active, start, Weight::all(), &mut ops);
-            }
-            epsilon_close(nwa, &mut active, &mut ops);
-
+            let mut state_id = dwa.start_state();
+            let mut path_weight = Weight::all();
             let mut accepted = Weight::empty();
-            let accumulate_finals = |active: &FxHashMap<u32, Weight>,
-                                     accepted: &mut Weight,
-                                     ops: &mut crate::ds::weight::ScopedWeightOpCache| {
-                for (&state_id, path_weight) in active {
-                    let Some(final_weight) = nwa
-                        .states()
-                        .get(state_id as usize)
-                        .and_then(|state| state.final_weight.as_ref())
-                    else {
-                        continue;
-                    };
+            let accumulate_final = |state_id: u32,
+                                    path_weight: &Weight,
+                                    accepted: &mut Weight,
+                                    ops: &mut crate::ds::weight::ScopedWeightOpCache| {
+                if let Some(final_weight) = dwa
+                    .states()
+                    .get(state_id as usize)
+                    .and_then(|state| state.final_weight.as_ref())
+                {
                     let contribution = ops.intersection(path_weight, final_weight);
                     if !contribution.is_empty() {
                         *accepted = ops.union(accepted, &contribution);
                     }
                 }
             };
-            accumulate_finals(&active, &mut accepted, &mut ops);
+            accumulate_final(state_id, &path_weight, &mut accepted, &mut ops);
 
             for &parser_state in top_first {
                 let label = encode_positive_label(parser_state);
-                let mut next = FxHashMap::<u32, Weight>::default();
-                for (&source, path_weight) in &active {
-                    let Some(state) = nwa.states().get(source as usize) else {
-                        continue;
-                    };
-                    let Some(targets) = state
-                        .transitions
-                        .get(&label)
-                        .or_else(|| state.transitions.get(&DEFAULT_LABEL))
-                    else {
-                        continue;
-                    };
-                    for (target, edge_weight) in targets {
-                        let contribution = ops.intersection(path_weight, edge_weight);
-                        union_into(&mut next, *target, contribution, &mut ops);
-                    }
-                }
-                if next.is_empty() {
+                let Some(state) = dwa.states().get(state_id as usize) else {
                     break;
-                }
-                epsilon_close(nwa, &mut next, &mut ops);
-                active = next;
-                accumulate_finals(&active, &mut accepted, &mut ops);
-            }
-            accepted
-        }
-
-        /// Evaluate the unresolved parser-template stack-effect alphabet
-        /// directly. Positive labels pop/match the current top; negative labels
-        /// push a concrete LR state. A positive transition first consumes a
-        /// virtual state produced by an earlier push, and only reaches into the
-        /// real parser stack once that virtual suffix is empty. This is the
-        /// operational form of the same cancellation performed by
-        /// `resolve_negative_codes_in_nwa` at compile time.
-        fn accepted_for_signed_stack(
-            nwa: &crate::automata::weighted_u32::nwa::NWA,
-            top_first: &[u32],
-        ) -> Weight {
-            type VirtualStack = SmallVec<[u32; 8]>;
-            type Config = (u32, usize, VirtualStack);
-
-            fn merge_config(
-                active: &mut FxHashMap<Config, Weight>,
-                queue: &mut std::collections::VecDeque<Config>,
-                config: Config,
-                add: Weight,
-                ops: &mut crate::ds::weight::ScopedWeightOpCache,
-            ) {
-                if add.is_empty() {
-                    return;
-                }
-                if let Some(existing) = active.get(&config) {
-                    let merged = ops.union(existing, &add);
-                    if merged == *existing {
-                        return;
-                    }
-                    active.insert(config.clone(), merged);
-                } else {
-                    active.insert(config.clone(), add);
-                }
-                queue.push_back(config);
-            }
-
-            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
-            let mut active = FxHashMap::<Config, Weight>::default();
-            let mut queue = std::collections::VecDeque::<Config>::new();
-            for &start in nwa.start_states() {
-                merge_config(
-                    &mut active,
-                    &mut queue,
-                    (start, 0, VirtualStack::new()),
-                    Weight::all(),
-                    &mut ops,
-                );
-            }
-
-            let mut accepted = Weight::empty();
-            while let Some(config) = queue.pop_front() {
-                let Some(path_weight) = active.get(&config).cloned() else {
-                    continue;
                 };
-                let (source, input_index, virtual_stack) = config;
-                let Some(state) = nwa.states().get(source as usize) else {
-                    continue;
-                };
-
-                if let Some(final_weight) = state.final_weight.as_ref() {
-                    let contribution = ops.intersection(&path_weight, final_weight);
-                    if !contribution.is_empty() {
-                        accepted = ops.union(&accepted, &contribution);
-                    }
-                }
-
-                for (target, edge_weight) in &state.epsilons {
-                    let contribution = ops.intersection(&path_weight, edge_weight);
-                    merge_config(
-                        &mut active,
-                        &mut queue,
-                        (*target, input_index, virtual_stack.clone()),
-                        contribution,
-                        &mut ops,
-                    );
-                }
-
-                // Push transitions do not consume the input stack.
-                for (&label, targets) in &state.transitions {
-                    if !is_negative_label(label) {
-                        continue;
-                    }
-                    let pushed = negative_to_positive_label(label) as u32;
-                    for (target, edge_weight) in targets {
-                        let contribution = ops.intersection(&path_weight, edge_weight);
-                        if contribution.is_empty() {
-                            continue;
-                        }
-                        let mut next_stack = virtual_stack.clone();
-                        next_stack.push(pushed);
-                        merge_config(
-                            &mut active,
-                            &mut queue,
-                            (*target, input_index, next_stack),
-                            contribution,
-                            &mut ops,
-                        );
-                    }
-                }
-
-                // A pop/read consumes the most recently pushed virtual state
-                // when present; otherwise it consumes the next real parser
-                // stack value. Exact rows shadow DEFAULT just as in the
-                // positive-only evaluator.
-                let (top, consumes_input) = if let Some(&top) = virtual_stack.last() {
-                    (top, false)
-                } else if let Some(&top) = top_first.get(input_index) {
-                    (top, true)
-                } else {
-                    continue;
-                };
-                let label = encode_positive_label(top);
-                let Some(targets) = state
+                let Some((target, edge_weight)) = state
                     .transitions
                     .get(&label)
                     .or_else(|| state.transitions.get(&DEFAULT_LABEL))
                 else {
-                    continue;
+                    break;
                 };
-                for (target, edge_weight) in targets {
-                    let contribution = ops.intersection(&path_weight, edge_weight);
-                    if contribution.is_empty() {
-                        continue;
-                    }
-                    let mut next_stack = virtual_stack.clone();
-                    if !consumes_input {
-                        next_stack.pop();
-                    }
-                    merge_config(
-                        &mut active,
-                        &mut queue,
-                        (
-                            *target,
-                            input_index + usize::from(consumes_input),
-                            next_stack,
-                        ),
-                        contribution,
-                        &mut ops,
-                    );
+                path_weight = ops.intersection(&path_weight, edge_weight);
+                if path_weight.is_empty() {
+                    break;
                 }
-            }
-            accepted
-        }
-
-        fn accepted_for_signed_stack_topological(
-            nwa: &crate::automata::weighted_u32::nwa::NWA,
-            topological_rank: &[u32],
-            top_first: &[u32],
-        ) -> Weight {
-            type VirtualStack = SmallVec<[u32; 8]>;
-            type PendingEntries = SmallVec<[(usize, VirtualStack, Weight); 4]>;
-
-            fn merge_pending(
-                pending: &mut FxHashMap<u32, PendingEntries>,
-                state: u32,
-                input_index: usize,
-                virtual_stack: VirtualStack,
-                add: Weight,
-                ops: &mut crate::ds::weight::ScopedWeightOpCache,
-            ) -> bool {
-                if add.is_empty() {
-                    return false;
-                }
-                let newly_pending = !pending.contains_key(&state);
-                let entries = pending.entry(state).or_default();
-                if let Some((_, _, existing)) = entries.iter_mut().find(|(existing_index, existing_stack, _)| {
-                    *existing_index == input_index && *existing_stack == virtual_stack
-                }) {
-                    *existing = ops.union(existing, &add);
-                } else {
-                    entries.push((input_index, virtual_stack, add));
-                }
-                newly_pending
-            }
-
-            debug_assert_eq!(topological_rank.len(), nwa.num_states() as usize);
-            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
-            let mut pending = FxHashMap::<u32, PendingEntries>::default();
-            let mut queue = std::collections::BinaryHeap::<std::cmp::Reverse<(u32, u32)>>::new();
-            for &start in nwa.start_states() {
-                if merge_pending(
-                    &mut pending,
-                    start,
-                    0,
-                    VirtualStack::new(),
-                    Weight::all(),
-                    &mut ops,
-                ) {
-                    queue.push(std::cmp::Reverse((topological_rank[start as usize], start)));
-                }
-            }
-
-            let mut accepted = Weight::empty();
-            while let Some(std::cmp::Reverse((source_rank, source))) = queue.pop() {
-                let Some(entries) = pending.remove(&source) else {
-                    continue;
-                };
-                let Some(state) = nwa.states().get(source as usize) else {
-                    continue;
-                };
-                for (input_index, virtual_stack, path_weight) in entries {
-                    if let Some(final_weight) = state.final_weight.as_ref() {
-                        let contribution = ops.intersection(&path_weight, final_weight);
-                        if !contribution.is_empty() {
-                            accepted = ops.union(&accepted, &contribution);
-                        }
-                    }
-
-                    for (target, edge_weight) in &state.epsilons {
-                        let contribution = ops.intersection(&path_weight, edge_weight);
-                        debug_assert!(topological_rank[*target as usize] > source_rank);
-                        if merge_pending(
-                            &mut pending,
-                            *target,
-                            input_index,
-                            virtual_stack.clone(),
-                            contribution,
-                            &mut ops,
-                        ) {
-                            queue.push(std::cmp::Reverse((
-                                topological_rank[*target as usize],
-                                *target,
-                            )));
-                        }
-                    }
-
-                    for (&label, targets) in &state.transitions {
-                        if !is_negative_label(label) {
-                            continue;
-                        }
-                        let pushed = negative_to_positive_label(label) as u32;
-                        for (target, edge_weight) in targets {
-                            let contribution = ops.intersection(&path_weight, edge_weight);
-                            if contribution.is_empty() {
-                                continue;
-                            }
-                            let mut next_stack = virtual_stack.clone();
-                            next_stack.push(pushed);
-                            debug_assert!(topological_rank[*target as usize] > source_rank);
-                            if merge_pending(
-                                &mut pending,
-                                *target,
-                                input_index,
-                                next_stack,
-                                contribution,
-                                &mut ops,
-                            ) {
-                                queue.push(std::cmp::Reverse((
-                                    topological_rank[*target as usize],
-                                    *target,
-                                )));
-                            }
-                        }
-                    }
-
-                    let (top, consumes_input) = if let Some(&top) = virtual_stack.last() {
-                        (top, false)
-                    } else if let Some(&top) = top_first.get(input_index) {
-                        (top, true)
-                    } else {
-                        continue;
-                    };
-                    let label = encode_positive_label(top);
-                    let Some(targets) = state
-                        .transitions
-                        .get(&label)
-                        .or_else(|| state.transitions.get(&DEFAULT_LABEL))
-                    else {
-                        continue;
-                    };
-                    for (target, edge_weight) in targets {
-                        let contribution = ops.intersection(&path_weight, edge_weight);
-                        if contribution.is_empty() {
-                            continue;
-                        }
-                        let mut next_stack = virtual_stack.clone();
-                        if !consumes_input {
-                            next_stack.pop();
-                        }
-                        debug_assert!(topological_rank[*target as usize] > source_rank);
-                        if merge_pending(
-                            &mut pending,
-                            *target,
-                            input_index + usize::from(consumes_input),
-                            next_stack,
-                            contribution,
-                            &mut ops,
-                        ) {
-                            queue.push(std::cmp::Reverse((
-                                topological_rank[*target as usize],
-                                *target,
-                            )));
-                        }
-                    }
-                }
+                state_id = *target;
+                accumulate_final(state_id, &path_weight, &mut accepted, &mut ops);
             }
             accepted
         }
@@ -2844,26 +2616,7 @@ impl<'a> ConstraintState<'a> {
                 else {
                     return;
                 };
-                let accepted = if boundary.signed_stack_effects
-                    && !boundary.signed_topological_rank.is_empty()
-                {
-                    accepted_for_signed_stack_topological(
-                        &boundary.parser_nwa,
-                        &boundary.signed_topological_rank,
-                        top_first,
-                    )
-                } else if boundary.signed_stack_effects {
-                    accepted_for_signed_stack(&boundary.parser_nwa, top_first)
-                } else {
-                    accepted_for_stack(&boundary.parser_nwa, top_first)
-                };
-                if let Some(reference) = resolved_reference.as_ref() {
-                    let expected = accepted_for_stack(reference, top_first);
-                    assert_eq!(
-                        accepted, expected,
-                        "segmented unresolved boundary differs from resolved reference for parser stack {top_first:?}",
-                    );
-                }
+                let accepted = accepted_for_stack(&boundary.parser_dwa, top_first);
                 let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
                     return;
                 };
@@ -2895,6 +2648,24 @@ impl<'a> ConstraintState<'a> {
             }
         }
         true
+    }
+
+    /// Two-DWA runtime: the ordinary mask hot path evaluates deterministic A
+    /// (`constraint.parser_dwa`) first, then ORs deterministic boundary DWA B.
+    /// The legacy segmented-component experiment already evaluates B inside its
+    /// own path, so only apply this overlay when there are no component
+    /// segments.
+    fn or_two_dwa_boundary_parser_mask(&self, buf: &mut [u32]) -> bool {
+        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
+            return true;
+        };
+        if !overlay.segmented_parser_components.is_empty() {
+            return true;
+        }
+        let Some(boundary) = overlay.segmented_boundary_parser.as_deref() else {
+            return true;
+        };
+        self.or_segmented_boundary_parser_mask(boundary, buf)
     }
 
     /// Exact overlay for an out-of-vocabulary special token reached only after
@@ -5281,6 +5052,9 @@ impl<'a> ConstraintState<'a> {
                 let factor_ns = factor_started.map_or(0, elapsed_ns);
                 let fill_started = factor_profile.then(Instant::now);
                 shadow.fill_mask_uncached(mask);
+                if !shadow.or_two_dwa_boundary_parser_mask(mask) {
+                    mask.fill(0);
+                }
                 if let Some(fill_started) = fill_started {
                     eprintln!(
                         "[glrmask/profile][lookahead_factor] built_ns={} fill_ns={} original_branches={} shadow_branches={}",
@@ -5300,6 +5074,9 @@ impl<'a> ConstraintState<'a> {
                     );
                 }
                 self.fill_mask_uncached(mask);
+                if !self.or_two_dwa_boundary_parser_mask(mask) {
+                    mask.fill(0);
+                }
             }
             self.update_control_special_token_mask(mask);
             if !self.constraint.table.control_terminals.is_empty() {
