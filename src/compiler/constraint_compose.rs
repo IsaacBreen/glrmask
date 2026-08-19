@@ -1555,15 +1555,54 @@ enum BoundaryParserWork {
     },
 }
 
+enum PositiveBoundaryParser {
+    Dwa(DWA),
+    Nwa(NWA),
+}
+
+impl PositiveBoundaryParser {
+    fn into_runtime_dwa(self, table: &crate::compiler::glr::table::GLRTable) -> DWA {
+        match self {
+            Self::Dwa(dwa) => dwa,
+            Self::Nwa(nwa) => normalize_weighted_parser_stack_nwa(table, &nwa),
+        }
+    }
+
+    fn ensure_positive(&self) -> Result<(), String> {
+        match self {
+            Self::Dwa(dwa) => ensure_positive_runtime_parser_dwa(dwa),
+            Self::Nwa(nwa) => {
+                for (source, state) in nwa.states().iter().enumerate() {
+                    if let Some(&label) = state
+                        .transitions
+                        .keys()
+                        .find(|&&label| is_negative_label(label))
+                    {
+                        return Err(format!(
+                            "runtime boundary parser NWA contains negative/PUSH label {label} at state {source}"
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+}
+
 impl BoundaryParserWork {
-    fn materialize_positive_dwa(
+    fn materialize_positive_parser(
         self,
         table: &crate::compiler::glr::table::GLRTable,
-    ) -> Result<(DWA, InternalIdMap, Option<Vec<Option<UnweightedDfa>>>), String> {
+    ) -> Result<(
+        PositiveBoundaryParser,
+        InternalIdMap,
+        Option<Vec<Option<UnweightedDfa>>>,
+    ), String> {
         match self {
             Self::Materialized(parser) => {
                 let (dwa, id_map) = parser.into_parts();
-                Ok((dwa, id_map, None))
+                Ok((PositiveBoundaryParser::Dwa(dwa), id_map, None))
             }
             Self::Deferred {
                 terminal_automaton,
@@ -1584,7 +1623,7 @@ impl BoundaryParserWork {
                         == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
                 );
                 let parser_dwa = normalize_weighted_parser_stack_nwa(table, &parser_nwa);
-                Ok((parser_dwa, id_map, None))
+                Ok((PositiveBoundaryParser::Dwa(parser_dwa), id_map, None))
             }
             Self::DeferredTerminalCount {
                 terminal_automaton,
@@ -1640,12 +1679,9 @@ impl BoundaryParserWork {
                     parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
                 }
                 let hashcons_ms = hashcons_started_at.elapsed().as_secs_f64() * 1000.0;
-                let normalize_started_at = Instant::now();
-                let parser_dwa = normalize_weighted_parser_stack_nwa(table, &parser_nwa);
-                let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
                 if compose_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={resolve_negative_ms:.3} hashcons_ms={hashcons_ms:.3} hashcons_states={}=>{} hashcons_transitions={}=>{} determinize_dwa_ms={normalize_ms:.3} deterministic_runtime=true compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
+                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={resolve_negative_ms:.3} hashcons_ms={hashcons_ms:.3} hashcons_states={}=>{} hashcons_transitions={}=>{} determinize_dwa_ms=deferred deterministic_runtime=false positive_nwa=true compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
                         before_hashcons_states,
                         parser_nwa.num_states(),
                         before_hashcons_transitions,
@@ -1658,7 +1694,11 @@ impl BoundaryParserWork {
                         *slot = Some(dfa);
                     }
                 }
-                Ok((parser_dwa, id_map, Some(template_cache)))
+                Ok((
+                    PositiveBoundaryParser::Nwa(parser_nwa),
+                    id_map,
+                    Some(template_cache),
+                ))
             }
         }
     }
@@ -15538,10 +15578,11 @@ pub(crate) fn compose_constraints_owned_parent(
             composition_parser_templates_by_terminal;
         result.constraint.composition_grammar_summary = composed_grammar_summary.clone();
 
-        // Child preservation and boundary-parser construction are independent.
-        // Clone the borrowed children while the boundary NWA is being built so
-        // segment ownership adds no serial cost to the linker critical path.
-        let (child_clone_result, boundary_runtime_result) = rayon::join(
+        // Child preservation and positive boundary-parser construction are
+        // independent.  Keep B as a positive NWA at this boundary: standalone
+        // determinization is a publication/final-union concern, not part of
+        // constructing B's parser language.
+        let (child_clone_result, boundary_positive_result) = rayon::join(
             || {
                 let started_at = Instant::now();
                 let mut sources = children
@@ -15578,7 +15619,7 @@ pub(crate) fn compose_constraints_owned_parent(
             },
             || -> Result<
                 Option<(
-                    DWA,
+                    PositiveBoundaryParser,
                     InternalIdMap,
                     Option<Vec<Option<UnweightedDfa>>>,
                     f64,
@@ -15589,12 +15630,26 @@ pub(crate) fn compose_constraints_owned_parent(
                     return Ok(None);
                 };
                 let started_at = Instant::now();
-                let (parser_dwa, boundary_id_map, template_cache) =
-                    work.materialize_positive_dwa(&result.constraint.table)?;
-                ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+                let (positive, boundary_id_map, template_cache) =
+                    work.materialize_positive_parser(&result.constraint.table)?;
+                positive.ensure_positive()?;
                 let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                if compose_profile_enabled() {
+                    match &positive {
+                        PositiveBoundaryParser::Nwa(nwa) => eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=nwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                            nwa.num_states(),
+                            nwa.num_transitions(),
+                        ),
+                        PositiveBoundaryParser::Dwa(dwa) => eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=dwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                            dwa.num_states(),
+                            dwa.num_transitions(),
+                        ),
+                    }
+                }
                 Ok(Some((
-                    parser_dwa,
+                    positive,
                     boundary_id_map,
                     template_cache,
                     elapsed_ms,
@@ -15602,7 +15657,7 @@ pub(crate) fn compose_constraints_owned_parent(
             },
         );
         let (mut source_constraints, child_clone_ms) = child_clone_result;
-        let boundary_runtime = boundary_runtime_result?;
+        let boundary_positive = boundary_positive_result?;
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_segment_clone] cloned_children={} parser_states={} overlapped=true total_ms={child_clone_ms:.3}",
@@ -15622,43 +15677,87 @@ pub(crate) fn compose_constraints_owned_parent(
         {
             return Err("segmented parser source/relation count mismatch".into());
         }
-        let mut segmented_components = Vec::with_capacity(source_constraints.len());
-        for (component_index, source) in source_constraints.into_iter().enumerate() {
-            let global_to_local_parser_state = invert_singleton_parser_state_relation(
-                &result.parser_state_relations[component_index],
-                global_state_count,
-            )
-            .ok_or_else(|| {
-                format!(
-                    "segmented parser component {component_index} has a non-functional LR-state relation"
-                )
-            })?;
-            segmented_components.push(crate::runtime::SegmentedParserComponent {
-                constraint: Box::new(source),
-                tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
-                terminal_offset: result.terminal_offsets[component_index],
-                global_to_local_parser_state,
-            });
-        }
-        let deterministic_root_dispatch = if two_dwa_runtime_requested {
-            Some(
-                deterministic_component_union_root_dispatch(
-                    &segmented_components,
-                    &result.parser_state_relations,
-                    &parser_default_domains.component_domains,
-                    &parser_default_domains.parser_state_labels,
-                    &automata_maps,
-                    id_num_tsids as usize,
-                    global_state_count,
-                )
-                .ok_or_else(|| {
-                    "two-DWA runtime requires a deterministic root-only component parser union"
-                        .to_string()
-                })?,
-            )
-        } else {
-            None
-        };
+
+        // Runtime DWA publication and component-union certification are
+        // independent.  This is also the interface at which a future final NWA
+        // union can consume positive B directly and omit the left branch.
+        let (boundary_runtime_result, segmented_result) = rayon::join(
+            || -> Result<
+                Option<(
+                    DWA,
+                    InternalIdMap,
+                    Option<Vec<Option<UnweightedDfa>>>,
+                    f64,
+                    f64,
+                )>,
+                String,
+            > {
+                let Some((positive, boundary_id_map, template_cache, positive_build_ms)) =
+                    boundary_positive
+                else {
+                    return Ok(None);
+                };
+                let normalize_started_at = Instant::now();
+                let parser_dwa = positive.into_runtime_dwa(&result.constraint.table);
+                ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+                let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                Ok(Some((
+                    parser_dwa,
+                    boundary_id_map,
+                    template_cache,
+                    positive_build_ms,
+                    normalize_ms,
+                )))
+            },
+            || -> Result<(Vec<crate::runtime::SegmentedParserComponent>, Option<Vec<u32>>, f64), String> {
+                let started_at = Instant::now();
+                let mut segmented_components = Vec::with_capacity(source_constraints.len());
+                for (component_index, source) in source_constraints.into_iter().enumerate() {
+                    let global_to_local_parser_state = invert_singleton_parser_state_relation(
+                        &result.parser_state_relations[component_index],
+                        global_state_count,
+                    )
+                    .ok_or_else(|| {
+                        format!(
+                            "segmented parser component {component_index} has a non-functional LR-state relation"
+                        )
+                    })?;
+                    segmented_components.push(crate::runtime::SegmentedParserComponent {
+                        constraint: Box::new(source),
+                        tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
+                        terminal_offset: result.terminal_offsets[component_index],
+                        global_to_local_parser_state,
+                    });
+                }
+                let deterministic_root_dispatch = if two_dwa_runtime_requested {
+                    Some(
+                        deterministic_component_union_root_dispatch(
+                            &segmented_components,
+                            &result.parser_state_relations,
+                            &parser_default_domains.component_domains,
+                            &parser_default_domains.parser_state_labels,
+                            &automata_maps,
+                            id_num_tsids as usize,
+                            global_state_count,
+                        )
+                        .ok_or_else(|| {
+                            "two-DWA runtime requires a deterministic root-only component parser union"
+                                .to_string()
+                        })?,
+                    )
+                } else {
+                    None
+                };
+                Ok((
+                    segmented_components,
+                    deterministic_root_dispatch,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                ))
+            },
+        );
+        let boundary_runtime = boundary_runtime_result?;
+        let (segmented_components, deterministic_root_dispatch, segment_publish_ms) = segmented_result?;
+
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
             crate::runtime::StaticDynamicOverlayMetadata {
                 terminal_offsets: result.terminal_offsets.clone(),
@@ -15676,7 +15775,7 @@ pub(crate) fn compose_constraints_owned_parent(
         }
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true parent_moved=true deterministic_union_view={}",
+                "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true parent_moved=true deterministic_union_view={} publish_ms={segment_publish_ms:.3}",
                 overlay.segmented_parser_components.len(),
                 !overlay.segmented_component_union_root_dispatch.is_empty(),
             );
@@ -15686,9 +15785,9 @@ pub(crate) fn compose_constraints_owned_parent(
             parser_dwa,
             boundary_id_map,
             template_cache,
-            boundary_build_ms,
-        )) =
-            boundary_runtime
+            positive_build_ms,
+            final_union_normalize_ms,
+        )) = boundary_runtime
         {
             if let Some(template_cache) = template_cache {
                 result.constraint.composition_parser_templates_by_terminal = template_cache;
@@ -15712,12 +15811,11 @@ pub(crate) fn compose_constraints_owned_parent(
             );
             if compose_profile_enabled() {
                 eprintln!(
-                    "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} deterministic=true tsids={} token_classes={} positive_only=true build_ms={:.3}",
+                    "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} deterministic=true tsids={} token_classes={} positive_only=true positive_build_ms={positive_build_ms:.3} final_union_normalize_ms={final_union_normalize_ms:.3}",
                     parser_dwa.num_states(),
                     parser_dwa.num_transitions(),
                     tokenizer_state_to_tsid.iter().copied().max().map_or(0, |v| v as usize + 1),
                     internal_token_to_originals.len(),
-                    boundary_build_ms,
                 );
             }
             overlay.segmented_boundary_parser =
@@ -15907,8 +16005,10 @@ pub(crate) fn compose_constraints_owned_parent(
         && let Some(work) = boundary_work.take()
     {
         let started_at = Instant::now();
-        let (parser_dwa, boundary_id_map, template_cache) =
-            work.materialize_positive_dwa(&result.constraint.table)?;
+        let (positive_parser, boundary_id_map, template_cache) =
+            work.materialize_positive_parser(&result.constraint.table)?;
+        positive_parser.ensure_positive()?;
+        let parser_dwa = positive_parser.into_runtime_dwa(&result.constraint.table);
         ensure_positive_runtime_parser_dwa(&parser_dwa)?;
         if let Some(template_cache) = template_cache {
             result.constraint.composition_parser_templates_by_terminal = template_cache;
