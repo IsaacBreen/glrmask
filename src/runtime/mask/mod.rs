@@ -2664,6 +2664,161 @@ impl<'a> ConstraintState<'a> {
             accepted
         }
 
+        fn accepted_for_signed_stack_topological(
+            nwa: &crate::automata::weighted_u32::nwa::NWA,
+            topological_rank: &[u32],
+            top_first: &[u32],
+        ) -> Weight {
+            type VirtualStack = SmallVec<[u32; 8]>;
+            type PendingEntries = SmallVec<[(usize, VirtualStack, Weight); 4]>;
+
+            fn merge_pending(
+                pending: &mut FxHashMap<u32, PendingEntries>,
+                state: u32,
+                input_index: usize,
+                virtual_stack: VirtualStack,
+                add: Weight,
+                ops: &mut crate::ds::weight::ScopedWeightOpCache,
+            ) -> bool {
+                if add.is_empty() {
+                    return false;
+                }
+                let newly_pending = !pending.contains_key(&state);
+                let entries = pending.entry(state).or_default();
+                if let Some((_, _, existing)) = entries.iter_mut().find(|(existing_index, existing_stack, _)| {
+                    *existing_index == input_index && *existing_stack == virtual_stack
+                }) {
+                    *existing = ops.union(existing, &add);
+                } else {
+                    entries.push((input_index, virtual_stack, add));
+                }
+                newly_pending
+            }
+
+            debug_assert_eq!(topological_rank.len(), nwa.num_states() as usize);
+            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
+            let mut pending = FxHashMap::<u32, PendingEntries>::default();
+            let mut queue = std::collections::BinaryHeap::<std::cmp::Reverse<(u32, u32)>>::new();
+            for &start in nwa.start_states() {
+                if merge_pending(
+                    &mut pending,
+                    start,
+                    0,
+                    VirtualStack::new(),
+                    Weight::all(),
+                    &mut ops,
+                ) {
+                    queue.push(std::cmp::Reverse((topological_rank[start as usize], start)));
+                }
+            }
+
+            let mut accepted = Weight::empty();
+            while let Some(std::cmp::Reverse((source_rank, source))) = queue.pop() {
+                let Some(entries) = pending.remove(&source) else {
+                    continue;
+                };
+                let Some(state) = nwa.states().get(source as usize) else {
+                    continue;
+                };
+                for (input_index, virtual_stack, path_weight) in entries {
+                    if let Some(final_weight) = state.final_weight.as_ref() {
+                        let contribution = ops.intersection(&path_weight, final_weight);
+                        if !contribution.is_empty() {
+                            accepted = ops.union(&accepted, &contribution);
+                        }
+                    }
+
+                    for (target, edge_weight) in &state.epsilons {
+                        let contribution = ops.intersection(&path_weight, edge_weight);
+                        debug_assert!(topological_rank[*target as usize] > source_rank);
+                        if merge_pending(
+                            &mut pending,
+                            *target,
+                            input_index,
+                            virtual_stack.clone(),
+                            contribution,
+                            &mut ops,
+                        ) {
+                            queue.push(std::cmp::Reverse((
+                                topological_rank[*target as usize],
+                                *target,
+                            )));
+                        }
+                    }
+
+                    for (&label, targets) in &state.transitions {
+                        if !is_negative_label(label) {
+                            continue;
+                        }
+                        let pushed = negative_to_positive_label(label) as u32;
+                        for (target, edge_weight) in targets {
+                            let contribution = ops.intersection(&path_weight, edge_weight);
+                            if contribution.is_empty() {
+                                continue;
+                            }
+                            let mut next_stack = virtual_stack.clone();
+                            next_stack.push(pushed);
+                            debug_assert!(topological_rank[*target as usize] > source_rank);
+                            if merge_pending(
+                                &mut pending,
+                                *target,
+                                input_index,
+                                next_stack,
+                                contribution,
+                                &mut ops,
+                            ) {
+                                queue.push(std::cmp::Reverse((
+                                    topological_rank[*target as usize],
+                                    *target,
+                                )));
+                            }
+                        }
+                    }
+
+                    let (top, consumes_input) = if let Some(&top) = virtual_stack.last() {
+                        (top, false)
+                    } else if let Some(&top) = top_first.get(input_index) {
+                        (top, true)
+                    } else {
+                        continue;
+                    };
+                    let label = encode_positive_label(top);
+                    let Some(targets) = state
+                        .transitions
+                        .get(&label)
+                        .or_else(|| state.transitions.get(&DEFAULT_LABEL))
+                    else {
+                        continue;
+                    };
+                    for (target, edge_weight) in targets {
+                        let contribution = ops.intersection(&path_weight, edge_weight);
+                        if contribution.is_empty() {
+                            continue;
+                        }
+                        let mut next_stack = virtual_stack.clone();
+                        if !consumes_input {
+                            next_stack.pop();
+                        }
+                        debug_assert!(topological_rank[*target as usize] > source_rank);
+                        if merge_pending(
+                            &mut pending,
+                            *target,
+                            input_index + usize::from(consumes_input),
+                            next_stack,
+                            contribution,
+                            &mut ops,
+                        ) {
+                            queue.push(std::cmp::Reverse((
+                                topological_rank[*target as usize],
+                                *target,
+                            )));
+                        }
+                    }
+                }
+            }
+            accepted
+        }
+
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -2689,7 +2844,15 @@ impl<'a> ConstraintState<'a> {
                 else {
                     return;
                 };
-                let accepted = if boundary.signed_stack_effects {
+                let accepted = if boundary.signed_stack_effects
+                    && !boundary.signed_topological_rank.is_empty()
+                {
+                    accepted_for_signed_stack_topological(
+                        &boundary.parser_nwa,
+                        &boundary.signed_topological_rank,
+                        top_first,
+                    )
+                } else if boundary.signed_stack_effects {
                     accepted_for_signed_stack(&boundary.parser_nwa, top_first)
                 } else {
                     accepted_for_stack(&boundary.parser_nwa, top_first)

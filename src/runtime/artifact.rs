@@ -1868,6 +1868,13 @@ pub(crate) struct SegmentedBoundaryParser {
     /// concrete LR state. The segmented mask evaluator interprets those
     /// effects directly instead of requiring compile-time negative resolution.
     pub(crate) signed_stack_effects: bool,
+    /// Full signed-NWA topological order when available. Empty means the
+    /// signed graph was cyclic or the boundary was resolved to positive labels.
+    pub(crate) signed_topological_order: Vec<u32>,
+    /// Inverse of `signed_topological_order`: state -> topological rank. Kept
+    /// explicitly so mask-time signed evaluation can schedule only reachable
+    /// states without scanning the entire 31k-state boundary graph.
+    pub(crate) signed_topological_rank: Vec<u32>,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
