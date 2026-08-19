@@ -495,14 +495,15 @@ fn build_direct_component_state_coordinates(
         if constraint.state_to_internal_tsid.len() != constraint.tokenizer.num_states() as usize {
             return Err("component tokenizer-state map does not cover its runtime tokenizer".into());
         }
-        let local_tsid_count = constraint.internal_tsid_to_states.len();
+        let internal_tsid_to_states = constraint.internal_tsid_groups();
+        let local_tsid_count = internal_tsid_to_states.len();
         if local_tsid_count == 0 {
             return Err("component tokenizer-state map contains no internal TSIDs".into());
         }
         let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
 
         if tokenizer_tsid_relation_is_singleton(constraint) {
-            for (local_tsid, local_states) in constraint.internal_tsid_to_states.iter().enumerate() {
+            for (local_tsid, local_states) in internal_tsid_to_states.iter().enumerate() {
                 if local_states.is_empty() {
                     continue;
                 }
@@ -2811,7 +2812,7 @@ fn candidate_start_state_groups_for_token(
             let constraint = components[component_index];
             let state_offset = tokenizer_state_offsets[component_index];
             for tsid in start_tsid..=end_tsid {
-                let Some(states) = constraint.internal_tsid_to_states.get(tsid as usize) else {
+                let Some(states) = constraint.internal_tsid_groups().get(tsid as usize) else {
                     continue;
                 };
                 let mut representative = None;
@@ -4125,12 +4126,13 @@ fn component_state_coordinate_map(
     }
     for (component_index, component) in components.iter().enumerate() {
         let state_offset = tokenizer_state_offsets[component_index];
-        let local_tsid_count = component.internal_tsid_to_states.len();
+        let internal_tsid_to_states = component.internal_tsid_groups();
+        let local_tsid_count = internal_tsid_to_states.len();
         if local_tsid_count == 0 {
             return Err(format!("component {component_index} has no internal TSIDs"));
         }
         if tokenizer_tsid_relation_is_singleton(component) {
-            for local_states in &component.internal_tsid_to_states {
+            for local_states in internal_tsid_to_states {
                 let mut merged_states = Vec::with_capacity(local_states.len());
                 for &local_state in local_states {
                     let merged_state = state_offset
@@ -13012,6 +13014,7 @@ fn build_composed_constraint_unfinalized(
         possible_matches_complete: true,
         state_to_internal_tsid,
         internal_tsid_to_states,
+        deferred_internal_tsid_to_states: Default::default(),
         composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),

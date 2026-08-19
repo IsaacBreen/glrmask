@@ -759,6 +759,85 @@ struct TokenMaskCacheBuildProfile {
 }
 
 impl Constraint {
+    /// Whether the stored internal-TSID inverse is redundant with the scalar
+    /// state -> TSID map. Runtime-product tokenizers can have several TSID
+    /// lanes per physical state and therefore must retain their explicit
+    /// inverse/relation metadata.
+    pub(crate) fn can_defer_internal_tsid_inverse(&self) -> bool {
+        if self.runtime_source_state_offset.is_some()
+            || self.state_to_internal_tsid.len() != self.tokenizer.num_states() as usize
+            || self.state_to_internal_tsid.iter().any(|&tsid| tsid == u32::MAX)
+        {
+            return false;
+        }
+        let Some(count) = self
+            .state_to_internal_tsid
+            .iter()
+            .copied()
+            .max()
+            .map(|max| max as usize + 1)
+        else {
+            return self.internal_tsid_to_states.is_empty();
+        };
+        // A previously loaded omitted inverse is already certified by the
+        // current-format writer. The complete scalar map is sufficient to
+        // reconstruct it exactly.
+        if self.internal_tsid_to_states.is_empty() {
+            return true;
+        }
+        if self.internal_tsid_to_states.len() != count {
+            return false;
+        }
+        let mut entries = 0usize;
+        for (tsid, states) in self.internal_tsid_to_states.iter().enumerate() {
+            entries = entries.saturating_add(states.len());
+            for &state in states {
+                if self
+                    .state_to_internal_tsid
+                    .get(state as usize)
+                    .copied()
+                    != Some(tsid as u32)
+                {
+                    return false;
+                }
+            }
+        }
+        entries == self.state_to_internal_tsid.len()
+    }
+
+    pub(crate) fn internal_tsid_count(&self) -> usize {
+        if !self.internal_tsid_to_states.is_empty() {
+            return self.internal_tsid_to_states.len();
+        }
+        if let Some(groups) = self.deferred_internal_tsid_to_states.get() {
+            return groups.len();
+        }
+        self.state_to_internal_tsid
+            .iter()
+            .copied()
+            .filter(|&tsid| tsid != u32::MAX)
+            .max()
+            .map_or(0, |max| max as usize + 1)
+    }
+
+    pub(crate) fn internal_tsid_groups(&self) -> &[Vec<u32>] {
+        if !self.internal_tsid_to_states.is_empty() {
+            return &self.internal_tsid_to_states;
+        }
+        let groups = self.deferred_internal_tsid_to_states.get_or_init(|| {
+            let mut groups = vec![Vec::new(); self.internal_tsid_count()];
+            for (state, &tsid) in self.state_to_internal_tsid.iter().enumerate() {
+                if tsid != u32::MAX
+                    && let Some(states) = groups.get_mut(tsid as usize)
+                {
+                    states.push(state as u32);
+                }
+            }
+            groups
+        });
+        groups.as_slice()
+    }
+
     /// Terminal source expressions retained for later compiled-constraint
     /// composition. Fresh constraints keep them directly on the tokenizer;
     /// current loaded artifacts may keep only the canonical serialized blob so
@@ -3258,7 +3337,13 @@ impl Constraint {
             == [u32::MAX]
             && self.state_internal_tsids.is_empty()
             && self.state_to_internal_tsid.len() == state_count;
+        let deferred_singleton_state_relation_ready = self.runtime_source_state_offset.is_none()
+            && self.state_internal_tsid_offsets.is_empty()
+            && self.state_internal_tsids.is_empty()
+            && self.state_to_internal_tsid.len() == state_count
+            && self.state_to_internal_tsid.iter().all(|&tsid| tsid != u32::MAX);
         let state_relation_ready = singleton_state_relation_ready
+            || deferred_singleton_state_relation_ready
             || (self.state_internal_tsid_offsets.len() == state_count + 1
                 && self
                     .state_internal_tsid_offsets
@@ -3543,7 +3628,7 @@ impl Constraint {
             &self.internal_token_universe(),
             self.internal_token_dense_words,
         );
-        let tsid_count = self.internal_tsid_to_states.len().max(1);
+        let tsid_count = self.internal_tsid_count().max(1);
         let wide_parts = self
             .direct_regular_wide_frontier_acceptance
             .iter()
@@ -3641,7 +3726,7 @@ impl Constraint {
                 started.elapsed().as_secs_f64() * 1000.0,
                 self.parser_dwa.states().len(),
                 transitions,
-                self.internal_tsid_to_states.len(),
+                self.internal_tsid_count(),
             );
         }
         self.fast_template_dfas_by_terminal = fast_template_dfas_by_terminal;
@@ -5282,7 +5367,7 @@ impl Constraint {
         let mut relation = (0..state_count)
             .map(|_| SmallVec::<[u32; 2]>::new())
             .collect::<Vec<_>>();
-        for (internal_tsid, states) in self.internal_tsid_to_states.iter().enumerate() {
+        for (internal_tsid, states) in self.internal_tsid_groups().iter().enumerate() {
             for &state in states {
                 if let Some(tsids) = relation.get_mut(state as usize) {
                     tsids.push(internal_tsid as u32);
@@ -6220,6 +6305,7 @@ impl Constraint {
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
         let mut result = SeedTerminalDenseMasks::default();
+        let internal_tsid_to_states = self.internal_tsid_groups();
         for terminal_id in self.runtime_possible_match_terminals() {
             let Some(weight) = self.runtime_possible_match_weight(terminal_id) else {
                 continue;
@@ -6227,7 +6313,7 @@ impl Constraint {
             weight.for_each_entry(|start, end, token_set| {
                 let dense = self.dense_words_from_runtime_token_set(token_set);
                 for internal_tsid in start..=end {
-                    if let Some(states) = self.internal_tsid_to_states.get(internal_tsid as usize) {
+                    if let Some(states) = internal_tsid_to_states.get(internal_tsid as usize) {
                         for &tokenizer_state in states {
                             let entry = result
                                 .entry((tokenizer_state, terminal_id))

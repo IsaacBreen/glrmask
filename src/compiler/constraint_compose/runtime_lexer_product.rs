@@ -193,7 +193,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
     if source_state_tsids.iter().any(Vec::is_empty) {
         return report;
     }
-    let internal_tsid_count = constraint.internal_tsid_to_states.len();
+    let internal_tsid_count = constraint.internal_tsid_count();
     if internal_tsid_count == 0 {
         return report;
     }
@@ -260,6 +260,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
     constraint.tokenizer = built.tokenizer;
     constraint.state_to_internal_tsid = state_to_internal_tsid;
     constraint.internal_tsid_to_states = internal_tsid_to_states;
+    constraint.deferred_internal_tsid_to_states = Default::default();
     // Force finalization to rebuild the exact many-TSID relation for product
     // states rather than retaining the direct-union singleton sentinel.
     constraint.state_internal_tsid_offsets.clear();

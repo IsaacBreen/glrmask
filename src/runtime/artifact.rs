@@ -2180,6 +2180,45 @@ pub(crate) mod internal_token_inverse_artifact_serde {
     }
 }
 
+/// Current-core serialization can omit the tokenizer-state inverse when it is
+/// exactly derivable from the scalar state -> internal-TSID map. The default
+/// mode preserves the historical `Vec<Vec<u32>>` bincode wire, so legacy
+/// artifact decoding is unchanged.
+pub(crate) mod internal_tsid_inverse_artifact_serde {
+    use std::cell::Cell;
+
+    use serde::{Deserialize, Serialize};
+
+    thread_local! {
+        static OMIT_INVERSE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_omit(enabled: bool) -> bool {
+        OMIT_INVERSE.with(|mode| mode.replace(enabled))
+    }
+
+    pub fn serialize<S>(value: &[Vec<u32>], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            return ().serialize(serializer);
+        }
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<u32>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            <()>::deserialize(deserializer)?;
+            return Ok(Vec::new());
+        }
+        Vec::<Vec<u32>>::deserialize(deserializer)
+    }
+}
+
 /// Compact v14+ wire form for the dense original-token -> internal-token map.
 /// Internal IDs are normally only a few thousand wide even for 128k-token
 /// vocabularies, so fixed-width u32 storage wastes roughly half this field.
@@ -3407,7 +3446,14 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
+    #[serde(default, with = "internal_tsid_inverse_artifact_serde")]
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Ordinary tokenizers have one internal TSID per physical state, making
+    /// `internal_tsid_to_states` the exact bucket inverse of
+    /// `state_to_internal_tsid`. Current artifacts can omit that redundant
+    /// allocation and reconstruct it only for composition/debug paths.
+    #[serde(skip, default)]
+    pub(crate) deferred_internal_tsid_to_states: OnceLock<Vec<Vec<u32>>>,
     /// Composition-preparation cache: row `t` lists original model-token IDs
     /// which, from this component's lexer reset, complete terminal `t` exactly
     /// at the end of the model token.  This is not part of the historical inner
