@@ -4394,6 +4394,12 @@ impl Constraint {
         &self,
         gss: &ParserGSS,
     ) -> Option<usize> {
+        // The cache below can only contain indices into this table. Avoid
+        // materializing a deferred dynamic mask vocabulary just to query an
+        // index cache that cannot possibly contain a valid entry.
+        if self.direct_regular_wide_frontier_acceptance.is_empty() {
+            return None;
+        }
         let lower_id = gss.single_interface_lower_id()?;
         if let Some(index) = self
             .direct_regular_wide_frontier_acceptance
@@ -6093,6 +6099,41 @@ impl<'a> ConstraintState<'a> {
 mod dense_internal_token_mask_tests {
     use super::*;
     use crate::Vocab;
+
+    #[test]
+    fn empty_wide_frontier_lookup_does_not_materialize_deferred_dynamic_vocab() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(loaded.direct_regular_wide_frontier_acceptance.is_empty());
+        assert!(
+            loaded.lazy_dynamic_mask_vocab.get().is_none(),
+            "load should preserve deferred dynamic-vocab materialization",
+        );
+
+        let initial = loaded.initial_state_map();
+        for gss in initial.values() {
+            assert!(loaded.direct_regular_wide_frontier_for_gss(gss).is_none());
+        }
+
+        assert!(
+            loaded.lazy_dynamic_mask_vocab.get().is_none(),
+            "empty wide-frontier lookup must not trigger deferred dynamic-vocab materialization",
+        );
+    }
 
     #[test]
     fn initial_commit_prime_token_ids_accepts_exact_limit() {
