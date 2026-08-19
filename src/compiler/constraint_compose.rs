@@ -1635,10 +1635,24 @@ impl BoundaryParserWork {
                 templates,
             } => {
                 let build_started_at = Instant::now();
-                let compile_nondeterministic_bundles = std::env::var_os(
+                let nondeterministic_bundles_requested = std::env::var_os(
                     "GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES",
                 )
                 .is_some();
+                // Preserving bundle nondeterminism avoids repeated local DFA
+                // union work on wide boundary alphabets, but on small boundary
+                // coordinates it creates more NWA support for the final
+                // publication pass than it saves during bundle construction.
+                // Key this on the boundary token coordinate itself: it is a
+                // representation-size policy, not a grammar/layout heuristic.
+                let nondeterministic_bundle_min_tokens = std::env::var(
+                    "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS",
+                )
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(64);
+                let compile_nondeterministic_bundles = nondeterministic_bundles_requested
+                    && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
                 let mut parser_nwa = if compile_nondeterministic_bundles {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
                         &terminal_automaton,
