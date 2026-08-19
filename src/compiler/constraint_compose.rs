@@ -497,7 +497,7 @@ fn deterministic_component_union_root_dispatch(
     if components.len() != parser_state_relations.len()
         || components.len() != default_domains.len()
         || components.len() != component_maps.len()
-        || global_domain_labels.len() < global_state_count
+        || (!global_domain_labels.is_empty() && global_domain_labels.len() < global_state_count)
     {
         return None;
     }
@@ -542,7 +542,10 @@ fn deterministic_component_union_root_dispatch(
             let targets = row
                 .get(&positive)
                 .or_else(|| {
-                    let domain = global_domain_labels[global_state];
+                    let domain = global_domain_labels
+                        .get(global_state)
+                        .copied()
+                        .unwrap_or(NO_PARSER_DOMAIN_LABEL);
                     (domain != NO_PARSER_DOMAIN_LABEL)
                         .then(|| row.get(&domain))
                         .flatten()

@@ -1881,7 +1881,7 @@ fn determinize_with_supports_mode(
         let min_states = std::env::var("GLRMASK_PARSER_SUPPORT_NORMALIZE_SINGLETON_MIN_NWA_STATES")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(16_384);
+            .unwrap_or(4_096);
         nwa.states().len() >= min_states
     });
     let normalized_singleton_weight = Weight::all();
@@ -1972,7 +1972,7 @@ fn determinize_with_supports_mode(
         && nwa.states().len() >= std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_MIN_NWA_STATES")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(16_384)
+            .unwrap_or(8_192)
         && std::env::var_os("GLRMASK_DISABLE_PARSER_SUPPORT_PARALLEL_FRONTIER").is_none();
     let parallel_frontier_min = std::env::var("GLRMASK_PARSER_SUPPORT_PARALLEL_MIN_FRONTIER")
         .ok()
