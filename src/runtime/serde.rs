@@ -335,6 +335,98 @@ struct TokenMaskCacheIrregular {
     byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SeedTerminalDenseCompact {
+    masks: Vec<crate::runtime::artifact::DenseWords>,
+    entries: Vec<(u32, crate::grammar::flat::TerminalID, u32)>,
+}
+
+impl SeedTerminalDenseCompact {
+    fn from_map(map: &crate::runtime::artifact::SeedTerminalDenseMasks) -> Self {
+        let mut ordered = map.iter().collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|&(&key, _)| key);
+        let mut mask_ids = rustc_hash::FxHashMap::<
+            crate::runtime::artifact::DenseWords,
+            u32,
+        >::default();
+        let mut masks = Vec::new();
+        let mut entries = Vec::with_capacity(ordered.len());
+        for (&(state, terminal), mask) in ordered {
+            let mask_id = if let Some(&mask_id) = mask_ids.get(mask) {
+                mask_id
+            } else {
+                let mask_id = masks.len() as u32;
+                let shared = std::sync::Arc::clone(mask);
+                mask_ids.insert(std::sync::Arc::clone(&shared), mask_id);
+                masks.push(shared);
+                mask_id
+            };
+            entries.push((state, terminal, mask_id));
+        }
+        Self { masks, entries }
+    }
+
+    fn into_map(self) -> Result<crate::runtime::artifact::SeedTerminalDenseMasks, String> {
+        let mut result = crate::runtime::artifact::SeedTerminalDenseMasks::default();
+        result.reserve(self.entries.len());
+        for (state, terminal, mask_id) in self.entries {
+            let mask = self
+                .masks
+                .get(mask_id as usize)
+                .ok_or_else(|| "token-mask seed mask id is out of range".to_owned())?;
+            if result
+                .insert((state, terminal), std::sync::Arc::clone(mask))
+                .is_some()
+            {
+                return Err("duplicate token-mask seed key".to_owned());
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Serialize)]
+struct TokenMaskCacheIrregularV5Ref<'a> {
+    guarded_shift_index: &'a [rustc_hash::FxHashMap<
+        crate::grammar::flat::TerminalID,
+        crate::compiler::glr::table::GuardedShiftCellIndex,
+    >],
+    seed_terminal_dense: &'a SeedTerminalDenseCompact,
+    seed_universe_dense: &'a [u64],
+    quad_group_sparse_masks: &'a [InternalTokenBufMasks],
+    quad_group_dense_masks: &'a [Option<Box<[u32]>>],
+    byte_group_sparse_masks: &'a [InternalTokenBufMasks],
+    byte_group_dense_masks: &'a [Option<Box<[u32]>>],
+}
+
+#[derive(Deserialize)]
+struct TokenMaskCacheIrregularV5 {
+    guarded_shift_index: Vec<rustc_hash::FxHashMap<
+        crate::grammar::flat::TerminalID,
+        crate::compiler::glr::table::GuardedShiftCellIndex,
+    >>,
+    seed_terminal_dense: SeedTerminalDenseCompact,
+    seed_universe_dense: Vec<u64>,
+    quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
+    byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
+}
+
+impl TokenMaskCacheIrregularV5 {
+    fn into_irregular(self) -> Result<TokenMaskCacheIrregular, String> {
+        Ok(TokenMaskCacheIrregular {
+            guarded_shift_index: self.guarded_shift_index,
+            seed_terminal_dense: self.seed_terminal_dense.into_map()?,
+            seed_universe_dense: self.seed_universe_dense,
+            quad_group_sparse_masks: self.quad_group_sparse_masks,
+            quad_group_dense_masks: self.quad_group_dense_masks,
+            byte_group_sparse_masks: self.byte_group_sparse_masks,
+            byte_group_dense_masks: self.byte_group_dense_masks,
+        })
+    }
+}
+
 enum TokenMaskCacheArtifact {
     Full {
         tail: TokenMaskCacheTail,
@@ -519,7 +611,6 @@ fn decode_cache_u32_rows(
 }
 
 fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
-    const MAGIC: &[u8; 4] = b"TMC4";
     const HEADER_LEN: usize = 24;
     const MAX_PREFIX_BYTES: usize = 1024 * 1024;
     const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024;
@@ -551,19 +642,41 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
     let tail_started = profile.then(std::time::Instant::now);
     let mut tail = Vec::with_capacity(32 * 1024);
-    bincode::serialize_into(
-        &mut tail,
-        &TokenMaskCacheIrregularRef {
-            guarded_shift_index: &constraint.table.guarded_shift_index,
-            seed_terminal_dense: &constraint.seed_terminal_dense,
-            seed_universe_dense: &constraint.seed_universe_dense,
-            quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
-            quad_group_dense_masks: &constraint.quad_group_dense_masks,
-            byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
-            byte_group_dense_masks: &constraint.byte_group_dense_masks,
-        },
-    )
-    .expect("token-mask cache serialization should succeed");
+    // Deduplicating tiny seed maps costs more bookkeeping than it saves. Large
+    // seed tables, however, commonly repeat the same dense token mask across
+    // hundreds of tokenizer-state/terminal keys; TMC5 pools those immutable
+    // masks once and shares the Arc again after load.
+    let compact_seed = constraint.seed_terminal_dense.len() >= 64;
+    if compact_seed {
+        let seed_terminal_dense = SeedTerminalDenseCompact::from_map(&constraint.seed_terminal_dense);
+        bincode::serialize_into(
+            &mut tail,
+            &TokenMaskCacheIrregularV5Ref {
+                guarded_shift_index: &constraint.table.guarded_shift_index,
+                seed_terminal_dense: &seed_terminal_dense,
+                seed_universe_dense: &constraint.seed_universe_dense,
+                quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
+                quad_group_dense_masks: &constraint.quad_group_dense_masks,
+                byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
+                byte_group_dense_masks: &constraint.byte_group_dense_masks,
+            },
+        )
+        .expect("token-mask cache serialization should succeed");
+    } else {
+        bincode::serialize_into(
+            &mut tail,
+            &TokenMaskCacheIrregularRef {
+                guarded_shift_index: &constraint.table.guarded_shift_index,
+                seed_terminal_dense: &constraint.seed_terminal_dense,
+                seed_universe_dense: &constraint.seed_universe_dense,
+                quad_group_sparse_masks: &constraint.quad_group_sparse_masks,
+                quad_group_dense_masks: &constraint.quad_group_dense_masks,
+                byte_group_sparse_masks: &constraint.byte_group_sparse_masks,
+                byte_group_dense_masks: &constraint.byte_group_dense_masks,
+            },
+        )
+        .expect("token-mask cache serialization should succeed");
+    }
     let tail_ms = tail_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
@@ -578,7 +691,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     }
     let prefix_started = profile.then(std::time::Instant::now);
     let mut out = Vec::with_capacity(total_len);
-    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(if compact_seed { b"TMC5" } else { b"TMC4" });
     for value in [tail.len(), mask_words, word_groups, word_entries, prefix_rows] {
         out.extend_from_slice(
             &u32::try_from(value)
@@ -622,7 +735,8 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
     if input.starts_with(b"TWS1") {
         return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
     }
-    if input.starts_with(b"TMC4") {
+    if input.starts_with(b"TMC5") || input.starts_with(b"TMC4") {
+        let compact_seed = input.starts_with(b"TMC5");
         const FAST_HEADER_LEN: usize = 24;
         if input.len() < FAST_HEADER_LEN {
             return Err("invalid fast token-mask cache header".to_owned());
@@ -664,12 +778,17 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
         let prefix_start = entries_start + entries_bytes;
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let tail_started = profile.then(std::time::Instant::now);
-        let irregular = bincode::deserialize::<TokenMaskCacheIrregular>(
-            input
-                .get(FAST_HEADER_LEN..tail_end)
-                .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?,
-        )
-        .map_err(|err| err.to_string())?;
+        let tail_bytes = input
+            .get(FAST_HEADER_LEN..tail_end)
+            .ok_or_else(|| "truncated fast token-mask cache tail".to_owned())?;
+        let irregular = if compact_seed {
+            bincode::deserialize::<TokenMaskCacheIrregularV5>(tail_bytes)
+                .map_err(|err| err.to_string())?
+                .into_irregular()?
+        } else {
+            bincode::deserialize::<TokenMaskCacheIrregular>(tail_bytes)
+                .map_err(|err| err.to_string())?
+        };
         let tail_ms = tail_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let body_started = profile.then(std::time::Instant::now);
@@ -2946,6 +3065,24 @@ mod tests {
             &Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn compact_seed_terminal_dense_deduplicates_and_roundtrips() {
+        let mut original = crate::runtime::artifact::SeedTerminalDenseMasks::default();
+        original.insert((3, 7), Arc::<[u64]>::from([1, 2, 3, 4]));
+        original.insert((9, 11), Arc::<[u64]>::from([1, 2, 3, 4]));
+        original.insert((12, 13), Arc::<[u64]>::from([8, 9]));
+
+        let compact = SeedTerminalDenseCompact::from_map(&original);
+        assert_eq!(compact.masks.len(), 2);
+        assert_eq!(compact.entries.len(), 3);
+        let decoded = compact.into_map().unwrap();
+        assert_eq!(decoded, original);
+        assert!(Arc::ptr_eq(
+            decoded.get(&(3, 7)).unwrap(),
+            decoded.get(&(9, 11)).unwrap(),
+        ));
     }
 
     #[test]
