@@ -587,19 +587,13 @@ impl DFA {
         let group_count = group_id_to_u8set.len();
         let mut states = Vec::with_capacity(state_count);
         for state in 0..state_count {
-            let mut finalizer_bits = BitSet::new(group_count);
             let a = finalizer_offsets[state] as usize;
             let b = finalizer_offsets[state + 1] as usize;
-            for &terminal in &finalizers[a..b] {
-                finalizer_bits.set(terminal as usize);
-            }
+            let finalizer_bits = BitSet::from_sparse_u32(group_count, &finalizers[a..b]);
 
-            let mut future_bits = BitSet::new(group_count);
             let a = future_offsets[state] as usize;
             let b = future_offsets[state + 1] as usize;
-            for &terminal in &futures[a..b] {
-                future_bits.set(terminal as usize);
-            }
+            let future_bits = BitSet::from_sparse_u32(group_count, &futures[a..b]);
 
             let a = epsilon_offsets[state] as usize;
             let b = epsilon_offsets[state + 1] as usize;

@@ -769,7 +769,8 @@ pub mod artifact_serde {
             *pos = end;
             Ok(out)
         };
-        let read_u16_vec = |input: &[u8], pos: &mut usize, count: usize| -> Result<Vec<u16>, String> {
+        let read_u16_as_u32_vec =
+            |input: &[u8], pos: &mut usize, count: usize| -> Result<Vec<u32>, String> {
             let bytes_len = count
                 .checked_mul(2)
                 .ok_or_else(|| "fast tokenizer u16 vector overflow".to_owned())?;
@@ -779,33 +780,19 @@ pub mod artifact_serde {
             let bytes = input
                 .get(*pos..end)
                 .ok_or_else(|| "truncated fast tokenizer u16 vector".to_owned())?;
-            let mut out = Vec::<u16>::with_capacity(count);
-            if cfg!(target_endian = "little") {
-                unsafe {
-                    out.set_len(count);
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        out.as_mut_ptr().cast::<u8>(),
-                        bytes_len,
-                    );
-                }
-            } else {
-                out.extend(
-                    bytes
-                        .chunks_exact(2)
-                        .map(|b| u16::from_le_bytes(b.try_into().unwrap())),
-                );
-            }
+            let mut out = Vec::<u32>::with_capacity(count);
+            out.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))),
+            );
             *pos = end;
             Ok(out)
         };
         let read_ids_as_u32 =
             |input: &[u8], pos: &mut usize, count: usize, width: usize| -> Result<Vec<u32>, String> {
                 match width {
-                    2 => Ok(read_u16_vec(input, pos, count)?
-                        .into_iter()
-                        .map(u32::from)
-                        .collect()),
+                    2 => read_u16_as_u32_vec(input, pos, count),
                     4 => read_u32_vec(input, pos, count),
                     _ => Err("invalid fast tokenizer id width".to_owned()),
                 }
@@ -951,10 +938,28 @@ pub mod artifact_serde {
         let metadata_build_ms = metadata_build_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started) = total_started {
+            let epsilon_rows = epsilon_offsets
+                .windows(2)
+                .filter(|row| row[0] != row[1])
+                .count();
+            let finalizer_rows = finalizer_offsets
+                .windows(2)
+                .filter(|row| row[0] != row[1])
+                .count();
+            let future_rows = future_offsets
+                .windows(2)
+                .filter(|row| row[0] != row[1])
+                .count();
             eprintln!(
-                "[glrmask/profile][tokenizer_fast_decode] states={} transitions={} dfa_groups_ms={:.3} transitions_ms={:.3} metadata_wire_ms={:.3} metadata_build_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][tokenizer_fast_decode] states={} transitions={} epsilon={} epsilon_rows={} finalizers={} finalizer_rows={} futures={} future_rows={} dfa_groups_ms={:.3} transitions_ms={:.3} metadata_wire_ms={:.3} metadata_build_ms={:.3} total_ms={:.3}",
                 state_count,
                 transition_count,
+                epsilon_count,
+                epsilon_rows,
+                finalizer_count,
+                finalizer_rows,
+                future_count,
+                future_rows,
                 dfa_alloc_groups_ms,
                 transitions_ms,
                 metadata_wire_ms,
