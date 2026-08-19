@@ -774,6 +774,18 @@ fn first_transition_factor_strict_reference_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STRICT_REFERENCE")
 }
 
+fn first_transition_literal_row_quotient_enabled() -> bool {
+    !env_flag_enabled("GLRMASK_DISABLE_VOCAB_FIRST_TRANSITION_LITERAL_ROW_QUOTIENT")
+}
+
+fn literal_row_quotient_coarsening_rounds() -> usize {
+    std::env::var("GLRMASK_VOCAB_LITERAL_ROW_COARSENING_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .min(1)
+}
+
 fn first_transition_factor_min_bucket_tokens() -> usize {
     std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS")
         .ok()
@@ -922,6 +934,255 @@ fn states_by_transition_diversity(dfa: &Dfa, states: &[usize]) -> Vec<usize> {
             .then_with(|| left.0.cmp(&right.0))
     });
     ranked.into_iter().map(|(state_id, _)| state_id).collect()
+}
+
+/// Quotient source states by their exact observable value and literal
+/// transition row over byte classes that can occur after the factored first
+/// byte. This is exact for the finite-vocabulary suffix walk: equal rows enter
+/// the same concrete target state for every observable next byte, so every
+/// later suffix has identical behavior as well.
+///
+/// Dead-end states expose their current finalizers/completion but have no
+/// future behavior, matching the vocabulary walk's early-death semantics.
+fn exact_literal_state_row_quotient(
+    dfa: &Dfa,
+    active_byte_classes: &[bool],
+    profiling: bool,
+) -> Option<(Vec<u32>, Vec<usize>)> {
+    let total_started_at = profiling.then(Instant::now);
+    let num_states = dfa.num_states;
+    if num_states == 0 || num_states > u32::MAX as usize {
+        return None;
+    }
+    let num_classes = dfa
+        .byte_to_class
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |max_class| max_class as usize + 1);
+    if num_classes > 256 {
+        return None;
+    }
+    if active_byte_classes.len() != num_classes {
+        return None;
+    }
+    let active_class_count = active_byte_classes.iter().filter(|&&active| active).count();
+
+    // Exact output labels: no probabilistic fingerprint is used here. The
+    // future-group list determines the completion observation, while the
+    // finalizer list is observable at the current consumed position.
+    let labels_started_at = profiling.then(Instant::now);
+    let mut label_ids = HashMap::<
+        (bool, SmallVec<[usize; 4]>, SmallVec<[usize; 4]>),
+        u32,
+    >::with_capacity(num_states.min(16_384));
+    let mut initial_classes = Vec::with_capacity(num_states);
+    let mut next_label = 0u32;
+    for state in 0..num_states {
+        let key = (
+            dfa.is_dead_end[state],
+            dfa.finalizers[state].clone(),
+            dfa.possible_future_groups[state].clone(),
+        );
+        let label = *label_ids.entry(key).or_insert_with(|| {
+            let label = next_label;
+            next_label += 1;
+            label
+        });
+        initial_classes.push(label);
+    }
+    let labels_ms = labels_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let refine_started_at = profiling.then(Instant::now);
+    let mut hashes = vec![HASH_SEED3; num_states];
+    for state in 0..num_states {
+        hashes[state] = hashes[state]
+            .wrapping_mul(HASH_SEED1)
+            .wrapping_add(initial_classes[state] as u64);
+    }
+    // Class-major transition storage lets us hash every state's literal
+    // relevant-byte row with sequential reads and writes. Hash collisions are
+    // resolved by the exact row comparison below.
+    for (class, &active) in active_byte_classes.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        let base = class * num_states;
+        for state in 0..num_states {
+            let target = if dfa.is_dead_end[state] {
+                NONE
+            } else {
+                dfa.trans_by_class[base + state]
+            };
+            hashes[state] = hashes[state]
+                .wrapping_mul(HASH_SEED1)
+                .wrapping_add(target as u64);
+        }
+    }
+    let mut order = (0..num_states).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| {
+        initial_classes[left]
+            .cmp(&initial_classes[right])
+            .then_with(|| hashes[left].cmp(&hashes[right]))
+            .then_with(|| left.cmp(&right))
+    });
+    let rows_equal = |left: usize, right: usize| {
+        if initial_classes[left] != initial_classes[right] || hashes[left] != hashes[right] {
+            return false;
+        }
+        for (class, &active) in active_byte_classes.iter().enumerate() {
+            if !active {
+                continue;
+            }
+            let base = class * num_states;
+            let left_target = if dfa.is_dead_end[left] {
+                NONE
+            } else {
+                dfa.trans_by_class[base + left]
+            };
+            let right_target = if dfa.is_dead_end[right] {
+                NONE
+            } else {
+                dfa.trans_by_class[base + right]
+            };
+            if left_target != right_target {
+                return false;
+            }
+        }
+        true
+    };
+    let mut classes = vec![0u32; num_states];
+    let mut class = 0u32;
+    let mut previous = None::<usize>;
+    for &state in &order {
+        if previous.is_some_and(|left| !rows_equal(left, state)) {
+            class += 1;
+        }
+        classes[state] = class;
+        previous = Some(state);
+    }
+    let literal_class_count = class as usize + 1;
+
+    // The literal-row classes above are already an exact behavioral
+    // equivalence. Replacing each concrete target with its certified class and
+    // regrouping by (observation, class-target row) can therefore only coarsen
+    // that equivalence soundly. One round recovers useful recursively-equivalent
+    // target rows cheaply; deeper rounds cost more than they save on the tail
+    // workloads this path targets.
+    let mut completed_coarsening_rounds = 0usize;
+    for _ in 0..literal_row_quotient_coarsening_rounds() {
+        hashes.fill(HASH_SEED3);
+        for state in 0..num_states {
+            hashes[state] = hashes[state]
+                .wrapping_mul(HASH_SEED1)
+                .wrapping_add(initial_classes[state] as u64);
+        }
+        for (byte_class, &active) in active_byte_classes.iter().enumerate() {
+            if !active {
+                continue;
+            }
+            let base = byte_class * num_states;
+            for state in 0..num_states {
+                let target_class = if dfa.is_dead_end[state] {
+                    u32::MAX
+                } else {
+                    let target = dfa.trans_by_class[base + state];
+                    if target == NONE {
+                        u32::MAX
+                    } else {
+                        classes[target as usize]
+                    }
+                };
+                hashes[state] = hashes[state]
+                    .wrapping_mul(HASH_SEED1)
+                    .wrapping_add(target_class as u64);
+            }
+        }
+        order.sort_unstable_by(|&left, &right| {
+            initial_classes[left]
+                .cmp(&initial_classes[right])
+                .then_with(|| hashes[left].cmp(&hashes[right]))
+                .then_with(|| left.cmp(&right))
+        });
+        let quotient_rows_equal = |left: usize, right: usize| {
+            if initial_classes[left] != initial_classes[right] || hashes[left] != hashes[right] {
+                return false;
+            }
+            for (byte_class, &active) in active_byte_classes.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let base = byte_class * num_states;
+                let target_class = |state: usize| {
+                    if dfa.is_dead_end[state] {
+                        u32::MAX
+                    } else {
+                        let target = dfa.trans_by_class[base + state];
+                        if target == NONE {
+                            u32::MAX
+                        } else {
+                            classes[target as usize]
+                        }
+                    }
+                };
+                if target_class(left) != target_class(right) {
+                    return false;
+                }
+            }
+            true
+        };
+        let old_class_count = classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |id| id as usize + 1);
+        let mut next_classes = vec![0u32; num_states];
+        let mut next_class = 0u32;
+        let mut previous = None::<usize>;
+        for &state in &order {
+            if previous.is_some_and(|left| !quotient_rows_equal(left, state)) {
+                next_class += 1;
+            }
+            next_classes[state] = next_class;
+            previous = Some(state);
+        }
+        let new_class_count = next_class as usize + 1;
+        classes = next_classes;
+        completed_coarsening_rounds += 1;
+        if new_class_count == old_class_count {
+            break;
+        }
+    }
+    let refine_ms = refine_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let class_count = classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut representatives = vec![usize::MAX; class_count];
+    for (state, &class) in classes.iter().enumerate() {
+        let representative = &mut representatives[class as usize];
+        if *representative == usize::MAX {
+            *representative = state;
+        }
+    }
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][vocab_literal_row_quotient_detail] states={} output_labels={} byte_classes={} active_byte_classes={} literal_classes={} classes={} coarsening_rounds={} labels_ms={:.3} refine_ms={:.3} total_ms={:.3}",
+            num_states,
+            next_label,
+            num_classes,
+            active_class_count,
+            literal_class_count,
+            class_count,
+            completed_coarsening_rounds,
+            labels_ms,
+            refine_ms,
+            total_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
+    Some((classes, representatives))
 }
 
 #[inline]
@@ -3339,6 +3600,105 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
             dfa.num_groups,
         )
         && preliminary_ratio > FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT;
+
+    // The admission decision above deliberately uses the historical raw state
+    // counts. The exact literal-row quotient only makes an already accepted
+    // large factor cheaper; it can never cause a new factor plan to be
+    // selected. Restrict it to the large state×vocabulary shape where the
+    // first-transition pass is a measured tail hotspot and the O(states ×
+    // byte-classes) quotient cost is well amortized.
+    if first_transition_literal_row_quotient_enabled()
+        && strings.len() >= 10_000
+        && initial_states.len() >= 10_000
+        && dfa.num_states >= 20_000
+    {
+        let quotient_started_at = Instant::now();
+        let quotient_num_classes = dfa
+            .byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |max_class| max_class as usize + 1);
+        let mut active_suffix_classes = vec![false; quotient_num_classes];
+        for string in strings {
+            for &byte in string.as_ref().iter().skip(1) {
+                active_suffix_classes[dfa.byte_to_class[byte as usize] as usize] = true;
+            }
+        }
+        if let Some((behavior_classes, representatives)) =
+            exact_literal_state_row_quotient(dfa, &active_suffix_classes, profiling)
+        {
+            let bucket_states_before = buckets
+                .iter()
+                .map(|bucket| bucket.initial_outcomes.len())
+                .sum::<usize>();
+            for bucket in &mut buckets {
+                let mut seen_classes = vec![false; representatives.len()];
+                let mut seen_none = false;
+                let mut quotient_outcomes = Vec::with_capacity(bucket.initial_outcomes.len());
+                for &state in &bucket.initial_outcomes {
+                    if state == STATE_NONE {
+                        if !seen_none {
+                            seen_none = true;
+                            quotient_outcomes.push(STATE_NONE);
+                        }
+                        continue;
+                    }
+                    let class = behavior_classes[state] as usize;
+                    if !seen_classes[class] {
+                        seen_classes[class] = true;
+                        quotient_outcomes.push(representatives[class]);
+                    }
+                }
+                bucket.initial_outcomes = quotient_outcomes;
+            }
+
+            // The quotient may make two previously distinct first-byte buckets
+            // share the exact same source coordinate. Reuse one traversal while
+            // retaining each token's semantic leading-byte domain in the later
+            // grouping key.
+            if buckets.len() > 1 {
+                let mut merged_buckets =
+                    Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
+                let mut shape_to_bucket =
+                    HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
+                for bucket in buckets {
+                    if let Some(&merged_idx) = shape_to_bucket.get(&bucket.initial_outcomes) {
+                        merged_buckets[merged_idx]
+                            .token_indices
+                            .extend(bucket.token_indices);
+                    } else {
+                        let merged_idx = merged_buckets.len();
+                        shape_to_bucket.insert(bucket.initial_outcomes.clone(), merged_idx);
+                        merged_buckets.push(bucket);
+                    }
+                }
+                buckets = merged_buckets;
+            }
+            if profiling {
+                let bucket_states_after = buckets
+                    .iter()
+                    .map(|bucket| bucket.initial_outcomes.len())
+                    .sum::<usize>();
+                eprintln!(
+                    "[glrmask/profile][vocab_first_transition_literal_row_quotient] dfa_states={} row_classes={} bucket_states_before={} bucket_states_after={} buckets={} reduction_pct={:.2} total_ms={:.3}",
+                    dfa.num_states,
+                    representatives.len(),
+                    bucket_states_before,
+                    bucket_states_after,
+                    buckets.len(),
+                    if bucket_states_before == 0 {
+                        0.0
+                    } else {
+                        100.0
+                            * (1.0
+                                - bucket_states_after as f64 / bucket_states_before as f64)
+                    },
+                    quotient_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+    }
 
     // Suffix sorting is required only for an accepted plan. Deferring it until
     // after the structural work-ratio test keeps default-off/rejected attempts
