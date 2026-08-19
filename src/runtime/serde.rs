@@ -808,16 +808,33 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
             let start = offsets[group] as usize;
             let end = offsets[group + 1] as usize;
             let mut decoded = Vec::with_capacity(end - start);
-            for entry in start..end {
-                let pos = entry * 6;
-                let word = u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap());
-                if word as usize >= mask_words {
-                    return Err("fast token-mask sparse word out of range".to_owned());
+            if cfg!(target_endian = "little") {
+                // `expected == input.len()` above proves every 6-byte record is
+                // present. Read the packed fields directly instead of doing
+                // two independently bounds-checked slices + `try_into()` per
+                // sparse entry. The wire is intentionally unaligned.
+                let base = entries.as_ptr();
+                for entry in start..end {
+                    let ptr = unsafe { base.add(entry * 6) };
+                    let word = unsafe { std::ptr::read_unaligned(ptr.cast::<u16>()) };
+                    if word as usize >= mask_words {
+                        return Err("fast token-mask sparse word out of range".to_owned());
+                    }
+                    let bits = unsafe { std::ptr::read_unaligned(ptr.add(2).cast::<u32>()) };
+                    decoded.push((word, bits));
                 }
-                decoded.push((
-                    word,
-                    u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
-                ));
+            } else {
+                for entry in start..end {
+                    let pos = entry * 6;
+                    let word = u16::from_le_bytes(entries[pos..pos + 2].try_into().unwrap());
+                    if word as usize >= mask_words {
+                        return Err("fast token-mask sparse word out of range".to_owned());
+                    }
+                    decoded.push((
+                        word,
+                        u32::from_le_bytes(entries[pos + 2..pos + 6].try_into().unwrap()),
+                    ));
+                }
             }
             word_group_sparse_masks.push(decoded);
         }

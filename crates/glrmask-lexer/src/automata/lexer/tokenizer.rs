@@ -359,6 +359,49 @@ impl<'de> Deserialize<'de> for CompressedTransitionEntries {
 
 pub mod artifact_serde {
     use super::*;
+
+    #[inline]
+    fn u16_values_all_below(bytes: &[u8], limit: usize) -> bool {
+        debug_assert_eq!(bytes.len() % 2, 0);
+        debug_assert!(limit <= u16::MAX as usize + 1);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // x86_64 guarantees SSE2. TKF2 target slabs are not necessarily
+            // aligned (the preceding byte-transition slab has arbitrary
+            // length), so use unaligned vector loads. Convert the unsigned
+            // comparison to a signed one by flipping the sign bit, and test
+            // `value > limit - 1` eight targets at a time.
+            if limit != 0 && limit <= u16::MAX as usize {
+                unsafe {
+                    use std::arch::x86_64::{
+                        __m128i, _mm_cmpgt_epi16, _mm_loadu_si128, _mm_movemask_epi8,
+                        _mm_set1_epi16, _mm_xor_si128,
+                    };
+                    let sign = _mm_set1_epi16(i16::MIN);
+                    let threshold = _mm_xor_si128(
+                        _mm_set1_epi16((limit as u16 - 1) as i16),
+                        sign,
+                    );
+                    let mut pos = 0usize;
+                    while pos + 16 <= bytes.len() {
+                        let values = _mm_loadu_si128(bytes.as_ptr().add(pos).cast::<__m128i>());
+                        let unsigned_ordered = _mm_xor_si128(values, sign);
+                        let invalid = _mm_cmpgt_epi16(unsigned_ordered, threshold);
+                        if _mm_movemask_epi8(invalid) != 0 {
+                            return false;
+                        }
+                        pos += 16;
+                    }
+                    return bytes[pos..].chunks_exact(2).all(|word| {
+                        (u16::from_le_bytes([word[0], word[1]]) as usize) < limit
+                    });
+                }
+            }
+        }
+        bytes
+            .chunks_exact(2)
+            .all(|word| (u16::from_le_bytes([word[0], word[1]]) as usize) < limit)
+    }
     use serde::{Deserializer, Serializer};
 
     #[derive(Serialize)]
@@ -834,9 +877,7 @@ pub mod artifact_serde {
                 let bytes = input
                     .get(start..end)
                     .ok_or_else(|| "truncated fast tokenizer targets".to_owned())?;
-                if bytes.chunks_exact(2).any(|word| {
-                    u16::from_le_bytes([word[0], word[1]]) as usize >= state_count
-                }) {
+                if !u16_values_all_below(bytes, state_count) {
                     return Err("fast tokenizer transition target out of range".to_owned());
                 }
                 pos = end;
@@ -937,6 +978,15 @@ pub mod artifact_serde {
         );
         let metadata_build_ms = metadata_build_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        // Static-constraint finalization always primes this cache before the
+        // constraint is returned. Build it here while tokenizer decode is one
+        // branch of the outer parallel section fan-out, rather than paying the
+        // same work serially after every section has joined.
+        let singleton_epsilon_closures = {
+            let cache = OnceLock::new();
+            let _ = cache.set(Arc::new(dfa.all_singleton_epsilon_closures()));
+            cache
+        };
         if let Some(total_started) = total_started {
             let epsilon_rows = epsilon_offsets
                 .windows(2)
@@ -977,7 +1027,7 @@ pub mod artifact_serde {
             })),
             compressed_transition_segments: Arc::from([]),
             exprs: None,
-            singleton_epsilon_closures: OnceLock::new(),
+            singleton_epsilon_closures,
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
             all_self_loop_bytes_cache: OnceLock::new(),
