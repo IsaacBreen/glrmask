@@ -778,6 +778,14 @@ fn first_transition_literal_row_quotient_enabled() -> bool {
     !env_flag_enabled("GLRMASK_DISABLE_VOCAB_FIRST_TRANSITION_LITERAL_ROW_QUOTIENT")
 }
 
+fn literal_row_quotient_coarsening_rounds() -> usize {
+    std::env::var("GLRMASK_VOCAB_LITERAL_ROW_COARSENING_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .min(1)
+}
+
 fn first_transition_factor_min_bucket_tokens() -> usize {
     std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS")
         .ok()
@@ -1053,6 +1061,98 @@ fn exact_literal_state_row_quotient(
         classes[state] = class;
         previous = Some(state);
     }
+    let literal_class_count = class as usize + 1;
+
+    // The literal-row classes above are already an exact behavioral
+    // equivalence. Replacing each concrete target with its certified class and
+    // regrouping by (observation, class-target row) can therefore only coarsen
+    // that equivalence soundly. One round recovers useful recursively-equivalent
+    // target rows cheaply; deeper rounds cost more than they save on the tail
+    // workloads this path targets.
+    let mut completed_coarsening_rounds = 0usize;
+    for _ in 0..literal_row_quotient_coarsening_rounds() {
+        hashes.fill(HASH_SEED3);
+        for state in 0..num_states {
+            hashes[state] = hashes[state]
+                .wrapping_mul(HASH_SEED1)
+                .wrapping_add(initial_classes[state] as u64);
+        }
+        for (byte_class, &active) in active_byte_classes.iter().enumerate() {
+            if !active {
+                continue;
+            }
+            let base = byte_class * num_states;
+            for state in 0..num_states {
+                let target_class = if dfa.is_dead_end[state] {
+                    u32::MAX
+                } else {
+                    let target = dfa.trans_by_class[base + state];
+                    if target == NONE {
+                        u32::MAX
+                    } else {
+                        classes[target as usize]
+                    }
+                };
+                hashes[state] = hashes[state]
+                    .wrapping_mul(HASH_SEED1)
+                    .wrapping_add(target_class as u64);
+            }
+        }
+        order.sort_unstable_by(|&left, &right| {
+            initial_classes[left]
+                .cmp(&initial_classes[right])
+                .then_with(|| hashes[left].cmp(&hashes[right]))
+                .then_with(|| left.cmp(&right))
+        });
+        let quotient_rows_equal = |left: usize, right: usize| {
+            if initial_classes[left] != initial_classes[right] || hashes[left] != hashes[right] {
+                return false;
+            }
+            for (byte_class, &active) in active_byte_classes.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let base = byte_class * num_states;
+                let target_class = |state: usize| {
+                    if dfa.is_dead_end[state] {
+                        u32::MAX
+                    } else {
+                        let target = dfa.trans_by_class[base + state];
+                        if target == NONE {
+                            u32::MAX
+                        } else {
+                            classes[target as usize]
+                        }
+                    }
+                };
+                if target_class(left) != target_class(right) {
+                    return false;
+                }
+            }
+            true
+        };
+        let old_class_count = classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |id| id as usize + 1);
+        let mut next_classes = vec![0u32; num_states];
+        let mut next_class = 0u32;
+        let mut previous = None::<usize>;
+        for &state in &order {
+            if previous.is_some_and(|left| !quotient_rows_equal(left, state)) {
+                next_class += 1;
+            }
+            next_classes[state] = next_class;
+            previous = Some(state);
+        }
+        let new_class_count = next_class as usize + 1;
+        classes = next_classes;
+        completed_coarsening_rounds += 1;
+        if new_class_count == old_class_count {
+            break;
+        }
+    }
     let refine_ms = refine_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let class_count = classes
@@ -1069,12 +1169,14 @@ fn exact_literal_state_row_quotient(
     }
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_literal_row_quotient_detail] states={} output_labels={} byte_classes={} active_byte_classes={} classes={} labels_ms={:.3} refine_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][vocab_literal_row_quotient_detail] states={} output_labels={} byte_classes={} active_byte_classes={} literal_classes={} classes={} coarsening_rounds={} labels_ms={:.3} refine_ms={:.3} total_ms={:.3}",
             num_states,
             next_label,
             num_classes,
             active_class_count,
+            literal_class_count,
             class_count,
+            completed_coarsening_rounds,
             labels_ms,
             refine_ms,
             total_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
