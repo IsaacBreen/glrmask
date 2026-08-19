@@ -4557,6 +4557,8 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
             serialized_artifact_cache: None,
+            deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
         };
         if build_packed_parser_dwa {
             let packed_started_at = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")

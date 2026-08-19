@@ -460,6 +460,8 @@ impl DynamicConstraint {
             parser_state_domain_labels: Vec::new(),
             ignore_expr: payload.ignore_expr,
             serialized_artifact_cache: None,
+            deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
         };
         inner
     }

@@ -1,4 +1,5 @@
 use crate::automata::lexer::Lexer;
+use crate::automata::regex::Expr;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -758,6 +759,32 @@ struct TokenMaskCacheBuildProfile {
 }
 
 impl Constraint {
+    /// Terminal source expressions retained for later compiled-constraint
+    /// composition. Fresh constraints keep them directly on the tokenizer;
+    /// current loaded artifacts may keep only the canonical serialized blob so
+    /// ordinary static load/mask/commit does not rebuild expression trees.
+    pub(crate) fn retained_terminal_exprs(&self) -> Option<&[Expr]> {
+        if let Some(exprs) = self.tokenizer.terminal_exprs() {
+            return Some(exprs);
+        }
+        if let Some(exprs) = self.deferred_terminal_exprs.get() {
+            return Some(exprs.as_ref());
+        }
+        let blob = self.deferred_terminal_exprs_blob.as_deref()?;
+        let decoded = bincode::deserialize::<Vec<Expr>>(blob).ok()?;
+        if decoded.len() != self.tokenizer.num_terminals() as usize {
+            return None;
+        }
+        let decoded = Arc::<[Expr]>::from(decoded.into_boxed_slice());
+        let _ = self.deferred_terminal_exprs.set(decoded);
+        self.deferred_terminal_exprs.get().map(Arc::as_ref)
+    }
+
+    #[inline]
+    pub(crate) fn retained_terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {
+        self.retained_terminal_exprs()?.get(terminal as usize)
+    }
+
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
         let vocab_entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &vocab_entries) {

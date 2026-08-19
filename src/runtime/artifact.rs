@@ -3684,6 +3684,15 @@ pub struct Constraint {
     /// re-encoding the same canonical pools.
     #[serde(skip, default)]
     pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
+    /// Current-format terminal source expressions can be retained as their
+    /// canonical bincode payload instead of recursively rebuilding every Expr
+    /// node during an ordinary static load. Composition materializes the list
+    /// lazily through `retained_terminal_exprs` when it actually needs source
+    /// language proofs.
+    #[serde(skip, default)]
+    pub(crate) deferred_terminal_exprs_blob: Option<Arc<[u8]>>,
+    #[serde(skip, default)]
+    pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
 }
 
 

@@ -37,6 +37,8 @@ const V18_SECTION_MAGIC: [u8; 4] = *b"S18\0";
 const V18_SECTION_HEADER_LEN: usize = V18_SECTION_MAGIC.len() + 9 * 8;
 const V19_SECTION_MAGIC: [u8; 4] = *b"S19\0";
 const V19_SECTION_HEADER_LEN: usize = V19_SECTION_MAGIC.len() + 10 * 8;
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
+const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 #[inline]
 fn uses_external_runtime_sections(version: u16) -> bool {
@@ -155,6 +157,66 @@ struct ConstraintArtifactV18Core {
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
     parser_state_domain_labels: Vec<i32>,
+}
+
+#[derive(Serialize)]
+struct ConstraintArtifactCurrentCoreBaseRef<'a> {
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+    parser_state_domain_labels: &'a [i32],
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactCurrentCoreBase {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    parser_state_domain_labels: Vec<i32>,
+}
+
+fn decode_current_core(
+    input: &[u8],
+) -> Result<(ConstraintArtifactCurrentCoreBase, Option<Vec<u8>>), String> {
+    if input.len() < CURRENT_CORE_HEADER_LEN || !input.starts_with(&CURRENT_CORE_MAGIC) {
+        return Err("invalid current constraint core header".to_owned());
+    }
+    let base_len = u64::from_le_bytes(
+        input[4..12]
+            .try_into()
+            .expect("current core base length has fixed width"),
+    );
+    let expr_len = u64::from_le_bytes(
+        input[12..20]
+            .try_into()
+            .expect("current core expression length has fixed width"),
+    );
+    let base_len = usize::try_from(base_len)
+        .map_err(|_| "current core base length does not fit platform".to_owned())?;
+    let expr_len = usize::try_from(expr_len)
+        .map_err(|_| "current core expression length does not fit platform".to_owned())?;
+    let base_end = CURRENT_CORE_HEADER_LEN
+        .checked_add(base_len)
+        .ok_or_else(|| "current core base length overflow".to_owned())?;
+    let expr_end = base_end
+        .checked_add(expr_len)
+        .ok_or_else(|| "current core expression length overflow".to_owned())?;
+    if expr_end != input.len() {
+        return Err("invalid current constraint core section lengths".to_owned());
+    }
+    let base = bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(
+        &input[CURRENT_CORE_HEADER_LEN..base_end],
+    )
+    .map_err(|err| err.to_string())?;
+    let exprs = (expr_len != 0).then(|| input[base_end..expr_end].to_vec());
+    Ok((base, exprs))
+}
+
+struct DecodedConstraintCore {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    terminal_exprs: Option<Vec<Expr>>,
+    terminal_exprs_blob: Option<Vec<u8>>,
+    parser_state_domain_labels: Vec<i32>,
+    internal_token_buf_masks: Vec<InternalTokenBufMasks>,
 }
 
 #[derive(Serialize)]
@@ -1592,32 +1654,6 @@ impl Constraint {
                             crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
                         let previous_external_token_bytes =
                             crate::runtime::artifact::token_bytes_artifact_serde::set_external(true);
-                        if std::env::var_os("GLRMASK_PROFILE_CORE_FIELDS").is_some() {
-                            let sizes = [
-                                ("internal_token_buf_masks", bincode::serialize(&self.internal_token_buf_masks).unwrap().len()),
-                                ("template_dfas", bincode::serialize(&self.template_dfas_by_terminal).unwrap().len()),
-                                ("state_tsid_maps", bincode::serialize(&(&self.state_to_internal_tsid, &self.internal_tsid_to_states)).unwrap().len()),
-                                ("runtime_product", bincode::serialize(&(
-                                    &self.runtime_source_state_offset,
-                                    &self.runtime_product_source_offsets,
-                                    &self.runtime_product_source_states,
-                                    &self.runtime_product_exact_source_states,
-                                )).unwrap().len()),
-                                ("possible_matches", bincode::serialize(&self.possible_matches).unwrap().len()),
-                                ("parser_accept", bincode::serialize(&(
-                                    &self.parser_top_accept,
-                                    &self.parser_top_accept_parts,
-                                    &self.direct_regular_l1_complete_by_terminal,
-                                    &self.direct_regular_automaton,
-                                )).unwrap().len()),
-                                ("display_special", bincode::serialize(&(
-                                    &self.terminal_display_names,
-                                    &self.ignore_terminal,
-                                    &self.special_token_terminals,
-                                )).unwrap().len()),
-                            ];
-                            eprintln!("[glrmask/profile][core_fields] {}", sizes.iter().map(|(name, bytes)| format!("{name}={bytes}")).collect::<Vec<_>>().join(" "));
-                        }
                         let started = profile.then(std::time::Instant::now);
                         // `bincode::serialize` first runs `serialized_size` and
                         // then serializes again. Custom compact serializers
@@ -1626,15 +1662,33 @@ impl Constraint {
                         // instead; capacity growth is much cheaper than
                         // rebuilding every packed field twice.
                         let mut encoded = Vec::with_capacity(3 * 1024 * 1024);
+                        encoded.extend_from_slice(&CURRENT_CORE_MAGIC);
+                        let base_len_offset = encoded.len();
+                        encoded.extend_from_slice(&0u64.to_le_bytes());
+                        let expr_len_offset = encoded.len();
+                        encoded.extend_from_slice(&0u64.to_le_bytes());
+                        let base_start = encoded.len();
                         let encode_result = bincode::serialize_into(
                             &mut encoded,
-                            &ConstraintArtifactV18CoreRef {
+                            &ConstraintArtifactCurrentCoreBaseRef {
                                 constraint: self,
                                 ignore_expr: &self.ignore_expr,
-                                terminal_exprs: self.tokenizer.terminal_exprs(),
                                 parser_state_domain_labels: &self.parser_state_domain_labels,
                             },
                         );
+                        let base_len = encoded.len() - base_start;
+                        encoded[base_len_offset..base_len_offset + 8]
+                            .copy_from_slice(&(base_len as u64).to_le_bytes());
+                        let expr_start = encoded.len();
+                        if let Some(exprs) = self.tokenizer.terminal_exprs() {
+                            bincode::serialize_into(&mut encoded, exprs)
+                                .expect("terminal expression serialization should succeed");
+                        } else if let Some(blob) = self.deferred_terminal_exprs_blob.as_deref() {
+                            encoded.extend_from_slice(blob);
+                        }
+                        let expr_len = encoded.len() - expr_start;
+                        encoded[expr_len_offset..expr_len_offset + 8]
+                            .copy_from_slice(&(expr_len as u64).to_le_bytes());
                         crate::automata::lexer::tokenizer::set_compact_artifact_serde(
                             previous_compact_tokenizer,
                         );
@@ -2383,7 +2437,7 @@ impl Constraint {
                 ),
                 || -> Result<
                     (
-                        ConstraintArtifactV14Core,
+                        DecodedConstraintCore,
                         Option<std::sync::Arc<crate::runtime::artifact::token_bytes_artifact_serde::PackedTokenBytes>>,
                         Option<(
                             std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
@@ -2454,17 +2508,38 @@ impl Constraint {
                             );
                         let core_started = profile.then(std::time::Instant::now);
                         let decoded = if uses_external_runtime_sections(version) {
-                            bincode::deserialize::<ConstraintArtifactV18Core>(core_section)
-                                .map(|artifact| ConstraintArtifactV14Core {
+                            if core_section.starts_with(&CURRENT_CORE_MAGIC) {
+                                decode_current_core(core_section)
+                                .map(|(artifact, terminal_exprs_blob)| DecodedConstraintCore {
                                     constraint: artifact.constraint,
                                     ignore_expr: artifact.ignore_expr,
-                                    terminal_exprs: artifact.terminal_exprs,
+                                    terminal_exprs: None,
+                                    terminal_exprs_blob,
                                     parser_state_domain_labels: artifact.parser_state_domain_labels,
                                     internal_token_buf_masks: Vec::new(),
                                 })
-                                .map_err(|err| err.to_string())
+                            } else {
+                                bincode::deserialize::<ConstraintArtifactV18Core>(core_section)
+                                    .map(|artifact| DecodedConstraintCore {
+                                        constraint: artifact.constraint,
+                                        ignore_expr: artifact.ignore_expr,
+                                        terminal_exprs: artifact.terminal_exprs,
+                                        terminal_exprs_blob: None,
+                                        parser_state_domain_labels: artifact.parser_state_domain_labels,
+                                        internal_token_buf_masks: Vec::new(),
+                                    })
+                                    .map_err(|err| err.to_string())
+                            }
                         } else {
                             bincode::deserialize::<ConstraintArtifactV14Core>(core_section)
+                                .map(|artifact| DecodedConstraintCore {
+                                    constraint: artifact.constraint,
+                                    ignore_expr: artifact.ignore_expr,
+                                    terminal_exprs: artifact.terminal_exprs,
+                                    terminal_exprs_blob: None,
+                                    parser_state_domain_labels: artifact.parser_state_domain_labels,
+                                    internal_token_buf_masks: artifact.internal_token_buf_masks,
+                                })
                                 .map_err(|err| err.to_string())
                         };
                         let deferred_token_bytes =
@@ -2635,6 +2710,10 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
+            constraint.deferred_terminal_exprs_blob = artifact
+                .terminal_exprs_blob
+                .map(|blob| std::sync::Arc::<[u8]>::from(blob.into_boxed_slice()));
+            constraint.deferred_terminal_exprs = Default::default();
             if let Some(decoded) = external_internal_token_buf_masks {
                 constraint.internal_token_buf_masks = Vec::new();
                 constraint.internal_token_buf_flat = decoded.flat;
@@ -2957,10 +3036,14 @@ mod tests {
         let loaded = Constraint::load(&constraint.save()).unwrap();
         assert!(constraint.ignore_expr.is_some());
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
+        assert!(
+            loaded.tokenizer.terminal_exprs().is_none(),
+            "current load should defer terminal expression reconstruction",
+        );
         assert_eq!(
-            loaded.tokenizer.terminal_exprs(),
+            loaded.retained_terminal_exprs(),
             constraint.tokenizer.terminal_exprs(),
-            "current artifacts should retain terminal proof expressions",
+            "current artifacts should lazily retain terminal proof expressions",
         );
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }

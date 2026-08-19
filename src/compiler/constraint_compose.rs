@@ -1728,6 +1728,36 @@ fn component_tokenizer_state_layout(components: &[&Constraint]) -> (Vec<u32>, us
     (offsets, next_state as usize)
 }
 
+/// Reconstruct the merged terminal-expression sidecar when one or more loaded
+/// components kept source expressions deferred outside their tokenizers.
+/// Fresh components normally let `Tokenizer` merge these directly, so callers
+/// only need this when the merged tokenizer otherwise has no expression list.
+fn merged_retained_terminal_exprs(
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    total_terminals: u32,
+) -> Option<Vec<crate::automata::regex::Expr>> {
+    if components.len() != terminal_offsets.len() {
+        return None;
+    }
+    let mut merged = vec![None; total_terminals as usize];
+    for (component, &offset) in components.iter().zip(terminal_offsets) {
+        let exprs = component.retained_terminal_exprs()?;
+        if exprs.len() != component.tokenizer.num_terminals() as usize {
+            return None;
+        }
+        for (local_terminal, expr) in exprs.iter().enumerate() {
+            let global = offset as usize + local_terminal;
+            let slot = merged.get_mut(global)?;
+            if slot.is_some() {
+                return None;
+            }
+            *slot = Some(expr.clone());
+        }
+    }
+    merged.into_iter().collect()
+}
+
 fn component_tokenizer_state_layout_owned_parent(
     components: &[&Constraint],
 ) -> (Vec<u32>, usize) {
@@ -2973,7 +3003,7 @@ fn boundary_token_prefilter(
             {
                 continue;
             }
-            let Some(expr) = component.tokenizer.terminal_expr(local_terminal as u32) else {
+            let Some(expr) = component.retained_terminal_expr(local_terminal as u32) else {
                 // Missing retained source is rare and cannot justify an unsafe
                 // exclusion. Fall back to the conservative first-byte summary.
                 conservative_first |= summaries[global_terminal]
@@ -12572,7 +12602,7 @@ fn constraint_ignore_expr(constraint: &Constraint) -> Option<&crate::automata::r
     constraint.ignore_expr.as_ref().or_else(|| {
         constraint
             .ignore_terminal
-            .and_then(|terminal| constraint.tokenizer.terminal_expr(terminal))
+            .and_then(|terminal| constraint.retained_terminal_expr(terminal))
     })
 }
 
@@ -13049,6 +13079,8 @@ fn build_composed_constraint_unfinalized(
         parser_state_domain_labels,
         ignore_expr,
         serialized_artifact_cache: None,
+        deferred_terminal_exprs_blob: None,
+        deferred_terminal_exprs: Default::default(),
     };
     ConstraintComposition {
         constraint,
@@ -13761,6 +13793,15 @@ pub(crate) fn compose_constraints(
             (boundary_repair, boundary_ms),
         )
     };
+    if tokenizer.terminal_exprs().is_none()
+        && let Some(exprs) = merged_retained_terminal_exprs(
+            &component_constraints,
+            &composed_table.terminal_offsets,
+            composed_table.table.num_terminals,
+        )
+    {
+        tokenizer.restore_terminal_exprs(Some(exprs))?;
+    }
     let (parser_artifacts, _component_top_accept) = parser_artifacts?;
     let boundary_repair = boundary_repair?;
     let union_started_at = Instant::now();
@@ -14479,7 +14520,27 @@ pub(crate) fn compose_constraints_owned_parent(
     let tokenizer_fast_transitions = parent_fast_transitions
         .append_rebased_children(&child_fast_transitions)
         .unwrap_or_default();
+    let merged_exprs_for_restore = (parent.tokenizer.terminal_exprs().is_none()
+        || children
+            .iter()
+            .any(|child| child.constraint.tokenizer.terminal_exprs().is_none()))
+    .then(|| {
+        let components = std::iter::once(&parent)
+            .chain(children.iter().map(|child| child.constraint))
+            .collect::<Vec<_>>();
+        merged_retained_terminal_exprs(
+            &components,
+            &composed_table.terminal_offsets,
+            composed_table.table.num_terminals,
+        )
+    })
+    .flatten();
     let (mut tokenizer, tokenizer_state_offsets) = tokenizer_result;
+    if tokenizer.terminal_exprs().is_none()
+        && let Some(exprs) = merged_exprs_for_restore
+    {
+        tokenizer.restore_terminal_exprs(Some(exprs))?;
+    }
     if let Some(canonical) = merged_ignores.canonical {
         tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
     }
@@ -15395,8 +15456,9 @@ mod tests {
         let before = composed.table.num_states;
         let terminal_analysis = composition_terminal_classes(&parent, &children, &composed);
         assert!(
-            loaded_child.tokenizer.terminal_exprs().is_some(),
-            "current serialized artifacts should retain terminal proof expressions",
+            loaded_child.tokenizer.terminal_exprs().is_none()
+                && loaded_child.retained_terminal_exprs().is_some(),
+            "current serialized artifacts should retain terminal proof expressions lazily",
         );
         assert!(
             terminal_analysis
