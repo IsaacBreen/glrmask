@@ -46,6 +46,7 @@ use crate::compiler::stages::parser_dwa::{
     LazyBooleanParserDomains, SharedBooleanParserDomains, build_boolean_terminal_bundle_nwa,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
+    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles,
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
     build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled,
     build_terminal_bundle_preimage_domain_nwa,
@@ -1444,22 +1445,61 @@ impl BoundaryParserWork {
                 templates,
             } => {
                 let build_started_at = Instant::now();
-                let mut parser_nwa =
+                let signed_stack_effects = std::env::var_os(
+                    "GLRMASK_EXPERIMENT_SEGMENTED_UNRESOLVED_BOUNDARY",
+                )
+                .is_some();
+                let preserve_bundle_nondeterminism = signed_stack_effects
+                    && std::env::var_os(
+                        "GLRMASK_EXPERIMENT_SEGMENTED_NONDETERMINISTIC_BUNDLES",
+                    )
+                    .is_some();
+                let mut parser_nwa = if preserve_bundle_nondeterminism {
+                    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
+                        &terminal_automaton,
+                        num_terminals,
+                        &templates,
+                        table,
+                    )
+                } else {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
                         &terminal_automaton,
                         num_terminals,
                         &templates,
                         table,
                     )
-                    .ok_or_else(|| {
-                        "count-only boundary terminal automaton induced no parser NWA".to_string()
-                    })?;
+                }
+                .ok_or_else(|| {
+                    "count-only boundary terminal automaton induced no parser NWA".to_string()
+                })?;
                 let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                 let resolve_started_at = Instant::now();
-                let signed_stack_effects = std::env::var_os(
-                    "GLRMASK_EXPERIMENT_SEGMENTED_UNRESOLVED_BOUNDARY",
-                )
-                .is_some();
+                if signed_stack_effects && compose_profile_enabled() {
+                    let mut backward = 0usize;
+                    let mut equal = 0usize;
+                    let mut total_edges = 0usize;
+                    for (source, state) in parser_nwa.states().iter().enumerate() {
+                        for (target, _) in &state.epsilons {
+                            total_edges += 1;
+                            backward += usize::from((*target as usize) < source);
+                            equal += usize::from((*target as usize) == source);
+                        }
+                        for targets in state.transitions.values() {
+                            for (target, _) in targets {
+                                total_edges += 1;
+                                backward += usize::from((*target as usize) < source);
+                                equal += usize::from((*target as usize) == source);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[glrmask/profile][constraint_signed_boundary_topology] states={} edges={} backward_edges={} self_edges={}",
+                        parser_nwa.num_states(),
+                        total_edges,
+                        backward,
+                        equal,
+                    );
+                }
                 if !signed_stack_effects {
                     resolve_negative_codes_in_nwa(
                         &mut parser_nwa,
@@ -1469,7 +1509,7 @@ impl BoundaryParserWork {
                 }
                 if compose_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={:.3} signed_stack_effects={signed_stack_effects}",
+                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={:.3} signed_stack_effects={signed_stack_effects} preserve_bundle_nondeterminism={preserve_bundle_nondeterminism}",
                         resolve_started_at.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
@@ -7153,6 +7193,50 @@ fn segmented_boundary_state_to_private_tsid(
     Ok(raw_to_boundary)
 }
 
+fn full_nwa_topological_order(nwa: &NWA) -> Option<Vec<u32>> {
+    let state_count = nwa.num_states() as usize;
+    let mut indegree = vec![0usize; state_count];
+    for state in nwa.states() {
+        for (target, _) in &state.epsilons {
+            *indegree.get_mut(*target as usize)? += 1;
+        }
+        for targets in state.transitions.values() {
+            for (target, _) in targets {
+                *indegree.get_mut(*target as usize)? += 1;
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state as u32);
+        }
+    }
+    let mut order = Vec::with_capacity(state_count);
+    while let Some(source) = queue.pop_front() {
+        order.push(source);
+        let state = &nwa.states()[source as usize];
+        for target in state
+            .epsilons
+            .iter()
+            .map(|(target, _)| *target)
+            .chain(
+                state
+                    .transitions
+                    .values()
+                    .flat_map(|targets| targets.iter().map(|(target, _)| *target)),
+            )
+        {
+            let degree = &mut indegree[target as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    (order.len() == state_count).then_some(order)
+}
+
 fn compose_local_id_map(
     local_to_base: &[Vec<u32>],
     base_to_common: &[Vec<u32>],
@@ -9181,6 +9265,12 @@ struct CachedCompositionTemplatePlan {
     num_terminals: usize,
 }
 
+struct EagerChangedParentTemplates {
+    templates: Templates,
+    changed_parent: Vec<bool>,
+    build_ms: f64,
+}
+
 impl CachedCompositionTemplatePlan {
     fn materialize(self, parent: &Constraint) -> Templates {
         let total_started_at = Instant::now();
@@ -9240,6 +9330,223 @@ impl CachedCompositionTemplatePlan {
         }
         raw
     }
+}
+
+fn try_build_changed_parent_templates_for_terminal_count(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    num_terminals: u32,
+    scoped_ignore_terminals: &BitSet,
+) -> Option<EagerChangedParentTemplates> {
+    let started_at = Instant::now();
+    let parent = *components.first()?;
+    let parent_terminal_end = composed_table
+        .terminal_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(num_terminals)
+        .min(num_terminals) as usize;
+    // A cached parent template can change only if the splice introduces a new
+    // action for that terminal in an appended state, or if a new boundary
+    // nonterminal goto exposes a predecessor whose top state admits it. Build
+    // that necessary candidate set directly from the composed table instead of
+    // characterizing every otherwise-safe parent terminal.
+    let candidate_started_at = Instant::now();
+    let mut candidates = BitSet::new(num_terminals as usize);
+    for row in composed_table
+        .table
+        .action
+        .iter()
+        .skip(parent.table.num_states as usize)
+    {
+        for (terminal, _) in row.iter() {
+            if (terminal as usize) < parent_terminal_end {
+                candidates.set(terminal as usize);
+            }
+        }
+    }
+    for row in &composed_table.table.goto {
+        for &boundary_nonterminal in &composed_table.boundary_nonterminals {
+            let Some(&(top_state, _)) = row.get(&boundary_nonterminal) else {
+                continue;
+            };
+            if let Some(action_row) = composed_table.table.action.get(top_state as usize) {
+                for (terminal, _) in action_row.iter() {
+                    if (terminal as usize) < parent_terminal_end {
+                        candidates.set(terminal as usize);
+                    }
+                }
+            }
+        }
+    }
+    let candidate_ms = candidate_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut selected = vec![false; num_terminals as usize];
+    for terminal in candidates.iter() {
+        if terminal >= parent_terminal_end {
+            continue;
+        }
+        let terminal_u32 = terminal as u32;
+        let cached = parent
+            .composition_parser_characterizations_by_terminal
+            .get(terminal)
+            .is_some_and(Option::is_some);
+        if !cached
+            || scoped_ignore_terminals.contains(terminal)
+            || composed_table.control_terminals.contains(&terminal_u32)
+        {
+            continue;
+        }
+        let existing_rows_unchanged = (0..parent.table.num_states).all(|state| {
+            composed_table.table.action(state, terminal_u32)
+                == parent.table.action(state, terminal_u32)
+                && composed_table
+                    .table
+                    .forwarded_shifts
+                    .contains(&(state, terminal_u32))
+                    == parent
+                        .table
+                        .forwarded_shifts
+                        .contains(&(state, terminal_u32))
+        });
+        selected[terminal] = existing_rows_unchanged;
+    }
+    let plan = try_prepare_cached_composition_template_plan_for_terminal_count(
+        composed_table,
+        components,
+        num_terminals,
+        None,
+        &selected,
+        scoped_ignore_terminals,
+    )?;
+    if !plan.fresh_characterizations.is_empty() {
+        return None;
+    }
+
+    let mut changed_parent = vec![false; num_terminals as usize];
+    let mut patched_characterizations = BTreeMap::new();
+    for (terminal, delta) in plan.characterization_deltas {
+        let mut patched = parent
+            .composition_parser_characterizations_by_terminal
+            .get(terminal as usize)
+            .and_then(Option::as_ref)?
+            .clone();
+        patched.escapes.extend(delta.escapes);
+        patched.reduces.extend(delta.reduces);
+        patched.nt_escapes.extend(delta.nt_escapes);
+        patched.nt_rereduces.extend(delta.nt_rereduces);
+        patched.all_nts.extend(delta.all_nts);
+        patched.escapes.sort();
+        patched.escapes.dedup();
+        patched.reduces.sort();
+        patched.reduces.dedup();
+        patched.nt_escapes.sort();
+        patched.nt_escapes.dedup();
+        patched.nt_rereduces.sort();
+        patched.nt_rereduces.dedup();
+        changed_parent[terminal as usize] = true;
+        patched_characterizations.insert(terminal, patched);
+    }
+    let templates = Templates::from_characterizations(&patched_characterizations);
+    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_eager_changed_parent_templates] candidates={} selected_parent={} changed_parent={} states={} candidate_ms={candidate_ms:.3} build_ms={build_ms:.3}",
+            candidates.count_ones(),
+            selected.iter().filter(|&&active| active).count(),
+            changed_parent.iter().filter(|&&changed| changed).count(),
+            templates
+                .by_terminal
+                .values()
+                .map(|dfa| dfa.num_states())
+                .sum::<usize>(),
+        );
+    }
+    Some(EagerChangedParentTemplates {
+        templates,
+        changed_parent,
+        build_ms,
+    })
+}
+
+fn finish_eager_changed_parent_templates(
+    mut eager: EagerChangedParentTemplates,
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    active_terminals: &[bool],
+) -> Option<(
+    Templates,
+    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    f64,
+)> {
+    let finish_started_at = Instant::now();
+    if eager.changed_parent.len() != active_terminals.len() {
+        return None;
+    }
+    eager
+        .templates
+        .by_terminal
+        .retain(|terminal, _| active_terminals[*terminal as usize]);
+    eager
+        .templates
+        .by_terminal_nwa
+        .retain(|terminal, _| active_terminals[*terminal as usize]);
+
+    let mut transport_selected = active_terminals.to_vec();
+    for (terminal, &changed) in eager.changed_parent.iter().enumerate() {
+        if changed {
+            transport_selected[terminal] = false;
+        }
+    }
+    let expected_transport = transport_selected.iter().filter(|&&selected| selected).count();
+    let transported = rebuild_transported_component_templates(
+        composed_table,
+        components,
+        &transport_selected,
+    );
+    if transported.len() != expected_transport {
+        return None;
+    }
+    let transported = Templates::from_terminal_dfas(transported);
+    eager.templates.by_terminal.extend(transported.by_terminal);
+    eager
+        .templates
+        .by_terminal_nwa
+        .extend(transported.by_terminal_nwa);
+    if eager.templates.by_terminal.len()
+        != active_terminals.iter().filter(|&&active| active).count()
+    {
+        return None;
+    }
+
+    let template_dfas_by_terminal = if defer_boundary_commit_templates() {
+        vec![None; active_terminals.len()]
+    } else {
+        let raw_templates = CachedCompositionTemplatePlan::raw_template_cache(
+            &eager.templates,
+            active_terminals.len(),
+        );
+        build_commit_templates_from_raw_templates(&raw_templates)
+    };
+    let finish_ms = finish_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_eager_changed_parent_finish] active={} changed_active={} transported={} finish_ms={finish_ms:.3} eager_cpu_ms={:.3}",
+            active_terminals.iter().filter(|&&active| active).count(),
+            eager
+                .changed_parent
+                .iter()
+                .zip(active_terminals)
+                .filter(|(changed, active)| **changed && **active)
+                .count(),
+            expected_transport,
+            eager.build_ms,
+        );
+    }
+    Some((
+        eager.templates,
+        template_dfas_by_terminal,
+        eager.build_ms + finish_ms,
+    ))
 }
 
 fn try_prepare_cached_composition_template_plan(
@@ -11652,16 +11959,28 @@ fn build_boundary_repair(
     let eager_all_templates = !fast_component_grammar_splice
         && std::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
     let all_terminals = vec![true; analyzed.num_terminals as usize];
-    let (eager_templates, ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms))) =
+    let eager_changed_parent_enabled = fast_component_grammar_splice
+        && std::env::var_os("GLRMASK_EXPERIMENT_EAGER_CHANGED_PARENT_TEMPLATES").is_some();
+    let ((eager_templates, eager_changed_parent), ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms))) =
         rayon::join(
             || {
-                eager_all_templates.then(|| {
-                    build_composition_templates(
-                        &composed_table.table,
-                        &analyzed,
-                        &all_terminals,
-                    )
-                })
+                (
+                    eager_all_templates.then(|| {
+                        build_composition_templates(
+                            &composed_table.table,
+                            &analyzed,
+                            &all_terminals,
+                        )
+                    }),
+                    eager_changed_parent_enabled.then(|| {
+                        try_build_changed_parent_templates_for_terminal_count(
+                            composed_table,
+                            components,
+                            analyzed.num_terminals,
+                            &ignore_terminals.scoped,
+                        )
+                    }).flatten(),
+                )
             },
             || {
                 rayon::join(
@@ -11822,6 +12141,20 @@ fn build_boundary_repair(
         let _ = selected_boundary_tokens.set(Ok(Some(selected_original_tokens.clone())));
     }
 
+    let post_discovery_started_at = Instant::now();
+    let eager_templates = eager_templates.or_else(|| {
+        eager_changed_parent.and_then(|eager| {
+            finish_eager_changed_parent_templates(
+                eager,
+                composed_table,
+                components,
+                &active_terminals,
+            )
+        })
+    });
+    let eager_finish_wall_ms = post_discovery_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let state_map_started_at = Instant::now();
     let owned_component_state_map = if precomputed_component_state_map.is_none()
         && deferred_component_state_map.is_none()
     {
@@ -11848,6 +12181,7 @@ fn build_boundary_repair(
         .or(deferred_component_state_map)
         .or(owned_component_state_map.as_ref())
         .expect("component state map must be available");
+    let state_map_ms = state_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let use_concrete_delta =
         std::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none()
@@ -11897,14 +12231,35 @@ fn build_boundary_repair(
                     }
                 }
             }
-            let plan = prepare_concrete_boundary_delta_plan(
-                composed_table,
-                components,
-                &active_terminals,
-                &templates,
-                analyzed.num_terminals,
-            );
-            install_concrete_boundary_delta_templates(&mut templates, &plan);
+            let delta_plan_started_at = Instant::now();
+            let cross_only_trivial_delta = std::env::var_os(
+                "GLRMASK_EXPERIMENT_CROSS_ONLY_TRIVIAL_DELTA_PLAN",
+            )
+            .is_some()
+                && cross_only_boundary;
+            let plan = if cross_only_trivial_delta {
+                ConcreteBoundaryDeltaPlan {
+                    original_num_terminals: analyzed.num_terminals,
+                    synthetic_num_terminals: analyzed.num_terminals,
+                    by_global_terminal: BTreeMap::new(),
+                    compared_terminals: BTreeSet::new(),
+                    unsafe_terminals: BTreeSet::new(),
+                }
+            } else {
+                prepare_concrete_boundary_delta_plan(
+                    composed_table,
+                    components,
+                    &active_terminals,
+                    &templates,
+                    analyzed.num_terminals,
+                )
+            };
+            let delta_plan_ms = delta_plan_started_at.elapsed().as_secs_f64() * 1000.0;
+            let delta_install_started_at = Instant::now();
+            if !cross_only_trivial_delta {
+                install_concrete_boundary_delta_templates(&mut templates, &plan);
+            }
+            let delta_install_ms = delta_install_started_at.elapsed().as_secs_f64() * 1000.0;
             let seed_relations = if std::env::var_os(
                 "GLRMASK_DISABLE_FACTOR_ONE_TERMINAL_SEEDS",
             )
@@ -11940,6 +12295,11 @@ fn build_boundary_repair(
                 tokenizer_state_offsets,
                 Some(&plan),
             );
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_boundary_delta_phases] plan_ms={delta_plan_ms:.3} install_ms={delta_install_ms:.3}"
+                );
+            }
             (
                 (templates, template_dfas_by_terminal, templates_ms),
                 (result, started_at.elapsed().as_secs_f64() * 1000.0),
@@ -12077,6 +12437,7 @@ fn build_boundary_repair(
         &boundary_paths,
         tokenizer_state_offsets,
     );
+    let template_publish_started_at = Instant::now();
     let mut composition_parser_templates_by_terminal =
         vec![None; analyzed.num_terminals as usize];
     for (&terminal, dfa) in &templates.by_terminal {
@@ -12089,6 +12450,7 @@ fn build_boundary_repair(
             composition_parser_templates_by_terminal[terminal as usize] = Some(dfa.clone());
         }
     }
+    let template_publish_ms = template_publish_started_at.elapsed().as_secs_f64() * 1000.0;
     if std::env::var_os("GLRMASK_COMPOSE_BUILD_FULL_TEMPLATE_CACHE").is_some() {
         let cache_started_at = Instant::now();
         composition_parser_templates_by_terminal = build_complete_composed_parser_template_cache(
@@ -12120,6 +12482,7 @@ fn build_boundary_repair(
     let special_source_state = merged_tokenizer
         .map(Tokenizer::initial_state_id)
         .unwrap_or(0);
+    let special_paths_started_at = Instant::now();
     let terminal_dwa = add_boundary_special_token_paths(
         terminal_dwa,
         &boundary_special_token_terminals,
@@ -12127,6 +12490,7 @@ fn build_boundary_repair(
         Some(component_state_map),
         &composed_table.control_terminals,
     )?;
+    let special_paths_ms = special_paths_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let parser_started_at = Instant::now();
     let (terminal_automaton, id_map) = terminal_dwa.into_parts();
@@ -12159,6 +12523,9 @@ fn build_boundary_repair(
         && !validate_direct_parser
     {
         if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_hidden_phases] eager_finish_wall_ms={eager_finish_wall_ms:.3} state_map_ms={state_map_ms:.3} template_publish_ms={template_publish_ms:.3} special_paths_ms={special_paths_ms:.3}"
+            );
             eprintln!(
                 "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_deferred=true parser_ms={:.3} total_ms={:.3}",
                 active_terminals.iter().filter(|&&active| active).count(),
@@ -14754,18 +15121,33 @@ pub(crate) fn compose_constraints_owned_parent(
                 boundary_num_tsids,
                 "segmented boundary raw-state map must cover the private TSID coordinate",
             );
+            let signed_topological_order = if signed_stack_effects {
+                full_nwa_topological_order(&parser_nwa).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let signed_topological_rank = if signed_topological_order.is_empty() {
+                Vec::new()
+            } else {
+                let mut rank = vec![u32::MAX; parser_nwa.num_states() as usize];
+                for (index, &state) in signed_topological_order.iter().enumerate() {
+                    rank[state as usize] = index as u32;
+                }
+                rank
+            };
             let internal_token_to_originals = boundary_id_map.vocab_tokens.internal_to_originals;
             let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
                 "segmented component metadata must exist before boundary metadata",
             );
             if compose_profile_enabled() {
                 eprintln!(
-                    "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} build_ms={:.3}",
+                    "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} signed_topo={} build_ms={:.3}",
                     parser_nwa.num_states(),
                     parser_nwa.num_transitions(),
                     parser_nwa.start_states().len(),
                     tokenizer_state_to_tsid.iter().copied().max().map_or(0, |v| v as usize + 1),
                     internal_token_to_originals.len(),
+                    signed_topological_order.len(),
                     boundary_build_ms,
                 );
             }
@@ -14773,6 +15155,8 @@ pub(crate) fn compose_constraints_owned_parent(
                 Some(Box::new(crate::runtime::SegmentedBoundaryParser {
                     parser_nwa,
                     signed_stack_effects,
+                    signed_topological_order,
+                    signed_topological_rank,
                     tokenizer_state_to_tsid,
                     internal_token_to_originals,
                 }));
@@ -14974,6 +15358,20 @@ pub(crate) fn compose_constraints_owned_parent(
             boundary_num_tsids,
             "segmented boundary raw-state map must cover the private TSID coordinate",
         );
+        let signed_topological_order = if signed_stack_effects {
+            full_nwa_topological_order(&parser_nwa).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let signed_topological_rank = if signed_topological_order.is_empty() {
+            Vec::new()
+        } else {
+            let mut rank = vec![u32::MAX; parser_nwa.num_states() as usize];
+            for (index, &state) in signed_topological_order.iter().enumerate() {
+                rank[state as usize] = index as u32;
+            }
+            rank
+        };
         let internal_token_to_originals = boundary_id_map.vocab_tokens.internal_to_originals;
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
             crate::runtime::StaticDynamicOverlayMetadata {
@@ -14987,18 +15385,21 @@ pub(crate) fn compose_constraints_owned_parent(
         });
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} build_ms={:.3}",
+                "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} signed_topo={} build_ms={:.3}",
                 parser_nwa.num_states(),
                 parser_nwa.num_transitions(),
                 parser_nwa.start_states().len(),
                 tokenizer_state_to_tsid.iter().copied().max().map_or(0, |v| v as usize + 1),
                 internal_token_to_originals.len(),
+                signed_topological_order.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
         overlay.segmented_boundary_parser = Some(Box::new(crate::runtime::SegmentedBoundaryParser {
             parser_nwa,
             signed_stack_effects,
+            signed_topological_order,
+            signed_topological_rank,
             tokenizer_state_to_tsid,
             internal_token_to_originals,
         }));

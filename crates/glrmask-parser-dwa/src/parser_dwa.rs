@@ -4167,6 +4167,7 @@ fn append_branch_fragment(
     built_bundle_cache: &mut [Option<Arc<NWA>>],
     bundle_id: usize,
     continuation_state: u32,
+    preserve_bundle_nondeterminism: bool,
     compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
 ) -> Option<NwaBody> {
     let bundle = summaries.unique_bundles.get(bundle_id)?;
@@ -4186,6 +4187,34 @@ fn append_branch_fragment(
             weight,
             continuation_state,
         ));
+    }
+
+    // The ordinary parser compiler determinizes every multi-terminal bundle so
+    // the subsequent negative-code cancellation step sees one stable local
+    // relation. A segmented runtime which deliberately keeps signed stack
+    // effects unresolved does not need that boundary: its runtime evaluator
+    // carries the NWA alternatives directly. In that mode the exact bundle
+    // language is simply the union of the weighted terminal-template NWAs.
+    // Append those alternatives directly instead of constructing a DFA product
+    // only to convert it back to an NWA.
+    if preserve_bundle_nondeterminism {
+        let mut starts = Vec::new();
+        for (&terminal, weight) in bundle {
+            if weight.is_empty() {
+                continue;
+            }
+            let template = templates.by_terminal_nwa.get(&terminal)?;
+            let body = append_weighted_template_redirecting_finals(
+                arena,
+                template,
+                weight,
+                continuation_state,
+            );
+            starts.extend(body.start_states);
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        return (!starts.is_empty()).then_some(NwaBody { start_states: starts });
     }
 
     // STICKY NOTE: keep parser bundles eagerly determinized here.
@@ -4279,6 +4308,7 @@ fn build_parser_nwa_from_terminal_dwa(
         grammar.num_terminals,
         templates,
         table,
+        false,
     )
 }
 
@@ -4287,6 +4317,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     num_terminals: u32,
     templates: &Templates,
     table: &GLRTable,
+    preserve_bundle_nondeterminism: bool,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
@@ -4455,7 +4486,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     use rayon::prelude::*;
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
-    if !compose_detail_enabled {
+    if !compose_detail_enabled && !preserve_bundle_nondeterminism {
         let repeated_group_cache = {
             let used_bundles = summaries
                 .unique_bundles
@@ -4547,6 +4578,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                     &mut built_bundle_cache,
                     branch.bundle_id,
                     target_continuation,
+                    preserve_bundle_nondeterminism,
                     compose_detail_enabled.then_some(&mut compose_detail),
                 ) else {
                     continue;
@@ -4657,6 +4689,27 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         num_terminals,
         templates,
         table,
+        false,
+    )
+    .map(|(nwa, _)| nwa)
+}
+
+/// Count-only parser-NWA construction for a runtime which keeps both bundle
+/// nondeterminism and signed stack effects unresolved. This is language-exact
+/// but intentionally bypasses the local bundle determinization required by the
+/// ordinary compile-time negative-resolution pipeline.
+pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
+    terminal_dwa: &TerminalAutomaton,
+    num_terminals: u32,
+    templates: &Templates,
+    table: &GLRTable,
+) -> Option<NWA> {
+    build_parser_nwa_from_terminal_dwa_for_terminal_count(
+        terminal_dwa,
+        num_terminals,
+        templates,
+        table,
+        true,
     )
     .map(|(nwa, _)| nwa)
 }
