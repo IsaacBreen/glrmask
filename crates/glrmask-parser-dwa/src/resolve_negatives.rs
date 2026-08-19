@@ -2037,7 +2037,10 @@ pub fn remove_redundant_default_transitions(nwa: &mut NWA) {
     prune_terminal_default_targets(nwa, &terminal_states);
 }
 
-pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: bool) {
+pub fn resolve_negative_codes_in_nwa(
+    nwa: &mut NWA,
+    allow_grouped_cancellation: bool,
+) -> Option<Vec<u32>> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let precompute_finality = rayon::current_num_threads() > 1
@@ -2087,6 +2090,12 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: 
     } else {
         apply_finality_fixpoint(nwa);
     }
+    let reusable_reverse_topo_order = finality_plan.as_ref().map(|plan| {
+        plan.reverse_topo_order
+            .iter()
+            .map(|&state| state as u32)
+            .collect::<Vec<_>>()
+    });
     let finality_ms = finality_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let remove_negative_started_at = profile_enabled.then(std::time::Instant::now);
@@ -2111,6 +2120,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: 
             used_precomputed_finality,
         );
     }
+    reusable_reverse_topo_order
 }
 
 #[cfg(test)]
