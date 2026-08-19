@@ -1627,7 +1627,11 @@ impl BoundaryParserWork {
                 let hashcons_started_at = Instant::now();
                 let before_hashcons_states = parser_nwa.num_states();
                 let before_hashcons_transitions = parser_nwa.num_transitions();
-                if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                    .is_some()
+                {
+                    parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast(parser_nwa);
+                } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
                     .is_some()
                 {
                     parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
@@ -7393,6 +7397,171 @@ fn full_nwa_topological_order(nwa: &NWA) -> Option<Vec<u32>> {
         }
     }
     (order.len() == state_count).then_some(order)
+}
+
+
+fn reverse_hashcons_positive_acyclic_nwa_fast(nwa: NWA) -> NWA {
+    use rayon::prelude::*;
+    use rustc_hash::FxHasher;
+    use smallvec::SmallVec;
+    use std::hash::{Hash, Hasher};
+
+    fn fingerprint_state(source: &NWAState, old_to_new: &[u32]) -> u64 {
+        let mut hasher = FxHasher::default();
+        source
+            .final_weight
+            .as_ref()
+            .map(Weight::ptr_key)
+            .hash(&mut hasher);
+        source.transitions.len().hash(&mut hasher);
+        for (&label, targets) in &source.transitions {
+            label.hash(&mut hasher);
+            targets.len().hash(&mut hasher);
+            for (target, weight) in targets {
+                old_to_new[*target as usize].hash(&mut hasher);
+                weight.ptr_key().hash(&mut hasher);
+            }
+        }
+        source.epsilons.len().hash(&mut hasher);
+        for (target, weight) in &source.epsilons {
+            old_to_new[*target as usize].hash(&mut hasher);
+            weight.ptr_key().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    // Fingerprints are only a candidate index. Exact structural comparison is
+    // the equivalence proof, so hash collisions cannot merge distinct states.
+    fn equivalent_old_states(
+        source: &NWAState,
+        representative: &NWAState,
+        old_to_new: &[u32],
+    ) -> bool {
+        if source.final_weight.as_ref().map(Weight::ptr_key)
+            != representative.final_weight.as_ref().map(Weight::ptr_key)
+            || source.transitions.len() != representative.transitions.len()
+            || source.epsilons.len() != representative.epsilons.len()
+        {
+            return false;
+        }
+        for ((&source_label, source_targets), (&rep_label, rep_targets)) in
+            source.transitions.iter().zip(representative.transitions.iter())
+        {
+            if source_label != rep_label || source_targets.len() != rep_targets.len() {
+                return false;
+            }
+            for ((source_target, source_weight), (rep_target, rep_weight)) in
+                source_targets.iter().zip(rep_targets.iter())
+            {
+                if old_to_new[*source_target as usize] != old_to_new[*rep_target as usize]
+                    || source_weight.ptr_key() != rep_weight.ptr_key()
+                {
+                    return false;
+                }
+            }
+        }
+        source
+            .epsilons
+            .iter()
+            .zip(representative.epsilons.iter())
+            .all(
+                |((source_target, source_weight), (rep_target, rep_weight))| {
+                    old_to_new[*source_target as usize] == old_to_new[*rep_target as usize]
+                        && source_weight.ptr_key() == rep_weight.ptr_key()
+                },
+            )
+    }
+
+    let profile = compose_profile_enabled();
+    let total_started = profile.then(Instant::now);
+    let topo_started = profile.then(Instant::now);
+    let Some(order) = full_nwa_topological_order(&nwa) else {
+        return nwa;
+    };
+    let topo_ms = topo_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+    let old_state_count = nwa.num_states() as usize;
+    let (old_states, old_starts) = nwa.into_parts();
+    let mut old_to_new = vec![u32::MAX; old_state_count];
+    let mut representatives = Vec::<u32>::new();
+    let mut buckets = FxHashMap::<u64, SmallVec<[u32; 2]>>::default();
+    let classify_started = profile.then(Instant::now);
+
+    for old_id in order.into_iter().rev() {
+        let source = &old_states[old_id as usize];
+        debug_assert!(source
+            .transitions
+            .keys()
+            .all(|&label| !is_negative_label(label)));
+        let fingerprint = fingerprint_state(source, &old_to_new);
+        let existing = buckets.get(&fingerprint).and_then(|candidates| {
+            candidates.iter().copied().find(|&candidate| {
+                equivalent_old_states(
+                    source,
+                    &old_states[representatives[candidate as usize] as usize],
+                    &old_to_new,
+                )
+            })
+        });
+        let new_id = if let Some(existing) = existing {
+            existing
+        } else {
+            let created = representatives.len() as u32;
+            representatives.push(old_id);
+            buckets.entry(fingerprint).or_default().push(created);
+            created
+        };
+        old_to_new[old_id as usize] = new_id;
+    }
+    let classify_ms = classify_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+
+    // Move the representative states into the quotient and drop all duplicate
+    // states on the Rayon workers. This avoids paying the discarded graph's
+    // large serial destructor tail on the composition critical path.
+    let move_started = profile.then(Instant::now);
+    let mut representative_new_id = vec![u32::MAX; old_state_count];
+    for (new_id, &old_id) in representatives.iter().enumerate() {
+        representative_new_id[old_id as usize] = new_id as u32;
+    }
+    let mut moved = old_states
+        .into_par_iter()
+        .enumerate()
+        .filter_map(|(old_id, mut state)| {
+            let new_id = representative_new_id[old_id];
+            if new_id == u32::MAX {
+                return None;
+            }
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target = old_to_new[*target as usize];
+                }
+            }
+            for (target, _) in &mut state.epsilons {
+                *target = old_to_new[*target as usize];
+            }
+            Some((new_id, state))
+        })
+        .collect::<Vec<_>>();
+    moved.par_sort_unstable_by_key(|(new_id, _)| *new_id);
+    let states = moved.into_iter().map(|(_, state)| state).collect::<Vec<_>>();
+    let move_ms = move_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let mut starts = old_starts
+        .into_iter()
+        .map(|state| old_to_new[state as usize])
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    if let (Some(topo_ms), Some(classify_ms), Some(move_ms), Some(total_started)) =
+        (topo_ms, classify_ms, move_ms, total_started)
+    {
+        eprintln!(
+            "[glrmask/profile][fast_reverse_hashcons_nwa] input_states={} output_states={} topo_ms={topo_ms:.3} classify_ms={classify_ms:.3} move_drop_ms={move_ms:.3} total_ms={:.3}",
+            old_state_count,
+            states.len(),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    NWA::from_parts(states, starts)
 }
 
 fn reverse_hashcons_positive_acyclic_nwa(nwa: NWA) -> NWA {
@@ -16577,6 +16746,67 @@ mod tests {
         );
         assert_eq!(expanded[&encode_positive_label(11)][0].0, 2);
         assert_eq!(expanded[&encode_positive_label(20)][0].0, 2);
+    }
+
+    #[test]
+    fn fast_reverse_hashcons_matches_exact_structural_quotient_on_weighted_dags() {
+        fn weight(start: u32, end: u32) -> Weight {
+            Weight::from_token_set_for_tsid(
+                0,
+                RangeSetBlaze::from_iter([start..=end]),
+            )
+        }
+
+        fn generated(seed: u32) -> NWA {
+            // Construct duplicate sub-DAGs deliberately.  Every edge points to
+            // a larger old state id, so the graph is acyclic; paired states use
+            // distinct old targets whose suffixes are nevertheless equivalent.
+            let mut nwa = NWA::new(1, 63);
+            for _ in 0..14 {
+                nwa.add_state();
+            }
+            let full = Weight::all();
+            let narrow = weight(seed % 16, (seed % 16) + 7);
+            nwa.set_final_weight(12, narrow.clone());
+            nwa.set_final_weight(13, narrow.clone());
+            for (left, right, left_target, right_target, label) in [
+                (10, 11, 12, 13, 1),
+                (8, 9, 10, 11, 2),
+                (6, 7, 8, 9, DEFAULT_LABEL),
+                (4, 5, 6, 7, 3),
+                (2, 3, 4, 5, 4),
+                (0, 1, 2, 3, 5),
+            ] {
+                nwa.add_transition(left, label, left_target, narrow.clone());
+                nwa.add_transition(right, label, right_target, narrow.clone());
+                if label != DEFAULT_LABEL {
+                    nwa.add_epsilon(left, left_target, full.clone());
+                    nwa.add_epsilon(right, right_target, full.clone());
+                }
+                if (left + seed) % 3 == 0 {
+                    nwa.set_final_weight(left, full.clone());
+                    nwa.set_final_weight(right, full.clone());
+                }
+            }
+            nwa.set_start_states(vec![0, 1]);
+            nwa
+        }
+
+        for seed in 0..64 {
+            let input = generated(seed);
+            let reference = reverse_hashcons_positive_acyclic_nwa(input.clone());
+            let fast = reverse_hashcons_positive_acyclic_nwa_fast(input);
+            assert_eq!(
+                fast.start_states(),
+                reference.start_states(),
+                "fast quotient start states differ for seed {seed}",
+            );
+            assert_eq!(
+                fast.states(),
+                reference.states(),
+                "fast quotient structure differs from exact structural quotient for seed {seed}",
+            );
+        }
     }
 
     #[test]
