@@ -394,6 +394,7 @@ impl DynamicConstraint {
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
+            composition_grammar_summary: None,
         terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),

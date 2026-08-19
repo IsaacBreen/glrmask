@@ -201,6 +201,7 @@ pub mod __private {
         fn clear_weight_interners();
         fn clear_weight_op_caches();
         fn set_test_compat_mode(enabled: bool);
+        fn prepare_composition_grammar_summary(&mut self) -> Result<()>;
 
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
@@ -288,6 +289,29 @@ pub mod __private {
 
         fn set_test_compat_mode(enabled: bool) {
             crate::set_test_compat_mode(enabled);
+        }
+
+        fn prepare_composition_grammar_summary(&mut self) -> Result<()> {
+            if self.composition_grammar_summary.is_some() {
+                return Ok(());
+            }
+            let augmented_start = self
+                .table
+                .rules
+                .first()
+                .map(|rule| rule.lhs)
+                .ok_or_else(|| Error::Compilation("constraint table has no augmented-start rule".to_string()))?;
+            let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_composed_rules(
+                self.table.rules.clone(),
+                self.table.num_terminals,
+                self.terminal_display_names.clone(),
+                self.table.nonterminal_display_names.clone(),
+                augmented_start,
+            );
+            self.composition_grammar_summary = Some(
+                crate::compiler::pipeline::composition_grammar_summary_from_analysis(&analyzed),
+            );
+            Ok(())
         }
 
 

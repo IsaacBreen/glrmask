@@ -473,6 +473,80 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
     compute_disallowed_follows_from_ever(grammar.num_terminals, &ever_allowed)
 }
 
+pub(crate) fn composition_grammar_summary_from_analysis(
+    grammar: &AnalyzedGrammar,
+) -> crate::runtime::CompositionGrammarSummary {
+    let num_terminals = grammar.num_terminals as usize;
+    let root = grammar
+        .rules
+        .first()
+        .and_then(|augmented| match augmented.rhs.as_slice() {
+            [crate::grammar::flat::Symbol::Nonterminal(root)] => Some(*root),
+            _ => None,
+        });
+    let allowed_follows = compute_ever_allowed_follows(grammar)
+        .into_iter()
+        .map(|row| {
+            let mut bits = BitSet::new(num_terminals);
+            for terminal in row {
+                if (terminal as usize) < num_terminals {
+                    bits.set(terminal as usize);
+                }
+            }
+            bits
+        })
+        .collect::<Vec<_>>();
+
+    let mut last = vec![BitSet::new(num_terminals); grammar.num_nonterminals as usize];
+    loop {
+        let mut changed = false;
+        for rule in &grammar.rules {
+            let mut additions = BitSet::new(num_terminals);
+            for symbol in rule.rhs.iter().rev() {
+                match symbol {
+                    crate::grammar::flat::Symbol::Terminal(terminal) => {
+                        if (*terminal as usize) < num_terminals {
+                            additions.set(*terminal as usize);
+                        }
+                        break;
+                    }
+                    crate::grammar::flat::Symbol::Nonterminal(nonterminal) => {
+                        if let Some(row) = last.get(*nonterminal as usize) {
+                            additions.union_with(row);
+                        }
+                        if !grammar.nullable.contains(nonterminal) {
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(target) = last.get_mut(rule.lhs as usize) else {
+                continue;
+            };
+            let before = target.count_ones();
+            target.union_with(&additions);
+            changed |= before != target.count_ones();
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let root_first = root
+        .and_then(|root| grammar.first.get(root as usize).cloned())
+        .unwrap_or_else(|| BitSet::new(num_terminals));
+    let root_last = root
+        .and_then(|root| last.get(root as usize).cloned())
+        .unwrap_or_else(|| BitSet::new(num_terminals));
+    let root_nullable = root.is_some_and(|root| grammar.nullable.contains(&root));
+    crate::runtime::CompositionGrammarSummary {
+        allowed_follows,
+        root_first,
+        root_last,
+        root_nullable,
+    }
+}
+
 fn compute_disallowed_follows_from_ever(
     num_terminals: u32,
     ever_allowed: &[Vec<u32>],
@@ -4358,6 +4432,11 @@ fn compile_prepared_with_profile_and_table_construction(
                 by_terminal
             })
             .unwrap_or_default();
+        let composition_grammar_summary = std::env::var_os(
+            "GLRMASK_DISABLE_COMPOSITION_GRAMMAR_SUMMARY",
+        )
+        .is_none()
+        .then(|| composition_grammar_summary_from_analysis(&analyzed_grammar));
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
@@ -4387,6 +4466,7 @@ fn compile_prepared_with_profile_and_table_construction(
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal,
             composition_parser_characterizations_by_terminal,
+            composition_grammar_summary,
         terminal_live_states: Vec::new(),
             // Unless optional runtime full-adaptive product states were selected,
             // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw

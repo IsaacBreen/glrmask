@@ -4,7 +4,9 @@ pub(crate) mod queue;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
-use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::labels::{
+    DEFAULT_LABEL, encode_positive_label, is_negative_label, negative_to_positive_label,
+};
 use crate::compiler::glr::parser::{
     lookahead_reduction_factor,
     lookahead_reduction_factor_row_subset,
@@ -19,6 +21,7 @@ use crate::ds::weight::Weight;
 use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
 use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
 use crate::runtime::state::{ConstraintState, MaskCacheData, MaskScratch, ParserStateMap};
+use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -2396,6 +2399,19 @@ impl<'a> ConstraintState<'a> {
         boundary: &crate::runtime::SegmentedBoundaryParser,
         buf: &mut [u32],
     ) -> bool {
+        let resolved_reference = if boundary.signed_stack_effects
+            && std::env::var_os("GLRMASK_VALIDATE_SEGMENTED_UNRESOLVED_BOUNDARY").is_some()
+        {
+            let mut reference = boundary.parser_nwa.clone();
+            resolve_negative_codes_in_nwa(
+                &mut reference,
+                self.constraint.table.construction
+                    == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+            );
+            Some(reference)
+        } else {
+            None
+        };
         fn union_into(
             map: &mut FxHashMap<u32, Weight>,
             state: u32,
@@ -2504,6 +2520,150 @@ impl<'a> ConstraintState<'a> {
             accepted
         }
 
+        /// Evaluate the unresolved parser-template stack-effect alphabet
+        /// directly. Positive labels pop/match the current top; negative labels
+        /// push a concrete LR state. A positive transition first consumes a
+        /// virtual state produced by an earlier push, and only reaches into the
+        /// real parser stack once that virtual suffix is empty. This is the
+        /// operational form of the same cancellation performed by
+        /// `resolve_negative_codes_in_nwa` at compile time.
+        fn accepted_for_signed_stack(
+            nwa: &crate::automata::weighted_u32::nwa::NWA,
+            top_first: &[u32],
+        ) -> Weight {
+            type VirtualStack = SmallVec<[u32; 8]>;
+            type Config = (u32, usize, VirtualStack);
+
+            fn merge_config(
+                active: &mut FxHashMap<Config, Weight>,
+                queue: &mut std::collections::VecDeque<Config>,
+                config: Config,
+                add: Weight,
+                ops: &mut crate::ds::weight::ScopedWeightOpCache,
+            ) {
+                if add.is_empty() {
+                    return;
+                }
+                if let Some(existing) = active.get(&config) {
+                    let merged = ops.union(existing, &add);
+                    if merged == *existing {
+                        return;
+                    }
+                    active.insert(config.clone(), merged);
+                } else {
+                    active.insert(config.clone(), add);
+                }
+                queue.push_back(config);
+            }
+
+            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
+            let mut active = FxHashMap::<Config, Weight>::default();
+            let mut queue = std::collections::VecDeque::<Config>::new();
+            for &start in nwa.start_states() {
+                merge_config(
+                    &mut active,
+                    &mut queue,
+                    (start, 0, VirtualStack::new()),
+                    Weight::all(),
+                    &mut ops,
+                );
+            }
+
+            let mut accepted = Weight::empty();
+            while let Some(config) = queue.pop_front() {
+                let Some(path_weight) = active.get(&config).cloned() else {
+                    continue;
+                };
+                let (source, input_index, virtual_stack) = config;
+                let Some(state) = nwa.states().get(source as usize) else {
+                    continue;
+                };
+
+                if let Some(final_weight) = state.final_weight.as_ref() {
+                    let contribution = ops.intersection(&path_weight, final_weight);
+                    if !contribution.is_empty() {
+                        accepted = ops.union(&accepted, &contribution);
+                    }
+                }
+
+                for (target, edge_weight) in &state.epsilons {
+                    let contribution = ops.intersection(&path_weight, edge_weight);
+                    merge_config(
+                        &mut active,
+                        &mut queue,
+                        (*target, input_index, virtual_stack.clone()),
+                        contribution,
+                        &mut ops,
+                    );
+                }
+
+                // Push transitions do not consume the input stack.
+                for (&label, targets) in &state.transitions {
+                    if !is_negative_label(label) {
+                        continue;
+                    }
+                    let pushed = negative_to_positive_label(label) as u32;
+                    for (target, edge_weight) in targets {
+                        let contribution = ops.intersection(&path_weight, edge_weight);
+                        if contribution.is_empty() {
+                            continue;
+                        }
+                        let mut next_stack = virtual_stack.clone();
+                        next_stack.push(pushed);
+                        merge_config(
+                            &mut active,
+                            &mut queue,
+                            (*target, input_index, next_stack),
+                            contribution,
+                            &mut ops,
+                        );
+                    }
+                }
+
+                // A pop/read consumes the most recently pushed virtual state
+                // when present; otherwise it consumes the next real parser
+                // stack value. Exact rows shadow DEFAULT just as in the
+                // positive-only evaluator.
+                let (top, consumes_input) = if let Some(&top) = virtual_stack.last() {
+                    (top, false)
+                } else if let Some(&top) = top_first.get(input_index) {
+                    (top, true)
+                } else {
+                    continue;
+                };
+                let label = encode_positive_label(top);
+                let Some(targets) = state
+                    .transitions
+                    .get(&label)
+                    .or_else(|| state.transitions.get(&DEFAULT_LABEL))
+                else {
+                    continue;
+                };
+                for (target, edge_weight) in targets {
+                    let contribution = ops.intersection(&path_weight, edge_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    let mut next_stack = virtual_stack.clone();
+                    if !consumes_input {
+                        next_stack.pop();
+                    }
+                    merge_config(
+                        &mut active,
+                        &mut queue,
+                        (
+                            *target,
+                            input_index + usize::from(consumes_input),
+                            next_stack,
+                        ),
+                        contribution,
+                        &mut ops,
+                    );
+                }
+            }
+            accepted
+        }
+
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -2529,7 +2689,18 @@ impl<'a> ConstraintState<'a> {
                 else {
                     return;
                 };
-                let accepted = accepted_for_stack(&boundary.parser_nwa, top_first);
+                let accepted = if boundary.signed_stack_effects {
+                    accepted_for_signed_stack(&boundary.parser_nwa, top_first)
+                } else {
+                    accepted_for_stack(&boundary.parser_nwa, top_first)
+                };
+                if let Some(reference) = resolved_reference.as_ref() {
+                    let expected = accepted_for_stack(reference, top_first);
+                    assert_eq!(
+                        accepted, expected,
+                        "segmented unresolved boundary differs from resolved reference for parser stack {top_first:?}",
+                    );
+                }
                 let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
                     return;
                 };

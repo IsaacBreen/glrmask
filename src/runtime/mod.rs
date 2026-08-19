@@ -10,7 +10,7 @@ mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 pub(crate) use artifact::{
-    ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
+    CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
     FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };

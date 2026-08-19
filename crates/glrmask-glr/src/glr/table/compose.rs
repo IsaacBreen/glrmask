@@ -33,6 +33,12 @@ pub struct SubgrammarTableInput<'a> {
 pub struct ComposedTable {
     pub table: GLRTable,
     pub terminal_offsets: Vec<TerminalID>,
+    /// Parent placeholder terminal replaced by each child, in child order.
+    /// These labels remain in the merged terminal ID domain but have no lexer
+    /// language after composition. Keeping the IDs lets higher layers compose
+    /// cached terminal-adjacency summaries algebraically instead of rebuilding
+    /// FIRST/FOLLOW over the fully merged rule graph.
+    pub placeholder_terminals: Vec<TerminalID>,
     /// One relation per input table, parent first. A local parser state may map
     /// to several merged states: a standalone child start state maps to every
     /// parent call-site state, and its accept state maps to the corresponding
@@ -557,7 +563,6 @@ pub fn compose_subgrammar_tables(
                 child_input.placeholder_terminal
             ));
         }
-
         let mut continuation_terminals = BTreeSet::<TerminalID>::new();
         for &(_, target, _) in &call_sites {
             continuation_terminals.extend(parent.action[target as usize].keys());
@@ -980,6 +985,10 @@ pub fn compose_subgrammar_tables(
     Ok(ComposedTable {
         table,
         terminal_offsets,
+        placeholder_terminals: children
+            .iter()
+            .map(|child| child.placeholder_terminal)
+            .collect(),
         state_relations,
         boundary_nonterminals,
         control_terminals: BTreeSet::new(),
@@ -1299,6 +1308,10 @@ pub fn compose_subgrammar_tables_explicit(
     Ok(ComposedTable {
         table,
         terminal_offsets,
+        placeholder_terminals: children
+            .iter()
+            .map(|child| child.placeholder_terminal)
+            .collect(),
         state_relations,
         boundary_nonterminals,
         control_terminals,

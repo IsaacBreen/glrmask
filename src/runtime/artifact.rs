@@ -18,10 +18,30 @@ use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
+use crate::ds::bitset::BitSet;
 
 use super::mask_mapping::FinalMaskMapping;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
+
+/// Small composition-time grammar summary retained with a compiled component.
+///
+/// For a nonnullable child, substituting the child's language for a parent
+/// placeholder needs only:
+/// * terminal adjacency (`allowed_follows`),
+/// * FIRST/LAST of the component root, and
+/// * root nullability.
+///
+/// Keeping this summary in the outer artifact envelope lets the linker compose
+/// grammar legality algebraically instead of rebuilding FIRST/FOLLOW over the
+/// fully merged rule graph.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct CompositionGrammarSummary {
+    pub(crate) allowed_follows: Vec<BitSet>,
+    pub(crate) root_first: BitSet,
+    pub(crate) root_last: BitSet,
+    pub(crate) root_nullable: bool,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectRegularWideFrontierAcceptance {
@@ -1843,6 +1863,11 @@ pub(crate) struct SegmentedParserComponent {
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedBoundaryParser {
     pub(crate) parser_nwa: NWA,
+    /// When true, parser-NWA labels retain the template stack-effect alphabet:
+    /// positive labels pop/match the current stack and negative labels push a
+    /// concrete LR state. The segmented mask evaluator interprets those
+    /// effects directly instead of requiring compile-time negative resolution.
+    pub(crate) signed_stack_effects: bool,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
@@ -1981,6 +2006,11 @@ pub struct Constraint {
     #[serde(skip, default)]
     pub(crate) composition_parser_characterizations_by_terminal:
         Vec<Option<TerminalCharacterization>>,
+    /// Composition-time grammar adjacency summary. Stored in the outer
+    /// versioned artifact envelope so older inner `Constraint` layouts remain
+    /// loadable unchanged.
+    #[serde(skip, default)]
+    pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
     /// Runtime-only inverse lexer-metadata index used by compiled-constraint
     /// composition. Row `t` lists exactly the raw tokenizer states whose
     /// epsilon closure has terminal `t` matched or still reachable.

@@ -161,6 +161,8 @@ fn js_core_source(cfa_root: &Path) -> String {
 
 fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
     fs::create_dir_all(cache_dir).unwrap();
+    let upgrade_summaries =
+        std::env::var_os("SELECTED10_UPGRADE_COMPOSITION_GRAMMAR_SUMMARIES").is_some();
 
     for (index, (short_name, file)) in SELECTED10.iter().enumerate() {
         let path = schema_cache_path(cache_dir, index, short_name);
@@ -171,11 +173,19 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
                 .unwrap_or_else(|error| panic!("compile {short_name}: {error}"));
             eprintln!("[selected10] schema {index:02} {short_name}: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
             save_constraint(&path, &constraint);
+        } else if upgrade_summaries {
+            let mut constraint = load_constraint(&path);
+            constraint.prepare_composition_grammar_summary().unwrap();
+            save_constraint(&path, &constraint);
         }
 
         let name_path = name_cache_path(cache_dir, index);
         if rebuild || !name_path.exists() {
             let constraint = build_name_constraint(index, vocab);
+            save_constraint(&name_path, &constraint);
+        } else if upgrade_summaries {
+            let mut constraint = load_constraint(&name_path);
+            constraint.prepare_composition_grammar_summary().unwrap();
             save_constraint(&name_path, &constraint);
         }
     }
@@ -210,6 +220,10 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         let dispatch = parent.compose_compiled_subgrammars(&refs, vocab).unwrap();
         eprintln!("[selected10] dispatcher 20-child compose: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
         save_constraint(&dispatch_path, &dispatch);
+    } else if upgrade_summaries {
+        let mut dispatch = load_constraint(&dispatch_path);
+        dispatch.prepare_composition_grammar_summary().unwrap();
+        save_constraint(&dispatch_path, &dispatch);
     }
 
     let core_path = cache_dir.join("core.bin");
@@ -217,6 +231,10 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         let started = Instant::now();
         let core = Constraint::from_glrm_grammar(&js_core_source(cfa_root), vocab).unwrap();
         eprintln!("[selected10] JS core compile: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
+        save_constraint(&core_path, &core);
+    } else if upgrade_summaries {
+        let mut core = load_constraint(&core_path);
+        core.prepare_composition_grammar_summary().unwrap();
         save_constraint(&core_path, &core);
     }
 }
@@ -269,6 +287,20 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
             let mut probe = composed.start();
             probe.commit_bytes(prefix).unwrap_or_else(|error| panic!("selected10 prefix {prefix:?} rejected: {error}"));
             std::hint::black_box(probe.mask());
+        }
+        if std::env::var_os("SELECTED10_EXTRA_BOUNDARY_PROBES").is_some() {
+            for prefix in [
+                b"const x = tool".as_slice(),
+                b"const x = tools.tool_".as_slice(),
+                b"const x = tools.tool_0(".as_slice(),
+                b"const x = tools.tool_0({}".as_slice(),
+            ] {
+                let mut probe = composed.start();
+                probe.commit_bytes(prefix).unwrap_or_else(|error| {
+                    panic!("selected10 extra boundary prefix {prefix:?} rejected: {error}")
+                });
+                std::hint::black_box(probe.mask());
+            }
         }
         state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
         std::hint::black_box(state.mask());
