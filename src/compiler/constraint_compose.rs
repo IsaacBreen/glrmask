@@ -1617,7 +1617,7 @@ impl BoundaryParserWork {
                 })?;
                 let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                 let resolve_started_at = Instant::now();
-                resolve_negative_codes_in_nwa(
+                let resolved_reverse_topo = resolve_negative_codes_in_nwa(
                     &mut parser_nwa,
                     table.construction
                         == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
@@ -1630,7 +1630,10 @@ impl BoundaryParserWork {
                 if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA")
                     .is_some()
                 {
-                    parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast(parser_nwa);
+                    parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+                        parser_nwa,
+                        resolved_reverse_topo,
+                    );
                 } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
                     .is_some()
                 {
@@ -7401,6 +7404,13 @@ fn full_nwa_topological_order(nwa: &NWA) -> Option<Vec<u32>> {
 
 
 fn reverse_hashcons_positive_acyclic_nwa_fast(nwa: NWA) -> NWA {
+    reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(nwa, None)
+}
+
+fn reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+    nwa: NWA,
+    precomputed_reverse_topo: Option<Vec<u32>>,
+) -> NWA {
     use rayon::prelude::*;
     use rustc_hash::FxHasher;
     use smallvec::SmallVec;
@@ -7475,18 +7485,26 @@ fn reverse_hashcons_positive_acyclic_nwa_fast(nwa: NWA) -> NWA {
     let profile = compose_profile_enabled();
     let total_started = profile.then(Instant::now);
     let topo_started = profile.then(Instant::now);
-    let Some(order) = full_nwa_topological_order(&nwa) else {
-        return nwa;
+    let old_state_count = nwa.num_states() as usize;
+    let reverse_order = if let Some(order) = precomputed_reverse_topo
+        && order.len() == old_state_count
+        && order.iter().all(|&state| (state as usize) < old_state_count)
+    {
+        order
+    } else {
+        let Some(order) = full_nwa_topological_order(&nwa) else {
+            return nwa;
+        };
+        order.into_iter().rev().collect()
     };
     let topo_ms = topo_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-    let old_state_count = nwa.num_states() as usize;
     let (old_states, old_starts) = nwa.into_parts();
     let mut old_to_new = vec![u32::MAX; old_state_count];
     let mut representatives = Vec::<u32>::new();
     let mut buckets = FxHashMap::<u64, SmallVec<[u32; 2]>>::default();
     let classify_started = profile.then(Instant::now);
 
-    for old_id in order.into_iter().rev() {
+    for old_id in reverse_order {
         let source = &old_states[old_id as usize];
         debug_assert!(source
             .transitions
@@ -16795,7 +16813,16 @@ mod tests {
         for seed in 0..64 {
             let input = generated(seed);
             let reference = reverse_hashcons_positive_acyclic_nwa(input.clone());
-            let fast = reverse_hashcons_positive_acyclic_nwa_fast(input);
+            let reverse_topo = full_nwa_topological_order(&input)
+                .expect("generated quotient graph must be acyclic")
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+            let fast = reverse_hashcons_positive_acyclic_nwa_fast(input.clone());
+            let reused = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+                input,
+                Some(reverse_topo),
+            );
             assert_eq!(
                 fast.start_states(),
                 reference.start_states(),
@@ -16805,6 +16832,16 @@ mod tests {
                 fast.states(),
                 reference.states(),
                 "fast quotient structure differs from exact structural quotient for seed {seed}",
+            );
+            assert_eq!(
+                reused.start_states(),
+                reference.start_states(),
+                "reused-topology quotient start states differ for seed {seed}",
+            );
+            assert_eq!(
+                reused.states(),
+                reference.states(),
+                "reused-topology quotient differs from exact structural quotient for seed {seed}",
             );
         }
     }
