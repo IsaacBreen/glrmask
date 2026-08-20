@@ -1857,19 +1857,48 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
     #[serde(skip, default)]
     pub(crate) segmented_boundary_parser: Option<Box<SegmentedBoundaryParser>>,
+    #[serde(skip, default)]
+    pub(crate) segmented_boundary_terminal_trie: Option<Box<SegmentedBoundaryTerminalTrie>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedParserComponent {
-    pub(crate) constraint: Box<Constraint>,
+    pub(crate) constraint: Arc<Constraint>,
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
+    /// Terminal to suppress only on the synthetic union-root empty-stack
+    /// projection. Shared component artifacts retain their standalone start
+    /// final weight; this root-only disallow is exactly the old cloned-artifact
+    /// start-final subtraction without mutating the shared parser DWA.
+    pub(crate) root_disallowed_terminal: Option<u32>,
     pub(crate) global_to_local_parser_state: Vec<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundaryTerminalTrieNode {
+    pub(crate) children: Vec<(u32, u32)>,
+    /// Bit i means private boundary token class i is accepted at this node.
+    pub(crate) outputs: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SegmentedBoundaryTerminalTrie {
+    pub(crate) nodes: Vec<BoundaryTerminalTrieNode>,
+    pub(crate) root_by_tsid: Vec<u32>,
+    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
+    pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
+    /// Generic wire/reference representation. Compact in-memory boundary
+    /// parsers leave this as the empty one-state DWA and use
+    /// `compact_parser_dwa`; V17 serialization materializes the compact machine
+    /// back into this exact generic wire shape.
     pub(crate) parser_dwa: DWA,
+    #[serde(skip, default)]
+    pub(crate) compact_parser_dwa:
+        Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }

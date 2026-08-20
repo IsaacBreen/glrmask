@@ -214,6 +214,71 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
     Some(token_ids)
 }
 
+pub(crate) struct InternalTokenMaskPrebuild {
+    internal_token_buf_masks: Vec<InternalTokenBufMasks>,
+}
+
+impl InternalTokenMaskPrebuild {
+    pub(crate) fn build(
+        original_to_internal: &[u32],
+        internal_to_tokens: &[Vec<u32>],
+    ) -> Self {
+        Self {
+            internal_token_buf_masks: build_internal_token_buf_masks_from_maps(
+                original_to_internal,
+                internal_to_tokens,
+            ),
+        }
+    }
+
+    pub(crate) fn install(self, constraint: &mut Constraint) {
+        debug_assert_eq!(
+            self.internal_token_buf_masks.len(),
+            constraint.internal_token_to_tokens.len(),
+            "base token-mask prebuild must match final internal-token coordinate",
+        );
+        constraint.internal_token_buf_masks = self.internal_token_buf_masks;
+    }
+}
+
+fn build_internal_token_buf_masks_from_maps(
+    original_to_internal: &[u32],
+    internal_to_tokens: &[Vec<u32>],
+) -> Vec<InternalTokenBufMasks> {
+    let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if !grouped && !original_to_internal.is_empty() {
+        let mut masks = vec![Vec::<(u16, u32)>::new(); internal_to_tokens.len()];
+        for (original, &internal) in original_to_internal.iter().enumerate() {
+            if internal == u32::MAX {
+                continue;
+            }
+            let Some(mask) = masks.get_mut(internal as usize) else {
+                continue;
+            };
+            let word = (original as u32 / 32) as u16;
+            let bit = original as u32 % 32;
+            if let Some((last_word, last_mask)) = mask.last_mut()
+                && *last_word == word
+            {
+                *last_mask |= 1u32 << bit;
+                continue;
+            }
+            mask.push((word, 1u32 << bit));
+        }
+        masks
+    } else {
+        internal_to_tokens
+            .iter()
+            .map(|originals| Constraint::build_internal_token_buf_mask(originals))
+            .collect()
+    }
+}
+
 pub(crate) struct TokenMaskCachePrebuild {
     mask_words: usize,
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
@@ -250,38 +315,10 @@ impl TokenMaskCachePrebuild {
         internal_to_tokens: &[Vec<u32>],
         mask_words: usize,
     ) -> Self {
-        let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        let internal_token_buf_masks = if !grouped && !original_to_internal.is_empty() {
-            let mut masks = vec![Vec::<(u16, u32)>::new(); internal_to_tokens.len()];
-            for (original, &internal) in original_to_internal.iter().enumerate() {
-                if internal == u32::MAX {
-                    continue;
-                }
-                let Some(mask) = masks.get_mut(internal as usize) else {
-                    continue;
-                };
-                let word = (original as u32 / 32) as u16;
-                let bit = original as u32 % 32;
-                if let Some((last_word, last_mask)) = mask.last_mut()
-                    && *last_word == word
-                {
-                    *last_mask |= 1u32 << bit;
-                    continue;
-                }
-                mask.push((word, 1u32 << bit));
-            }
-            masks
-        } else {
-            internal_to_tokens
-                .iter()
-                .map(|originals| Constraint::build_internal_token_buf_mask(originals))
-                .collect()
-        };
+        let internal_token_buf_masks = build_internal_token_buf_masks_from_maps(
+            original_to_internal,
+            internal_to_tokens,
+        );
 
         let build_blocks = |block_size: usize| {
             if internal_token_buf_masks.is_empty() {
@@ -2144,8 +2181,12 @@ impl Constraint {
         rows
     }
 
-    fn token_mask_caches_ready(&self) -> bool {
+    fn internal_token_buf_masks_ready(&self) -> bool {
         self.internal_token_buf_masks.len() == self.internal_token_to_tokens.len()
+    }
+
+    fn token_mask_caches_ready(&self) -> bool {
+        self.internal_token_buf_masks_ready()
             && self.internal_token_buf_offsets.len()
                 == self.internal_token_to_tokens.len().saturating_add(1)
     }
@@ -2633,8 +2674,9 @@ impl Constraint {
         // on the first state that actually requires a dynamic mask.
         let dynamic_vocab_reused = false;
         let dynamic_vocab_ms = 0.0;
+        let internal_token_buf_masks_prebuilt = self.internal_token_buf_masks_ready();
         let token_mask_caches_prebuilt = self.token_mask_caches_ready();
-        let mut prebuilt_internal_token_buf_masks = token_mask_caches_prebuilt
+        let mut prebuilt_internal_token_buf_masks = internal_token_buf_masks_prebuilt
             .then(|| std::mem::take(&mut self.internal_token_buf_masks));
         let parser_runtime_caches_prebuilt = self.parser_runtime_caches_prebuilt;
         let mut prebuilt_parser_dense_masks = parser_runtime_caches_prebuilt.then(|| {
