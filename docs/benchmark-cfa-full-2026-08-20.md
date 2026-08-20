@@ -52,14 +52,14 @@ Microseconds. TBM is the old CFA metric: measured mask time plus commit time for
 
 | TBM | GLRMask | llguidance |
 |---|---:|---:|
-| mean | **3.448 µs** | 21.168 µs |
-| p50 | **3.051 µs** | 10.451 µs |
-| p90 | **4.730 µs** | 27.578 µs |
-| p95 | **5.650 µs** | 43.640 µs |
-| p99 | **10.310 µs** | 222.980 µs |
-| p99.9 | **17.820 µs** | 787.850 µs |
-| p99.99 | **23.943 µs** | 2.290 ms |
-| maximum | **70.080 µs** | 14.426 ms |
+| mean | **3 µs** | 21 µs |
+| p50 | **3 µs** | 10 µs |
+| p90 | **5 µs** | 28 µs |
+| p95 | **6 µs** | 44 µs |
+| p99 | **10 µs** | 223 µs |
+| p99.9 | **18 µs** | 788 µs |
+| p99.99 | **24 µs** | 2,290 µs |
+| maximum | **70 µs** | 14,426 µs |
 
 Measured TBM sample counts:
 
@@ -68,7 +68,7 @@ GLRMask:     3,066,674
 llguidance:  3,068,495
 ```
 
-GLRMask had five samples at or above 50 µs and **zero at or above 75 µs**. llguidance had 17,787 samples at or above 500 µs, 864 at or above 1 ms, 366 at or above 2 ms, and 17 at or above 5 ms.
+GLRMask had five samples at or above 50 µs and **zero at or above 75 µs**. llguidance had 17,787 samples at or above 500 µs, 864 at or above 1,000 µs, 366 at or above 2,000 µs, and 17 at or above 5,000 µs.
 
 The reciprocal of mean constraint-only TBM is approximately 290,062 transitions/s for GLRMask and 47,242 transitions/s for llguidance. This is not end-to-end model throughput; it is only a convenient reciprocal service-time quantity.
 
@@ -78,23 +78,23 @@ TTFM:
 
 | TTFM | GLRMask | llguidance |
 |---|---:|---:|
-| mean | 25.737 ms | **1.652 ms** |
-| p50 | 10.421 ms | **1.109 ms** |
-| p90 | 59.350 ms | **2.738 ms** |
-| p95 | 102.590 ms | **3.909 ms** |
-| p99 | 229.809 ms | **12.023 ms** |
-| p99.9 | 674.319 ms | **36.839 ms** |
-| maximum | 779.588 ms | **81.104 ms** |
+| mean | 25,737 µs | **1,652 µs** |
+| p50 | 10,421 µs | **1,109 µs** |
+| p90 | 59,350 µs | **2,738 µs** |
+| p95 | 102,590 µs | **3,909 µs** |
+| p99 | 229,809 µs | **12,023 µs** |
+| p99.9 | 674,319 µs | **36,839 µs** |
+| maximum | 779,588 µs | **81,104 µs** |
 
 Constraint build time itself is nearly identical to TTFM in this old CFA run:
 
 | Build | GLRMask | llguidance |
 |---|---:|---:|
-| p50 | 10.417 ms | **1.062 ms** |
-| p90 | 59.346 ms | **2.715 ms** |
-| p99 | 229.809 ms | **11.946 ms** |
-| p99.9 | 674.317 ms | **36.832 ms** |
-| maximum | 779.586 ms | **81.104 ms** |
+| p50 | 10,417 µs | **1,062 µs** |
+| p90 | 59,346 µs | **2,715 µs** |
+| p99 | 229,809 µs | **11,946 µs** |
+| p99.9 | 674,317 µs | **36,832 µs** |
+| maximum | 779,586 µs | **81,104 µs** |
 
 The static GLRMask design is deliberately trading substantially more up-front compilation for a much smaller runtime tail.
 
@@ -108,7 +108,7 @@ Among the 7,970 paired runtime problems:
 | any TBM ≥ 100 µs | 0 | 6,906 / 7,970 (86.6499%) |
 | any TBM ≥ 200 µs | 0 | 1,952 / 7,970 (24.4918%) |
 | any TBM ≥ 500 µs | 0 | 855 / 7,970 (10.7277%) |
-| any TBM ≥ 1 ms | 0 | 142 / 7,970 (1.7817%) |
+| any TBM ≥ 1,000 µs | 0 | 142 / 7,970 (1.7817%) |
 
 ## Interpretation limits
 

@@ -201,11 +201,11 @@ Latest corrected engineering result: the **9,558 official JSONSchemaBench schema
 
 | TBM | GLRMask | LLGuidance |
 |---|---:|---:|
-| p50 | **3.051 µs** | 10.451 µs |
-| p99 | **10.310 µs** | 222.980 µs |
-| p99.9 | **17.820 µs** | 787.850 µs |
-| p99.99 | **23.943 µs** | 2.290 ms |
-| maximum | **70.080 µs** | 14.426 ms |
+| p50 | **3 µs** | 10 µs |
+| p99 | **10 µs** | 223 µs |
+| p99.9 | **18 µs** | 788 µs |
+| p99.99 | **24 µs** | 2,290 µs |
+| maximum | **70 µs** | 14,426 µs |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-2026-08-20.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
