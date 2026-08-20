@@ -1,13 +1,9 @@
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
-> **Preliminary:** these timings are not yet accurate and should not be relied on.
+> **Interim benchmark:** the figures below are the corrected 20 August 2026 engineering run. They supersede the July figures, but are not the final publication benchmark; the final native 9,558-schema JSONSchemaBench sweep is still pending.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-tail-2026-07-16.webp">
-    <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with higher exceedance probabilities on the left and rarer events on the right" width="100%">
-  </picture>
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-tail-2026-08-20.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 ## Installation
@@ -201,22 +197,22 @@ Each transition carries a Boolean mask over the model vocabulary. These masks ar
 
 ## Performance
 
-Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
+Latest corrected engineering result: an expanded 10,263-case MaskBench/CFA selection containing the 9,558 official JSONSchemaBench schemas plus 705 additional Handwritten, Synthesized, JME, and MCPspec cases. The original full sweep used AWS M8azn; the corrected GLRMask runtime tail was refreshed on the same CPU family after fixing a deterministic post-deserialization first-commit bug. This is intentionally not presented as the final publication run.
+
+| TBM | GLRMask | LLGuidance |
+|---|---:|---:|
+| p50 | **3.060 µs** | 10.458 µs |
+| p99 | **10.360 µs** | 222.900 µs |
+| p99.9 | **17.841 µs** | 787.640 µs |
+| p99.99 | **24.001 µs** | 2,290.526 µs |
+| maximum | **70.080 µs** | 14,426.103 µs |
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-cfa-bars-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp">
-    <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp" alt="Mask-generation latency percentiles for GLRMask and LLGuidance" width="100%">
-  </picture>
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-2026-08-20.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-compilation-cfa-bars-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp">
-    <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp" alt="Compilation-time percentiles for GLRMask and LLGuidance" width="100%">
-  </picture>
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-ttfm-2026-08-20.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
-See the [full benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-full-corpus-2026-07-16.md) for methodology.
+The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final native runner uses a different, stricter methodology. See the [20 August engineering benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-full-2026-08-20.md) for the exact corpus, hardware, fix/rerun provenance, build numbers, and interpretation limits.
