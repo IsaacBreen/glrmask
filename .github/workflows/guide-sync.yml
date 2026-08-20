@@ -1,0 +1,26 @@
+name: Guide sync
+
+on:
+  pull_request:
+    paths:
+      - 'GUIDE.md'
+      - 'README.md'
+      - 'scripts/sync-guide.py'
+      - '.github/workflows/guide-sync.yml'
+  push:
+    branches: [main, glrmask-main]
+    paths:
+      - 'GUIDE.md'
+      - 'README.md'
+      - 'scripts/sync-guide.py'
+      - '.github/workflows/guide-sync.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python scripts/sync-guide.py --check

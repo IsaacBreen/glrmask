@@ -1,7 +1,3 @@
-# GLRMask
-
-<!-- Generated from GUIDE.md. Edit that file, then run `python scripts/sync-guide.py`. -->
-
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
 > **Preliminary:** these timings are not yet accurate and should not be relied on.
@@ -224,7 +220,3 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
 </p>
 
 See the [full benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-full-corpus-2026-07-16.md) for methodology.
-
-## License
-
-Licensed under either the MIT License or the Apache License, Version 2.0, at your option.
