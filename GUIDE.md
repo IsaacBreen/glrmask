@@ -1,6 +1,6 @@
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
-> **Interim benchmark:** the figures below are the corrected 20 August 2026 engineering run. They supersede the July figures, but are not the final publication benchmark; the final native 9,558-schema JSONSchemaBench sweep is still pending.
+> **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-tail-2026-08-20.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
@@ -197,15 +197,15 @@ Each transition carries a Boolean mask over the model vocabulary. These masks ar
 
 ## Performance
 
-Latest corrected engineering result: an expanded 10,263-case MaskBench/CFA selection containing the 9,558 official JSONSchemaBench schemas plus 705 additional Handwritten, Synthesized, JME, and MCPspec cases. The original full sweep used AWS M8azn; the corrected GLRMask runtime tail was refreshed on the same CPU family after fixing a deterministic post-deserialization first-commit bug. This is intentionally not presented as the final publication run.
+Latest corrected engineering result: the **9,558 official JSONSchemaBench schemas**, using their corresponding MaskBench replay payloads. The historical run originally contained 705 additional MaskBench-only cases; those are excluded from every number and graph shown here. The original full sweep used AWS M8azn, and the corrected GLRMask runtime tail was refreshed on the same CPU family after fixing a deterministic post-deserialization first-commit bug. This is intentionally not presented as the final native publication run.
 
 | TBM | GLRMask | LLGuidance |
 |---|---:|---:|
-| p50 | **3.060 µs** | 10.458 µs |
-| p99 | **10.360 µs** | 222.900 µs |
-| p99.9 | **17.841 µs** | 787.640 µs |
-| p99.99 | **24.001 µs** | 2,290.526 µs |
-| maximum | **70.080 µs** | 14,426.103 µs |
+| p50 | **3.051 µs** | 10.451 µs |
+| p99 | **10.310 µs** | 222.980 µs |
+| p99.9 | **17.820 µs** | 787.850 µs |
+| p99.99 | **23.943 µs** | 2.290 ms |
+| maximum | **70.080 µs** | 14.426 ms |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-2026-08-20.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
