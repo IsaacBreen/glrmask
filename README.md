@@ -219,11 +219,11 @@ Latest corrected engineering result: the **9,558 official JSONSchemaBench schema
 | maximum | 779,588 µs | **81,104 µs** |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/2f8b1505d0cba2467a458eb8b45c4879710468dd/docs/assets/benchmark-tbm-2026-08-21.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/66c35d196f9af1ab683b962ad536ec10b4d11ee0/docs/assets/benchmark-tbm-2026-08-21-v2.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/2f8b1505d0cba2467a458eb8b45c4879710468dd/docs/assets/benchmark-ttfm-2026-08-21.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/66c35d196f9af1ab683b962ad536ec10b4d11ee0/docs/assets/benchmark-ttfm-2026-08-21-v2.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final native runner uses a different, stricter methodology. See the [20 August engineering benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-full-2026-08-20.md) for the exact corpus, hardware, fix/rerun provenance, build numbers, and interpretation limits.
