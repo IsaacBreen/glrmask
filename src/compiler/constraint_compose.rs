@@ -1133,14 +1133,70 @@ fn build_direct_component_token_coordinates(
                 Ok(())
             };
 
-        for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
-            let mut groups = BTreeMap::<u32, Vec<u32>>::new();
-            for &original in originals {
-                if !selected_original
+        let singleton_fast = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
+        let dense_child_buckets = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
+        if dense_child_buckets {
+            let child_class_count = child.internal_token_to_tokens.len();
+            let mut buckets = (0..child_class_count)
+                .map(|_| Vec::<u32>::new())
+                .collect::<Vec<_>>();
+            let mut touched = Vec::<usize>::new();
+            let mut touched_flags = vec![false; child_class_count];
+            let mut unmapped = Vec::<u32>::new();
+            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+                if singleton_fast && originals.len() == 1 {
+                    let original = originals[0];
+                    if selected_original.get(original as usize).copied().unwrap_or(false) {
+                        let child_local = child
+                            .original_token_to_internal
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        add_pair_class(vec![original], parent_local as u32, child_local)?;
+                    }
+                    continue;
+                }
+                for &original in originals {
+                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let child_local = child
+                        .original_token_to_internal
+                        .get(original as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    if child_local == u32::MAX {
+                        unmapped.push(original);
+                        continue;
+                    }
+                    let child_index = child_local as usize;
+                    if child_index >= child_class_count {
+                        return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
+                    }
+                    if !touched_flags[child_index] {
+                        touched_flags[child_index] = true;
+                        touched.push(child_index);
+                    }
+                    buckets[child_index].push(original);
+                }
+                touched.sort_unstable();
+                for child_index in touched.drain(..) {
+                    touched_flags[child_index] = false;
+                    let originals = std::mem::take(&mut buckets[child_index]);
+                    add_pair_class(originals, parent_local as u32, child_index as u32)?;
+                }
+                if !unmapped.is_empty() {
+                    add_pair_class(std::mem::take(&mut unmapped), parent_local as u32, u32::MAX)?;
+                }
+            }
+
+            for &original in original_token_ids {
+                let parent_local = parent
+                    .original_token_to_internal
                     .get(original as usize)
                     .copied()
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(u32::MAX);
+                if parent_local != u32::MAX {
                     continue;
                 }
                 let child_local = child
@@ -1148,32 +1204,80 @@ fn build_direct_component_token_coordinates(
                     .get(original as usize)
                     .copied()
                     .unwrap_or(u32::MAX);
-                groups.entry(child_local).or_default().push(original);
+                if child_local == u32::MAX {
+                    unmapped.push(original);
+                    continue;
+                }
+                let child_index = child_local as usize;
+                if child_index >= child_class_count {
+                    return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
+                }
+                if !touched_flags[child_index] {
+                    touched_flags[child_index] = true;
+                    touched.push(child_index);
+                }
+                buckets[child_index].push(original);
             }
-            for (child_local, originals) in groups {
-                add_pair_class(originals, parent_local as u32, child_local)?;
+            touched.sort_unstable();
+            for child_index in touched.drain(..) {
+                touched_flags[child_index] = false;
+                let originals = std::mem::take(&mut buckets[child_index]);
+                add_pair_class(originals, u32::MAX, child_index as u32)?;
             }
-        }
+            if !unmapped.is_empty() {
+                add_pair_class(std::mem::take(&mut unmapped), u32::MAX, u32::MAX)?;
+            }
+        } else {
+            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+                if singleton_fast && originals.len() == 1 {
+                    let original = originals[0];
+                    if selected_original.get(original as usize).copied().unwrap_or(false) {
+                        let child_local = child
+                            .original_token_to_internal
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        add_pair_class(vec![original], parent_local as u32, child_local)?;
+                    }
+                    continue;
+                }
+                let mut groups = BTreeMap::<u32, Vec<u32>>::new();
+                for &original in originals {
+                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let child_local = child
+                        .original_token_to_internal
+                        .get(original as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    groups.entry(child_local).or_default().push(original);
+                }
+                for (child_local, originals) in groups {
+                    add_pair_class(originals, parent_local as u32, child_local)?;
+                }
+            }
 
-        let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
-        for &original in original_token_ids {
-            let parent_local = parent
-                .original_token_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if parent_local != u32::MAX {
-                continue;
+            let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
+            for &original in original_token_ids {
+                let parent_local = parent
+                    .original_token_to_internal
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if parent_local != u32::MAX {
+                    continue;
+                }
+                let child_local = child
+                    .original_token_to_internal
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                parent_unmapped.entry(child_local).or_default().push(original);
             }
-            let child_local = child
-                .original_token_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            parent_unmapped.entry(child_local).or_default().push(original);
-        }
-        for (child_local, originals) in parent_unmapped {
-            add_pair_class(originals, u32::MAX, child_local)?;
+            for (child_local, originals) in parent_unmapped {
+                add_pair_class(originals, u32::MAX, child_local)?;
+            }
         }
 
         return Ok((
@@ -4825,10 +4929,27 @@ fn boundary_interface_adjacent_pair_candidates(
         .max()
         .unwrap_or(0) as usize;
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
+    let sparse_summaries = std::env::var_os(
+        "GLRMASK_DISABLE_SPARSE_INTERFACE_BYTE_SUMMARIES",
+    )
+    .is_none();
+    let needed_terminals = sparse_summaries.then(|| {
+        interface_pairs
+            .iter()
+            .flat_map(|&(left, right)| [left, right])
+            .collect::<BTreeSet<_>>()
+    });
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-            summaries[terminal_offset + local_terminal] = Some(
+            let global_terminal = terminal_offset + local_terminal;
+            if needed_terminals
+                .as_ref()
+                .is_some_and(|needed| !needed.contains(&(global_terminal as u32)))
+            {
+                continue;
+            }
+            summaries[global_terminal] = Some(
                 component
                     .tokenizer
                     .terminal_expr(local_terminal as u32)

@@ -3568,7 +3568,7 @@ impl FastBoundaryWeightInterner {
 
 struct FastBoundaryNwaState {
     epsilons: Vec<(u32, FastBoundaryWeightId)>,
-    transitions: Vec<(i32, Vec<(u32, FastBoundaryWeightId)>)>,
+    transitions: Vec<(i32, SmallVec<[(u32, FastBoundaryWeightId); 1]>)>,
     final_weight: FastBoundaryWeightId,
 }
 
@@ -4123,7 +4123,7 @@ fn resolve_negative_codes_small_boundary_impl(
         }
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, branches) in &state.transitions {
-            let mut out = Vec::with_capacity(branches.len());
+            let mut out = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
                 let weight = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
                 if weight != 0 {
@@ -5688,7 +5688,7 @@ pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_stat
         }
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, branches) in &state.transitions {
-            let mut row = Vec::with_capacity(branches.len());
+            let mut row = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
                 let id = interner.source_weight_id(weight, &mut source_weight_ids, None)?;
                 if id != 0 {
@@ -5816,7 +5816,7 @@ fn determinize_with_supports_small_boundary(
         }
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, branches) in &state.transitions {
-            let mut fast_branches = Vec::with_capacity(branches.len());
+            let mut fast_branches = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
                 let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
                 if weight != 0 {
@@ -5886,7 +5886,7 @@ pub fn normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_sta
         }
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, branches) in &state.transitions {
-            let mut fast_branches = Vec::with_capacity(branches.len());
+            let mut fast_branches = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
                 let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
                 if weight != 0 {
