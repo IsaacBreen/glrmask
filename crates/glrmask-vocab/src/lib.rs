@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(skip)]
-    compiler_cache: VocabCompilerCache,
+    compiler_cache: Arc<VocabCompilerCache>,
     #[serde(skip)]
     max_token_byte_len: OnceLock<usize>,
 }
@@ -76,7 +76,7 @@ impl Clone for Vocab {
         }
         Self {
             entries: Arc::clone(&self.entries),
-            compiler_cache: VocabCompilerCache::default(),
+            compiler_cache: Arc::clone(&self.compiler_cache),
             max_token_byte_len,
         }
     }
@@ -90,7 +90,7 @@ impl Vocab {
         let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
         Self {
             entries,
-            compiler_cache: VocabCompilerCache::default(),
+            compiler_cache: Arc::new(VocabCompilerCache::default()),
             max_token_byte_len,
         }
     }
@@ -224,5 +224,22 @@ pub mod __private {
 
     pub mod vocab_prefix_tree {
         pub use super::super::vocab_prefix_tree::*;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clones_share_pure_derived_artifact_cache() {
+        let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"bc".to_vec())]);
+        assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 0);
+        let _ = vocab.relevant_bytes();
+        assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 1);
+
+        let cloned = vocab.clone();
+        assert!(Arc::ptr_eq(&vocab.compiler_cache, &cloned.compiler_cache));
+        assert_eq!(cloned.compiler_cache.artifacts.lock().unwrap().len(), 1);
     }
 }

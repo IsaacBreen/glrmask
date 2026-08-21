@@ -2270,6 +2270,237 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
+    fn try_fill_mask_segmented_deterministic_union_direct(&self, buf: &mut [u32]) -> bool {
+        fn accepted_for_stack(
+            component: &crate::runtime::SegmentedParserComponent,
+            top_first: &[u32],
+        ) -> Weight {
+            let constraint = component.constraint.as_ref();
+            let dwa = &constraint.parser_dwa;
+            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
+            let mut state_id = dwa.start_state();
+            let mut path_weight = Weight::all();
+            let mut accepted = Weight::empty();
+            let accumulate = |state_id: u32,
+                              path_weight: &Weight,
+                              accepted: &mut Weight,
+                              ops: &mut crate::ds::weight::ScopedWeightOpCache| {
+                if let Some(final_weight) = dwa
+                    .states()
+                    .get(state_id as usize)
+                    .and_then(|state| state.final_weight.as_ref())
+                {
+                    let contribution = ops.intersection(path_weight, final_weight);
+                    if !contribution.is_empty() {
+                        *accepted = ops.union(accepted, &contribution);
+                    }
+                }
+            };
+            accumulate(state_id, &path_weight, &mut accepted, &mut ops);
+            for &parser_state in top_first {
+                let Some(state) = dwa.states().get(state_id as usize) else {
+                    break;
+                };
+                let positive = encode_positive_label(parser_state);
+                let transition = state
+                    .transitions
+                    .get(&positive)
+                    .or_else(|| {
+                        constraint
+                            .parser_state_domain_label(parser_state)
+                            .and_then(|label| state.transitions.get(&label))
+                    })
+                    .or_else(|| state.transitions.get(&DEFAULT_LABEL));
+                let Some((target, edge_weight)) = transition else {
+                    break;
+                };
+                path_weight = ops.intersection(&path_weight, edge_weight);
+                if path_weight.is_empty() {
+                    break;
+                }
+                state_id = *target;
+                accumulate(state_id, &path_weight, &mut accepted, &mut ops);
+            }
+            accepted
+        }
+
+        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
+            let word = token as usize / 64;
+            let bit = token % 64;
+            acc.0.iter().any(|(_, dense)| {
+                dense.get(word)
+                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
+            })
+        }
+
+        fn or_component_weight(
+            outer: &ConstraintState<'_>,
+            component: &crate::runtime::SegmentedParserComponent,
+            global_tokenizer_state: u32,
+            accepted: &Weight,
+            allowed: &DenseMaskAcc,
+            root_disallow: bool,
+            buf: &mut [u32],
+        ) -> bool {
+            let Some(local_tokenizer_state) =
+                outer.segmented_local_tokenizer_state(component, global_tokenizer_state)
+            else {
+                return true;
+            };
+            let source = component.constraint.as_ref();
+            let blocked = root_disallow
+                .then(|| component.root_disallowed_terminal)
+                .flatten()
+                .and_then(|terminal| source.possible_matches.get(&terminal));
+            for &tsid in source.internal_tsids_for_state(local_tokenizer_state) {
+                let accepted_tokens = if accepted.is_full() {
+                    source.internal_token_universe()
+                } else {
+                    accepted.tokens_for_tsid(tsid)
+                };
+                if accepted_tokens.is_empty() {
+                    continue;
+                }
+                let blocked_tokens = blocked.map(|weight| {
+                    if weight.is_full() {
+                        source.internal_token_universe()
+                    } else {
+                        weight.tokens_for_tsid(tsid)
+                    }
+                });
+                for internal_token in accepted_tokens.iter() {
+                    if blocked_tokens
+                        .as_ref()
+                        .is_some_and(|tokens| tokens.contains(internal_token))
+                    {
+                        continue;
+                    }
+                    if source.internal_token_to_tokens.is_empty() {
+                        let original = internal_token;
+                        let outer_internal = outer
+                            .constraint
+                            .original_token_to_internal
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
+                            set_original_mask_bit(buf, original);
+                        }
+                    } else if let Some(originals) =
+                        source.internal_token_to_tokens.get(internal_token as usize)
+                    {
+                        for &original in originals {
+                            let outer_internal = outer
+                                .constraint
+                                .original_token_to_internal
+                                .get(original as usize)
+                                .copied()
+                                .unwrap_or(u32::MAX);
+                            if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
+                                set_original_mask_bit(buf, original);
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        }
+
+        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
+            return false;
+        };
+        let dispatch = &overlay.segmented_component_union_root_dispatch;
+        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+            return false;
+        }
+        buf.fill(0);
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let mut complete = true;
+            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                let Some(allowed) =
+                    self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
+                else {
+                    complete = false;
+                    return;
+                };
+                // Synthetic root final: every component start final contributes.
+                for component in &overlay.segmented_parser_components {
+                    let accepted = accepted_for_stack(component, &[]);
+                    if !or_component_weight(
+                        self,
+                        component,
+                        global_tokenizer_state,
+                        &accepted,
+                        &allowed,
+                        true,
+                        buf,
+                    ) {
+                        complete = false;
+                        return;
+                    }
+                }
+                let Some(&global_top) = top_first.first() else {
+                    return;
+                };
+                let component_index = dispatch
+                    .get(global_top as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if component_index == u32::MAX {
+                    return;
+                }
+                let Some(component) = overlay
+                    .segmented_parser_components
+                    .get(component_index as usize)
+                else {
+                    complete = false;
+                    return;
+                };
+                let mut local_top_first = SmallVec::<[u32; 64]>::new();
+                for &global_parser_state in top_first {
+                    let local = component
+                        .global_to_local_parser_state
+                        .get(global_parser_state as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    if local == u32::MAX {
+                        break;
+                    }
+                    local_top_first.push(local);
+                }
+                if local_top_first.is_empty() {
+                    return;
+                }
+                let accepted = accepted_for_stack(component, &local_top_first);
+                if !or_component_weight(
+                    self,
+                    component,
+                    global_tokenizer_state,
+                    &accepted,
+                    &allowed,
+                    false,
+                    buf,
+                ) {
+                    complete = false;
+                }
+            });
+            if !traversal_complete || !complete {
+                return false;
+            }
+        }
+        if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
+            && !self.or_segmented_boundary_parser_mask(boundary, buf)
+        {
+            return false;
+        }
+        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref()
+            && !self.or_segmented_boundary_terminal_trie_mask(boundary, buf)
+        {
+            return false;
+        }
+        true
+    }
+
     /// Evaluate the compressed deterministic union A.  Its synthetic root is
     /// represented by `segmented_component_union_root_dispatch`; after the
     /// first parser-state read each concrete stack path is in exactly one
@@ -2277,6 +2508,9 @@ impl<'a> ConstraintState<'a> {
     /// component start final, so we also project an empty stack into each
     /// component coordinate for the same branch accumulator.
     fn try_fill_mask_segmented_deterministic_union(&self, buf: &mut [u32]) -> bool {
+        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some() {
+            return self.try_fill_mask_segmented_deterministic_union_direct(buf);
+        }
         let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
         let total_started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
@@ -2308,7 +2542,13 @@ impl<'a> ConstraintState<'a> {
                     else {
                         continue;
                     };
-                    let local_disallowed = self.segmented_local_disallowed(component, acc);
+                    let mut local_disallowed = self.segmented_local_disallowed(component, acc);
+                    if let Some(terminal) = component.root_disallowed_terminal {
+                        local_disallowed = local_disallowed.with_insert(
+                            local_tokenizer_state,
+                            terminal,
+                        );
+                    }
                     projected_states[component_index].merge_insert(
                         local_tokenizer_state,
                         ParserGSS::from_single_stack(Vec::new(), local_disallowed),
@@ -2401,6 +2641,11 @@ impl<'a> ConstraintState<'a> {
         let boundary_started_at = profile.then(Instant::now);
         if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
             && !self.or_segmented_boundary_parser_mask(boundary, buf)
+        {
+            return false;
+        }
+        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref()
+            && !self.or_segmented_boundary_terminal_trie_mask(boundary, buf)
         {
             return false;
         }
@@ -2523,6 +2768,11 @@ impl<'a> ConstraintState<'a> {
         {
             return false;
         }
+        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref()
+            && !self.or_segmented_boundary_terminal_trie_mask(boundary, buf)
+        {
+            return false;
+        }
         let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
         if let Some(started_at) = total_started_at {
             eprintln!(
@@ -2531,6 +2781,110 @@ impl<'a> ConstraintState<'a> {
                 boundary_ns,
                 elapsed_ns(started_at),
             );
+        }
+        true
+    }
+
+    /// Evaluate an exact boundary terminal-output trie against the composed
+    /// GLR stack. The trie is deterministic storage: every branch consumes one
+    /// parser-visible terminal and every leaf carries a bitset of private
+    /// boundary token classes. It contains exactly the terminal sequences
+    /// accepted by the boundary terminal DWA for the current private TSID.
+    fn or_segmented_boundary_terminal_trie_mask(
+        &self,
+        boundary: &crate::runtime::SegmentedBoundaryTerminalTrie,
+        buf: &mut [u32],
+    ) -> bool {
+        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
+            let word = token as usize / 64;
+            let bit = token % 64;
+            acc.0.iter().any(|(_, dense)| {
+                dense.get(word)
+                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
+            })
+        }
+
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let tsid = boundary
+                .tokenizer_state_to_tsid
+                .get(global_tokenizer_state as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if tsid == u32::MAX {
+                continue;
+            }
+            let root = boundary
+                .root_by_tsid
+                .get(tsid as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if root == u32::MAX {
+                continue;
+            }
+            let mut complete = true;
+            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                let Some(allowed) =
+                    self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
+                else {
+                    complete = false;
+                    return;
+                };
+                let mut stack = top_first.to_vec();
+                stack.reverse();
+                let parser = ParserGSS::from_single_stack(stack, acc.clone());
+                let mut pending = Vec::<(u32, ParserGSS)>::new();
+                pending.push((root, parser));
+                let mut visits = 0usize;
+                while let Some((node_id, parser)) = pending.pop() {
+                    visits += 1;
+                    if visits > boundary.nodes.len().saturating_mul(2).max(32) {
+                        complete = false;
+                        return;
+                    }
+                    let Some(node) = boundary.nodes.get(node_id as usize) else {
+                        complete = false;
+                        return;
+                    };
+                    let mut outputs = node.outputs;
+                    while outputs != 0 {
+                        let internal_token = outputs.trailing_zeros() as u32;
+                        outputs &= outputs - 1;
+                        let Some(originals) = boundary
+                            .internal_token_to_originals
+                            .get(internal_token as usize)
+                        else {
+                            complete = false;
+                            return;
+                        };
+                        for &original in originals {
+                            let outer_internal = self
+                                .constraint
+                                .original_token_to_internal
+                                .get(original as usize)
+                                .copied()
+                                .unwrap_or(u32::MAX);
+                            if outer_internal != u32::MAX
+                                && dense_contains(&allowed, outer_internal)
+                            {
+                                set_original_mask_bit(buf, original);
+                            }
+                        }
+                    }
+                    for &(terminal, child) in &node.children {
+                        if let Some(advanced) = super::commit::advance_parser_stacks_if_possible(
+                            self.constraint,
+                            &parser,
+                            terminal,
+                        ) && !advanced.is_empty()
+                        {
+                            pending.push((child, advanced));
+                        }
+                    }
+                }
+            });
+            if !traversal_complete || !complete {
+                return false;
+            }
         }
         true
     }
@@ -2591,6 +2945,54 @@ impl<'a> ConstraintState<'a> {
             accepted
         }
 
+        fn accepted_mask_for_stack(
+            dwa: &crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
+            tsid: u32,
+            top_first: &[u32],
+        ) -> u64 {
+            if tsid >= dwa.tsid_count as u32 {
+                return 0;
+            }
+            let mut state_id = dwa.start_state();
+            let mut path_mask = dwa.all_token_mask();
+            let mut accepted = 0u64;
+            let accumulate_final = |state_id: u32, path_mask: u64, accepted: &mut u64| {
+                let Some(state) = dwa.states.get(state_id as usize) else {
+                    return;
+                };
+                if state.final_weight != 0 {
+                    *accepted |= path_mask & dwa.weight_mask(state.final_weight, tsid);
+                }
+            };
+            accumulate_final(state_id, path_mask, &mut accepted);
+            for &parser_state in top_first {
+                let label = encode_positive_label(parser_state);
+                let Some(state) = dwa.states.get(state_id as usize) else {
+                    break;
+                };
+                let edge = state
+                    .transitions
+                    .iter()
+                    .find(|(edge_label, _, _)| *edge_label == label)
+                    .or_else(|| {
+                        state
+                            .transitions
+                            .iter()
+                            .find(|(edge_label, _, _)| *edge_label == DEFAULT_LABEL)
+                    });
+                let Some(&(_, target, weight)) = edge else {
+                    break;
+                };
+                path_mask &= dwa.weight_mask(weight, tsid);
+                if path_mask == 0 {
+                    break;
+                }
+                state_id = target;
+                accumulate_final(state_id, path_mask, &mut accepted);
+            }
+            accepted
+        }
+
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -2600,12 +3002,21 @@ impl<'a> ConstraintState<'a> {
             })
         }
 
+        let debug_boundary = std::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let boundary_tsid = boundary
                 .tokenizer_state_to_tsid
                 .get(global_tokenizer_state as usize)
                 .copied()
                 .unwrap_or(u32::MAX);
+            if debug_boundary {
+                eprintln!(
+                    "[glrmask/debug][segmented_boundary_state] global_tokenizer_state={} boundary_tsid={} paths={}",
+                    global_tokenizer_state,
+                    boundary_tsid,
+                    gss.path_count_at_most(129),
+                );
+            }
             if boundary_tsid == u32::MAX {
                 continue;
             }
@@ -2616,12 +3027,27 @@ impl<'a> ConstraintState<'a> {
                 else {
                     return;
                 };
-                let accepted = accepted_for_stack(&boundary.parser_dwa, top_first);
-                let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
-                    return;
-                };
-                for range in tokens.ranges() {
-                    for internal_token in range {
+                if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+                    let mut accepted = accepted_mask_for_stack(compact, boundary_tsid, top_first);
+                    if debug_boundary {
+                        let internal = (0..compact.token_count as u32)
+                            .filter(|&token| accepted & (1u64 << token) != 0)
+                            .collect::<Vec<_>>();
+                        let originals = internal
+                            .iter()
+                            .flat_map(|&token| boundary.internal_token_to_originals.get(token as usize).into_iter().flatten().copied())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal={:?} accepted_originals={:?} compact=true",
+                            top_first,
+                            boundary_tsid,
+                            internal,
+                            originals,
+                        );
+                    }
+                    while accepted != 0 {
+                        let internal_token = accepted.trailing_zeros();
+                        accepted &= accepted - 1;
                         let Some(originals) = boundary
                             .internal_token_to_originals
                             .get(internal_token as usize)
@@ -2638,6 +3064,54 @@ impl<'a> ConstraintState<'a> {
                                 .unwrap_or(u32::MAX);
                             if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
                                 set_original_mask_bit(buf, original);
+                            }
+                        }
+                    }
+                } else {
+                    let accepted = accepted_for_stack(&boundary.parser_dwa, top_first);
+                    let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
+                        if debug_boundary {
+                            eprintln!(
+                                "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal=[]",
+                                top_first,
+                                boundary_tsid,
+                            );
+                        }
+                        return;
+                    };
+                    if debug_boundary {
+                        let internal = tokens.ranges().flat_map(|range| range).collect::<Vec<_>>();
+                        let originals = internal
+                            .iter()
+                            .flat_map(|&token| boundary.internal_token_to_originals.get(token as usize).into_iter().flatten().copied())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal={:?} accepted_originals={:?}",
+                            top_first,
+                            boundary_tsid,
+                            internal,
+                            originals,
+                        );
+                    }
+                    for range in tokens.ranges() {
+                        for internal_token in range {
+                            let Some(originals) = boundary
+                                .internal_token_to_originals
+                                .get(internal_token as usize)
+                            else {
+                                complete = false;
+                                return;
+                            };
+                            for &original in originals {
+                                let outer_internal = self
+                                    .constraint
+                                    .original_token_to_internal
+                                    .get(original as usize)
+                                    .copied()
+                                    .unwrap_or(u32::MAX);
+                                if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
+                                    set_original_mask_bit(buf, original);
+                                }
                             }
                         }
                     }
@@ -2662,10 +3136,17 @@ impl<'a> ConstraintState<'a> {
         if !overlay.segmented_parser_components.is_empty() {
             return true;
         }
-        let Some(boundary) = overlay.segmented_boundary_parser.as_deref() else {
-            return true;
-        };
-        self.or_segmented_boundary_parser_mask(boundary, buf)
+        if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
+            && !self.or_segmented_boundary_parser_mask(boundary, buf)
+        {
+            return false;
+        }
+        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref()
+            && !self.or_segmented_boundary_terminal_trie_mask(boundary, buf)
+        {
+            return false;
+        }
+        true
     }
 
     /// Exact overlay for an out-of-vocabulary special token reached only after

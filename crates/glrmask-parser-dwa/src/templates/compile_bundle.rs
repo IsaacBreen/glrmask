@@ -637,8 +637,38 @@ impl Templates {
             return bundle;
         }
 
+        if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BUNDLE_UNGROUPED").is_some()
+            && terminal_weights.len() <= 8
+            && !minimize_template_bundles_enabled()
+        {
+            let direct_groups = terminal_weights
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    (!weight.is_empty())
+                        .then(|| {
+                            self.by_terminal
+                                .get(&terminal)
+                                .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                        })
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            if direct_groups.len() > 1
+                && std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BUNDLE_FIXED_NWA").is_some()
+                && let Some(nwa) = determinize_bundle_groups_serial_small_fixed_nwa(&direct_groups)
+            {
+                return nwa;
+            }
+        }
+
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
         let group_dfas = self.build_group_dfas(&weight_groups, group_cache);
+        if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BUNDLE_FIXED_NWA").is_some()
+            && !minimize_template_bundles_enabled()
+            && let Some(nwa) = determinize_bundle_groups_serial_small_fixed_nwa(&group_dfas)
+        {
+            return nwa;
+        }
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
         let minimized = if weight_groups.len() > 1 && minimize_template_bundles_enabled() {
             minimize(&bundle_dwa)
@@ -861,12 +891,456 @@ fn determinize_bundle_groups_profiled(
     (dwa, profile)
 }
 
+
+fn determinize_bundle_groups_parallel_small(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Option<DWA> {
+    use crate::automata::weighted_u32::dwa::DWA;
+
+    let started_at = Instant::now();
+    let n = groups.len();
+    if n == 0 || n > 8 || rayon::current_num_threads() <= 1 {
+        return None;
+    }
+
+    // For a small bundle there are only 2^n possible supports. Materialize
+    // their exact Weight union once; workers then carry a u16 support mask
+    // rather than performing Weight algebra in the product-state hot loop.
+    let subset_count = 1usize << n;
+    let mut subset_weights = Vec::with_capacity(subset_count);
+    subset_weights.push(Weight::empty());
+    for mask in 1..subset_count {
+        let bit = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        subset_weights.push(subset_weights[previous].union(groups[bit].0));
+    }
+
+    #[derive(Debug)]
+    struct ScannedEdge {
+        label: i32,
+        next: Vec<(u32, u32)>,
+        support_mask: u16,
+    }
+    #[derive(Debug)]
+    struct ScannedState {
+        from: u32,
+        final_mask: u16,
+        edges: Vec<ScannedEdge>,
+    }
+
+    let start_key = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| {
+            (
+                checked_usize_to_u32(group_id, "bundle group id"),
+                dfa.dfa().start_state,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut dwa = DWA::new(0, 0);
+    let mut state_map = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+    let mut singleton_state_map = FxHashMap::<(u32, u32), u32>::default();
+    if let [singleton] = start_key.as_slice() {
+        singleton_state_map.insert(*singleton, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    let mut frontier = vec![(0u32, start_key)];
+    let mut waves = 0usize;
+    let mut max_frontier = 0usize;
+
+    while !frontier.is_empty() {
+        waves += 1;
+        max_frontier = max_frontier.max(frontier.len());
+        let scanned = frontier
+            .par_iter()
+            .map_init(LabelTargets::new, |label_targets, (from, product_state)| {
+                let mut final_mask = 0u16;
+                for &(group_id, dfa_state) in product_state {
+                    if groups[group_id as usize].1.dfa().states[dfa_state as usize].is_accepting {
+                        final_mask |= 1u16 << group_id;
+                    }
+                }
+
+                collect_label_targets(groups, product_state, label_targets);
+                let mut edges = Vec::with_capacity(label_targets.len());
+                let mut label_start = 0usize;
+                while label_start < label_targets.len() {
+                    let label = label_targets[label_start].0;
+                    let mut label_end = label_start + 1;
+                    while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                        label_end += 1;
+                    }
+                    let mut support_mask = 0u16;
+                    let mut next = Vec::with_capacity(label_end - label_start);
+                    for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                        support_mask |= 1u16 << group_id;
+                        next.push((group_id, target));
+                    }
+                    edges.push(ScannedEdge {
+                        label,
+                        next,
+                        support_mask,
+                    });
+                    label_start = label_end;
+                }
+                ScannedState {
+                    from: *from,
+                    final_mask,
+                    edges,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut next_frontier = Vec::<(u32, Vec<(u32, u32)>)>::new();
+        for state in scanned {
+            if state.final_mask != 0 {
+                let weight = subset_weights[state.final_mask as usize].clone();
+                if !weight.is_empty() {
+                    dwa.set_final_weight(state.from, weight);
+                }
+            }
+            for edge in state.edges {
+                let edge_weight = subset_weights[edge.support_mask as usize].clone();
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                let target = if let [singleton] = edge.next.as_slice() {
+                    if let Some(&existing) = singleton_state_map.get(singleton) {
+                        existing
+                    } else {
+                        let new_id = dwa.add_state();
+                        singleton_state_map.insert(*singleton, new_id);
+                        next_frontier.push((new_id, edge.next));
+                        new_id
+                    }
+                } else if let Some(&existing) = state_map.get(&edge.next) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    state_map.insert(edge.next.clone(), new_id);
+                    next_frontier.push((new_id, edge.next));
+                    new_id
+                };
+                dwa.add_transition(state.from, edge.label, target, edge_weight);
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][parallel_bundle_determinize] groups={} subset_weights={} states={} transitions={} waves={} max_frontier={} total_ms={:.3}",
+            n,
+            subset_weights.len(),
+            dwa.num_states(),
+            dwa.num_transitions(),
+            waves,
+            max_frontier,
+            elapsed_ms(started_at),
+        );
+    }
+    Some(dwa)
+}
+
+
+
+
+fn determinize_bundle_groups_serial_small_fixed_nwa(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> Option<NWA> {
+    const DEAD: u32 = u32::MAX;
+    let n = groups.len();
+    if n == 0 || n > 8 {
+        return None;
+    }
+
+    let subset_count = 1usize << n;
+    let mut subset_weights = Vec::with_capacity(subset_count);
+    subset_weights.push(Weight::empty());
+    for mask in 1..subset_count {
+        let bit = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        subset_weights.push(subset_weights[previous].union(groups[bit].0));
+    }
+
+    let mut start_key = [DEAD; 8];
+    for (group_id, (_, dfa)) in groups.iter().enumerate() {
+        start_key[group_id] = dfa.dfa().start_state;
+    }
+
+    let mut states = vec![NWAState::default()];
+    let mut state_map = FxHashMap::<[u32; 8], u32>::default();
+    state_map.insert(start_key, 0);
+    let mut worklist = VecDeque::from([(0u32, start_key)]);
+    let mut label_targets = LabelTargets::new();
+
+    while let Some((from, product_state)) = worklist.pop_front() {
+        let mut final_mask = 0u16;
+        label_targets.clear();
+        for group_id in 0..n {
+            let dfa_state = product_state[group_id];
+            if dfa_state == DEAD {
+                continue;
+            }
+            let dfa = groups[group_id].1.dfa();
+            let node = &dfa.states[dfa_state as usize];
+            if node.is_accepting {
+                final_mask |= 1u16 << group_id;
+            }
+            for (&label, &target) in &node.transitions {
+                label_targets.push((label, group_id as u32, target));
+            }
+        }
+        if final_mask != 0 {
+            let weight = subset_weights[final_mask as usize].clone();
+            if !weight.is_empty() {
+                states[from as usize].final_weight = Some(weight);
+            }
+        }
+
+        label_targets.sort_unstable_by_key(|&(label, group_id, _)| (label, group_id));
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            let mut support_mask = 0u16;
+            let mut next = [DEAD; 8];
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                support_mask |= 1u16 << group_id;
+                next[group_id as usize] = target;
+            }
+            let edge_weight = subset_weights[support_mask as usize].clone();
+            if !edge_weight.is_empty() {
+                let target = if let Some(&existing) = state_map.get(&next) {
+                    existing
+                } else {
+                    let new_id = checked_usize_to_u32(states.len(), "bundle NWA state id");
+                    states.push(NWAState::default());
+                    state_map.insert(next, new_id);
+                    worklist.push_back((new_id, next));
+                    new_id
+                };
+                states[from as usize]
+                    .transitions
+                    .insert(label, vec![(target, edge_weight)]);
+            }
+            label_start = label_end;
+        }
+    }
+
+    Some(NWA::from_parts(states, vec![0]))
+}
+fn determinize_bundle_groups_serial_small_fixed(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> Option<DWA> {
+    use crate::automata::weighted_u32::dwa::DWA;
+
+    const DEAD: u32 = u32::MAX;
+    let n = groups.len();
+    if n == 0 || n > 8 {
+        return None;
+    }
+
+    // The support semiring has at most 2^8 exact group unions. Compute each
+    // once and keep product-state topology in a fixed key so the hot loop never
+    // allocates Vec<(group,state)> keys merely to probe the state table.
+    let subset_count = 1usize << n;
+    let mut subset_weights = Vec::with_capacity(subset_count);
+    subset_weights.push(Weight::empty());
+    for mask in 1..subset_count {
+        let bit = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        subset_weights.push(subset_weights[previous].union(groups[bit].0));
+    }
+
+    let mut start_key = [DEAD; 8];
+    for (group_id, (_, dfa)) in groups.iter().enumerate() {
+        start_key[group_id] = dfa.dfa().start_state;
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    let mut state_map = FxHashMap::<[u32; 8], u32>::default();
+    state_map.insert(start_key, 0);
+    let mut worklist = VecDeque::from([(0u32, start_key)]);
+    let mut label_targets = LabelTargets::new();
+
+    while let Some((from, product_state)) = worklist.pop_front() {
+        let mut final_mask = 0u16;
+        label_targets.clear();
+        for group_id in 0..n {
+            let dfa_state = product_state[group_id];
+            if dfa_state == DEAD {
+                continue;
+            }
+            let dfa = groups[group_id].1.dfa();
+            let node = &dfa.states[dfa_state as usize];
+            if node.is_accepting {
+                final_mask |= 1u16 << group_id;
+            }
+            for (&label, &target) in &node.transitions {
+                label_targets.push((label, group_id as u32, target));
+            }
+        }
+        if final_mask != 0 {
+            let weight = subset_weights[final_mask as usize].clone();
+            if !weight.is_empty() {
+                dwa.set_final_weight(from, weight);
+            }
+        }
+
+        label_targets.sort_unstable_by_key(|&(label, group_id, _)| (label, group_id));
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            let mut support_mask = 0u16;
+            let mut next = [DEAD; 8];
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                support_mask |= 1u16 << group_id;
+                next[group_id as usize] = target;
+            }
+            let edge_weight = subset_weights[support_mask as usize].clone();
+            if !edge_weight.is_empty() {
+                let target = if let Some(&existing) = state_map.get(&next) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    state_map.insert(next, new_id);
+                    worklist.push_back((new_id, next));
+                    new_id
+                };
+                dwa.add_transition(from, label, target, edge_weight);
+            }
+            label_start = label_end;
+        }
+    }
+    Some(dwa)
+}
+
+fn determinize_bundle_groups_serial_small(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Option<DWA> {
+    use crate::automata::weighted_u32::dwa::DWA;
+
+    let n = groups.len();
+    if n == 0 || n > 8 {
+        return None;
+    }
+    let subset_count = 1usize << n;
+    let mut subset_weights = Vec::with_capacity(subset_count);
+    subset_weights.push(Weight::empty());
+    for mask in 1..subset_count {
+        let bit = mask.trailing_zeros() as usize;
+        let previous = mask & (mask - 1);
+        subset_weights.push(subset_weights[previous].union(groups[bit].0));
+    }
+
+    let start_key = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| {
+            (
+                checked_usize_to_u32(group_id, "bundle group id"),
+                dfa.dfa().start_state,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut dwa = DWA::new(0, 0);
+    let mut state_map = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+    let mut singleton_state_map = FxHashMap::<(u32, u32), u32>::default();
+    if let [singleton] = start_key.as_slice() {
+        singleton_state_map.insert(*singleton, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    let mut worklist = VecDeque::from([(0u32, start_key)]);
+    let mut label_targets = LabelTargets::new();
+
+    while let Some((from, product_state)) = worklist.pop_front() {
+        let mut final_mask = 0u16;
+        for &(group_id, dfa_state) in &product_state {
+            if groups[group_id as usize].1.dfa().states[dfa_state as usize].is_accepting {
+                final_mask |= 1u16 << group_id;
+            }
+        }
+        if final_mask != 0 {
+            let weight = subset_weights[final_mask as usize].clone();
+            if !weight.is_empty() {
+                dwa.set_final_weight(from, weight);
+            }
+        }
+
+        collect_label_targets(groups, &product_state, &mut label_targets);
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            let mut support_mask = 0u16;
+            let mut next = Vec::with_capacity(label_end - label_start);
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                support_mask |= 1u16 << group_id;
+                next.push((group_id, target));
+            }
+            let edge_weight = subset_weights[support_mask as usize].clone();
+            if !edge_weight.is_empty() {
+                let target = if let [singleton] = next.as_slice() {
+                    if let Some(&existing) = singleton_state_map.get(singleton) {
+                        existing
+                    } else {
+                        let new_id = dwa.add_state();
+                        singleton_state_map.insert(*singleton, new_id);
+                        worklist.push_back((new_id, next));
+                        new_id
+                    }
+                } else if let Some(&existing) = state_map.get(&next) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    state_map.insert(next.clone(), new_id);
+                    worklist.push_back((new_id, next));
+                    new_id
+                };
+                dwa.add_transition(from, label, target, edge_weight);
+            }
+            label_start = label_end;
+        }
+    }
+    Some(dwa)
+}
+
 fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
     use crate::automata::weighted_u32::dwa::DWA;
 
     let n = groups.len();
     if n == 0 {
         return DWA::new(0, 0);
+    }
+    if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BUNDLE_FIXED_KEY").is_some()
+        && let Some(dwa) = determinize_bundle_groups_serial_small_fixed(groups)
+    {
+        return dwa;
+    }
+    if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BUNDLE_SUBSET_WEIGHTS").is_some()
+        && let Some(dwa) = determinize_bundle_groups_serial_small(groups)
+    {
+        return dwa;
+    }
+    if std::env::var_os("GLRMASK_EXPERIMENT_PARALLEL_BUNDLE_DETERMINIZE").is_some()
+        && rayon::current_thread_index().is_none()
+        && let Some(dwa) = determinize_bundle_groups_parallel_small(groups)
+    {
+        return dwa;
     }
 
     let group_weights: Vec<Weight> = groups
@@ -1301,11 +1775,14 @@ mod tests {
 
         let optimized = determinize_bundle_groups(&groups);
         let (profiled, _) = determinize_bundle_groups_profiled(&groups);
+        let parallel = determinize_bundle_groups_parallel_small(&groups)
+            .expect("small bundle must support parallel determinization");
         let mut word = Vec::new();
         visit_words(&[1, 2, 3, 4, 5], 4, &mut word, &mut |word| {
             let expected = eval_bundle_product(&groups, word);
             assert_eq!(optimized.eval_word(word), expected, "optimized word={word:?}");
             assert_eq!(profiled.eval_word(word), expected, "profiled word={word:?}");
+            assert_eq!(parallel.eval_word(word), expected, "parallel word={word:?}");
         });
     }
 }
