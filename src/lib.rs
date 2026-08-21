@@ -71,12 +71,14 @@ pub(crate) mod ds;
 mod error;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
+pub mod programmatic_js;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
+pub use programmatic_js::ProgrammaticJsCompiler;
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 
