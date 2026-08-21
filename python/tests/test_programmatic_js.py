@@ -52,7 +52,8 @@ def test_programmatic_js_compiler_shared_parts_and_schema_semantics() -> None:
       "additionalProperties":false
     }'''
     compiled_schema = compiler.compile_schema(schema, vocab)
-    constraint = compiler.compose_tools({"lookup": compiled_schema}, vocab)
+    dispatcher = compiler.compile_dispatcher({"lookup": compiled_schema}, vocab)
+    constraint = compiler.compose_dispatcher(dispatcher, vocab)
 
     assert _accepts(constraint, 'tools.lookup({status: "open"});')
     assert _accepts(constraint, "tools.lookup({status: customer.status});")

@@ -137,9 +137,10 @@ impl ProgrammaticJsCompiler {
         )
     }
 
-    /// Compose already-compiled tool schemas into a named dispatcher and link
-    /// it into the reusable full-JavaScript parent.
-    pub fn compose_tools(
+    /// Compile a named tool dispatcher from already-compiled tool schemas.
+    /// This is separate from the outer JavaScript link so callers can time or
+    /// configure the two composition stages independently.
+    pub fn compile_dispatcher(
         &self,
         tools: &[(&str, &Constraint)],
         vocab: &Vocab,
@@ -161,21 +162,36 @@ impl ProgrammaticJsCompiler {
             .iter()
             .map(|(name, schema)| (name.as_str(), *schema))
             .collect::<Vec<_>>();
-        let dispatcher = Constraint::from_glrm_grammar_with_subgrammars(
-            &dispatcher_source,
-            &borrowed,
-            vocab,
-        )?;
+        Constraint::from_glrm_grammar_with_subgrammars(&dispatcher_source, &borrowed, vocab)
+    }
+
+    /// Link a compiled tool dispatcher into the reusable full-JavaScript parent.
+    pub fn compose_dispatcher(
+        &self,
+        dispatcher: &Constraint,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
         compose_constraints(
             &self.parent,
             &[CompiledSubgrammarInput {
                 placeholder_terminal: self.parent_placeholder_terminal,
-                constraint: &dispatcher,
+                constraint: dispatcher,
             }],
             vocab,
         )
         .map(|composition| composition.constraint)
         .map_err(GlrMaskError::Compilation)
+    }
+
+    /// Compose already-compiled tool schemas into a named dispatcher and link
+    /// it into the reusable full-JavaScript parent.
+    pub fn compose_tools(
+        &self,
+        tools: &[(&str, &Constraint)],
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        let dispatcher = self.compile_dispatcher(tools, vocab)?;
+        self.compose_dispatcher(&dispatcher, vocab)
     }
 
     /// Convenience path that compiles every schema and then composes the full

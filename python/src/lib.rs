@@ -656,6 +656,42 @@ impl PyProgrammaticJsCompiler {
         PyConstraint::from_constraint_result(self.inner.compile_schema(schema, &vocab.inner), vocab)
     }
 
+    /// Compile the named tool dispatcher without linking the outer JS parent.
+    fn compile_dispatcher(
+        &self,
+        py: Python<'_>,
+        tools: BTreeMap<String, Py<PyConstraint>>,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        let owned = tools
+            .into_iter()
+            .map(|(name, constraint)| {
+                let constraint = constraint.borrow(py);
+                (name, Arc::clone(&constraint.inner))
+            })
+            .collect::<Vec<_>>();
+        let borrowed = owned
+            .iter()
+            .map(|(name, constraint)| (name.as_str(), constraint.as_ref()))
+            .collect::<Vec<_>>();
+        PyConstraint::from_constraint_result(
+            self.inner.compile_dispatcher(&borrowed, &vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Link a compiled dispatcher into the reusable full-JavaScript parent.
+    fn compose_dispatcher(
+        &self,
+        dispatcher: &PyConstraint,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(
+            self.inner.compose_dispatcher(dispatcher.inner.as_ref(), &vocab.inner),
+            vocab,
+        )
+    }
+
     /// Compose named, already-compiled tool schemas into the full JS parent.
     fn compose_tools(
         &self,
