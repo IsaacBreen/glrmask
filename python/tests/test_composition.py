@@ -320,3 +320,40 @@ def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
 
 def test_legacy_manual_subgrammar_composition_api_is_not_exposed() -> None:
     assert not hasattr(glrmask.Constraint, "compose_subgrammars")
+
+
+def test_compose_compiled_subgrammars_links_cached_parent_and_child() -> None:
+    vocab = glrmask.Vocab.from_id_to_bytes(
+        {0: b"X", 1: b"ab!", 2: b"Xab!", 3: b"a", 4: b"b", 5: b"!"}
+    )
+    child = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start child;
+        nt child ::= "a" "b";
+        ''',
+        vocab,
+    )
+    parent = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start document;
+        t PAYLOAD ::= @token(100);
+        nt document ::= "X" PAYLOAD "!";
+        ''',
+        vocab,
+    )
+    composed = parent.compose_compiled_subgrammars({"PAYLOAD": child}, vocab)
+    monolithic = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start document;
+        nt document ::= "X" "a" "b" "!";
+        ''',
+        vocab,
+    )
+
+    actual = composed.start()
+    expected = monolithic.start()
+    assert actual.mask().tolist() == expected.mask().tolist()
+    actual.commit_token(2)
+    expected.commit_token(2)
+    assert actual.is_finished()
+    assert expected.is_finished()

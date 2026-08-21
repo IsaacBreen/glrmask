@@ -727,13 +727,48 @@ impl PyConstraint {
         )
     }
 
+    /// Compose already-compiled child constraints into this compiled parent.
+    ///
+    /// Parent/child compilation is intentionally outside this call so cached
+    /// composition users can measure just the final link step.
+    fn compose_compiled_subgrammars(
+        &self,
+        py: Python<'_>,
+        subgrammars: BTreeMap<String, Py<PyConstraint>>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let owned_children = subgrammars
+            .into_iter()
+            .map(|(name, child)| {
+                let child = child.borrow(py);
+                (name, Arc::clone(&child.inner))
+            })
+            .collect::<Vec<_>>();
+        let shared_children = owned_children
+            .iter()
+            .map(|(name, child)| (name.as_str(), Arc::clone(child)))
+            .collect::<Vec<_>>();
+        let mut parent = self.inner.as_ref().clone();
+        parent
+            .bind_vocab_exact(&vocab.inner)
+            .map_err(PyValueError::new_err)?;
+        Self::from_constraint_result(
+            parent.compose_compiled_subgrammars_shared(&shared_children, &vocab.inner),
+            vocab,
+        )
+    }
+
     fn save(&self) -> Vec<u8> {
         self.inner.save()
     }
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(glrmask::Constraint::load(data), vocab)
+        let mut constraint = constraint_result(glrmask::Constraint::load(data))?;
+        constraint
+            .bind_vocab_exact(&vocab.inner)
+            .map_err(PyValueError::new_err)?;
+        Self::from_constraint_result(Ok::<_, String>(constraint), vocab)
     }
 
     #[pyo3(signature = (max_rollback_tokens=0))]
