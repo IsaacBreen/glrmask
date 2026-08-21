@@ -73,7 +73,11 @@ fn remap_rule(rule: &Rule, terminal_offset: TerminalID, nonterminal_offset: Nont
 }
 
 fn child_root_nonterminal(table: &GLRTable) -> Result<NonterminalID, String> {
-    let Some(augmented) = table.rules.first() else {
+    child_root_nonterminal_from_rules(&table.rules)
+}
+
+fn child_root_nonterminal_from_rules(rules: &[Rule]) -> Result<NonterminalID, String> {
+    let Some(augmented) = rules.first() else {
         return Err("standalone child table contains no augmented-start rule".to_string());
     };
     match augmented.rhs.as_slice() {
@@ -423,6 +427,29 @@ pub fn compose_subgrammar_tables(
     parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
+    let child_rules = children
+        .iter()
+        .map(|child| child.table.rules.as_slice())
+        .collect::<Vec<_>>();
+    compose_subgrammar_tables_with_rules(
+        parent,
+        &parent.rules,
+        parent_scoped_ignore_terminal,
+        children,
+        &child_rules,
+    )
+}
+
+pub fn compose_subgrammar_tables_with_rules(
+    parent: &GLRTable,
+    parent_rules: &[Rule],
+    parent_scoped_ignore_terminal: Option<TerminalID>,
+    children: &[SubgrammarTableInput<'_>],
+    child_rules: &[&[Rule]],
+) -> Result<ComposedTable, String> {
+    if children.len() != child_rules.len() {
+        return Err("child table/rule override count mismatch".to_owned());
+    }
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let total_started_at = profile.then(Instant::now);
     let source_has_guarded_stack_shifts = table_has_guarded_stack_shifts(parent)
@@ -464,8 +491,8 @@ pub fn compose_subgrammar_tables(
     );
     let mut next_state = parent.num_states;
 
-    let parent_root = child_root_nonterminal(parent)?;
-    let mut rules = parent.rules.clone();
+    let parent_root = child_root_nonterminal_from_rules(parent_rules)?;
+    let mut rules = parent_rules.to_vec();
     if parent.embedded_start_nullable() {
         ensure_epsilon_rule(&mut rules, parent_root);
     }
@@ -506,6 +533,7 @@ pub fn compose_subgrammar_tables(
 
     for (child_index, child_input) in children.iter().enumerate() {
         let child = child_input.table;
+        let child_rules = child_rules[child_index];
         let terminal_offset = terminal_offsets[child_index + 1];
         // A child may itself already be a composed/scoped table. Its Skip
         // actions are copied below like ordinary LR actions, so their metadata
@@ -519,7 +547,7 @@ pub fn compose_subgrammar_tables(
                 .map(|terminal| terminal + terminal_offset),
         );
         let nonterminal_offset = nonterminal_offsets[child_index];
-        let child_root_local = child_root_nonterminal(child)?;
+        let child_root_local = child_root_nonterminal_from_rules(child_rules)?;
         let child_root = child_root_local + nonterminal_offset;
         boundary_nonterminals.insert(child_root);
         let child_start = 0u32;
@@ -863,7 +891,7 @@ pub fn compose_subgrammar_tables(
             }
         }
 
-        for rule in &child.rules {
+        for rule in child_rules {
             rules.push(remap_rule(rule, terminal_offset, nonterminal_offset));
         }
         if child_input.start_nullable {
@@ -1022,6 +1050,29 @@ pub fn compose_subgrammar_tables_explicit(
     parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
+    let child_rules = children
+        .iter()
+        .map(|child| child.table.rules.as_slice())
+        .collect::<Vec<_>>();
+    compose_subgrammar_tables_explicit_with_rules(
+        parent,
+        &parent.rules,
+        parent_scoped_ignore_terminal,
+        children,
+        &child_rules,
+    )
+}
+
+pub fn compose_subgrammar_tables_explicit_with_rules(
+    parent: &GLRTable,
+    parent_rules: &[Rule],
+    parent_scoped_ignore_terminal: Option<TerminalID>,
+    children: &[SubgrammarTableInput<'_>],
+    child_rules: &[&[Rule]],
+) -> Result<ComposedTable, String> {
+    if children.len() != child_rules.len() {
+        return Err("child table/rule override count mismatch".to_owned());
+    }
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
     terminal_offsets.push(0);
     let mut next_terminal = parent.num_terminals;
@@ -1058,8 +1109,8 @@ pub fn compose_subgrammar_tables_explicit(
     );
     let mut next_state = parent.num_states;
 
-    let parent_root = child_root_nonterminal(parent)?;
-    let mut rules = parent.rules.clone();
+    let parent_root = child_root_nonterminal_from_rules(parent_rules)?;
+    let mut rules = parent_rules.to_vec();
     if parent.embedded_start_nullable() {
         ensure_epsilon_rule(&mut rules, parent_root);
     }
@@ -1076,9 +1127,10 @@ pub fn compose_subgrammar_tables_explicit(
 
     for (child_index, child_input) in children.iter().enumerate() {
         let child = child_input.table;
+        let child_rules = child_rules[child_index];
         let terminal_offset = terminal_offsets[child_index + 1];
         let nonterminal_offset = nonterminal_offsets[child_index];
-        let child_root_local = child_root_nonterminal(child)?;
+        let child_root_local = child_root_nonterminal_from_rules(child_rules)?;
         let child_root = child_root_local + nonterminal_offset;
         boundary_nonterminals.insert(child_root);
         let child_start = 0u32;
@@ -1267,7 +1319,7 @@ pub fn compose_subgrammar_tables_explicit(
         }
         state_relations.push(child_relation);
 
-        for rule in &child.rules {
+        for rule in child_rules {
             rules.push(remap_rule(rule, terminal_offset, nonterminal_offset));
         }
         if child_input.start_nullable {

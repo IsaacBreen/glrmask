@@ -1861,6 +1861,9 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint.rebuild_runtime_caches();
+    constraint.tokenizer.prepare_artifact_wire_cache();
+    constraint.prepare_serialization_weight_pool_cache();
+    constraint.prepare_large_serialization_sections();
     constraint
 }
 
@@ -4460,6 +4463,7 @@ fn compile_prepared_with_profile_and_table_construction(
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
             packed_parser_dwa: None,
+            prepared_parser_dwa_wire: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
@@ -4516,11 +4520,11 @@ fn compile_prepared_with_profile_and_table_construction(
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
             word_group_buf_masks: Vec::new(),
-            pair_word_group_buf_masks: Vec::new(),
-            quad_word_group_buf_masks: Vec::new(),
-            super_word_group_buf_masks: Vec::new(),
-            mega_word_group_buf_masks: Vec::new(),
-            giga_word_group_buf_masks: Vec::new(),
+            pair_word_group_buf_masks: Default::default(),
+            quad_word_group_buf_masks: Default::default(),
+            super_word_group_buf_masks: Default::default(),
+            mega_word_group_buf_masks: Default::default(),
+            giga_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),
             word_group_prefix_buf_masks: Default::default(),
             word_group_sparse_prefix_entries: Vec::new(),
@@ -4558,8 +4562,12 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
             serialized_artifact_cache: None,
+            prepared_weight_pool_bytes: None,
+            prepared_serialization_sections: None,
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
         };
         if build_packed_parser_dwa {
             let packed_started_at = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
@@ -4576,9 +4584,17 @@ fn compile_prepared_with_profile_and_table_construction(
                     elapsed_ms(started_at),
                 );
             }
+            const PREPARE_LARGE_DWA_WIRE_MIN_BYTES: usize = 8 * 1024 * 1024;
+            let prepared_wire = packed
+                .fast_wire_len()
+                .filter(|&len| len >= PREPARE_LARGE_DWA_WIRE_MIN_BYTES)
+                .map(|_| std::sync::Arc::<[u8]>::from(packed.fast_wire_bytes().into_boxed_slice()));
             if std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some() {
                 let started_at = Instant::now();
-                let bytes = packed.fast_wire_bytes();
+                let bytes = prepared_wire
+                    .as_deref()
+                    .map(|bytes| bytes.to_vec())
+                    .unwrap_or_else(|| packed.fast_wire_bytes());
                 eprintln!(
                     "[glrmask/profile][packed_runtime_dwa_fast_wire] ms={:.3} bytes={}",
                     elapsed_ms(started_at),
@@ -4586,6 +4602,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 );
                 std::hint::black_box(bytes);
             }
+            constraint.prepared_parser_dwa_wire = prepared_wire;
             constraint.packed_parser_dwa = Some(std::sync::Arc::new(packed));
         }
         if let Some(caches) = prebuilt_token_mask_caches

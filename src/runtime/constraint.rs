@@ -416,11 +416,11 @@ pub(crate) struct TokenMaskCachePrebuild {
     mask_words: usize,
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
     word_group_buf_masks: Vec<Box<[u32]>>,
-    pair_word_group_buf_masks: Vec<Box<[u32]>>,
-    quad_word_group_buf_masks: Vec<Box<[u32]>>,
-    super_word_group_buf_masks: Vec<Box<[u32]>>,
-    mega_word_group_buf_masks: Vec<Box<[u32]>>,
-    giga_word_group_buf_masks: Vec<Box<[u32]>>,
+    pair_word_group_buf_masks: DenseBufMaskRows,
+    quad_word_group_buf_masks: DenseBufMaskRows,
+    super_word_group_buf_masks: DenseBufMaskRows,
+    mega_word_group_buf_masks: DenseBufMaskRows,
+    giga_word_group_buf_masks: DenseBufMaskRows,
     word_group_sparse_masks: Vec<InternalTokenBufMasks>,
     word_group_prefix_buf_masks: DenseBufMaskRows,
     word_group_sparse_prefix_entries: Vec<usize>,
@@ -592,7 +592,7 @@ impl TokenMaskCachePrebuild {
 
         let build_sliding = |word_group_len: usize| {
             if word_group_prefix_buf_masks.is_empty() || word_group_len == 0 {
-                return Vec::new();
+                return DenseBufMaskRows::default();
             }
             let n_word_groups = word_group_prefix_buf_masks.len() - 1;
             let n_windows = if n_word_groups < word_group_len {
@@ -600,21 +600,26 @@ impl TokenMaskCachePrebuild {
             } else {
                 n_word_groups - word_group_len + 1
             };
-            let mut result = Vec::with_capacity(n_windows);
+            if n_windows == 0 {
+                return DenseBufMaskRows::default();
+            }
+            let mut flat = vec![0u32; n_windows.saturating_mul(mask_words)];
             for word_group_start in 0..n_windows {
                 let before = &word_group_prefix_buf_masks[word_group_start];
                 let through = &word_group_prefix_buf_masks[word_group_start + word_group_len];
                 // Internal-token groups partition original model-token ids, so
                 // their output bits are disjoint. The OR-prefix therefore has
                 // an exact inverse over a window: P[b] & !P[a].
-                let dense = through
-                    .iter()
-                    .zip(before.iter())
-                    .map(|(&end, &start)| end & !start)
-                    .collect::<Vec<_>>();
-                result.push(dense.into_boxed_slice());
+                let row = &mut flat
+                    [word_group_start * mask_words..(word_group_start + 1) * mask_words];
+                for ((slot, &end), &start) in
+                    row.iter_mut().zip(through.iter()).zip(before.iter())
+                {
+                    *slot = end & !start;
+                }
             }
-            result
+            DenseBufMaskRows::from_flat(flat.into_boxed_slice(), n_windows, mask_words)
+                .expect("sliding dense-mask dimensions should match construction")
         };
         let pair_word_group_buf_masks = build_sliding(2);
         let quad_word_group_buf_masks = build_sliding(4);
@@ -849,7 +854,7 @@ impl Constraint {
         if let Some(exprs) = self.deferred_terminal_exprs.get() {
             return Some(exprs.as_ref());
         }
-        let blob = self.deferred_terminal_exprs_blob.as_deref()?;
+        let blob = self.deferred_terminal_exprs_blob.as_ref()?.as_slice();
         let decoded = bincode::deserialize::<Vec<Expr>>(blob).ok()?;
         if decoded.len() != self.tokenizer.num_terminals() as usize {
             return None;
@@ -862,6 +867,37 @@ impl Constraint {
     #[inline]
     pub(crate) fn retained_terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {
         self.retained_terminal_exprs()?.get(terminal as usize)
+    }
+
+    /// Return the complete source grammar rules for composition. Ordinary
+    /// runtime execution never consults these rules, so large current-format
+    /// artifacts may retain their canonical bincode payload and decode it only
+    /// when a later composition actually needs grammar structure.
+    pub(crate) fn retained_table_rules(&self) -> Result<&[crate::grammar::flat::Rule], String> {
+        if self.deferred_table_rules_blob.is_none() {
+            return Ok(&self.table.rules);
+        }
+        if let Some(rules) = self.deferred_table_rules.get() {
+            return Ok(rules.as_ref());
+        }
+        let blob = self
+            .deferred_table_rules_blob
+            .as_ref()
+            .ok_or_else(|| "missing deferred GLR rules payload".to_owned())?;
+        let decoded = bincode::deserialize::<Vec<crate::grammar::flat::Rule>>(blob.as_slice())
+            .map_err(|err| err.to_string())?;
+        if decoded.len() != self.table.num_rules as usize {
+            return Err("deferred GLR rule count does not match table num_rules".to_owned());
+        }
+        if decoded.first() != self.table.rules.first() {
+            return Err("deferred GLR augmented-start rule mismatch".to_owned());
+        }
+        let decoded = Arc::<[crate::grammar::flat::Rule]>::from(decoded.into_boxed_slice());
+        let _ = self.deferred_table_rules.set(decoded);
+        self.deferred_table_rules
+            .get()
+            .map(Arc::as_ref)
+            .ok_or_else(|| "failed to install deferred GLR rules".to_owned())
     }
 
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
@@ -1197,6 +1233,18 @@ impl Constraint {
         })
     }
 
+    /// Return an already-materialized dynamic-mask vocabulary without causing
+    /// first-use runtime work.  Callers that only want to consult an optional
+    /// memoization cache must use this instead of `dynamic_mask_vocab_for_runtime`.
+    #[inline]
+    fn initialized_dynamic_mask_vocab_for_runtime(&self) -> Option<&DynamicMaskVocab> {
+        if self.dynamic_mask_vocab.is_initialized() {
+            Some(&self.dynamic_mask_vocab)
+        } else {
+            self.lazy_dynamic_mask_vocab.get()
+        }
+    }
+
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -1222,22 +1270,24 @@ impl Constraint {
         let sort_ms = sort_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let aliases_started_at = profile.then(std::time::Instant::now);
-        let max_token_id = self.max_original_token_id().unwrap_or(0) as usize;
-        let mut token_aliases = Vec::with_capacity(max_token_id.saturating_add(1));
-        token_aliases.resize_with(max_token_id.saturating_add(1), || None);
+        // Match the compiler's OrderedVocab coordinate system exactly: trie
+        // token ids are dense byte-order ids, and each id maps back to one or
+        // more original model token ids. Using an original token id as the trie
+        // id is incorrect when lexical byte order differs from token-id order.
+        let mut token_aliases = Vec::with_capacity(sorted_tokens.len());
         let mut trie_entries = Vec::with_capacity(sorted_tokens.len());
 
         let mut start = 0usize;
         while start < sorted_tokens.len() {
             let bytes = sorted_tokens[start].1;
-            let canonical = sorted_tokens[start].0;
             let mut end = start + 1;
             while end < sorted_tokens.len() && sorted_tokens[end].1 == bytes {
                 end += 1;
             }
 
+            let ordered_id = token_aliases.len() as u32;
             let aliases = if end == start + 1 {
-                PackedDynamicMaskTokenAliases::Single(canonical)
+                PackedDynamicMaskTokenAliases::Single(sorted_tokens[start].0)
             } else {
                 PackedDynamicMaskTokenAliases::Many(
                     sorted_tokens[start..end]
@@ -1247,8 +1297,8 @@ impl Constraint {
                         .into_boxed_slice(),
                 )
             };
-            token_aliases[canonical as usize] = Some(aliases);
-            trie_entries.push((canonical as usize, bytes));
+            token_aliases.push(Some(aliases));
+            trie_entries.push((ordered_id as usize, bytes));
             start = end;
         }
 
@@ -2938,7 +2988,7 @@ impl Constraint {
         let build_sliding = |len: usize| {
             let started = profile.then(std::time::Instant::now);
             let result = if skip_load_dense_group_caches || skip_load_sliding_dense_caches {
-                Vec::new()
+                DenseBufMaskRows::default()
             } else {
                 self.compute_sliding_word_group_dense_masks(len)
             };
@@ -3750,12 +3800,14 @@ impl Constraint {
         // finalization rather than charging its one-time allocations to the
         // first decoding commit.
         let tokenizer_closures_started_at = profile.then(std::time::Instant::now);
-        let tokenizer_closures = self.tokenizer.all_singleton_epsilon_closures();
-        if tokenizer_closures
-            .get(self.tokenizer.initial_state() as usize)
-            .is_some_and(|closure| closure.len() > 64)
-        {
-            let _ = self.tokenizer.initial_byte_frontiers();
+        if !self.tokenizer.has_packed_runtime_metadata() {
+            let tokenizer_closures = self.tokenizer.all_singleton_epsilon_closures();
+            if tokenizer_closures
+                .get(self.tokenizer.initial_state() as usize)
+                .is_some_and(|closure| closure.len() > 64)
+            {
+                let _ = self.tokenizer.initial_byte_frontiers();
+            }
         }
         let tokenizer_closures_ms = tokenizer_closures_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -3977,9 +4029,9 @@ impl Constraint {
         }
     }
 
-    fn compute_sliding_word_group_dense_masks(&self, word_group_len: usize) -> Vec<Box<[u32]>> {
+    fn compute_sliding_word_group_dense_masks(&self, word_group_len: usize) -> DenseBufMaskRows {
         if self.word_group_prefix_buf_masks.is_empty() || word_group_len == 0 {
-            return Vec::new();
+            return DenseBufMaskRows::default();
         }
         let n_word_groups = self.word_group_prefix_buf_masks.len() - 1;
         // Runtime only consults a dense sliding window when `remaining >=
@@ -3993,38 +4045,154 @@ impl Constraint {
             n_word_groups - word_group_len + 1
         };
         if n_windows == 0 {
-            return Vec::new();
+            return DenseBufMaskRows::default();
         }
-        let build_group = |word_group_start: usize| {
+        let row_len = self.word_group_prefix_buf_masks.row_len();
+        if row_len == 0 {
+            return DenseBufMaskRows::from_flat(Vec::new().into_boxed_slice(), n_windows, 0)
+                .expect("zero-width sliding dense-mask dimensions should match");
+        }
+        let total_values = n_windows
+            .checked_mul(row_len)
+            .expect("sliding dense-mask dimensions fit usize");
+        let mut flat = Vec::<std::mem::MaybeUninit<u32>>::with_capacity(total_values);
+        // SAFETY: `MaybeUninit<u32>` may be uninitialized. Every slot is
+        // written exactly once below before the allocation is reinterpreted.
+        unsafe {
+            flat.set_len(total_values);
+        }
+        let build_group = |word_group_start: usize, dense: &mut [std::mem::MaybeUninit<u32>]| {
             let before = &self.word_group_prefix_buf_masks[word_group_start];
             let through = &self.word_group_prefix_buf_masks[word_group_start + word_group_len];
-            let dense = through
-                .iter()
-                .zip(before.iter())
-                .map(|(&end, &start)| end & !start)
-                .collect::<Vec<_>>();
-            dense.into_boxed_slice()
+            debug_assert_eq!(dense.len(), row_len);
+            for ((slot, &end), &start) in dense.iter_mut().zip(through.iter()).zip(before.iter()) {
+                slot.write(end & !start);
+            }
         };
         if rayon::current_num_threads() == 1 {
-            (0..n_windows).map(build_group).collect()
+            for (word_group_start, dense) in flat.chunks_mut(row_len).enumerate() {
+                build_group(word_group_start, dense);
+            }
         } else {
-            (0..n_windows).into_par_iter().map(build_group).collect()
+            flat.par_chunks_mut(row_len)
+                .enumerate()
+                .for_each(|(word_group_start, dense)| build_group(word_group_start, dense));
         }
+        let flat = flat.into_boxed_slice();
+        // SAFETY: all `MaybeUninit<u32>` elements were initialized above and
+        // `MaybeUninit<u32>` has the same layout/alignment as `u32`.
+        let flat = unsafe { Box::from_raw(Box::into_raw(flat) as *mut [u32]) };
+        DenseBufMaskRows::from_flat(flat, n_windows, row_len)
+            .expect("sliding dense-mask dimensions should match construction")
+    }
+
+    fn compute_all_sliding_word_group_dense_masks(
+        &self,
+    ) -> (
+        DenseBufMaskRows,
+        DenseBufMaskRows,
+        DenseBufMaskRows,
+        DenseBufMaskRows,
+        DenseBufMaskRows,
+    ) {
+        if self.word_group_prefix_buf_masks.is_empty() {
+            return Default::default();
+        }
+        let n_word_groups = self.word_group_prefix_buf_masks.len() - 1;
+        let row_len = self.word_group_prefix_buf_masks.row_len();
+        let lengths = [2usize, 4, 8, 16, 32];
+        let windows = lengths.map(|len| {
+            if n_word_groups >= len {
+                n_word_groups - len + 1
+            } else {
+                0
+            }
+        });
+        if row_len == 0 {
+            let empty = |rows| {
+                DenseBufMaskRows::from_flat(Vec::new().into_boxed_slice(), rows, 0)
+                    .expect("zero-width sliding dense-mask dimensions should match")
+            };
+            return (
+                empty(windows[0]),
+                empty(windows[1]),
+                empty(windows[2]),
+                empty(windows[3]),
+                empty(windows[4]),
+            );
+        }
+
+        let allocate = |rows: usize| {
+            let total = rows
+                .checked_mul(row_len)
+                .expect("sliding dense-mask dimensions fit usize");
+            let mut values = Vec::<std::mem::MaybeUninit<u32>>::with_capacity(total);
+            // SAFETY: MaybeUninit elements may be uninitialized; every slot is
+            // written exactly once below before reinterpretation.
+            unsafe {
+                values.set_len(total);
+            }
+            values
+        };
+        let mut pair = allocate(windows[0]);
+        let mut quad = allocate(windows[1]);
+        let mut super_group = allocate(windows[2]);
+        let mut mega = allocate(windows[3]);
+        let mut giga = allocate(windows[4]);
+        let ptrs = [
+            pair.as_mut_ptr() as usize,
+            quad.as_mut_ptr() as usize,
+            super_group.as_mut_ptr() as usize,
+            mega.as_mut_ptr() as usize,
+            giga.as_mut_ptr() as usize,
+        ];
+        let build_start = |start: usize| {
+            let before = &self.word_group_prefix_buf_masks[start];
+            for word in 0..row_len {
+                let base = before[word];
+                for tier in 0..lengths.len() {
+                    if start >= windows[tier] {
+                        continue;
+                    }
+                    let end = self.word_group_prefix_buf_masks[start + lengths[tier]][word];
+                    // SAFETY: each `start` owns one disjoint row in every tier;
+                    // `word` selects one disjoint element within that row.
+                    unsafe {
+                        ((ptrs[tier] as *mut std::mem::MaybeUninit<u32>)
+                            .add(start * row_len + word))
+                        .write(std::mem::MaybeUninit::new(end & !base));
+                    }
+                }
+            }
+        };
+        if rayon::current_num_threads() == 1 || n_word_groups < 8 {
+            for start in 0..n_word_groups {
+                build_start(start);
+            }
+        } else {
+            (0..n_word_groups).into_par_iter().for_each(build_start);
+        }
+
+        let finish = |values: Vec<std::mem::MaybeUninit<u32>>, rows: usize| {
+            let values = values.into_boxed_slice();
+            // SAFETY: all slots corresponding to the `rows` output were
+            // initialized above and MaybeUninit<u32> has u32's layout.
+            let values = unsafe { Box::from_raw(Box::into_raw(values) as *mut [u32]) };
+            DenseBufMaskRows::from_flat(values, rows, row_len)
+                .expect("fused sliding dense-mask dimensions should match")
+        };
+        (
+            finish(pair, windows[0]),
+            finish(quad, windows[1]),
+            finish(super_group, windows[2]),
+            finish(mega, windows[3]),
+            finish(giga, windows[4]),
+        )
     }
 
     pub(crate) fn rebuild_sliding_word_group_dense_masks(&mut self) {
-        let build = |len| self.compute_sliding_word_group_dense_masks(len);
-        let ((pair, quad), (super_group, (mega, giga))) = if rayon::current_num_threads() == 1 {
-            (
-                (build(2), build(4)),
-                (build(8), (build(16), build(32))),
-            )
-        } else {
-            rayon::join(
-                || rayon::join(|| build(2), || build(4)),
-                || rayon::join(|| build(8), || rayon::join(|| build(16), || build(32))),
-            )
-        };
+        let (pair, quad, super_group, mega, giga) =
+            self.compute_all_sliding_word_group_dense_masks();
         self.pair_word_group_buf_masks = pair;
         self.quad_word_group_buf_masks = quad;
         self.super_word_group_buf_masks = super_group;
@@ -4323,6 +4491,7 @@ impl Constraint {
 
         Some(any)
     }
+
 
     #[inline(always)]
     pub(crate) fn has_weight_token_set_buf_if_contained(
@@ -4828,24 +4997,7 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_heavy_and_sliding_token_mask_caches(&mut self) {
-        let build_sliding = || {
-            let build = |len| self.compute_sliding_word_group_dense_masks(len);
-            if rayon::current_num_threads() == 1 {
-                (
-                    build(2),
-                    build(4),
-                    build(8),
-                    build(16),
-                    build(32),
-                )
-            } else {
-                let ((pair, quad), (super_group, (mega, giga))) = rayon::join(
-                    || rayon::join(|| build(2), || build(4)),
-                    || rayon::join(|| build(8), || rayon::join(|| build(16), || build(32))),
-                );
-                (pair, quad, super_group, mega, giga)
-            }
-        };
+        let build_sliding = || self.compute_all_sliding_word_group_dense_masks();
         let (heavy, (pair, quad, super_group, mega, giga)) = if rayon::current_num_threads() == 1 {
             (self.compute_heavy_token_dense_masks(), build_sliding())
         } else {
@@ -5580,7 +5732,7 @@ impl Constraint {
     /// Create a state retaining up to `max_rollback_tokens` token snapshots.
     pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
-        if self.tokenizer_has_epsilon_transitions {
+        if self.tokenizer_has_epsilon_transitions && !self.tokenizer.has_packed_runtime_metadata() {
             drop(self.tokenizer.all_singleton_epsilon_closures());
         }
         let state = self.initial_state_map();
@@ -5627,9 +5779,10 @@ impl Constraint {
         &self,
         gss: &ParserGSS,
     ) -> Option<usize> {
-        // The cache below can only contain indices into this table. Avoid
-        // materializing a deferred dynamic mask vocabulary just to query an
-        // index cache that cannot possibly contain a valid entry.
+        // The cache below can only contain indices into this table. Ordinary
+        // parser runtimes may have no direct-regular wide-frontier summaries;
+        // avoid materializing deferred dynamic-vocab state merely to query a
+        // cache that cannot contain a valid entry.
         if self.direct_regular_wide_frontier_acceptance.is_empty() {
             return None;
         }
@@ -5644,8 +5797,8 @@ impl Constraint {
             return Some(index);
         }
         if let Some(index) = self
-            .dynamic_mask_vocab_for_runtime()
-            .cached_direct_regular_wide_frontier_index(lower_id)
+            .initialized_dynamic_mask_vocab_for_runtime()
+            .and_then(|vocab| vocab.cached_direct_regular_wide_frontier_index(lower_id))
         {
             return Some(index);
         }
@@ -5661,8 +5814,13 @@ impl Constraint {
                 summary.state_count == top_values.len()
                     && summary.frontier_states.as_ref() == top_values.as_slice()
             })?;
-        self.dynamic_mask_vocab_for_runtime()
-            .cache_direct_regular_wide_frontier_index(lower_id, index);
+        // This cache is only an optimization.  Do not materialize the entire
+        // dynamic-mask vocabulary merely to memoize a wide-frontier lookup;
+        // doing so can otherwise put tens of milliseconds onto the first
+        // commit of an ordinary statically compiled constraint.
+        if let Some(vocab) = self.initialized_dynamic_mask_vocab_for_runtime() {
+            vocab.cache_direct_regular_wide_frontier_index(lower_id, index);
+        }
         Some(index)
     }
 
@@ -5781,8 +5939,8 @@ impl Constraint {
         let cache_key = gss.single_interface_lower_id();
         if let Some(key) = cache_key
             && let Some(cached) = self
-                .dynamic_mask_vocab_for_runtime()
-                .cached_direct_regular_frontier(key)
+                .initialized_dynamic_mask_vocab_for_runtime()
+                .and_then(|vocab| vocab.cached_direct_regular_frontier(key))
         {
             return Some(cached);
         }
@@ -5835,8 +5993,10 @@ impl Constraint {
             advance_by_terminal: Arc::from(advance_by_terminal),
         };
         Some(cache_key.map_or(entry.clone(), |key| {
-            self.dynamic_mask_vocab_for_runtime()
-                .cache_direct_regular_frontier(key, entry)
+            self.initialized_dynamic_mask_vocab_for_runtime()
+                .map_or(entry.clone(), |vocab| {
+                    vocab.cache_direct_regular_frontier(key, entry)
+                })
         }))
     }
 
@@ -7376,6 +7536,55 @@ mod dense_internal_token_mask_tests {
         assert!(
             loaded.lazy_dynamic_mask_vocab.get().is_none(),
             "empty wide-frontier lookup must not trigger deferred dynamic-vocab materialization",
+        );
+    }
+
+    #[test]
+    fn nonempty_wide_frontier_lookup_does_not_materialize_vocab_for_cache_only() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(loaded.lazy_dynamic_mask_vocab.get().is_none());
+
+        let initial = loaded.initial_state_map();
+        let gss = initial.values().next().unwrap().clone();
+        let mut frontier_states = gss.peek_values();
+        frontier_states.sort_unstable();
+        loaded.direct_regular_wide_frontier_acceptance = vec![
+            crate::runtime::artifact::DirectRegularWideFrontierAcceptance {
+                action_origins: Vec::new(),
+                state_count: frontier_states.len(),
+                actionable_terminals: crate::ds::bitset::BitSet::new(
+                    loaded.table.num_terminals as usize,
+                ),
+                frontier_states: Arc::<[u32]>::from(frontier_states.as_slice()),
+                // Keep this deliberately unrelated to `gss` so the cheap
+                // lower-id lookup misses and the fallback frontier-state scan
+                // is exercised.
+                empty_acc_frontier: ParserGSS::empty(),
+                acceptance_parts: Arc::from([]),
+                dense_by_tsid: Arc::new(crate::runtime::artifact::DenseAcceptanceRows::default()),
+                advance_by_terminal: Arc::from([]),
+            },
+        ];
+
+        assert!(loaded.direct_regular_wide_frontier_for_gss(&gss).is_some());
+        assert!(
+            loaded.lazy_dynamic_mask_vocab.get().is_none(),
+            "wide-frontier memoization must not materialize the dynamic vocab",
         );
     }
 

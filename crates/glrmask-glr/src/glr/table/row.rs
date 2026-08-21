@@ -27,6 +27,19 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> Default for SparseRow<K, V> {
 }
 
 impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
+    /// Construct storage sized for a known decoded row length while preserving
+    /// the runtime representation policy: <=8 entries inline, larger rows in
+    /// the O(1)-lookup FxHashMap representation.
+    pub fn with_expected_len(expected_len: usize) -> Self {
+        if expected_len <= INLINE_ROW_CAPACITY {
+            Self::Inline(SmallVec::new())
+        } else {
+            let mut entries = FxHashMap::default();
+            entries.reserve(expected_len);
+            Self::Large(entries)
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         match self {
@@ -379,6 +392,15 @@ pub enum ActionRow {
         exceptions: SparseRow<TerminalID, Option<Action>>,
         num_terminals: TerminalID,
     },
+    /// Runtime-oriented decoded representation for dense-enough action rows.
+    /// `slots[t]` is the index into `entries`, or u8::MAX when terminal `t`
+    /// is absent. EOF lives outside the ordinary terminal domain and therefore
+    /// has its own slot.
+    Indexed {
+        slots: Box<[u8]>,
+        eof_slot: u8,
+        entries: Vec<(TerminalID, Action)>,
+    },
 }
 
 impl Default for ActionRow {
@@ -393,10 +415,54 @@ impl ActionRow {
         matches!(self, Self::Default { .. })
     }
 
+    pub fn from_indexed_entries(entries: Vec<(TerminalID, Action)>) -> Self {
+        const ABSENT: u8 = u8::MAX;
+        if entries.len() <= INLINE_ROW_CAPACITY || entries.len() >= ABSENT as usize {
+            return Self::Sparse(entries.into_iter().collect());
+        }
+        let eof = crate::glr::analysis::EOF;
+        let Some(max_regular) = entries
+            .iter()
+            .filter_map(|(terminal, _)| (*terminal != eof).then_some(*terminal as usize))
+            .max()
+        else {
+            return Self::Sparse(entries.into_iter().collect());
+        };
+        // Avoid accidentally allocating a giant direct table for a sparse or
+        // non-standard terminal-id domain. Current parser tables use a compact
+        // 0..num_terminals domain plus EOF.
+        if max_regular > 16_383 {
+            return Self::Sparse(entries.into_iter().collect());
+        }
+        let mut slots = vec![ABSENT; max_regular + 1];
+        let mut eof_slot = ABSENT;
+        for (index, (terminal, _)) in entries.iter().enumerate() {
+            let slot = index as u8;
+            if *terminal == eof {
+                if eof_slot != ABSENT {
+                    return Self::Sparse(entries.into_iter().collect());
+                }
+                eof_slot = slot;
+            } else {
+                let cell = &mut slots[*terminal as usize];
+                if *cell != ABSENT {
+                    return Self::Sparse(entries.into_iter().collect());
+                }
+                *cell = slot;
+            }
+        }
+        Self::Indexed {
+            slots: slots.into_boxed_slice(),
+            eof_slot,
+            entries,
+        }
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         match self {
             Self::Sparse(row) => row.len(),
+            Self::Indexed { entries, .. } => entries.len(),
             Self::Default {
                 exceptions,
                 num_terminals,
@@ -417,6 +483,19 @@ impl ActionRow {
     pub fn get(&self, key: &TerminalID) -> Option<&Action> {
         match self {
             Self::Sparse(row) => row.get(key),
+            Self::Indexed {
+                slots,
+                eof_slot,
+                entries,
+            } => {
+                const ABSENT: u8 = u8::MAX;
+                let slot = if *key == crate::glr::analysis::EOF {
+                    *eof_slot
+                } else {
+                    slots.get(*key as usize).copied().unwrap_or(ABSENT)
+                };
+                (slot != ABSENT).then(|| &entries[slot as usize].1)
+            }
             Self::Default {
                 default,
                 exceptions,
@@ -435,16 +514,17 @@ impl ActionRow {
     }
 
     pub fn get_mut(&mut self, key: &TerminalID) -> Option<&mut Action> {
-        if matches!(self, Self::Default { .. }) {
-            self.expand_default_to_sparse();
-        }
+        self.expand_runtime_rows_to_sparse();
         match self {
             Self::Sparse(row) => row.get_mut(key),
-            Self::Default { .. } => unreachable!("default rows should have been expanded"),
+            Self::Default { .. } | Self::Indexed { .. } => unreachable!("runtime rows should have been expanded"),
         }
     }
 
     pub fn insert(&mut self, key: TerminalID, value: Action) -> Option<Action> {
+        if matches!(self, Self::Indexed { .. }) {
+            self.expand_runtime_rows_to_sparse();
+        }
         match self {
             Self::Sparse(row) => row.insert(key, value),
             Self::Default {
@@ -470,10 +550,14 @@ impl ActionRow {
                 }
                 previous
             }
+            Self::Indexed { .. } => unreachable!("indexed row should have been expanded"),
         }
     }
 
     pub fn remove(&mut self, key: &TerminalID) -> Option<Action> {
+        if matches!(self, Self::Indexed { .. }) {
+            self.expand_runtime_rows_to_sparse();
+        }
         match self {
             Self::Sparse(row) => row.remove(key),
             Self::Default {
@@ -498,6 +582,7 @@ impl ActionRow {
                     }
                 }
             }
+            Self::Indexed { .. } => unreachable!("indexed row should have been expanded"),
         }
     }
 
@@ -510,6 +595,7 @@ impl ActionRow {
     pub fn iter(&self) -> ActionRowIter<'_> {
         match self {
             Self::Sparse(row) => ActionRowIter::Sparse(row.iter()),
+            Self::Indexed { entries, .. } => ActionRowIter::Indexed(entries.iter()),
             Self::Default {
                 default,
                 exceptions,
@@ -534,14 +620,17 @@ impl ActionRow {
     }
 
     pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Action)) {
-        self.expand_default_to_sparse();
+        self.expand_runtime_rows_to_sparse();
         match self {
             Self::Sparse(row) => row.for_each_value_mut(|action| f(action)),
-            Self::Default { .. } => unreachable!("default row should have been expanded"),
+            Self::Default { .. } | Self::Indexed { .. } => unreachable!("runtime row should have been expanded"),
         }
     }
 
     pub fn compress_default(&mut self, num_terminals: TerminalID) {
+        if matches!(self, Self::Indexed { .. }) {
+            self.expand_runtime_rows_to_sparse();
+        }
         let Self::Sparse(row) = self else {
             return;
         };
@@ -625,6 +714,25 @@ impl ActionRow {
         }
         *self = Self::Sparse(row);
     }
+
+    fn expand_runtime_rows_to_sparse(&mut self) {
+        if matches!(self, Self::Default { .. }) {
+            self.expand_default_to_sparse();
+            return;
+        }
+        let Self::Indexed { .. } = self else {
+            return;
+        };
+        let old = std::mem::replace(self, Self::default());
+        let Self::Indexed { entries, .. } = old else {
+            unreachable!();
+        };
+        let mut row = SparseRow::with_expected_len(entries.len());
+        for (terminal, action) in entries {
+            row.insert(terminal, action);
+        }
+        *self = Self::Sparse(row);
+    }
 }
 
 impl PartialEq for ActionRow {
@@ -664,6 +772,7 @@ impl FromIterator<(TerminalID, Action)> for ActionRow {
 
 pub enum ActionRowIter<'a> {
     Sparse(SparseRowIter<'a, TerminalID, Action>),
+    Indexed(std::slice::Iter<'a, (TerminalID, Action)>),
     Default(DefaultActionRowIter<'a>),
 }
 
@@ -673,6 +782,7 @@ impl<'a> Iterator for ActionRowIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Sparse(iter) => iter.next().map(|(terminal, action)| (*terminal, action)),
+            Self::Indexed(iter) => iter.next().map(|(terminal, action)| (*terminal, action)),
             Self::Default(iter) => iter.next(),
         }
     }
@@ -914,5 +1024,71 @@ mod tests {
 
         assert_eq!(before, after);
         assert!(table.action[0].is_default_compressed());
+    }
+
+    #[test]
+    fn unconditional_advance_default_rows_match_expanded_sparse_rows() {
+        let accept_only_split = Action::Split {
+            shift: None,
+            reduces: Vec::new(),
+            accept: true,
+        };
+        let default_rows = vec![
+            ActionRow::Default {
+                default: shift(10),
+                exceptions: SparseRow::from_iter([
+                    (1, None),
+                    (3, Some(Action::Accept)),
+                    (4, Some(Action::Skip)),
+                ]),
+                num_terminals: 6,
+            },
+            ActionRow::Default {
+                default: Action::Accept,
+                exceptions: SparseRow::from_iter([
+                    (2, Some(shift(20))),
+                    (5, Some(Action::Skip)),
+                ]),
+                num_terminals: 6,
+            },
+            ActionRow::Default {
+                default: accept_only_split.clone(),
+                exceptions: SparseRow::from_iter([
+                    (0, Some(Action::Skip)),
+                    (4, Some(shift(30))),
+                ]),
+                num_terminals: 6,
+            },
+        ];
+        let sparse_rows = default_rows
+            .iter()
+            .map(|row| ActionRow::from_iter(row.iter().map(|(terminal, action)| {
+                (terminal, action.clone())
+            })))
+            .collect::<Vec<_>>();
+
+        let make_table = |action: Vec<ActionRow>| GLRTable {
+            goto: vec![SparseRow::default(); action.len()],
+            num_states: action.len() as u32,
+            num_terminals: 6,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: Default::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+            action,
+        };
+        let mut compressed = make_table(default_rows);
+        let mut expanded = make_table(sparse_rows);
+        compressed.rebuild_unconditional_advance_rows();
+        expanded.rebuild_unconditional_advance_rows();
+        assert_eq!(compressed.unconditional_advance, expanded.unconditional_advance);
     }
 }

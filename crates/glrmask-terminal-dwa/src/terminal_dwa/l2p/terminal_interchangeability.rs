@@ -31,7 +31,7 @@ use super::equivalence_analysis::state_equivalence::nfa::{
 };
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
-use crate::automata::weighted::dwa::{DWAState, DWA};
+        use crate::automata::weighted::dwa::{DWAState, DWA};
 use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::ds::bitset::BitSet;
@@ -12089,6 +12089,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::automata::weighted::dwa::DwaTransitionMap;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::{
         build_regex_monolithic as build_regex, build_regex_partitioned_with_adaptive,
@@ -12325,15 +12326,15 @@ mod tests {
         let core = DWA::from_parts(
             vec![
                 DWAState {
-                    transitions: BTreeMap::from([(0, (1, start_weight))]),
+                    transitions: DwaTransitionMap::Owned(BTreeMap::from([(0, (1, start_weight))])),
                     final_weight: None,
                 },
                 DWAState {
-                    transitions: BTreeMap::from([(2, (2, suffix_weight))]),
+                    transitions: DwaTransitionMap::Owned(BTreeMap::from([(2, (2, suffix_weight))])),
                     final_weight: None,
                 },
                 DWAState {
-                    transitions: BTreeMap::new(),
+                    transitions: DwaTransitionMap::Owned(BTreeMap::new()),
                     final_weight: Some(Weight::all()),
                 },
             ],
@@ -12365,15 +12366,15 @@ mod tests {
             range_set_blaze::RangeSetBlaze::from_iter([7..=7]),
         );
         let source = DWAState {
-            transitions: BTreeMap::from([(10, (1, reachable.clone()))]),
+            transitions: DwaTransitionMap::Owned(BTreeMap::from([(10, (1, reachable.clone()))])),
             final_weight: None,
         };
         let middle = DWAState {
-            transitions: BTreeMap::from([(11, (2, Weight::all()))]),
+            transitions: DwaTransitionMap::Owned(BTreeMap::from([(11, (2, Weight::all()))])),
             final_weight: Some(Weight::all()),
         };
         let final_state = DWAState {
-            transitions: BTreeMap::new(),
+            transitions: DwaTransitionMap::Owned(BTreeMap::new()),
             final_weight: Some(Weight::all()),
         };
         let before = DWA::from_parts(vec![source, middle, final_state], 0);
@@ -12394,11 +12395,11 @@ mod tests {
         let before = DWA::from_parts(
             vec![
                 DWAState {
-                    transitions: BTreeMap::from([(10, (1, reachable.clone()))]),
+                    transitions: DwaTransitionMap::Owned(BTreeMap::from([(10, (1, reachable.clone()))])),
                     final_weight: None,
                 },
                 DWAState {
-                    transitions: BTreeMap::from([(11, (1, Weight::all()))]),
+                    transitions: DwaTransitionMap::Owned(BTreeMap::from([(11, (1, Weight::all()))])),
                     final_weight: Some(Weight::all()),
                 },
             ],

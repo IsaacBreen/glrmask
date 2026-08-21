@@ -223,6 +223,11 @@ const DENSE_BUF_MASK_ROWS_FLAT_MIN_BYTES: usize = 512 * 1024;
 enum DenseBufMaskRowsStorage {
     Rows(Vec<Box<[u32]>>),
     Flat(Box<[u32]>),
+    #[serde(skip)]
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -268,6 +273,41 @@ impl DenseBufMaskRows {
         })
     }
 
+    /// Retain a current-format little-endian dense matrix directly in the
+    /// artifact allocation. The byte range must be naturally aligned because
+    /// callers consume rows as ordinary `&[u32]` slices on the hot path.
+    pub(crate) fn from_backed(
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        rows: usize,
+        row_len: usize,
+    ) -> Result<Self, String> {
+        if !cfg!(target_endian = "little") {
+            return Err("backed dense mask rows require little-endian host".to_owned());
+        }
+        let values = rows
+            .checked_mul(row_len)
+            .ok_or_else(|| "backed dense mask dimensions overflow".to_owned())?;
+        let bytes = values
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| "backed dense mask byte length overflow".to_owned())?;
+        let end = start
+            .checked_add(bytes)
+            .ok_or_else(|| "backed dense mask range overflow".to_owned())?;
+        if end > backing.len() {
+            return Err("backed dense mask range is outside artifact".to_owned());
+        }
+        let ptr = unsafe { backing.as_ptr().add(start) };
+        if ptr.align_offset(std::mem::align_of::<u32>()) != 0 {
+            return Err("backed dense mask range is not u32-aligned".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Backed { backing, start },
+            rows,
+            row_len,
+        })
+    }
+
     pub(crate) fn from_rows(rows: Vec<Box<[u32]>>) -> Result<Self, String> {
         let row_count = rows.len();
         let row_len = rows.first().map_or(0, |row| row.len());
@@ -306,6 +346,14 @@ impl DenseBufMaskRows {
             DenseBufMaskRowsStorage::Flat(flat) => {
                 let start = row * self.row_len;
                 flat.get(start..start + self.row_len)
+            }
+            DenseBufMaskRowsStorage::Backed { backing, start } => {
+                let value_start = row.checked_mul(self.row_len)?;
+                let byte_start = start.checked_add(value_start.checked_mul(4)?)?;
+                let ptr = unsafe { backing.as_ptr().add(byte_start).cast::<u32>() };
+                // SAFETY: `from_backed` validated the full range and alignment;
+                // row boundaries advance by a multiple of four bytes.
+                Some(unsafe { std::slice::from_raw_parts(ptr, self.row_len) })
             }
         }
     }
@@ -3325,6 +3373,43 @@ pub(crate) struct SegmentedBoundaryParser {
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum DeferredTerminalExprBytes {
+    Owned(Arc<[u8]>),
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl DeferredTerminalExprBytes {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+        }
+    }
+}
+
+/// Canonical current-format sections prepared for large compiler-produced
+/// constraints.  These are section payloads, not a pre-saved artifact: the
+/// first `Constraint::save()` still constructs the envelope and copies every
+/// section into its final output allocation.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSerializationSections {
+    pub(crate) table: Arc<[u8]>,
+    pub(crate) runtime: Arc<[u8]>,
+    pub(crate) original_token_map: Arc<[u8]>,
+    pub(crate) internal_token_buf_masks: Arc<[u8]>,
+    pub(crate) token_mask_cache: Arc<[u8]>,
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
@@ -3359,6 +3444,12 @@ pub struct Constraint {
     #[serde(skip, default)]
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
+    /// Pre-encoded current packed-DWA wire for very large compiler-produced
+    /// constraints. This is presently used to measure (and bound) fresh-save
+    /// cost without charging `Constraint::save` for DWA encoding. Loaded
+    /// constraints already retain the whole input artifact instead.
+    #[serde(skip, default)]
+    pub(crate) prepared_parser_dwa_wire: Option<Arc<[u8]>>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -3572,19 +3663,19 @@ pub struct Constraint {
     pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
     /// Precomputed dense output masks for groups of 128 internal tokens.
     #[serde(skip)]
-    pub(crate) pair_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) pair_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 256 internal tokens.
     #[serde(skip)]
-    pub(crate) quad_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) quad_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 512 internal tokens.
     #[serde(skip)]
-    pub(crate) super_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) super_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 1024 internal tokens.
     #[serde(skip)]
-    pub(crate) mega_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) mega_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 2048 internal tokens.
     #[serde(skip)]
-    pub(crate) giga_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) giga_word_group_buf_masks: DenseBufMaskRows,
     /// Sparse OR-union for each 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -3730,15 +3821,37 @@ pub struct Constraint {
     /// re-encoding the same canonical pools.
     #[serde(skip, default)]
     pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
+    /// Canonical WPL3 bytes prepared once at compile finalization for
+    /// constraints with a large non-DWA Weight population. The Weight objects
+    /// themselves remain authoritative; this only avoids re-packing the same
+    /// immutable token-set/range pool on the first fresh save.
+    #[serde(skip, default)]
+    pub(crate) prepared_weight_pool_bytes: Option<Arc<[u8]>>,
+    /// Large compiler-produced constraints can prepare their immutable
+    /// current-format section payloads during finalization. This avoids
+    /// rebuilding the same canonical metadata during the first save while
+    /// deliberately leaving final artifact assembly inside `save()`.
+    #[serde(skip, default)]
+    pub(crate) prepared_serialization_sections:
+        Option<Arc<PreparedSerializationSections>>,
     /// Current-format terminal source expressions can be retained as their
     /// canonical bincode payload instead of recursively rebuilding every Expr
     /// node during an ordinary static load. Composition materializes the list
     /// lazily through `retained_terminal_exprs` when it actually needs source
     /// language proofs.
     #[serde(skip, default)]
-    pub(crate) deferred_terminal_exprs_blob: Option<Arc<[u8]>>,
+    pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
     #[serde(skip, default)]
     pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
+    /// Large current-format GLR rule vectors are composition metadata rather
+    /// than runtime parser data. Keep their canonical payload undecoded during
+    /// ordinary load; composition materializes it lazily through
+    /// `retained_table_rules`.
+    #[serde(skip, default)]
+    pub(crate) deferred_table_rules_blob:
+        Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
+    #[serde(skip, default)]
+    pub(crate) deferred_table_rules: OnceLock<Arc<[crate::grammar::flat::Rule]>>,
 }
 
 

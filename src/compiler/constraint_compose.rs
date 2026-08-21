@@ -68,8 +68,8 @@ use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
-    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput, compose_subgrammar_tables,
-    compose_subgrammar_tables_explicit,
+    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput,
+    compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
 };
 use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
@@ -12694,6 +12694,7 @@ fn components_have_no_compiled_eof_stack_rewrites(
 /// explicit-control linker remains the reference path for those cases.
 fn legacy_splice_has_only_byte_terminal_continuations(
     parent: &Constraint,
+    parent_rules: &[crate::grammar::flat::Rule],
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
     if children.is_empty() {
@@ -12713,11 +12714,11 @@ fn legacy_splice_has_only_byte_terminal_continuations(
                 .map(|special| special.terminal_id),
         )
         .collect::<BTreeSet<_>>();
-    let Some(augmented_start) = parent.table.rules.first().map(|rule| rule.lhs) else {
+    let Some(augmented_start) = parent_rules.first().map(|rule| rule.lhs) else {
         return false;
     };
     let analyzed = AnalyzedGrammar::from_composed_rules(
-        parent.table.rules.clone(),
+        parent_rules.to_vec(),
         parent.table.num_terminals,
         parent.terminal_display_names.clone(),
         parent.table.nonterminal_display_names.clone(),
@@ -12990,6 +12991,7 @@ fn build_composed_constraint_unfinalized(
         scoped_ignore_prefix_fusions: Vec::new(),
         parser_dwa,
         packed_parser_dwa: None,
+        prepared_parser_dwa_wire: None,
         parser_top_accept: BTreeMap::new(),
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
@@ -13040,11 +13042,11 @@ fn build_composed_constraint_unfinalized(
         token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
         word_group_buf_masks: Vec::new(),
-        pair_word_group_buf_masks: Vec::new(),
-        quad_word_group_buf_masks: Vec::new(),
-        super_word_group_buf_masks: Vec::new(),
-        mega_word_group_buf_masks: Vec::new(),
-        giga_word_group_buf_masks: Vec::new(),
+        pair_word_group_buf_masks: Default::default(),
+        quad_word_group_buf_masks: Default::default(),
+        super_word_group_buf_masks: Default::default(),
+        mega_word_group_buf_masks: Default::default(),
+        giga_word_group_buf_masks: Default::default(),
         word_group_sparse_masks: Vec::new(),
         word_group_prefix_buf_masks: Default::default(),
         word_group_sparse_prefix_entries: Vec::new(),
@@ -13082,8 +13084,12 @@ fn build_composed_constraint_unfinalized(
         parser_state_domain_labels,
         ignore_expr,
         serialized_artifact_cache: None,
+        prepared_weight_pool_bytes: None,
+        prepared_serialization_sections: None,
         deferred_terminal_exprs_blob: None,
-        deferred_terminal_exprs: Default::default(),
+            deferred_terminal_exprs: Default::default(),
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
     };
     ConstraintComposition {
         constraint,
@@ -13171,6 +13177,11 @@ pub(crate) fn compose_constraints(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let parent_rules = parent.retained_table_rules()?;
+    let child_rules = children
+        .iter()
+        .map(|child| child.constraint.retained_table_rules())
+        .collect::<Result<Vec<_>, String>>()?;
     let components_have_no_runtime_product = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -13246,21 +13257,32 @@ pub(crate) fn compose_constraints(
         && components_have_no_explicit_controls(parent, children)
         && components_have_no_compiled_eof_stack_rewrites(parent, children)
         && (all_children_nonnullable
-            || legacy_splice_has_only_byte_terminal_continuations(parent, children));
+            || legacy_splice_has_only_byte_terminal_continuations(parent, parent_rules, children));
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
-        compose_subgrammar_tables(
+        compose_subgrammar_tables_with_rules(
             &parent.table,
+            parent_rules,
             (!global_ignores).then_some(parent.ignore_terminal).flatten(),
             &table_inputs,
+            &child_rules,
         )?
     } else {
-        compose_subgrammar_tables_explicit(
+        compose_subgrammar_tables_explicit_with_rules(
             &parent.table,
+            parent_rules,
+            &table_inputs,
+            &child_rules,
+        )?
+    } else {
+        compose_subgrammar_tables_explicit_with_rules(
+            &parent.table,
+            parent_rules,
             (!global_ignores)
                 .then_some(parent.ignore_terminal)
                 .flatten(),
             &table_inputs,
+            &child_rules,
         )?
     };
     let structural_started_at = Instant::now();
@@ -13957,6 +13979,11 @@ pub(crate) fn compose_constraints_owned_parent(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let parent_rules = parent.retained_table_rules()?;
+    let child_rules = children
+        .iter()
+        .map(|child| child.constraint.retained_table_rules())
+        .collect::<Result<Vec<_>, String>>()?;
     let components_have_no_runtime_product = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -14065,21 +14092,32 @@ pub(crate) fn compose_constraints_owned_parent(
         && components_have_no_explicit_controls(&parent, children)
         && components_have_no_compiled_eof_stack_rewrites(&parent, children)
         && (all_children_nonnullable
-            || legacy_splice_has_only_byte_terminal_continuations(&parent, children));
+            || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
-        compose_subgrammar_tables(
+        compose_subgrammar_tables_with_rules(
             &parent.table,
+            parent_rules,
             (!global_ignores).then_some(parent.ignore_terminal).flatten(),
             &table_inputs,
+            &child_rules,
         )?
     } else {
-        compose_subgrammar_tables_explicit(
+        compose_subgrammar_tables_explicit_with_rules(
             &parent.table,
+            parent_rules,
+            &table_inputs,
+            &child_rules,
+        )?
+    } else {
+        compose_subgrammar_tables_explicit_with_rules(
+            &parent.table,
+            parent_rules,
             (!global_ignores)
                 .then_some(parent.ignore_terminal)
                 .flatten(),
             &table_inputs,
+            &child_rules,
         )?
     };
     let structural_started_at = Instant::now();

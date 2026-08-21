@@ -357,6 +357,9 @@ impl<T> PackedRuntimeSeqPool<T> {
 #[derive(Debug)]
 pub struct PackedRuntimeDwa {
     start_state: u32,
+    /// Zero-copy DWF3 view used by current-format loads. Compiler-produced
+    /// constraints keep the owned fields below and leave this unset.
+    backed: Option<BackedPackedRuntimeDwa>,
     // DWF1 compatibility representation: one decoded range slab per wire
     // chunk plus token-id -> (chunk,local) indirection.
     token_set_chunks: Box<[PackedRuntimeTokenSetChunk]>,
@@ -389,6 +392,688 @@ pub struct PackedRuntimeDwa {
     states: Box<[PackedRuntimeState]>,
 }
 
+#[derive(Debug)]
+struct BackedPackedRuntimeDwa {
+    backing: Arc<Vec<u8>>,
+    section_start: usize,
+    section_len: usize,
+    /// DWF4/5 use a narrower directly-readable tail. DWF3 keeps the original
+    /// fixed-width u32 representation.
+    narrow: bool,
+    /// DWF5 interns repeated label sequences separately from the packed
+    /// target/weight stream. DWF4 keeps labels interleaved with target/weight.
+    label_dedup: bool,
+    token_set_count: usize,
+    token_locations_start: usize,
+    token_word_spans_start: usize,
+    token_body_start: usize,
+    token_body_end: usize,
+    chunk_starts: Box<[u32]>,
+    chunk_lens: Box<[u32]>,
+    geometry_offsets: Box<[u32]>,
+    weights_start: usize,
+    weight_count: usize,
+    weight_token_ids_start: usize,
+    weight_token_id_count: usize,
+    label_values_start: usize,
+    label_value_count: usize,
+    label_spans_start: usize,
+    label_span_count: usize,
+    target_values_start: usize,
+    target_value_count: usize,
+    target_spans_start: usize,
+    target_span_count: usize,
+    weight_values_start: usize,
+    weight_value_count: usize,
+    weight_spans_start: usize,
+    weight_span_count: usize,
+    rows_start: usize,
+    row_count: usize,
+    states_start: usize,
+    state_count: usize,
+}
+
+impl BackedPackedRuntimeDwa {
+    fn parse(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        let section_end = section_start
+            .checked_add(section_len)
+            .ok_or_else(|| "overflowing backed DWA range".to_owned())?;
+        let input = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "backed DWA section is outside artifact backing".to_owned())?;
+        if input.starts_with(b"DWF5") {
+            return Self::parse_dwf5(backing, section_start, section_len);
+        }
+        if input.starts_with(b"DWF4") {
+            return Self::parse_dwf4(backing, section_start, section_len);
+        }
+        Self::parse_dwf3(backing, section_start, section_len)
+    }
+
+    fn parse_dwf3(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        let section_end = section_start
+            .checked_add(section_len)
+            .ok_or_else(|| "overflowing DWF3 backing range".to_owned())?;
+        let input = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "DWF3 section is outside artifact backing".to_owned())?;
+        if input.len() < 16 || !input.starts_with(b"DWF3") {
+            return Err("invalid backed runtime DWA header".to_owned());
+        }
+        #[inline]
+        fn read_u32(input: &[u8], pos: usize) -> Result<u32, String> {
+            let bytes: [u8; 4] = input
+                .get(pos..pos + 4)
+                .ok_or_else(|| "truncated DWF3 u32".to_owned())?
+                .try_into()
+                .expect("four-byte slice");
+            Ok(u32::from_le_bytes(bytes))
+        }
+        #[inline]
+        fn skip(pos: &mut usize, bytes: usize, len: usize, what: &str) -> Result<usize, String> {
+            let start = *pos;
+            *pos = pos
+                .checked_add(bytes)
+                .ok_or_else(|| format!("overflowing DWF3 {what} range"))?;
+            if *pos > len {
+                return Err(format!("truncated DWF3 {what}"));
+            }
+            Ok(start)
+        }
+
+        let start_state = read_u32(input, 4)?;
+        let chunk_count = read_u32(input, 8)? as usize;
+        let token_set_count = read_u32(input, 12)? as usize;
+        let mut pos = 16usize;
+        let descriptor_bytes = chunk_count
+            .checked_mul(8)
+            .ok_or_else(|| "overflowing DWF3 chunk descriptors".to_owned())?;
+        skip(&mut pos, descriptor_bytes, input.len(), "chunk descriptors")?;
+        let token_locations_start = skip(
+            &mut pos,
+            token_set_count
+                .checked_mul(4)
+                .ok_or_else(|| "overflowing DWF3 token locations".to_owned())?,
+            input.len(),
+            "token locations",
+        )?;
+        let token_word_spans_start = skip(
+            &mut pos,
+            token_set_count
+                .checked_mul(4)
+                .ok_or_else(|| "overflowing DWF3 token word spans".to_owned())?,
+            input.len(),
+            "token word spans",
+        )?;
+        let mut chunk_starts = Vec::with_capacity(chunk_count);
+        let mut chunk_lens = Vec::with_capacity(chunk_count);
+        let mut declared_sets = 0usize;
+        let mut body_pos = pos;
+        for chunk in 0..chunk_count {
+            let descriptor = 16 + chunk * 8;
+            let body_len = read_u32(input, descriptor)? as usize;
+            let set_count = read_u32(input, descriptor + 4)? as usize;
+            declared_sets = declared_sets
+                .checked_add(set_count)
+                .ok_or_else(|| "overflowing DWF3 token-set count".to_owned())?;
+            chunk_starts.push(u32::try_from(body_pos).map_err(|_| "DWF3 chunk offset exceeds u32".to_owned())?);
+            chunk_lens.push(u32::try_from(body_len).map_err(|_| "DWF3 chunk length exceeds u32".to_owned())?);
+            body_pos = body_pos
+                .checked_add(body_len)
+                .ok_or_else(|| "overflowing DWF3 chunk body range".to_owned())?;
+            if body_pos > input.len() {
+                return Err("truncated DWF3 chunk body".to_owned());
+            }
+        }
+        if declared_sets != token_set_count {
+            return Err("DWF3 token-set count mismatch".to_owned());
+        }
+        pos = body_pos;
+
+        let geometry_count = read_u32(input, pos)? as usize;
+        pos += 4;
+        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        for _ in 0..geometry_count {
+            geometry_offsets.push(u32::try_from(pos).map_err(|_| "DWF3 geometry offset exceeds u32".to_owned())?);
+            let count = read_u32(input, pos)? as usize;
+            pos += 4;
+            skip(
+                &mut pos,
+                count
+                    .checked_mul(8)
+                    .ok_or_else(|| "overflowing DWF3 geometry ranges".to_owned())?,
+                input.len(),
+                "geometry ranges",
+            )?;
+        }
+
+        macro_rules! fixed_section {
+            ($name:literal, $stride:expr) => {{
+                let count = read_u32(input, pos)? as usize;
+                pos += 4;
+                let start = skip(
+                    &mut pos,
+                    count
+                        .checked_mul($stride)
+                        .ok_or_else(|| format!("overflowing DWF3 {}", $name))?,
+                    input.len(),
+                    $name,
+                )?;
+                (start, count)
+            }};
+        }
+        let (weights_start, weight_count) = fixed_section!("weights", 12);
+        let (weight_token_ids_start, weight_token_id_count) = fixed_section!("weight token ids", 4);
+        let (label_values_start, label_value_count) = fixed_section!("label values", 4);
+        let (label_spans_start, label_span_count) = fixed_section!("label spans", 8);
+        let (target_values_start, target_value_count) = fixed_section!("target values", 4);
+        let (target_spans_start, target_span_count) = fixed_section!("target spans", 8);
+        let (weight_values_start, weight_value_count) = fixed_section!("weight-id values", 4);
+        let (weight_spans_start, weight_span_count) = fixed_section!("weight-id spans", 8);
+        if label_span_count != target_span_count || label_span_count != weight_span_count {
+            return Err("DWF3 row-pool span counts do not match".to_owned());
+        }
+        let (rows_start, row_count) = fixed_section!("rows", 12);
+        let (states_start, state_count) = fixed_section!("states", 8);
+        if pos != input.len() {
+            return Err("trailing bytes in DWF3 runtime DWA".to_owned());
+        }
+        if state_count != 0 && start_state as usize >= state_count {
+            return Err("invalid DWF3 start state".to_owned());
+        }
+
+        Ok((
+            start_state,
+            Self {
+                backing,
+                section_start,
+                section_len,
+                narrow: false,
+                label_dedup: false,
+                token_set_count,
+                token_locations_start,
+                token_word_spans_start,
+                token_body_start: 0,
+                token_body_end: 0,
+                chunk_starts: chunk_starts.into_boxed_slice(),
+                chunk_lens: chunk_lens.into_boxed_slice(),
+                geometry_offsets: geometry_offsets.into_boxed_slice(),
+                weights_start,
+                weight_count,
+                weight_token_ids_start,
+                weight_token_id_count,
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                target_values_start,
+                target_value_count,
+                target_spans_start,
+                target_span_count,
+                weight_values_start,
+                weight_value_count,
+                weight_spans_start,
+                weight_span_count,
+                rows_start,
+                row_count,
+                states_start,
+                state_count,
+            },
+        ))
+    }
+
+    /// DWF4 is the narrow zero-copy wire layout. It deliberately has no
+    /// variable-width schema: writers only select it when every field fits the
+    /// fixed widths below, otherwise they fall back to DWF3. That keeps hot
+    /// runtime access branch-light and makes malformed-artifact validation
+    /// straightforward.
+    fn parse_dwf4(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        Self::parse_narrow(backing, section_start, section_len, false)
+    }
+
+    fn parse_dwf5(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        Self::parse_narrow(backing, section_start, section_len, true)
+    }
+
+    fn parse_narrow(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+        label_dedup: bool,
+    ) -> Result<(u32, Self), String> {
+        let section_end = section_start
+            .checked_add(section_len)
+            .ok_or_else(|| "overflowing DWF4 backing range".to_owned())?;
+        let input = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "DWF4 section is outside artifact backing".to_owned())?;
+        let expected_magic = if label_dedup { b"DWF5" } else { b"DWF4" };
+        if input.len() < 16 || !input.starts_with(expected_magic) {
+            return Err("invalid backed narrow runtime DWA header".to_owned());
+        }
+        #[inline]
+        fn read_u16(input: &[u8], pos: usize) -> Result<u16, String> {
+            let bytes: [u8; 2] = input
+                .get(pos..pos + 2)
+                .ok_or_else(|| "truncated DWF4 u16".to_owned())?
+                .try_into()
+                .expect("two-byte slice");
+            Ok(u16::from_le_bytes(bytes))
+        }
+        #[inline]
+        fn read_u32(input: &[u8], pos: usize) -> Result<u32, String> {
+            let bytes: [u8; 4] = input
+                .get(pos..pos + 4)
+                .ok_or_else(|| "truncated DWF4 u32".to_owned())?
+                .try_into()
+                .expect("four-byte slice");
+            Ok(u32::from_le_bytes(bytes))
+        }
+        #[inline]
+        fn skip(pos: &mut usize, bytes: usize, len: usize, what: &str) -> Result<usize, String> {
+            let start = *pos;
+            *pos = pos
+                .checked_add(bytes)
+                .ok_or_else(|| format!("overflowing DWF4 {what} range"))?;
+            if *pos > len {
+                return Err(format!("truncated DWF4 {what}"));
+            }
+            Ok(start)
+        }
+
+        let start_state = read_u32(input, 4)?;
+        let token_set_count = read_u32(input, 8)? as usize;
+        let token_body_len = read_u32(input, 12)? as usize;
+        let mut pos = 16usize;
+        let token_locations_start = skip(
+            &mut pos,
+            token_set_count
+                .checked_mul(3)
+                .ok_or_else(|| "overflowing DWF4 token locations".to_owned())?,
+            input.len(),
+            "token locations",
+        )?;
+        let token_word_spans_start = skip(
+            &mut pos,
+            token_set_count
+                .checked_mul(2)
+                .ok_or_else(|| "overflowing DWF4 token word spans".to_owned())?,
+            input.len(),
+            "token word spans",
+        )?;
+        let token_body_start = pos;
+        skip(&mut pos, token_body_len, input.len(), "token body")?;
+        let token_body_end = pos;
+
+        let geometry_count = read_u32(input, pos)? as usize;
+        pos += 4;
+        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        for _ in 0..geometry_count {
+            geometry_offsets.push(
+                u32::try_from(pos).map_err(|_| "DWF4 geometry offset exceeds u32".to_owned())?,
+            );
+            let count = read_u16(input, pos)? as usize;
+            pos += 2;
+            skip(
+                &mut pos,
+                count
+                    .checked_mul(4)
+                    .ok_or_else(|| "overflowing DWF4 geometry ranges".to_owned())?,
+                input.len(),
+                "geometry ranges",
+            )?;
+        }
+
+        macro_rules! fixed_section {
+            ($name:literal, $stride:expr) => {{
+                let count = read_u32(input, pos)? as usize;
+                pos += 4;
+                let start = skip(
+                    &mut pos,
+                    count
+                        .checked_mul($stride)
+                        .ok_or_else(|| format!("overflowing DWF4 {}", $name))?,
+                    input.len(),
+                    $name,
+                )?;
+                (start, count)
+            }};
+        }
+        let (weights_start, weight_count) = fixed_section!("weights", 6);
+        let (weight_token_ids_start, weight_token_id_count) =
+            fixed_section!("weight token ids", 2);
+        let (
+            label_values_start,
+            label_value_count,
+            label_spans_start,
+            label_span_count,
+            target_values_start,
+            target_value_count,
+            target_spans_start,
+            target_span_count,
+            weight_values_start,
+            weight_value_count,
+            weight_spans_start,
+            weight_span_count,
+            rows_start,
+            row_count,
+        ) = if label_dedup {
+            // DWF5 stores the heavily repeated sorted label vectors once. Each
+            // row carries only a u16 label-vector id; target/weight entries keep
+            // their row-local order and share one packed span table.
+            let (label_values_start, label_value_count) = fixed_section!("label values", 2);
+            let (label_spans_start, label_span_count) = fixed_section!("label spans", 4);
+            let (rows_start, row_count) = fixed_section!("row label ids", 2);
+            let (target_values_start, target_value_count) =
+                fixed_section!("target-weight entries", 4);
+            let (target_spans_start, target_span_count) = fixed_section!("transition spans", 4);
+            if row_count != target_span_count {
+                return Err("DWF5 row/span count mismatch".to_owned());
+            }
+            (
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                target_values_start,
+                target_value_count,
+                target_spans_start,
+                target_span_count,
+                target_values_start,
+                target_value_count,
+                target_spans_start,
+                target_span_count,
+                rows_start,
+                row_count,
+            )
+        } else {
+            // DWF4 interleaves u16 label + packed u32(target, weight), and all
+            // three compiler pools share one identity row/span mapping.
+            let (label_values_start, label_value_count) = fixed_section!("transition entries", 6);
+            let (label_spans_start, label_span_count) = fixed_section!("transition spans", 4);
+            (
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                0,
+                label_span_count,
+            )
+        };
+        let (states_start, state_count) = fixed_section!("states", 4);
+        if pos != input.len() {
+            return Err("trailing bytes in DWF4 runtime DWA".to_owned());
+        }
+        if state_count != 0 && start_state as usize >= state_count {
+            return Err("invalid DWF4 start state".to_owned());
+        }
+
+        Ok((
+            start_state,
+            Self {
+                backing,
+                section_start,
+                section_len,
+                narrow: true,
+                label_dedup,
+                token_set_count,
+                token_locations_start,
+                token_word_spans_start,
+                token_body_start,
+                token_body_end,
+                chunk_starts: Box::new([]),
+                chunk_lens: Box::new([]),
+                geometry_offsets: geometry_offsets.into_boxed_slice(),
+                weights_start,
+                weight_count,
+                weight_token_ids_start,
+                weight_token_id_count,
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                target_values_start,
+                target_value_count,
+                target_spans_start,
+                target_span_count,
+                weight_values_start,
+                weight_value_count,
+                weight_spans_start,
+                weight_span_count,
+                rows_start,
+                row_count,
+                states_start,
+                state_count,
+            },
+        ))
+    }
+
+    #[inline(always)]
+    fn read_u32(&self, relative: usize) -> Option<u32> {
+        let start = self.section_start.checked_add(relative)?;
+        let bytes = self.backing.get(start..start + 4)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    }
+
+    #[inline(always)]
+    fn read_u16(&self, relative: usize) -> Option<u16> {
+        let start = self.section_start.checked_add(relative)?;
+        let bytes = self.backing.get(start..start + 2)?;
+        Some(u16::from_le_bytes(bytes.try_into().ok()?))
+    }
+
+    #[inline(always)]
+    fn read_u24(&self, relative: usize) -> Option<u32> {
+        let start = self.section_start.checked_add(relative)?;
+        let bytes = self.backing.get(start..start + 3)?;
+        Some(bytes[0] as u32 | ((bytes[1] as u32) << 8) | ((bytes[2] as u32) << 16))
+    }
+
+    #[inline(always)]
+    fn read_i32(&self, relative: usize) -> Option<i32> {
+        self.read_u32(relative).map(|value| value as i32)
+    }
+
+    #[inline]
+    fn weight(&self, id: u32) -> Option<PackedRuntimeWeight> {
+        let index = id as usize;
+        if index >= self.weight_count {
+            return None;
+        }
+        if self.narrow {
+            let pos = self.weights_start + index * 6;
+            return Some(PackedRuntimeWeight {
+                geometry: self.read_u16(pos)? as u32,
+                token_ids_start: self.read_u24(pos + 2)?,
+                full: *self.backing.get(self.section_start + pos + 5)? as u32,
+            });
+        }
+        let pos = self.weights_start + index * 12;
+        Some(PackedRuntimeWeight {
+            geometry: self.read_u32(pos)?,
+            token_ids_start: self.read_u32(pos + 4)?,
+            full: self.read_u32(pos + 8)?,
+        })
+    }
+
+    #[inline]
+    fn row(&self, id: u32) -> Option<PackedRuntimeRow> {
+        let index = id as usize;
+        if index >= self.row_count {
+            return None;
+        }
+        if self.narrow {
+            let labels = if self.label_dedup {
+                self.read_u16(self.rows_start + index * 2)? as u32
+            } else {
+                index as u32
+            };
+            return Some(PackedRuntimeRow {
+                labels,
+                targets: index as u32,
+                weights: index as u32,
+            });
+        }
+        let pos = self.rows_start + index * 12;
+        Some(PackedRuntimeRow {
+            labels: self.read_u32(pos)?,
+            targets: self.read_u32(pos + 4)?,
+            weights: self.read_u32(pos + 8)?,
+        })
+    }
+
+    #[inline]
+    fn state(&self, id: u32) -> Option<PackedRuntimeState> {
+        let index = id as usize;
+        if index >= self.state_count {
+            return None;
+        }
+        if self.narrow {
+            let pos = self.states_start + index * 4;
+            let final_encoded = self.read_u16(pos + 2)? as u32;
+            return Some(PackedRuntimeState {
+                row: self.read_u16(pos)? as u32,
+                final_weight: if final_encoded == 0 {
+                    u32::MAX
+                } else {
+                    final_encoded - 1
+                },
+            });
+        }
+        let pos = self.states_start + index * 8;
+        Some(PackedRuntimeState {
+            row: self.read_u32(pos)?,
+            final_weight: self.read_u32(pos + 4)?,
+        })
+    }
+
+    #[inline]
+    fn span(&self, start: usize, count: usize, id: u32) -> Option<[u32; 2]> {
+        let index = id as usize;
+        if index >= count {
+            return None;
+        }
+        if self.narrow {
+            let packed = self.read_u32(start + index * 4)?;
+            return Some([packed >> 10, packed & 0x3ff]);
+        }
+        let pos = start + index * 8;
+        Some([self.read_u32(pos)?, self.read_u32(pos + 4)?])
+    }
+
+    #[inline]
+    fn geometry_len(&self, id: u32) -> Option<usize> {
+        let pos = *self.geometry_offsets.get(id as usize)? as usize;
+        if self.narrow {
+            Some(self.read_u16(pos)? as usize)
+        } else {
+            Some(self.read_u32(pos)? as usize)
+        }
+    }
+
+    #[inline]
+    fn geometry_pair(&self, id: u32, index: usize) -> Option<(u32, u32)> {
+        let pos = *self.geometry_offsets.get(id as usize)? as usize;
+        let len = if self.narrow {
+            self.read_u16(pos)? as usize
+        } else {
+            self.read_u32(pos)? as usize
+        };
+        if index >= len {
+            return None;
+        }
+        if self.narrow {
+            let pair = pos + 2 + index * 4;
+            return Some((self.read_u16(pair)? as u32, self.read_u16(pair + 2)? as u32));
+        }
+        let pair = pos + 4 + index * 8;
+        Some((self.read_u32(pair)?, self.read_u32(pair + 4)?))
+    }
+
+    #[inline]
+    fn weight_token_id(&self, index: usize) -> Option<u32> {
+        if self.narrow {
+            return (index < self.weight_token_id_count)
+                .then(|| self.read_u16(self.weight_token_ids_start + index * 2).map(u32::from))
+                .flatten();
+        }
+        (index < self.weight_token_id_count)
+            .then(|| self.read_u32(self.weight_token_ids_start + index * 4))
+            .flatten()
+    }
+
+    #[inline]
+    fn pool_u32(&self, start: usize, count: usize, index: usize) -> Option<u32> {
+        (index < count)
+            .then(|| self.read_u32(start + index * 4))
+            .flatten()
+    }
+
+    #[inline]
+    fn pool_i32(&self, start: usize, count: usize, index: usize) -> Option<i32> {
+        (index < count)
+            .then(|| self.read_i32(start + index * 4))
+            .flatten()
+    }
+
+    #[inline]
+    fn token_bytes(&self, id: u32) -> Option<(&[u8], u32)> {
+        let id = id as usize;
+        if id >= self.token_set_count {
+            return None;
+        }
+        if self.narrow {
+            let local = self.read_u24(self.token_locations_start + id * 3)? as usize;
+            let body_len = self.token_body_end.checked_sub(self.token_body_start)?;
+            if local >= body_len {
+                return None;
+            }
+            let absolute = self.section_start + self.token_body_start + local;
+            let body_end = self.section_start + self.token_body_end;
+            let bytes = self.backing.get(absolute..body_end)?;
+            let word_spans = self.read_u16(self.token_word_spans_start + id * 2)? as u32;
+            return Some((bytes, word_spans));
+        }
+        let location = self.read_u32(self.token_locations_start + id * 4)?;
+        let chunk = (location >> 24) as usize;
+        let local = (location & 0x00ff_ffff) as usize;
+        let chunk_start = *self.chunk_starts.get(chunk)? as usize;
+        let chunk_len = *self.chunk_lens.get(chunk)? as usize;
+        if local >= chunk_len {
+            return None;
+        }
+        let absolute = self.section_start + chunk_start + local;
+        let chunk_end = self.section_start + chunk_start + chunk_len;
+        let bytes = self.backing.get(absolute..chunk_end)?;
+        let word_spans = self.read_u32(self.token_word_spans_start + id * 4)?;
+        Some((bytes, word_spans))
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct PackedRuntimeTokenSetRef<'a> {
     id: u32,
@@ -399,6 +1084,10 @@ pub struct PackedRuntimeTokenSetRef<'a> {
 #[derive(Clone, Copy)]
 enum PackedRuntimeTokenSetStorageRef<'a> {
     Flat(&'a [[u32; 2]]),
+    Varint {
+        bytes: &'a [u8],
+        range_count: u32,
+    },
     Materialized(&'a Arc<RangeSetBlaze<u32>>),
 }
 
@@ -412,6 +1101,7 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
     pub fn range_count(self) -> usize {
         match self.storage {
             PackedRuntimeTokenSetStorageRef::Flat(ranges) => ranges.len(),
+            PackedRuntimeTokenSetStorageRef::Varint { range_count, .. } => range_count as usize,
             PackedRuntimeTokenSetStorageRef::Materialized(tokens) => tokens.ranges().len(),
         }
     }
@@ -425,7 +1115,8 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
     pub fn materialized_arc(self) -> Option<&'a Arc<RangeSetBlaze<u32>>> {
         match self.storage {
             PackedRuntimeTokenSetStorageRef::Materialized(tokens) => Some(tokens),
-            PackedRuntimeTokenSetStorageRef::Flat(_) => None,
+            PackedRuntimeTokenSetStorageRef::Flat(_)
+            | PackedRuntimeTokenSetStorageRef::Varint { .. } => None,
         }
     }
 
@@ -435,6 +1126,32 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
             PackedRuntimeTokenSetStorageRef::Flat(ranges) => {
                 for &[start, end] in ranges {
                     f(start, end);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::Varint {
+                bytes,
+                range_count,
+            } => {
+                let mut pos = 0usize;
+                let mut previous_end_plus_one = 0u64;
+                for _ in 0..range_count {
+                    let Ok(gap) = take_var_u64(bytes, &mut pos) else {
+                        return;
+                    };
+                    let Ok(len) = take_var_u32(bytes, &mut pos) else {
+                        return;
+                    };
+                    let Some(lo64) = previous_end_plus_one.checked_add(gap) else {
+                        return;
+                    };
+                    let Ok(lo) = u32::try_from(lo64) else {
+                        return;
+                    };
+                    let Some(hi) = lo.checked_add(len) else {
+                        return;
+                    };
+                    f(lo, hi);
+                    previous_end_plus_one = hi as u64 + 1;
                 }
             }
             PackedRuntimeTokenSetStorageRef::Materialized(tokens) => {
@@ -452,6 +1169,35 @@ pub struct PackedRuntimeWeightRef<'a> {
     id: u32,
 }
 
+pub struct PackedRuntimeWeightEntries<'a> {
+    dwa: &'a PackedRuntimeDwa,
+    weight: PackedRuntimeWeight,
+    index: usize,
+    len: usize,
+}
+
+impl<'a> Iterator for PackedRuntimeWeightEntries<'a> {
+    type Item = ((u32, u32), PackedRuntimeTokenSetRef<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.len {
+            return None;
+        }
+        let index = self.index;
+        self.index += 1;
+        let range = self.dwa.geometry_pair_at(self.weight.geometry, index)?;
+        let token_id = self
+            .dwa
+            .weight_token_id_at(self.weight.token_ids_start as usize + index)?;
+        Some((range, self.dwa.token_set(token_id)?))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len.saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
 impl<'a> PackedRuntimeWeightRef<'a> {
     #[inline]
     pub fn id(self) -> u32 {
@@ -460,59 +1206,617 @@ impl<'a> PackedRuntimeWeightRef<'a> {
 
     #[inline]
     pub fn is_full(self) -> bool {
-        self.dwa.weights[self.id as usize].full != 0
+        self.dwa
+            .weight_record(self.id)
+            .is_some_and(|weight| weight.full != 0)
     }
 
     #[inline]
     pub fn is_empty(self) -> bool {
-        let weight = self.dwa.weights[self.id as usize];
-        weight.full == 0 && self.dwa.geometries[weight.geometry as usize].is_empty()
+        let Some(weight) = self.dwa.weight_record(self.id) else {
+            return true;
+        };
+        weight.full == 0 && self.dwa.geometry_len_at(weight.geometry).unwrap_or(0) == 0
     }
 
     pub fn token_set_for_tsid(self, tsid: u32) -> Option<PackedRuntimeTokenSetRef<'a>> {
-        let weight = self.dwa.weights[self.id as usize];
+        let weight = self.dwa.weight_record(self.id)?;
         if weight.full != 0 {
             return None;
         }
-        let geometry = &self.dwa.geometries[weight.geometry as usize];
-        let index = geometry
-            .binary_search_by(|&(start, end)| {
-                if tsid < start {
-                    std::cmp::Ordering::Greater
-                } else if tsid > end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()?;
-        let token_id = self.dwa.weight_token_ids[weight.token_ids_start as usize + index];
+        let mut low = 0usize;
+        let mut high = self.dwa.geometry_len_at(weight.geometry)?;
+        let index = loop {
+            if low >= high {
+                return None;
+            }
+            let mid = (low + high) / 2;
+            let (start, end) = self.dwa.geometry_pair_at(weight.geometry, mid)?;
+            match (start, end) {
+                (start, _) if tsid < start => high = mid,
+                (_, end) if tsid > end => low = mid + 1,
+                _ => break mid,
+            }
+        };
+        let token_id = self
+            .dwa
+            .weight_token_id_at(weight.token_ids_start as usize + index)?;
         self.dwa.token_set(token_id)
     }
 
-    pub fn entries(
-        self,
-    ) -> impl Iterator<Item = ((u32, u32), PackedRuntimeTokenSetRef<'a>)> + 'a {
-        let weight = self.dwa.weights[self.id as usize];
-        let geometry: &'a [(u32, u32)] = if weight.full != 0 {
-            &[]
+    pub fn entries(self) -> PackedRuntimeWeightEntries<'a> {
+        let weight = self.dwa.weight_record(self.id).unwrap_or(PackedRuntimeWeight {
+            geometry: 0,
+            token_ids_start: 0,
+            full: 1,
+        });
+        let len = if weight.full != 0 {
+            0
         } else {
-            &self.dwa.geometries[weight.geometry as usize]
+            self.dwa.geometry_len_at(weight.geometry).unwrap_or(0)
         };
-        let ids = &self.dwa.weight_token_ids
-            [weight.token_ids_start as usize..weight.token_ids_start as usize + geometry.len()];
-        geometry.iter().copied().zip(ids.iter().copied()).map(|(range, token_id)| {
-            (
-                range,
-                self.dwa
-                    .token_set(token_id)
-                    .expect("validated packed runtime DWA token-set id"),
-            )
-        })
+        PackedRuntimeWeightEntries {
+            dwa: self.dwa,
+            weight,
+            index: 0,
+            len,
+        }
     }
 }
 
 impl PackedRuntimeDwa {
+    #[inline]
+    fn weight_record(&self, id: u32) -> Option<PackedRuntimeWeight> {
+        self.backed
+            .as_ref()
+            .map_or_else(|| self.weights.get(id as usize).copied(), |backed| backed.weight(id))
+    }
+
+    #[inline]
+    fn state_record(&self, id: u32) -> Option<PackedRuntimeState> {
+        self.backed
+            .as_ref()
+            .map_or_else(|| self.states.get(id as usize).copied(), |backed| backed.state(id))
+    }
+
+    #[inline]
+    fn row_record(&self, id: u32) -> Option<PackedRuntimeRow> {
+        self.backed
+            .as_ref()
+            .map_or_else(|| self.rows.get(id as usize).copied(), |backed| backed.row(id))
+    }
+
+    #[inline]
+    fn geometry_len_at(&self, id: u32) -> Option<usize> {
+        self.backed.as_ref().map_or_else(
+            || self.geometries.get(id as usize).map(Vec::len),
+            |backed| backed.geometry_len(id),
+        )
+    }
+
+    #[inline]
+    fn geometry_pair_at(&self, id: u32, index: usize) -> Option<(u32, u32)> {
+        self.backed.as_ref().map_or_else(
+            || self.geometries.get(id as usize)?.get(index).copied(),
+            |backed| backed.geometry_pair(id, index),
+        )
+    }
+
+    #[inline]
+    fn weight_token_id_at(&self, index: usize) -> Option<u32> {
+        self.backed.as_ref().map_or_else(
+            || self.weight_token_ids.get(index).copied(),
+            |backed| backed.weight_token_id(index),
+        )
+    }
+
+    #[inline]
+    fn pool_span_at(&self, kind: u8, id: u32) -> Option<[u32; 2]> {
+        if let Some(backed) = &self.backed {
+            return match kind {
+                0 => backed.span(backed.label_spans_start, backed.label_span_count, id),
+                1 => backed.span(backed.target_spans_start, backed.target_span_count, id),
+                2 => backed.span(backed.weight_spans_start, backed.weight_span_count, id),
+                _ => None,
+            };
+        }
+        match kind {
+            0 => self.label_pool.spans.get(id as usize).copied(),
+            1 => self.target_pool.spans.get(id as usize).copied(),
+            2 => self.weight_id_pool.spans.get(id as usize).copied(),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn label_value_at(&self, index: usize) -> Option<i32> {
+        self.backed.as_ref().map_or_else(
+            || self.label_pool.values.get(index).copied(),
+            |backed| {
+                if backed.narrow {
+                    if index >= backed.label_value_count {
+                        return None;
+                    }
+                    let stride = if backed.label_dedup { 2 } else { 6 };
+                    let encoded = backed.read_u16(backed.label_values_start + index * stride)?;
+                    Some(if encoded == u16::MAX {
+                        i32::MAX - 1
+                    } else {
+                        encoded as i32
+                    })
+                } else {
+                    backed.pool_i32(backed.label_values_start, backed.label_value_count, index)
+                }
+            },
+        )
+    }
+
+    #[inline]
+    fn target_value_at(&self, index: usize) -> Option<u32> {
+        self.backed.as_ref().map_or_else(
+            || self.target_pool.values.get(index).copied(),
+            |backed| {
+                if backed.narrow {
+                    if index >= backed.target_value_count {
+                        return None;
+                    }
+                    let pos = if backed.label_dedup {
+                        backed.target_values_start + index * 4
+                    } else {
+                        backed.target_values_start + index * 6 + 2
+                    };
+                    Some(backed.read_u32(pos)? & 0x1ffff)
+                } else {
+                    backed.pool_u32(backed.target_values_start, backed.target_value_count, index)
+                }
+            },
+        )
+    }
+
+    #[inline]
+    fn weight_value_at(&self, index: usize) -> Option<u32> {
+        self.backed.as_ref().map_or_else(
+            || self.weight_id_pool.values.get(index).copied(),
+            |backed| {
+                if backed.narrow {
+                    if index >= backed.weight_value_count {
+                        return None;
+                    }
+                    let pos = if backed.label_dedup {
+                        backed.weight_values_start + index * 4
+                    } else {
+                        backed.weight_values_start + index * 6 + 2
+                    };
+                    Some(backed.read_u32(pos)? >> 17)
+                } else {
+                    backed.pool_u32(backed.weight_values_start, backed.weight_value_count, index)
+                }
+            },
+        )
+    }
+
+    #[inline]
+    fn find_label_in_row(&self, row: PackedRuntimeRow, label: Label) -> Option<usize> {
+        let [start, len] = self.pool_span_at(0, row.labels)?;
+        let start = start as usize;
+        let mut low = 0usize;
+        let mut high = len as usize;
+        while low < high {
+            let mid = (low + high) / 2;
+            match self.label_value_at(start + mid)?.cmp(&label) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => return Some(mid),
+            }
+        }
+        None
+    }
+
+
+    #[inline]
+    fn fast_wire_tail_len(&self) -> usize {
+        self.fast_wire_len_for_chunks(&[]).saturating_sub(12)
+    }
+
+    /// DWF3 keeps the compact per-token-set varint bodies from DWF2, but adds
+    /// a direct token-id -> (chunk, byte-offset) index and word-span table.
+    /// The fixed-width DWA tail remains byte-for-byte runtime-readable, so a
+    /// current-format loader can retain the artifact backing instead of
+    /// allocating/decoding millions of token ranges and pool entries.
+    fn try_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
+        self.try_narrow_backed_fast_wire_bytes()
+            .or_else(|| self.try_backed_fast_wire_bytes_dwf3())
+    }
+
+    /// DWF5 narrows the directly-read fixed tail while preserving DWF3's
+    /// zero-copy execution model. The layout is deliberately fixed: if any
+    /// value does not fit, serialization falls back to DWF3 rather than adding
+    /// per-artifact width tags to hot runtime accessors.
+    fn try_narrow_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
+        let chunks = self.fast_wire_token_chunks.as_deref()?;
+        let word_spans = self.materialized_token_word_spans.as_deref()?;
+        let token_set_count = self.token_set_count();
+        if word_spans.len() != token_set_count
+            || token_set_count > u16::MAX as usize + 1
+            || word_spans.iter().any(|&value| value > u16::MAX as u32)
+        {
+            return None;
+        }
+
+        let token_bytes = chunks.iter().map(|chunk| chunk.len()).sum::<usize>();
+        if token_bytes > (1usize << 24) {
+            return None;
+        }
+
+        // DWF4 stores a single 24-bit offset into the concatenated token body.
+        // The chunking remains an encoder implementation detail only.
+        let mut locations = Vec::<u32>::with_capacity(token_set_count);
+        let mut body_base = 0usize;
+        for body in chunks {
+            let mut pos = 0usize;
+            let set_count = take_var_u32(body, &mut pos).ok()? as usize;
+            for _ in 0..set_count {
+                let location = body_base.checked_add(pos)?;
+                if location >= (1usize << 24) {
+                    return None;
+                }
+                locations.push(location as u32);
+                let range_count = take_var_u32(body, &mut pos).ok()? as usize;
+                for _ in 0..range_count {
+                    let _ = take_var_u64(body, &mut pos).ok()?;
+                    let _ = take_var_u32(body, &mut pos).ok()?;
+                }
+            }
+            if pos != body.len() {
+                return None;
+            }
+            body_base = body_base.checked_add(body.len())?;
+        }
+        if locations.len() != token_set_count || body_base != token_bytes {
+            return None;
+        }
+
+        const DEFAULT_LABEL_WIRE: i32 = i32::MAX - 1;
+        const SPAN_LEN_BITS: u32 = 10;
+        const SPAN_LEN_MAX: u32 = (1 << SPAN_LEN_BITS) - 1;
+        const SPAN_START_MAX: u32 = (1 << (32 - SPAN_LEN_BITS)) - 1;
+        let span_fits = |span: &[u32; 2]| span[0] <= SPAN_START_MAX && span[1] <= SPAN_LEN_MAX;
+
+        if self.geometries.len() > u16::MAX as usize + 1
+            || self.geometries.iter().any(|geometry| {
+                geometry.len() > u16::MAX as usize
+                    || geometry
+                        .iter()
+                        .any(|&(start, end)| start > u16::MAX as u32 || end > u16::MAX as u32)
+            })
+            || self.weights.len() > u16::MAX as usize
+            || self.weights.iter().any(|weight| {
+                weight.geometry > u16::MAX as u32
+                    || weight.token_ids_start >= (1 << 24)
+                    || weight.full > u8::MAX as u32
+            })
+            || self.weight_token_ids.iter().any(|&value| value > u16::MAX as u32)
+            || self.label_pool.values.iter().any(|&label| {
+                label != DEFAULT_LABEL_WIRE && !(0..u16::MAX as i32).contains(&label)
+            })
+            || self.label_pool.values.len() != self.target_pool.values.len()
+            || self.label_pool.values.len() != self.weight_id_pool.values.len()
+            || self.label_pool.spans.len() > u16::MAX as usize + 1
+            || self.label_pool.spans.iter().any(|span| !span_fits(span))
+            || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
+            || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15))
+            || self.label_pool.spans.len() != self.target_pool.spans.len()
+            || self.label_pool.spans.len() != self.weight_id_pool.spans.len()
+            || self
+                .label_pool
+                .spans
+                .iter()
+                .zip(self.target_pool.spans.iter())
+                .zip(self.weight_id_pool.spans.iter())
+                .any(|((label, target), weight)| label != target || label != weight)
+            || self.rows.len() != self.label_pool.spans.len()
+            || self.rows.iter().enumerate().any(|(index, row)| {
+                row.labels as usize != index
+                    || row.targets as usize != index
+                    || row.weights as usize != index
+            })
+            || self.states.len() > (1usize << 24)
+            || self.states.iter().any(|state| {
+                state.row > u16::MAX as u32
+                    || (state.final_weight != u32::MAX && state.final_weight >= u16::MAX as u32)
+            })
+        {
+            return None;
+        }
+
+        // Parser rows often differ only in target/weight destinations while
+        // admitting exactly the same sorted labels. JS is extreme here: tens
+        // of thousands of rows collapse to only a few hundred label vectors.
+        // Intern borrowed slices so this preparation allocates only the compact
+        // dictionary itself, not one temporary Vec per row.
+        let mut label_ids = FxHashMap::<&[Label], u16>::default();
+        label_ids.reserve(self.label_pool.spans.len().min(u16::MAX as usize));
+        let mut unique_label_values = Vec::<Label>::new();
+        let mut unique_label_spans = Vec::<[u32; 2]>::new();
+        let mut row_label_ids = Vec::<u16>::with_capacity(self.label_pool.spans.len());
+        for &[start, len] in self.label_pool.spans.iter() {
+            let start_usize = start as usize;
+            let labels = self
+                .label_pool
+                .values
+                .get(start_usize..start_usize.checked_add(len as usize)?)?;
+            let id = if let Some(&id) = label_ids.get(labels) {
+                id
+            } else {
+                let id = u16::try_from(unique_label_spans.len()).ok()?;
+                let unique_start = u32::try_from(unique_label_values.len()).ok()?;
+                if unique_start > SPAN_START_MAX || len > SPAN_LEN_MAX {
+                    return None;
+                }
+                unique_label_values.extend_from_slice(labels);
+                unique_label_spans.push([unique_start, len]);
+                label_ids.insert(labels, id);
+                id
+            };
+            row_label_ids.push(id);
+        }
+
+        #[inline]
+        fn put_u16(out: &mut Vec<u8>, value: u16) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        #[inline]
+        fn put_u24(out: &mut Vec<u8>, value: u32) {
+            debug_assert!(value < (1 << 24));
+            out.push(value as u8);
+            out.push((value >> 8) as u8);
+            out.push((value >> 16) as u8);
+        }
+        #[inline]
+        fn put_u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        #[inline]
+        fn put_span(out: &mut Vec<u8>, span: [u32; 2]) {
+            debug_assert!(span[0] <= SPAN_START_MAX && span[1] <= SPAN_LEN_MAX);
+            put_u32(out, (span[0] << SPAN_LEN_BITS) | span[1]);
+        }
+
+        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let expected_len = 16usize
+            .saturating_add(token_set_count.saturating_mul(3))
+            .saturating_add(token_set_count.saturating_mul(2))
+            .saturating_add(token_bytes)
+            .saturating_add(4)
+            .saturating_add(self.geometries.len().saturating_mul(2))
+            .saturating_add(geometry_range_count.saturating_mul(4))
+            .saturating_add(4 + self.weights.len().saturating_mul(6))
+            .saturating_add(4 + self.weight_token_ids.len().saturating_mul(2))
+            .saturating_add(4 + unique_label_values.len().saturating_mul(2))
+            .saturating_add(4 + unique_label_spans.len().saturating_mul(4))
+            .saturating_add(4 + row_label_ids.len().saturating_mul(2))
+            .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
+            .saturating_add(4 + self.target_pool.spans.len().saturating_mul(4))
+            .saturating_add(4 + self.states.len().saturating_mul(4));
+        let mut out = Vec::with_capacity(expected_len);
+        out.extend_from_slice(b"DWF5");
+        put_u32(&mut out, self.start_state);
+        put_u32(&mut out, token_set_count as u32);
+        put_u32(&mut out, token_bytes as u32);
+        for location in locations {
+            put_u24(&mut out, location);
+        }
+        for &word_span in word_spans {
+            put_u16(&mut out, word_span as u16);
+        }
+        for body in chunks {
+            out.extend_from_slice(body);
+        }
+
+        put_u32(&mut out, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u16(&mut out, geometry.len() as u16);
+            for &(start, end) in geometry {
+                put_u16(&mut out, start as u16);
+                put_u16(&mut out, end as u16);
+            }
+        }
+        put_u32(&mut out, self.weights.len() as u32);
+        for weight in self.weights.iter() {
+            put_u16(&mut out, weight.geometry as u16);
+            put_u24(&mut out, weight.token_ids_start);
+            out.push(weight.full as u8);
+        }
+        put_u32(&mut out, self.weight_token_ids.len() as u32);
+        for &value in self.weight_token_ids.iter() {
+            put_u16(&mut out, value as u16);
+        }
+        put_u32(&mut out, unique_label_values.len() as u32);
+        for &label in &unique_label_values {
+            put_u16(
+                &mut out,
+                if label == DEFAULT_LABEL_WIRE {
+                    u16::MAX
+                } else {
+                    label as u16
+                },
+            );
+        }
+        put_u32(&mut out, unique_label_spans.len() as u32);
+        for &span in &unique_label_spans {
+            put_span(&mut out, span);
+        }
+        put_u32(&mut out, row_label_ids.len() as u32);
+        for &label_id in &row_label_ids {
+            put_u16(&mut out, label_id);
+        }
+        put_u32(&mut out, self.target_pool.values.len() as u32);
+        for (&target, &weight_id) in self
+            .target_pool
+            .values
+            .iter()
+            .zip(self.weight_id_pool.values.iter())
+        {
+            put_u32(&mut out, target | (weight_id << 17));
+        }
+        put_u32(&mut out, self.target_pool.spans.len() as u32);
+        for &span in self.target_pool.spans.iter() {
+            put_span(&mut out, span);
+        }
+        put_u32(&mut out, self.states.len() as u32);
+        for state in self.states.iter() {
+            put_u16(&mut out, state.row as u16);
+            put_u16(
+                &mut out,
+                if state.final_weight == u32::MAX {
+                    0
+                } else {
+                    state.final_weight as u16 + 1
+                },
+            );
+        }
+        debug_assert_eq!(out.len(), expected_len);
+        Some(out)
+    }
+
+    fn try_backed_fast_wire_bytes_dwf3(&self) -> Option<Vec<u8>> {
+        let chunks = self.fast_wire_token_chunks.as_deref()?;
+        let word_spans = self.materialized_token_word_spans.as_deref()?;
+        if chunks.len() > u8::MAX as usize || word_spans.len() != self.token_set_count() {
+            return None;
+        }
+
+        #[inline]
+        fn put_u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        #[inline]
+        fn put_u32s(out: &mut Vec<u8>, values: &[u32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    put_u32(out, value);
+                }
+            }
+        }
+        #[inline]
+        fn put_i32s(out: &mut Vec<u8>, values: &[i32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+
+        let token_set_count = word_spans.len();
+        let mut locations = Vec::<u32>::with_capacity(token_set_count);
+        let mut chunk_set_counts = Vec::<u32>::with_capacity(chunks.len());
+        for (chunk_id, body) in chunks.iter().enumerate() {
+            let mut pos = 0usize;
+            let set_count = take_var_u32(body, &mut pos).ok()? as usize;
+            chunk_set_counts.push(u32::try_from(set_count).ok()?);
+            for _ in 0..set_count {
+                if pos >= (1usize << 24) {
+                    return None;
+                }
+                locations.push(((chunk_id as u32) << 24) | pos as u32);
+                let range_count = take_var_u32(body, &mut pos).ok()? as usize;
+                for _ in 0..range_count {
+                    let _ = take_var_u64(body, &mut pos).ok()?;
+                    let _ = take_var_u32(body, &mut pos).ok()?;
+                }
+            }
+            if pos != body.len() {
+                return None;
+            }
+        }
+        if locations.len() != token_set_count {
+            return None;
+        }
+
+        let token_bytes = chunks.iter().map(|chunk| chunk.len()).sum::<usize>();
+        let mut out = Vec::with_capacity(
+            16 + chunks.len() * 8 + token_set_count * 8 + token_bytes + self.fast_wire_tail_len(),
+        );
+        out.extend_from_slice(b"DWF3");
+        put_u32(&mut out, self.start_state);
+        put_u32(&mut out, chunks.len() as u32);
+        put_u32(&mut out, token_set_count as u32);
+        for (body, &set_count) in chunks.iter().zip(&chunk_set_counts) {
+            put_u32(&mut out, body.len() as u32);
+            put_u32(&mut out, set_count);
+        }
+        put_u32s(&mut out, &locations);
+        put_u32s(&mut out, word_spans);
+        for body in chunks {
+            out.extend_from_slice(body);
+        }
+
+        put_u32(&mut out, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u32(&mut out, geometry.len() as u32);
+            for &(start, end) in geometry {
+                put_u32(&mut out, start);
+                put_u32(&mut out, end);
+            }
+        }
+        put_u32(&mut out, self.weights.len() as u32);
+        for weight in self.weights.iter() {
+            put_u32(&mut out, weight.geometry);
+            put_u32(&mut out, weight.token_ids_start);
+            put_u32(&mut out, weight.full);
+        }
+        put_u32(&mut out, self.weight_token_ids.len() as u32);
+        put_u32s(&mut out, &self.weight_token_ids);
+        put_u32(&mut out, self.label_pool.values.len() as u32);
+        put_i32s(&mut out, &self.label_pool.values);
+        put_u32(&mut out, self.label_pool.spans.len() as u32);
+        for &[start, len] in self.label_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+        put_u32(&mut out, self.target_pool.values.len() as u32);
+        put_u32s(&mut out, &self.target_pool.values);
+        put_u32(&mut out, self.target_pool.spans.len() as u32);
+        for &[start, len] in self.target_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+        put_u32(&mut out, self.weight_id_pool.values.len() as u32);
+        put_u32s(&mut out, &self.weight_id_pool.values);
+        put_u32(&mut out, self.weight_id_pool.spans.len() as u32);
+        for &[start, len] in self.weight_id_pool.spans.iter() {
+            put_u32(&mut out, start);
+            put_u32(&mut out, len);
+        }
+        put_u32(&mut out, self.rows.len() as u32);
+        for row in self.rows.iter() {
+            put_u32(&mut out, row.labels);
+            put_u32(&mut out, row.targets);
+            put_u32(&mut out, row.weights);
+        }
+        put_u32(&mut out, self.states.len() as u32);
+        for state in self.states.iter() {
+            put_u32(&mut out, state.row);
+            put_u32(&mut out, state.final_weight);
+        }
+        Some(out)
+    }
 
     fn fast_wire_len_for_chunks(&self, chunk_bodies: &[Box<[u8]>]) -> usize {
         let token_bytes = chunk_bodies.iter().map(|body| body.len()).sum::<usize>();
@@ -561,6 +1865,84 @@ impl PackedRuntimeDwa {
     /// encoded independently so the expensive millions-of-ranges pass scales
     /// across cores without requiring lexicographic set sorting.
     pub fn fast_wire_bytes(&self) -> Vec<u8> {
+        if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
+            let token_range_count = self
+                .materialized_token_sets
+                .as_ref()
+                .map(|sets| sets.iter().map(|set| set.ranges().len()).sum::<usize>())
+                .or_else(|| self.flat_token_ranges.as_ref().map(|ranges| ranges.len()))
+                .unwrap_or_else(|| self.token_set_chunks.iter().map(|chunk| chunk.ranges.len()).sum());
+            let token_max = self
+                .materialized_token_sets
+                .as_ref()
+                .and_then(|sets| sets.iter().flat_map(|set| set.ranges()).map(|r| *r.end()).max())
+                .or_else(|| {
+                    self.flat_token_ranges
+                        .as_ref()
+                        .and_then(|ranges| ranges.iter().map(|range| range[1]).max())
+                })
+                .or_else(|| {
+                    self.token_set_chunks
+                        .iter()
+                        .flat_map(|chunk| chunk.ranges.iter())
+                        .map(|range| range[1])
+                        .max()
+                })
+                .unwrap_or(0);
+            let geometry_ranges = self.geometries.iter().map(Vec::len).sum::<usize>();
+            let geometry_max = self
+                .geometries
+                .iter()
+                .flat_map(|geometry| geometry.iter())
+                .flat_map(|&(start, end)| [start, end])
+                .max()
+                .unwrap_or(0);
+            let span_stats = |spans: &[[u32; 2]]| {
+                (
+                    spans.iter().map(|span| span[0]).max().unwrap_or(0),
+                    spans.iter().map(|span| span[1]).max().unwrap_or(0),
+                )
+            };
+            let (label_span_start, label_span_len) = span_stats(&self.label_pool.spans);
+            let (target_span_start, target_span_len) = span_stats(&self.target_pool.spans);
+            let (weight_span_start, weight_span_len) = span_stats(&self.weight_id_pool.spans);
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_layout] token_sets={} token_ranges={} token_max={} geometries={} geometry_ranges={} geometry_max={} weights={} weight_token_ids={} weight_token_id_max={} label_values={} label_min={} label_max={} label_spans={} label_span_start_max={} label_span_len_max={} target_values={} target_max={} target_spans={} target_span_start_max={} target_span_len_max={} weight_values={} weight_value_max={} weight_spans={} weight_span_start_max={} weight_span_len_max={} rows={} row_field_max={} states={} state_row_max={} state_final_max={}",
+                self.token_set_count(),
+                token_range_count,
+                token_max,
+                self.geometries.len(),
+                geometry_ranges,
+                geometry_max,
+                self.weights.len(),
+                self.weight_token_ids.len(),
+                self.weight_token_ids.iter().copied().max().unwrap_or(0),
+                self.label_pool.values.len(),
+                self.label_pool.values.iter().copied().min().unwrap_or(0),
+                self.label_pool.values.iter().copied().max().unwrap_or(0),
+                self.label_pool.spans.len(),
+                label_span_start,
+                label_span_len,
+                self.target_pool.values.len(),
+                self.target_pool.values.iter().copied().max().unwrap_or(0),
+                self.target_pool.spans.len(),
+                target_span_start,
+                target_span_len,
+                self.weight_id_pool.values.len(),
+                self.weight_id_pool.values.iter().copied().max().unwrap_or(0),
+                self.weight_id_pool.spans.len(),
+                weight_span_start,
+                weight_span_len,
+                self.rows.len(),
+                self.rows.iter().flat_map(|row| [row.labels, row.targets, row.weights]).max().unwrap_or(0),
+                self.states.len(),
+                self.states.iter().map(|state| state.row).max().unwrap_or(0),
+                self.states.iter().filter_map(|state| (state.final_weight != u32::MAX).then_some(state.final_weight)).max().unwrap_or(0),
+            );
+        }
+        if let Some(out) = self.try_backed_fast_wire_bytes() {
+            return out;
+        }
         let mut out = Vec::new();
         self.append_fast_wire_bytes(&mut out);
         out
@@ -825,7 +2207,65 @@ impl PackedRuntimeDwa {
         }
     }
 
+    pub fn from_fast_wire_bytes_backed(
+        input: &[u8],
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+    ) -> Result<Self, String> {
+        let section_end = section_start
+            .checked_add(input.len())
+            .ok_or_else(|| "overflowing backed DWA section range".to_owned())?;
+        let backed_slice = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "backed DWA section is outside artifact".to_owned())?;
+        if backed_slice.as_ptr() != input.as_ptr() || backed_slice.len() != input.len() {
+            return Err("backed DWA section does not match artifact backing".to_owned());
+        }
+        if !input.starts_with(b"DWF3")
+            && !input.starts_with(b"DWF4")
+            && !input.starts_with(b"DWF5")
+        {
+            return Self::from_fast_wire_bytes(input);
+        }
+        let (start_state, backed) =
+            BackedPackedRuntimeDwa::parse(backing, section_start, input.len())?;
+        Ok(Self {
+            start_state,
+            backed: Some(backed),
+            token_set_chunks: Box::new([]),
+            token_set_locations: Box::new([]),
+            flat_token_ranges: None,
+            flat_token_spans: None,
+            materialized_token_sets: None,
+            materialized_token_word_spans: None,
+            fast_wire_token_chunks: None,
+            fast_wire_token_chunk_range_counts: None,
+            geometries: Box::new([]),
+            weights: Box::new([]),
+            weight_token_ids: Box::new([]),
+            label_pool: PackedRuntimeSeqPool {
+                values: Box::new([]),
+                spans: Box::new([]),
+            },
+            target_pool: PackedRuntimeSeqPool {
+                values: Box::new([]),
+                spans: Box::new([]),
+            },
+            weight_id_pool: PackedRuntimeSeqPool {
+                values: Box::new([]),
+                spans: Box::new([]),
+            },
+            rows: Box::new([]),
+            states: Box::new([]),
+        })
+    }
+
     pub fn from_fast_wire_bytes(input: &[u8]) -> Result<Self, String> {
+        if input.starts_with(b"DWF3") || input.starts_with(b"DWF4") || input.starts_with(b"DWF5") {
+            let backing = Arc::new(input.to_vec());
+            let section = backing.as_slice();
+            return Self::from_fast_wire_bytes_backed(section, Arc::clone(&backing), 0);
+        }
         #[inline]
         fn take_fixed_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
             let end = pos
@@ -1567,6 +3007,7 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state,
+            backed: None,
             token_set_chunks,
             token_set_locations,
             flat_token_ranges,
@@ -1835,6 +3276,7 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state: dwa.start_state(),
+            backed: None,
             token_set_chunks: Box::new([]),
             token_set_locations: Box::new([]),
             flat_token_ranges: None,
@@ -2090,6 +3532,7 @@ impl PackedRuntimeDwa {
 
         Ok(Self {
             start_state: dwa.start_state(),
+            backed: None,
             token_set_chunks: token_set_chunks.into_boxed_slice(),
             token_set_locations: token_set_locations.into_boxed_slice(),
             flat_token_ranges: None,
@@ -2419,6 +3862,7 @@ impl PackedRuntimeDwa {
 
         let result = Self {
             start_state,
+            backed: None,
             token_set_chunks: token_set_chunks.into_boxed_slice(),
             token_set_locations: token_set_locations.into_boxed_slice(),
             flat_token_ranges: None,
@@ -2452,11 +3896,16 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn state_count(&self) -> usize {
-        self.states.len()
+        self.backed
+            .as_ref()
+            .map_or(self.states.len(), |backed| backed.state_count)
     }
 
     #[inline]
     pub fn token_set_count(&self) -> usize {
+        if let Some(backed) = &self.backed {
+            return backed.token_set_count;
+        }
         self.materialized_token_sets.as_ref().map_or_else(
             || {
                 self.flat_token_spans
@@ -2479,11 +3928,26 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn weight_count(&self) -> usize {
-        self.weights.len()
+        self.backed
+            .as_ref()
+            .map_or(self.weights.len(), |backed| backed.weight_count)
     }
 
     #[inline]
     pub fn token_set(&self, id: u32) -> Option<PackedRuntimeTokenSetRef<'_>> {
+        if let Some(backed) = &self.backed {
+            let (bytes, word_spans) = backed.token_bytes(id)?;
+            let mut pos = 0usize;
+            let range_count = take_var_u32(bytes, &mut pos).ok()?;
+            return Some(PackedRuntimeTokenSetRef {
+                id,
+                storage: PackedRuntimeTokenSetStorageRef::Varint {
+                    bytes: bytes.get(pos..)?,
+                    range_count,
+                },
+                word_spans,
+            });
+        }
         if let Some(sets) = &self.materialized_token_sets {
             let tokens = sets.get(id as usize)?;
             let word_spans = *self
@@ -2520,21 +3984,44 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn weight(&self, id: u32) -> Option<PackedRuntimeWeightRef<'_>> {
-        ((id as usize) < self.weights.len()).then_some(PackedRuntimeWeightRef { dwa: self, id })
+        self.weight_record(id)
+            .map(|_| PackedRuntimeWeightRef { dwa: self, id })
     }
 
     pub fn transition(&self, state: u32, label: Label) -> Option<(u32, PackedRuntimeWeightRef<'_>)> {
-        let state = *self.states.get(state as usize)?;
-        let row = *self.rows.get(state.row as usize)?;
-        let labels = self.label_pool.get(row.labels)?;
-        let index = labels.binary_search(&label).ok()?;
-        let target = *self.target_pool.get(row.targets)?.get(index)?;
-        let weight = *self.weight_id_pool.get(row.weights)?.get(index)?;
+        let state = self.state_record(state)?;
+        let row = self.row_record(state.row)?;
+        let index = self.find_label_in_row(row, label)?;
+        let [target_start, target_len] = self.pool_span_at(1, row.targets)?;
+        let [weight_start, weight_len] = self.pool_span_at(2, row.weights)?;
+        if index >= target_len as usize || index >= weight_len as usize {
+            return None;
+        }
+        if target_start == weight_start
+            && let Some(backed) = &self.backed
+            && backed.narrow
+        {
+            let flat_index = target_start as usize + index;
+            if flat_index >= backed.target_value_count || flat_index >= backed.weight_value_count {
+                return None;
+            }
+            let pos = if backed.label_dedup {
+                backed.target_values_start + flat_index * 4
+            } else {
+                backed.target_values_start + flat_index * 6 + 2
+            };
+            let packed = backed.read_u32(pos)?;
+            let target = packed & 0x1ffff;
+            let weight = packed >> 17;
+            return Some((target, self.weight(weight)?));
+        }
+        let target = self.target_value_at(target_start as usize + index)?;
+        let weight = self.weight_value_at(weight_start as usize + index)?;
         Some((target, self.weight(weight)?))
     }
 
     pub fn final_weight(&self, state: u32) -> Option<PackedRuntimeWeightRef<'_>> {
-        let state = *self.states.get(state as usize)?;
+        let state = self.state_record(state)?;
         (state.final_weight != u32::MAX)
             .then(|| self.weight(state.final_weight))
             .flatten()
@@ -2542,15 +4029,14 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn row_is_empty(&self, state: u32) -> bool {
-        let Some(state) = self.states.get(state as usize) else {
+        let Some(state) = self.state_record(state) else {
             return true;
         };
-        let Some(row) = self.rows.get(state.row as usize) else {
+        let Some(row) = self.row_record(state.row) else {
             return true;
         };
-        self.label_pool
-            .get(row.labels)
-            .is_none_or(|labels| labels.is_empty())
+        self.pool_span_at(0, row.labels)
+            .is_none_or(|span| span[1] == 0)
     }
 }
 
@@ -5221,6 +6707,52 @@ impl PartialEq for DWAState {
 mod cache_tests {
     use super::*;
     use crate::automata::weighted_u32::equivalence::find_difference;
+
+    fn token_weight(values: impl IntoIterator<Item = u32>) -> Weight {
+        Weight::from_per_tsid_token_sets(std::iter::once((
+            0,
+            RangeSetBlaze::from_iter(values.into_iter().map(|value| value..=value)),
+        )))
+    }
+
+    #[test]
+    fn packed_runtime_dwf5_roundtrip_preserves_direct_access() {
+        let mut dwa = DWA::new(1, 1);
+        let accept = dwa.add_state();
+        let restricted = token_weight([3, 4, 9]);
+        dwa.add_transition(0, 7, accept, restricted.clone());
+        dwa.add_transition(0, i32::MAX - 1, accept, Weight::all());
+        dwa.set_final_weight(accept, restricted);
+        let dwa = dwa.share_exact_transition_rows_owned();
+
+        let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
+        let wire = packed.fast_wire_bytes();
+        assert!(wire.starts_with(b"DWF5"));
+        let loaded = PackedRuntimeDwa::from_fast_wire_bytes(&wire).unwrap();
+
+        assert_eq!(loaded.start_state(), packed.start_state());
+        assert_eq!(loaded.state_count(), packed.state_count());
+        assert_eq!(loaded.token_set_count(), packed.token_set_count());
+        assert_eq!(loaded.weight_count(), packed.weight_count());
+
+        let (target, weight) = loaded.transition(0, 7).unwrap();
+        assert_eq!(target, accept);
+        assert!(!weight.is_full());
+        let tokens = weight.token_set_for_tsid(0).unwrap();
+        let mut ranges = Vec::new();
+        tokens.for_each_range(|start, end| ranges.push((start, end)));
+        assert_eq!(ranges, vec![(3, 4), (9, 9)]);
+
+        let (default_target, default_weight) = loaded.transition(0, i32::MAX - 1).unwrap();
+        assert_eq!(default_target, accept);
+        assert!(default_weight.is_full());
+
+        let final_weight = loaded.final_weight(accept).unwrap();
+        let final_tokens = final_weight.token_set_for_tsid(0).unwrap();
+        let mut final_ranges = Vec::new();
+        final_tokens.for_each_range(|start, end| final_ranges.push((start, end)));
+        assert_eq!(final_ranges, vec![(3, 4), (9, 9)]);
+    }
 
     #[test]
     fn mutating_shared_transition_row_converts_it_to_owned() {

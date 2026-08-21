@@ -5,6 +5,7 @@ use crate::runtime::artifact::{
 };
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
@@ -46,6 +47,48 @@ const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
 #[inline]
 fn uses_external_runtime_sections(version: u16) -> bool {
     version == CONSTRAINT_VERSION || version == PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
+}
+
+/// Clone a large already-serialized artifact without forcing one core to move
+/// the entire byte slab.  Current JS artifacts are ~20 MiB, so a serial
+/// `Vec::clone` is itself multiple milliseconds on some hosts even though the
+/// bytes need no transformation at all.
+fn clone_serialized_artifact(bytes: &[u8]) -> Vec<u8> {
+    const PARALLEL_COPY_MIN_BYTES: usize = 4 * 1024 * 1024;
+    let len = bytes.len();
+    if len < PARALLEL_COPY_MIN_BYTES || rayon::current_num_threads() <= 1 {
+        return bytes.to_vec();
+    }
+
+    // On the 16-thread Windows benchmark host, 12 ~1.7 MiB chunks saturate
+    // memory bandwidth without the scheduler overhead seen at 16+ chunks.
+    // Cap rather than multiplying the worker count: this operation is pure
+    // bandwidth, not compute.
+    let target_chunks = rayon::current_num_threads().clamp(2, 12);
+    let chunk_size = len.div_ceil(target_chunks).max(1024 * 1024);
+    let chunk_count = len.div_ceil(chunk_size);
+    let mut out = Vec::<u8>::with_capacity(len);
+    let dst_base = out.as_mut_ptr() as usize;
+    let src_base = bytes.as_ptr() as usize;
+    (0..chunk_count).into_par_iter().for_each(|chunk| {
+        let start = chunk * chunk_size;
+        let count = (len - start).min(chunk_size);
+        // SAFETY: each Rayon job owns one disjoint destination range, both
+        // source and destination allocations remain alive for the full join,
+        // and `count` is bounded by `len - start`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (src_base + start) as *const u8,
+                (dst_base + start) as *mut u8,
+                count,
+            );
+        }
+    });
+    // SAFETY: every byte in 0..len was initialized by exactly one job above.
+    unsafe {
+        out.set_len(len);
+    }
+    out
 }
 
 #[derive(Serialize)]
@@ -178,7 +221,11 @@ struct ConstraintArtifactCurrentCoreBase {
 
 fn decode_current_core(
     input: &[u8],
-) -> Result<(ConstraintArtifactCurrentCoreBase, Option<Vec<u8>>), String> {
+    backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
+) -> Result<(
+    ConstraintArtifactCurrentCoreBase,
+    Option<crate::runtime::artifact::DeferredTerminalExprBytes>,
+), String> {
     let (header_len, flags, base_len, expr_len) = if input.starts_with(&CURRENT_CORE_MAGIC) {
         if input.len() < CURRENT_CORE_HEADER_LEN {
             return Err("truncated current constraint core header".to_owned());
@@ -244,7 +291,28 @@ fn decode_current_core(
         previous_omit_tsid_inverse,
     );
     let base = decoded.map_err(|err| err.to_string())?;
-    let exprs = (expr_len != 0).then(|| input[base_end..expr_end].to_vec());
+    let exprs = if expr_len == 0 {
+        None
+    } else if let Some((backing, section_start)) = backing {
+        let start = section_start
+            .checked_add(base_end)
+            .ok_or_else(|| "current core expression backing offset overflow".to_owned())?;
+        let end = start
+            .checked_add(expr_len)
+            .ok_or_else(|| "current core expression backing range overflow".to_owned())?;
+        if backing.get(start..end) != Some(&input[base_end..expr_end]) {
+            return Err("current core expression bytes do not match artifact backing".to_owned());
+        }
+        Some(crate::runtime::artifact::DeferredTerminalExprBytes::Backed {
+            backing,
+            start,
+            len: expr_len,
+        })
+    } else {
+        Some(crate::runtime::artifact::DeferredTerminalExprBytes::Owned(
+            std::sync::Arc::from(input[base_end..expr_end].to_vec().into_boxed_slice()),
+        ))
+    };
     Ok((base, exprs))
 }
 
@@ -252,7 +320,7 @@ struct DecodedConstraintCore {
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
-    terminal_exprs_blob: Option<Vec<u8>>,
+    terminal_exprs_blob: Option<crate::runtime::artifact::DeferredTerminalExprBytes>,
     parser_state_domain_labels: Vec<i32>,
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
 }
@@ -612,8 +680,10 @@ fn decode_cache_u32_rows(
 
 fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     const HEADER_LEN: usize = 24;
-    const MAX_PREFIX_BYTES: usize = 1024 * 1024;
-    const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024;
+    // JS's exact prefix matrix is ~1.3 MiB. Keeping the old 1 MiB cutoff made
+    // every load throw that useful runtime-native cache away and rebuild it.
+    const MAX_PREFIX_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
     if !constraint.token_mask_caches_ready() {
         return Vec::new();
     }
@@ -681,17 +751,25 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
     let word_entries_bytes = word_entries.saturating_mul(6);
+    // TMC6/7 align the dense u32 matrix so load_owned can retain it directly
+    // from the artifact rather than copying ~1.3 MiB merely for alignment.
+    let prefix_unaligned_start = HEADER_LEN
+        .saturating_add(tail.len())
+        .saturating_add(word_offsets_bytes)
+        .saturating_add(word_entries_bytes);
+    let prefix_padding = (4 - (prefix_unaligned_start & 3)) & 3;
     let total_len = HEADER_LEN
         .saturating_add(tail.len())
         .saturating_add(word_offsets_bytes)
         .saturating_add(word_entries_bytes)
+        .saturating_add(prefix_padding)
         .saturating_add(prefix_bytes);
     if total_len > MAX_CACHE_BYTES {
         return encode_word_sparse_token_mask_cache(constraint);
     }
     let prefix_started = profile.then(std::time::Instant::now);
     let mut out = Vec::with_capacity(total_len);
-    out.extend_from_slice(if compact_seed { b"TMC5" } else { b"TMC4" });
+    out.extend_from_slice(if compact_seed { b"TMC7" } else { b"TMC6" });
     for value in [tail.len(), mask_words, word_groups, word_entries, prefix_rows] {
         out.extend_from_slice(
             &u32::try_from(value)
@@ -712,6 +790,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
             out.extend_from_slice(&bits.to_le_bytes());
         }
     }
+    out.resize(out.len() + prefix_padding, 0);
     for row in &constraint.word_group_prefix_buf_masks {
         append_cache_u32s(&mut out, row);
     }
@@ -730,13 +809,33 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
 }
 
 fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, String> {
+    decode_token_mask_cache_impl(input, None)
+}
+
+fn decode_token_mask_cache_backed(
+    input: &[u8],
+    backing: std::sync::Arc<Vec<u8>>,
+    section_start: usize,
+) -> Result<TokenMaskCacheArtifact, String> {
+    decode_token_mask_cache_impl(input, Some((backing, section_start)))
+}
+
+fn decode_token_mask_cache_impl(
+    input: &[u8],
+    backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
+) -> Result<TokenMaskCacheArtifact, String> {
     const MAGIC: &[u8; 4] = b"TMC3";
     const HEADER_LEN: usize = 16;
     if input.starts_with(b"TWS1") {
         return decode_word_sparse_token_mask_cache(input).map(TokenMaskCacheArtifact::WordSparse);
     }
-    if input.starts_with(b"TMC5") || input.starts_with(b"TMC4") {
-        let compact_seed = input.starts_with(b"TMC5");
+    if input.starts_with(b"TMC7")
+        || input.starts_with(b"TMC6")
+        || input.starts_with(b"TMC5")
+        || input.starts_with(b"TMC4")
+    {
+        let compact_seed = input.starts_with(b"TMC7") || input.starts_with(b"TMC5");
+        let aligned_prefix = input.starts_with(b"TMC7") || input.starts_with(b"TMC6");
         const FAST_HEADER_LEN: usize = 24;
         if input.len() < FAST_HEADER_LEN {
             return Err("invalid fast token-mask cache header".to_owned());
@@ -765,17 +864,33 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
             .checked_mul(mask_words)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| "fast token-mask prefix bytes overflow".to_owned())?;
-        let expected = tail_end
+        let prefix_unaligned_start = tail_end
             .checked_add(offsets_bytes)
             .and_then(|n| n.checked_add(entries_bytes))
-            .and_then(|n| n.checked_add(prefix_bytes))
+            .ok_or_else(|| "fast token-mask cache prefix offset overflow".to_owned())?;
+        let prefix_padding = if aligned_prefix {
+            (4 - (prefix_unaligned_start & 3)) & 3
+        } else {
+            0
+        };
+        let prefix_start = prefix_unaligned_start
+            .checked_add(prefix_padding)
+            .ok_or_else(|| "fast token-mask cache prefix padding overflow".to_owned())?;
+        let expected = prefix_start
+            .checked_add(prefix_bytes)
             .ok_or_else(|| "fast token-mask cache length overflow".to_owned())?;
         if expected != input.len() {
             return Err("invalid fast token-mask cache length".to_owned());
         }
         let offsets_start = tail_end;
         let entries_start = offsets_start + offsets_bytes;
-        let prefix_start = entries_start + entries_bytes;
+        if aligned_prefix
+            && input
+                .get(prefix_unaligned_start..prefix_start)
+                .is_none_or(|padding| padding.iter().any(|&byte| byte != 0))
+        {
+            return Err("invalid fast token-mask prefix padding".to_owned());
+        }
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         let tail_started = profile.then(std::time::Instant::now);
         let tail_bytes = input
@@ -803,8 +918,7 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
             return Err("invalid fast token-mask sparse offsets".to_owned());
         }
         let entries = &input[entries_start..prefix_start];
-        let mut word_group_sparse_masks = Vec::with_capacity(word_groups);
-        for group in 0..word_groups {
+        let decode_group = |group: usize| -> Result<InternalTokenBufMasks, String> {
             let start = offsets[group] as usize;
             let end = offsets[group + 1] as usize;
             let mut decoded = Vec::with_capacity(end - start);
@@ -836,11 +950,44 @@ fn decode_token_mask_cache(input: &[u8]) -> Result<TokenMaskCacheArtifact, Strin
                     ));
                 }
             }
-            word_group_sparse_masks.push(decoded);
-        }
+            Ok(decoded)
+        };
+        let word_group_sparse_masks = if word_groups >= 128 && rayon::current_num_threads() > 1 {
+            (0..word_groups)
+                .into_par_iter()
+                .map(decode_group)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            (0..word_groups)
+                .map(decode_group)
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let mut pos = prefix_start;
-        let word_group_prefix_buf_masks =
-            decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?;
+        let word_group_prefix_buf_masks = if aligned_prefix {
+            if let Some((backing, section_start)) = backing.as_ref() {
+                let absolute_start = section_start
+                    .checked_add(prefix_start)
+                    .ok_or_else(|| "fast token-mask backed prefix offset overflow".to_owned())?;
+                match DenseBufMaskRows::from_backed(
+                    std::sync::Arc::clone(backing),
+                    absolute_start,
+                    prefix_rows,
+                    mask_words,
+                ) {
+                    Ok(rows) => {
+                        pos = pos
+                            .checked_add(prefix_bytes)
+                            .ok_or_else(|| "fast token-mask backed prefix overflow".to_owned())?;
+                        rows
+                    }
+                    Err(_) => decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?,
+                }
+            } else {
+                decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?
+            }
+        } else {
+            decode_cache_u32_rows(input, &mut pos, prefix_rows, mask_words)?
+        };
         debug_assert_eq!(pos, input.len());
         if let Some(started) = body_started {
             eprintln!(
@@ -1535,46 +1682,73 @@ fn attach_packed_non_dwa_weights(
     pool: std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
     ids: Vec<u32>,
 ) -> Result<(), String> {
-    let mut ids = ids.into_iter();
-    let mut parser_top_accept = BTreeMap::new();
-    for &label in constraint.parser_top_accept.keys() {
-        let id = ids
-            .next()
-            .ok_or_else(|| "missing packed Weight id for parser_top_accept".to_owned())?;
-        parser_top_accept.insert(label, id);
+    let top_len = constraint.parser_top_accept.len();
+    let parts_len = constraint
+        .parser_top_accept_parts
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    let direct_len = constraint.direct_regular_l1_complete_by_terminal.len();
+    let possible_len = constraint.possible_matches.len();
+    let expected = top_len
+        .checked_add(parts_len)
+        .and_then(|value| value.checked_add(direct_len))
+        .and_then(|value| value.checked_add(possible_len))
+        .ok_or_else(|| "packed Weight id count overflow".to_owned())?;
+    if ids.len() != expected {
+        return Err(format!(
+            "packed Weight id count mismatch: expected {expected}, found {}",
+            ids.len(),
+        ));
     }
 
-    let mut parser_top_accept_parts = BTreeMap::new();
-    for (&label, parts) in &constraint.parser_top_accept_parts {
-        let mut part_ids = Vec::with_capacity(parts.len());
-        for _ in parts {
-            part_ids.push(
-                ids.next().ok_or_else(|| {
-                    "missing packed Weight id for parser_top_accept_parts".to_owned()
-                })?,
-            );
-        }
-        parser_top_accept_parts.insert(label, part_ids);
-    }
+    let (top_ids, rest) = ids.split_at(top_len);
+    let (part_ids, rest) = rest.split_at(parts_len);
+    let (direct_ids, possible_ids) = rest.split_at(direct_len);
 
-    let mut direct_regular_l1_complete_by_terminal = BTreeMap::new();
-    for &terminal in constraint.direct_regular_l1_complete_by_terminal.keys() {
-        let id = ids.next().ok_or_else(|| {
-            "missing packed Weight id for direct_regular_l1_complete_by_terminal".to_owned()
-        })?;
-        direct_regular_l1_complete_by_terminal.insert(terminal, id);
-    }
-
-    let mut possible_matches = BTreeMap::new();
-    for &terminal in constraint.possible_matches.keys() {
-        let id = ids
-            .next()
-            .ok_or_else(|| "missing packed Weight id for possible_matches".to_owned())?;
-        possible_matches.insert(terminal, id);
-    }
-    if ids.next().is_some() {
-        return Err("unused packed Weight ids after current constraint core decode".to_owned());
-    }
+    let build_small = || {
+        let parser_top_accept = constraint
+            .parser_top_accept
+            .keys()
+            .copied()
+            .zip(top_ids.iter().copied())
+            .collect::<BTreeMap<_, _>>();
+        let mut part_pos = 0usize;
+        let parser_top_accept_parts = constraint
+            .parser_top_accept_parts
+            .iter()
+            .map(|(&label, parts)| {
+                let end = part_pos + parts.len();
+                let ids = part_ids[part_pos..end].to_vec();
+                part_pos = end;
+                (label, ids)
+            })
+            .collect::<BTreeMap<_, _>>();
+        debug_assert_eq!(part_pos, part_ids.len());
+        (parser_top_accept, parser_top_accept_parts)
+    };
+    let build_direct = || {
+        constraint
+            .direct_regular_l1_complete_by_terminal
+            .keys()
+            .copied()
+            .zip(direct_ids.iter().copied())
+            .collect::<BTreeMap<_, _>>()
+    };
+    let build_possible = || {
+        constraint
+            .possible_matches
+            .keys()
+            .copied()
+            .zip(possible_ids.iter().copied())
+            .collect::<BTreeMap<_, _>>()
+    };
+    let ((parser_top_accept, parser_top_accept_parts), (direct_regular_l1_complete_by_terminal, possible_matches)) =
+        if expected >= 1_024 && rayon::current_num_threads() > 1 {
+            rayon::join(build_small, || rayon::join(build_direct, build_possible))
+        } else {
+            (build_small(), (build_direct(), build_possible()))
+        };
 
     constraint.packed_non_dwa_weights = Some(std::sync::Arc::new(
         crate::runtime::artifact::PackedNonDwaWeights {
@@ -1643,6 +1817,83 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 impl Constraint {
+    pub(crate) fn prepare_serialization_weight_pool_cache(&mut self) {
+        if self.serialized_artifact_cache.is_some() || self.prepared_weight_pool_bytes.is_some() {
+            return;
+        }
+        // Avoid adding measurable finalization work to ordinary schemas. The
+        // long save tail comes from constraints with thousands of non-DWA
+        // Weight references and hundreds of KiB of canonical WPL3 data.
+        let reference_count = self.parser_top_accept.len()
+            + self
+                .parser_top_accept_parts
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+            + self.direct_regular_l1_complete_by_terminal.len()
+            + self.possible_matches.len();
+        if reference_count < 2_048 {
+            return;
+        }
+        let weights = constraint_serialized_weight_pool(self);
+        let bytes = crate::ds::weight::pack_pooled_weights(&weights);
+        // We have already paid the full packing cost to determine the canonical
+        // bytes. Keeping even a small result is essentially free compared with
+        // throwing it away and repeating the work on first save.
+        self.prepared_weight_pool_bytes = Some(std::sync::Arc::from(bytes.into_boxed_slice()));
+    }
+
+    /// Prepare the non-DWA current-format sections whose first-save encoding is
+    /// material for very large compiler-produced constraints. The large-DWA
+    /// gate is intentionally supplied by compiler finalization so ordinary
+    /// schema compiles do not pay these serialization costs.
+    pub(crate) fn prepare_large_serialization_sections(&mut self) {
+        if self.serialized_artifact_cache.is_some()
+            || self.prepared_serialization_sections.is_some()
+            || self.prepared_parser_dwa_wire.is_none()
+        {
+            return;
+        }
+
+        self.tokenizer.prepare_artifact_wire_cache_for_large_save();
+
+        if self.deferred_terminal_exprs_blob.is_none()
+            && let Some(exprs) = self.tokenizer.terminal_exprs()
+        {
+            let bytes = bincode::serialize(exprs)
+                .expect("terminal expression preparation should succeed");
+            self.deferred_terminal_exprs_blob = Some(
+                crate::runtime::artifact::DeferredTerminalExprBytes::Owned(
+                    std::sync::Arc::from(bytes.into_boxed_slice()),
+                ),
+            );
+        }
+
+        let table = crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table);
+        let runtime = bincode::serialize(&ConstraintArtifactV15RuntimeRef {
+            terminal_live_states: &self.terminal_live_states,
+        })
+        .expect("Constraint runtime metadata serialization should succeed");
+        let original_token_map =
+            crate::runtime::artifact::original_token_map_artifact_serde::to_fast_bytes(
+                self.original_token_map(),
+            );
+        let internal_token_buf_masks = encode_internal_token_buf_masks(self);
+        let token_mask_cache = encode_token_mask_cache(self);
+
+        self.prepared_serialization_sections = Some(std::sync::Arc::new(
+            crate::runtime::artifact::PreparedSerializationSections {
+                table: std::sync::Arc::from(table.into_boxed_slice()),
+                runtime: std::sync::Arc::from(runtime.into_boxed_slice()),
+                original_token_map: std::sync::Arc::from(original_token_map.into_boxed_slice()),
+                internal_token_buf_masks: std::sync::Arc::from(
+                    internal_token_buf_masks.into_boxed_slice(),
+                ),
+                token_mask_cache: std::sync::Arc::from(token_mask_cache.into_boxed_slice()),
+            },
+        ));
+    }
+
     /// Serialize this compiled constraint to a versioned binary artifact.
     ///
     /// v13 intentionally stores the compact wire representation uncompressed.
@@ -1650,7 +1901,7 @@ impl Constraint {
     /// not depend on a decompression pass to hide structural redundancy.
     pub fn save(&self) -> Vec<u8> {
         if let Some(bytes) = &self.serialized_artifact_cache {
-            return bytes.as_ref().clone();
+            return clone_serialized_artifact(bytes.as_slice());
         }
         let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
         if std::env::var_os("GLRMASK_PROFILE_CACHE_ARTIFACT").is_some() {
@@ -1724,17 +1975,32 @@ impl Constraint {
         // a very large DFA with >u16::MAX states can expand dramatically. Keep
         // the old packed/varint tokenizer wire as a size-adaptive escape hatch.
         const FAST_TOKENIZER_MAX_BYTES: usize = 64 * 1024 * 1024;
-        let estimated_fast_tokenizer_len =
-            crate::automata::lexer::tokenizer::artifact_serde::estimated_fast_len(&self.tokenizer);
-        let compact_tokenizer = estimated_fast_tokenizer_len > FAST_TOKENIZER_MAX_BYTES;
-        let fast_tokenizer_len =
-            crate::automata::lexer::tokenizer::artifact_serde::fast_len(&self.tokenizer);
+        let prepared_tokenizer = self.tokenizer.prepared_artifact_wire_bytes();
+        let prepared_tokenizer_len = prepared_tokenizer.map(<[u8]>::len);
+        // A freshly compiled giant tokenizer already paid the exact format
+        // selection/interning cost during compiler finalization. Do not scan
+        // hundreds of thousands of states again merely to rediscover that
+        // choice on every save.
+        let compact_tokenizer = prepared_tokenizer.map_or_else(
+            || {
+                crate::automata::lexer::tokenizer::artifact_serde::estimated_fast_len(
+                    &self.tokenizer,
+                ) > FAST_TOKENIZER_MAX_BYTES
+            },
+            |bytes| bytes.starts_with(b"TKS3") || bytes.starts_with(b"TKP1") || bytes.starts_with(b"TKS2"),
+        );
+        let fast_tokenizer_len = prepared_tokenizer
+            .is_none()
+            .then(|| crate::automata::lexer::tokenizer::artifact_serde::fast_len(&self.tokenizer))
+            .flatten();
         let preserve_compressed_tokenizer = compact_tokenizer && fast_tokenizer_len.is_none();
         let direct_tokenizer_len = parallel_assembly_candidate
             .then_some(fast_tokenizer_len)
             .flatten()
             .filter(|_| !compact_tokenizer)
             .filter(|&len| len >= DIRECT_TOKENIZER_MIN_BYTES);
+        let prepared_weight_pool = self.prepared_weight_pool_bytes.as_deref();
+        let prepared_sections = self.prepared_serialization_sections.as_deref();
         let ((token_bytes, (original_token_map, (tokenizer, internal_token_buf_masks))), ((weight_pool, core), (dwa, table, runtime, token_mask_cache))) = rayon::join(
             || rayon::join(
                 || {
@@ -1752,9 +2018,13 @@ impl Constraint {
                 || rayon::join(
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes = crate::runtime::artifact::original_token_map_artifact_serde::to_fast_bytes(
-                            self.original_token_map(),
-                        );
+                        let bytes = if prepared_sections.is_some() {
+                            Vec::new()
+                        } else {
+                            crate::runtime::artifact::original_token_map_artifact_serde::to_fast_bytes(
+                                self.original_token_map(),
+                            )
+                        };
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=original_token_map ms={:.3} bytes={}",
@@ -1767,10 +2037,23 @@ impl Constraint {
                     || rayon::join(
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = if preserve_compressed_tokenizer {
-                                crate::automata::lexer::tokenizer::artifact_serde::to_segment_bytes(
+                            let bytes = if prepared_tokenizer.is_some() {
+                                // The prepared current-format tokenizer is
+                                // already immutable storage owned by the
+                                // constraint. Keep it borrowed until final
+                                // artifact assembly instead of cloning a
+                                // multi-megabyte section into a temporary Vec
+                                // and immediately copying it a second time.
+                                Vec::new()
+                            } else if preserve_compressed_tokenizer {
+                                crate::automata::lexer::tokenizer::artifact_serde::build_huge_bytes(
                                     &self.tokenizer,
                                 )
+                                    .unwrap_or_else(|| {
+                                        crate::automata::lexer::tokenizer::artifact_serde::to_segment_bytes(
+                                            &self.tokenizer,
+                                        )
+                                    })
                             } else if compact_tokenizer {
                                 crate::automata::lexer::tokenizer::artifact_serde::to_packed_bytes(
                                     &self.tokenizer,
@@ -1786,14 +2069,20 @@ impl Constraint {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=tokenizer ms={:.3} bytes={}",
                                     started.elapsed().as_secs_f64() * 1000.0,
-                                    direct_tokenizer_len.unwrap_or(bytes.len()),
+                                    prepared_tokenizer_len
+                                        .or(direct_tokenizer_len)
+                                        .unwrap_or(bytes.len()),
                                 );
                             }
                             bytes
                         },
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = encode_internal_token_buf_masks(self);
+                            let bytes = if prepared_sections.is_some() {
+                                Vec::new()
+                            } else {
+                                encode_internal_token_buf_masks(self)
+                            };
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=internal_token_buf_masks ms={:.3} bytes={}",
@@ -1813,7 +2102,10 @@ impl Constraint {
                 let (weight_pool, encoded) = rayon::join(
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let weight_pool = crate::ds::weight::pack_pooled_weights(&weights);
+                        let weight_pool = prepared_weight_pool.map_or_else(
+                            || crate::ds::weight::pack_pooled_weights(&weights),
+                            |_| Vec::new(),
+                        );
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=weights ms={:.3} bytes={}",
@@ -1888,11 +2180,11 @@ impl Constraint {
                         encoded[base_len_offset..base_len_offset + 8]
                             .copy_from_slice(&(base_len as u64).to_le_bytes());
                         let expr_start = encoded.len();
-                        if let Some(exprs) = self.tokenizer.terminal_exprs() {
+                        if let Some(blob) = self.deferred_terminal_exprs_blob.as_ref() {
+                            encoded.extend_from_slice(blob.as_slice());
+                        } else if let Some(exprs) = self.tokenizer.terminal_exprs() {
                             bincode::serialize_into(&mut encoded, exprs)
                                 .expect("terminal expression serialization should succeed");
-                        } else if let Some(blob) = self.deferred_terminal_exprs_blob.as_deref() {
-                            encoded.extend_from_slice(blob);
                         }
                         let expr_len = encoded.len() - expr_start;
                         encoded[expr_len_offset..expr_len_offset + 8]
@@ -1969,7 +2261,11 @@ impl Constraint {
                     },
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes = crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table);
+                        let bytes = if prepared_sections.is_some() {
+                            Vec::new()
+                        } else {
+                            crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table)
+                        };
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=table ms={:.3} bytes={}",
@@ -1984,10 +2280,14 @@ impl Constraint {
                     || rayon::join(
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = bincode::serialize(&ConstraintArtifactV15RuntimeRef {
-                                terminal_live_states: &self.terminal_live_states,
-                            })
-                            .expect("Constraint runtime metadata serialization should succeed");
+                            let bytes = if prepared_sections.is_some() {
+                                Vec::new()
+                            } else {
+                                bincode::serialize(&ConstraintArtifactV15RuntimeRef {
+                                    terminal_live_states: &self.terminal_live_states,
+                                })
+                                .expect("Constraint runtime metadata serialization should succeed")
+                            };
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=runtime ms={:.3} bytes={}",
@@ -1999,7 +2299,11 @@ impl Constraint {
                         },
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = encode_token_mask_cache(self);
+                            let bytes = if prepared_sections.is_some() {
+                                Vec::new()
+                            } else {
+                                encode_token_mask_cache(self)
+                            };
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=token_mask_cache ms={:.3} bytes={}",
@@ -2016,10 +2320,20 @@ impl Constraint {
             ),
         );
 
-        let dwa_wire_len = self
-            .packed_parser_dwa
+        // `PackedRuntimeDwa::fast_wire_len()` is the exact DWF2 size.  The
+        // actual current wire may be a substantially narrower DWF4/DWF5.
+        // Use the DWF2 value only as a cheap materialization threshold; once
+        // the current wire has been materialized its real byte length must be
+        // authoritative for the V19 allocation and section header.
+        let estimated_dwa_wire_len = self
+            .prepared_parser_dwa_wire
             .as_ref()
-            .and_then(|packed| packed.fast_wire_len())
+            .map(|bytes| bytes.len())
+            .or_else(|| {
+                self.packed_parser_dwa
+                    .as_ref()
+                    .and_then(|packed| packed.fast_wire_len())
+            })
             .unwrap_or(dwa.len());
         // For ordinary constraints, materializing the small packed-DWA section
         // is much cheaper than serially copying the entire multi-megabyte
@@ -2028,26 +2342,56 @@ impl Constraint {
         // ranges in parallel. Large JS-like DWAs keep direct emission below to
         // avoid creating a second 10+ MiB DWA buffer.
         let packed_dwa_for_parallel = self
-            .packed_parser_dwa
-            .as_ref()
-            .filter(|_| dwa_wire_len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES)
-            .map(|packed| packed.fast_wire_bytes());
-        let parallel_dwa = packed_dwa_for_parallel
+            .prepared_parser_dwa_wire
+            .is_none()
+            .then(|| {
+                self.packed_parser_dwa
+                    .as_ref()
+                    .filter(|_| {
+                        estimated_dwa_wire_len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES
+                    })
+                    .map(|packed| packed.fast_wire_bytes())
+            })
+            .flatten();
+        let parallel_dwa = self
+            .prepared_parser_dwa_wire
             .as_deref()
+            .or_else(|| packed_dwa_for_parallel.as_deref())
             .or_else(|| self.packed_parser_dwa.is_none().then_some(dwa.as_slice()));
-        let tokenizer_wire_len = direct_tokenizer_len.unwrap_or(tokenizer.len());
+        let dwa_wire_len = parallel_dwa
+            .map(<[u8]>::len)
+            .unwrap_or(estimated_dwa_wire_len);
+        let tokenizer_wire_len = prepared_tokenizer_len
+            .or(direct_tokenizer_len)
+            .unwrap_or(tokenizer.len());
+        let weight_pool_wire = prepared_weight_pool.unwrap_or(weight_pool.as_slice());
+        let table_wire = prepared_sections
+            .map(|sections| sections.table.as_ref())
+            .unwrap_or(table.as_slice());
+        let runtime_wire = prepared_sections
+            .map(|sections| sections.runtime.as_ref())
+            .unwrap_or(runtime.as_slice());
+        let original_token_map_wire = prepared_sections
+            .map(|sections| sections.original_token_map.as_ref())
+            .unwrap_or(original_token_map.as_slice());
+        let internal_token_buf_masks_wire = prepared_sections
+            .map(|sections| sections.internal_token_buf_masks.as_ref())
+            .unwrap_or(internal_token_buf_masks.as_slice());
+        let token_mask_cache_wire = prepared_sections
+            .map(|sections| sections.token_mask_cache.as_ref())
+            .unwrap_or(token_mask_cache.as_slice());
         let assemble_started = profile.then(std::time::Instant::now);
         let payload_len = V19_SECTION_HEADER_LEN
-            + weight_pool.len()
+            + weight_pool_wire.len()
             + dwa_wire_len
-            + table.len()
+            + table_wire.len()
             + core.len()
-            + runtime.len()
+            + runtime_wire.len()
             + token_bytes.len()
-            + original_token_map.len()
+            + original_token_map_wire.len()
             + tokenizer_wire_len
-            + internal_token_buf_masks.len()
-            + token_mask_cache.len();
+            + internal_token_buf_masks_wire.len()
+            + token_mask_cache_wire.len();
         if let Some(dwa_bytes) = parallel_dwa {
             debug_assert_eq!(dwa_bytes.len(), dwa_wire_len);
             let total_len = CONSTRAINT_HEADER_LEN + payload_len;
@@ -2071,47 +2415,47 @@ impl Constraint {
             header[pos..pos + V19_SECTION_MAGIC.len()].copy_from_slice(&V19_SECTION_MAGIC);
             pos += V19_SECTION_MAGIC.len();
             for len in [
-                weight_pool.len(),
+                weight_pool_wire.len(),
                 dwa_bytes.len(),
-                table.len(),
+                table_wire.len(),
                 core.len(),
-                runtime.len(),
+                runtime_wire.len(),
                 token_bytes.len(),
-                original_token_map.len(),
+                original_token_map_wire.len(),
                 tokenizer_wire_len,
-                internal_token_buf_masks.len(),
-                token_mask_cache.len(),
+                internal_token_buf_masks_wire.len(),
+                token_mask_cache_wire.len(),
             ] {
                 header[pos..pos + 8].copy_from_slice(&(len as u64).to_le_bytes());
                 pos += 8;
             }
             debug_assert_eq!(pos, header.len());
 
-            let mut copy_jobs = Vec::<(&mut [u8], &[u8])>::with_capacity(10);
+            let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(24);
             let mut direct_tokenizer_destination = None;
             let sources: [&[u8]; 10] = [
-                weight_pool.as_slice(),
+                weight_pool_wire,
                 dwa_bytes,
-                table.as_slice(),
+                table_wire,
                 core.as_slice(),
-                runtime.as_slice(),
+                runtime_wire,
                 token_bytes.as_slice(),
-                original_token_map.as_slice(),
-                tokenizer.as_slice(),
-                internal_token_buf_masks.as_slice(),
-                token_mask_cache.as_slice(),
+                original_token_map_wire,
+                prepared_tokenizer.unwrap_or(tokenizer.as_slice()),
+                internal_token_buf_masks_wire,
+                token_mask_cache_wire,
             ];
             for (index, len) in [
-                weight_pool.len(),
+                weight_pool_wire.len(),
                 dwa_bytes.len(),
-                table.len(),
+                table_wire.len(),
                 core.len(),
-                runtime.len(),
+                runtime_wire.len(),
                 token_bytes.len(),
-                original_token_map.len(),
+                original_token_map_wire.len(),
                 tokenizer_wire_len,
-                internal_token_buf_masks.len(),
-                token_mask_cache.len(),
+                internal_token_buf_masks_wire.len(),
+                token_mask_cache_wire.len(),
             ]
             .into_iter()
             .enumerate()
@@ -2120,37 +2464,81 @@ impl Constraint {
                 if index == 7 && direct_tokenizer_len.is_some() {
                     direct_tokenizer_destination = Some(section);
                 } else {
-                    copy_jobs.push((section, sources[index]));
+                    const PARALLEL_COPY_SPLIT_MIN_BYTES: usize = 4 * 1024 * 1024;
+                    let source = sources[index];
+                    if len >= PARALLEL_COPY_SPLIT_MIN_BYTES && rayon::current_num_threads() > 1 {
+                        let target_chunks = rayon::current_num_threads().clamp(2, 12);
+                        let chunk_size = len.div_ceil(target_chunks).max(1024 * 1024);
+                        let mut destination = section;
+                        let mut source = source;
+                        while !source.is_empty() {
+                            let count = chunk_size.min(source.len());
+                            let (destination_chunk, destination_rest) = destination.split_at_mut(count);
+                            let (source_chunk, source_rest) = source.split_at(count);
+                            copy_jobs.push((
+                                destination_chunk.as_mut_ptr() as usize,
+                                source_chunk.as_ptr() as usize,
+                                count,
+                            ));
+                            destination = destination_rest;
+                            source = source_rest;
+                        }
+                    } else {
+                        copy_jobs.push((
+                            section.as_mut_ptr() as usize,
+                            source.as_ptr() as usize,
+                            source.len(),
+                        ));
+                    }
                 }
                 body = rest;
             }
             debug_assert!(body.is_empty());
             if rayon::current_num_threads() > 1 {
-                rayon::scope(|scope| {
-                    for (destination, source) in copy_jobs {
-                        scope.spawn(move |_| destination.copy_from_slice(source));
-                    }
-                    if let Some(destination) = direct_tokenizer_destination {
-                        scope.spawn(|_| {
-                            let started = profile.then(std::time::Instant::now);
-                            crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes(
-                                &self.tokenizer,
-                                destination,
-                            )
-                            .expect("precomputed fast tokenizer layout should match final section");
-                            if let Some(started) = started {
-                                eprintln!(
-                                    "[glrmask/profile][constraint_save_section] name=tokenizer_direct ms={:.3} bytes={}",
-                                    started.elapsed().as_secs_f64() * 1000.0,
-                                    destination.len(),
-                                );
-                            }
-                        });
-                    }
-                });
+                let copy_all = || {
+                    copy_jobs.into_par_iter().for_each(|(destination, source, len)| {
+                        // SAFETY: jobs were created from disjoint final-artifact
+                        // ranges. Source sections remain alive for the whole
+                        // join and never overlap the destination allocation.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                source as *const u8,
+                                destination as *mut u8,
+                                len,
+                            );
+                        }
+                    });
+                };
+                if let Some(destination) = direct_tokenizer_destination {
+                    let write_tokenizer = || {
+                        let started = profile.then(std::time::Instant::now);
+                        crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes(
+                            &self.tokenizer,
+                            destination,
+                        )
+                        .expect("precomputed fast tokenizer layout should match final section");
+                        if let Some(started) = started {
+                            eprintln!(
+                                "[glrmask/profile][constraint_save_section] name=tokenizer_direct ms={:.3} bytes={}",
+                                started.elapsed().as_secs_f64() * 1000.0,
+                                destination.len(),
+                            );
+                        }
+                    };
+                    rayon::join(copy_all, write_tokenizer);
+                } else {
+                    copy_all();
+                }
             } else {
-                for (destination, source) in copy_jobs {
-                    destination.copy_from_slice(source);
+                for (destination, source, len) in copy_jobs {
+                    // SAFETY: same disjointness/liveness argument as above.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            source as *const u8,
+                            destination as *mut u8,
+                            len,
+                        );
+                    }
                 }
                 if let Some(destination) = direct_tokenizer_destination {
                     crate::automata::lexer::tokenizer::artifact_serde::write_fast_bytes(
@@ -2181,18 +2569,18 @@ impl Constraint {
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&V19_SECTION_MAGIC);
-        bytes.extend_from_slice(&(weight_pool.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(table.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(table_wire.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(core.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(runtime.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(runtime_wire.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(token_bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(original_token_map.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(original_token_map_wire.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&(tokenizer_wire_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&(internal_token_buf_masks.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&(token_mask_cache.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&weight_pool);
+        bytes.extend_from_slice(&(internal_token_buf_masks_wire.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(token_mask_cache_wire.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(weight_pool_wire);
         let dwa_start = bytes.len();
         if let Some(packed) = &self.packed_parser_dwa {
             debug_assert!(dwa.is_empty());
@@ -2211,18 +2599,20 @@ impl Constraint {
         let dwa_len = bytes.len() - dwa_start;
         bytes[dwa_len_offset..dwa_len_offset + 8]
             .copy_from_slice(&(dwa_len as u64).to_le_bytes());
-        bytes.extend_from_slice(&table);
+        bytes.extend_from_slice(table_wire);
         bytes.extend_from_slice(&core);
-        bytes.extend_from_slice(&runtime);
+        bytes.extend_from_slice(runtime_wire);
         bytes.extend_from_slice(token_bytes.as_slice());
-        bytes.extend_from_slice(&original_token_map);
-        if direct_tokenizer_len.is_some() {
+        bytes.extend_from_slice(original_token_map_wire);
+        if let Some(prepared) = prepared_tokenizer {
+            bytes.extend_from_slice(prepared);
+        } else if direct_tokenizer_len.is_some() {
             unreachable!("direct tokenizer encoding requires the parallel assembly path");
         } else {
             bytes.extend_from_slice(&tokenizer);
         }
-        bytes.extend_from_slice(&internal_token_buf_masks);
-        bytes.extend_from_slice(&token_mask_cache);
+        bytes.extend_from_slice(internal_token_buf_masks_wire);
+        bytes.extend_from_slice(token_mask_cache_wire);
         let payload_len = bytes.len() - CONSTRAINT_HEADER_LEN;
         bytes[payload_len_offset..payload_len_offset + 8]
             .copy_from_slice(&(payload_len as u64).to_le_bytes());
@@ -2460,7 +2850,34 @@ impl Constraint {
                                 || version == PREVIOUS_FAST_RUNTIME_CONSTRAINT_VERSION
                                 || version == PREVIOUS_PACKED_RUNTIME_CONSTRAINT_VERSION
                             {
-                                let decoded = if dwa_section.starts_with(b"DWF1")
+                                let decoded = if dwa_section.starts_with(b"DWF3")
+                                    || dwa_section.starts_with(b"DWF4")
+                                    || dwa_section.starts_with(b"DWF5")
+                                {
+                                    let backing = current_backing.as_ref().ok_or_else(|| {
+                                        "current backed DWA has no artifact backing".to_owned()
+                                    });
+                                    match backing {
+                                        Ok(backing) => {
+                                            let base = backing.as_ptr() as usize;
+                                            let section_start = (dwa_section.as_ptr() as usize)
+                                                .checked_sub(base)
+                                                .ok_or_else(|| {
+                                                    "DWA section does not belong to artifact backing"
+                                                        .to_owned()
+                                                });
+                                            match section_start {
+                                                Ok(section_start) => crate::automata::weighted::dwa::PackedRuntimeDwa::from_fast_wire_bytes_backed(
+                                                    dwa_section,
+                                                    std::sync::Arc::clone(backing),
+                                                    section_start,
+                                                ),
+                                                Err(err) => Err(err),
+                                            }
+                                        }
+                                        Err(err) => Err(err),
+                                    }
+                                } else if dwa_section.starts_with(b"DWF1")
                                     || dwa_section.starts_with(b"DWF2")
                                 {
                                     crate::automata::weighted::dwa::PackedRuntimeDwa::from_fast_wire_bytes(
@@ -2491,7 +2908,33 @@ impl Constraint {
                             rayon::join(
                                 || {
                                     let started = profile.then(std::time::Instant::now);
-                                    let result = crate::compiler::glr::table::artifact_serde::from_compact_bytes(table_section);
+                                    let result = if uses_external_runtime_sections(version) {
+                                        let backing = current_backing.as_ref().ok_or_else(|| {
+                                            "current GLR table has no artifact backing".to_owned()
+                                        });
+                                        match backing {
+                                            Ok(backing) => {
+                                                let base = backing.as_ptr() as usize;
+                                                let section_start = (table_section.as_ptr() as usize)
+                                                    .checked_sub(base)
+                                                    .ok_or_else(|| {
+                                                        "GLR table section does not belong to artifact backing"
+                                                            .to_owned()
+                                                    });
+                                                match section_start {
+                                                    Ok(section_start) => crate::compiler::glr::table::artifact_serde::from_compact_bytes_deferred_backed(
+                                                        table_section,
+                                                        std::sync::Arc::clone(backing),
+                                                        section_start,
+                                                    ),
+                                                    Err(err) => Err(err),
+                                                }
+                                            }
+                                            Err(err) => Err(err),
+                                        }
+                                    } else {
+                                        crate::compiler::glr::table::artifact_serde::from_compact_bytes_deferred(table_section)
+                                    };
                                     if let Some(started) = started {
                                         eprintln!("[glrmask/profile][constraint_section] name=table ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                                     }
@@ -2719,7 +3162,12 @@ impl Constraint {
                             if core_section.starts_with(&CURRENT_CORE_MAGIC)
                                 || core_section.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC)
                             {
-                                decode_current_core(core_section)
+                                let core_backing = current_backing.as_ref().and_then(|backing| {
+                                    let base = backing.as_ptr() as usize;
+                                    let start = (core_section.as_ptr() as usize).checked_sub(base)?;
+                                    Some((std::sync::Arc::clone(backing), start))
+                                });
+                                decode_current_core(core_section, core_backing)
                                 .map(|(artifact, terminal_exprs_blob)| DecodedConstraintCore {
                                     constraint: artifact.constraint,
                                     ignore_expr: artifact.ignore_expr,
@@ -2832,7 +3280,9 @@ impl Constraint {
                 },
             );
             let parser_dwa = dwa_result.map_err(crate::GlrMaskError::Serialization)?;
-            let table = table_result.map_err(crate::GlrMaskError::Serialization)?;
+            let decoded_table = table_result.map_err(crate::GlrMaskError::Serialization)?;
+            let table = decoded_table.table;
+            let deferred_table_rules_blob = decoded_table.deferred_rules;
             let runtime = runtime_result.map_err(crate::GlrMaskError::Serialization)?;
             let tokenizer = tokenizer_result.map_err(crate::GlrMaskError::Serialization)?;
             let original_token_map =
@@ -2906,6 +3356,8 @@ impl Constraint {
             let attach_dwa_ms = attach_dwa_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             constraint.table = table;
+            constraint.deferred_table_rules_blob = deferred_table_rules_blob;
+            constraint.deferred_table_rules = Default::default();
             let invert_started = profile.then(std::time::Instant::now);
             if !uses_external_runtime_sections(version)
                 && version != PREVIOUS_VOCAB_SECTION_CONSTRAINT_VERSION
@@ -2920,9 +3372,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
-            constraint.deferred_terminal_exprs_blob = artifact
-                .terminal_exprs_blob
-                .map(|blob| std::sync::Arc::<[u8]>::from(blob.into_boxed_slice()));
+            constraint.deferred_terminal_exprs_blob = artifact.terminal_exprs_blob;
             constraint.deferred_terminal_exprs = Default::default();
             if let Some(decoded) = external_internal_token_buf_masks {
                 constraint.internal_token_buf_masks = Vec::new();
@@ -3150,6 +3600,30 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
+    }
+
+    #[test]
+    fn current_parallel_save_uses_actual_narrow_dwa_wire_length() {
+        let mut constraint = tiny_constraint();
+        let packed = crate::automata::weighted::dwa::PackedRuntimeDwa::from_dwa(
+            &constraint.parser_dwa,
+        )
+        .unwrap();
+        let estimated = packed.fast_wire_len().unwrap();
+        let wire = packed.fast_wire_bytes();
+        assert!(wire.starts_with(b"DWF5"));
+        assert_ne!(
+            estimated,
+            wire.len(),
+            "this regression requires the DWF2 size estimate to differ from the actual narrow wire",
+        );
+        assert!(estimated <= 1024 * 1024);
+
+        constraint.packed_parser_dwa = Some(Arc::new(packed));
+        constraint.prepared_parser_dwa_wire = None;
+        let saved = constraint.save();
+        let loaded = Constraint::load(&saved).unwrap();
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 
     #[test]

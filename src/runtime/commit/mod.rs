@@ -28,6 +28,7 @@ use crate::compiler::glr::parser::{
     stack_admissible_terminals,
 };
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
+use crate::compiler::glr::table::row::ActionRow;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{
     CommitBuffers, ConstraintState, INLINE_PARSER_STATE_CAPACITY, LINEAR_STACK_RESERVE,
@@ -586,6 +587,33 @@ fn bitset_union_intersection_prefix(
     }
 }
 
+/// Return the sole candidate in `actions` that is requested by `terminals`
+/// and not already covered by the unconditional-advance row.  `Err(())`
+/// means there are at least two candidates, so the single-terminal bounded
+/// shortcut is not applicable.
+#[inline]
+fn single_conditional_candidate(
+    actions: &ActionRow,
+    unconditional: &crate::ds::bitset::BitSet,
+    terminals: &crate::ds::bitset::BitSet,
+) -> Result<Option<u32>, ()> {
+    let mut selected = None;
+    for (terminal, _action) in actions.iter() {
+        let bit = terminal as usize;
+        if bit >= terminals.len()
+            || !terminals.contains(bit)
+            || unconditional.contains(bit)
+        {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(());
+        }
+        selected = Some(terminal);
+    }
+    Ok(selected)
+}
+
 fn exact_simulation_prefilter_may_advance_on_any(
     constraint: &Constraint,
     stack: &ParserGSS,
@@ -616,34 +644,23 @@ fn exact_simulation_prefilter_may_advance_on_any(
     // concrete-stack exact path when each current top has at most one remaining
     // candidate terminal; otherwise fall through to the general exact closure.
     let mut terminal_by_top = SmallVec::<[(u32, u32); 8]>::new();
-    for &top in &tops {
+    let mut bounded_applicable = true;
+    'tops: for &top in &tops {
         let actions = constraint.table.action.get(top as usize)?;
         let unconditional = constraint.table.unconditional_advance_row(top)?;
-        let mut selected = None;
-        for (terminal, _action) in actions.iter() {
-            let bit = terminal as usize;
-            if bit >= terminals.len()
-                || !terminals.contains(bit)
-                || unconditional.contains(bit)
-            {
-                continue;
+        let selected = match single_conditional_candidate(actions, unconditional, terminals) {
+            Ok(selected) => selected,
+            Err(()) => {
+                bounded_applicable = false;
+                break 'tops;
             }
-            if selected.is_some() {
-                terminal_by_top.clear();
-                break;
-            }
-            selected = Some(terminal);
-        }
-        if terminal_by_top.is_empty() && selected.is_none() {
-            continue;
-        }
+        };
         if let Some(terminal) = selected {
             terminal_by_top.push((top, terminal));
-        } else if terminal_by_top.is_empty() {
-            break;
         }
     }
-    if !terminal_by_top.is_empty()
+    if bounded_applicable
+        && !terminal_by_top.is_empty()
         && let Some(result) = stack_may_advance_disjoint_top_terminals_bounded(
             &constraint.table,
             stack,
@@ -6656,6 +6673,7 @@ fn try_commit_direct_linear_in_place(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     frontier: &mut FlatFrontierScratch,
 ) -> Option<Result<(), String>> {
+    let debug_path = std::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
     let (&start_tokenizer_state, gss) = state.iter().next()?;
     let acc = gss.single_path_acc()?;
     if !acc.is_empty()
@@ -6693,6 +6711,20 @@ fn try_commit_direct_linear_in_place(
             &tokenizer_scratch.matches,
             None,
         );
+        if debug_path {
+            eprintln!(
+                "[glrmask/debug][direct_linear_step] offset={} tokenizer_state={} stack={:?} raw_matches={:?} normalized={:?} end_states={:?}",
+                offset,
+                tokenizer_state,
+                work,
+                tokenizer_scratch.matches,
+                normalized_matches
+                    .iter()
+                    .map(|m| (m.terminal_id, m.width, m.ignored))
+                    .collect::<Vec<_>>(),
+                tokenizer_scratch.states,
+            );
+        }
         if normalized_matches.len() > 1 {
             return None;
         }
@@ -6743,12 +6775,23 @@ fn try_commit_direct_linear_in_place(
                 // The general path must attach a future-terminal exclusion.
                 return None;
             }
-            match apply_terminal_to_flat_stacks(
+            let applied = apply_terminal_to_flat_stacks(
                 constraint,
                 matched.terminal_id,
                 work,
                 &mut frontier.action,
-            ) {
+            );
+            if debug_path {
+                eprintln!(
+                    "[glrmask/debug][direct_linear_apply] terminal={} top_before={:?} table_action={:?} applied={:?} complete={:?}",
+                    matched.terminal_id,
+                    work.last().copied(),
+                    work.last().and_then(|&top| constraint.table.action(top, matched.terminal_id)),
+                    applied,
+                    frontier.action.complete,
+                );
+            }
+            match applied {
                 Some(true) if frontier.action.complete.len() == 1 => {
                     work.clear();
                     work.extend_from_slice(&frontier.action.complete[0]);
@@ -7778,6 +7821,39 @@ mod tests {
         state: &ParserStateMap,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn exact_prefilter_rejects_multiple_conditional_candidates_independent_of_row_order() {
+        let mut terminals = crate::ds::bitset::BitSet::new(8);
+        terminals.set(1);
+        terminals.set(2);
+        let unconditional = crate::ds::bitset::BitSet::new(8);
+
+        let row_a = ActionRow::from_iter([
+            (1, Action::Reduce(0, 1)),
+            (2, Action::Reduce(0, 1)),
+        ]);
+        let row_b = ActionRow::from_iter([
+            (2, Action::Reduce(0, 1)),
+            (1, Action::Reduce(0, 1)),
+        ]);
+
+        assert_eq!(
+            single_conditional_candidate(&row_a, &unconditional, &terminals),
+            Err(()),
+        );
+        assert_eq!(
+            single_conditional_candidate(&row_b, &unconditional, &terminals),
+            Err(()),
+        );
+
+        let mut one_terminal = crate::ds::bitset::BitSet::new(8);
+        one_terminal.set(2);
+        assert_eq!(
+            single_conditional_candidate(&row_a, &unconditional, &one_terminal),
+            Ok(Some(2)),
+        );
     }
 
     #[test]

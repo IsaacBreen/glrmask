@@ -17,7 +17,8 @@ pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 #[allow(unused_imports)]
 pub use compose::{
     ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
-    compose_subgrammar_tables_explicit,
+    compose_subgrammar_tables_explicit, compose_subgrammar_tables_explicit_with_rules,
+    compose_subgrammar_tables_with_rules,
 };
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
@@ -138,6 +139,7 @@ pub mod artifact_serde {
     use std::cell::Cell;
 
     use super::*;
+    use rayon::prelude::*;
     use serde::{Deserializer, Serializer};
 
     thread_local! {
@@ -282,14 +284,573 @@ pub mod artifact_serde {
         direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
     }
 
-    const PARALLEL_TABLE_MAGIC: &[u8; 4] = b"GTC2";
+    #[derive(Serialize)]
+    struct CompactTableMetaNoRulesRef<'a> {
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        first_rule: Option<&'a Rule>,
+        nonterminal_display_names: &'a [String],
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        forwarded_shifts: &'a FxHashSet<(u32, TerminalID)>,
+        control_terminals: &'a BTreeSet<TerminalID>,
+        skip_terminals: &'a BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: &'a [DirectRegularWideFrontierDescriptor],
+    }
+
+    #[derive(Deserialize)]
+    struct CompactTableMetaNoRules {
+        num_states: u32,
+        num_terminals: u32,
+        num_rules: u32,
+        first_rule: Option<Rule>,
+        nonterminal_display_names: Vec<String>,
+        construction: GlrTableConstruction,
+        admission_policy: AdmissionPolicy,
+        forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+        control_terminals: BTreeSet<TerminalID>,
+        skip_terminals: BTreeSet<TerminalID>,
+        direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
+    }
+
+    const PARALLEL_TABLE_MAGIC_V2: &[u8; 4] = b"GTC2";
+    const PARALLEL_TABLE_MAGIC: &[u8; 4] = b"GTC3";
     const PARALLEL_TABLE_HEADER_LEN: usize = 4 + 4 * 8;
+    const CHUNKED_ACTION_MAGIC: &[u8; 4] = b"GTA1";
+    const SIMPLE_ACTION_MAGIC: &[u8; 4] = b"GSA1";
+    const CHUNKED_ACTION_HEADER_LEN: usize = 12;
+    const CHUNKED_ACTION_MIN_ROWS: usize = 8_192;
+    const SIMPLE_ACTION_MIN_ROWS: usize = 512;
+    const DEFERRED_META_MAGIC: &[u8; 4] = b"GTM2";
+    const DEFERRED_META_HEADER_LEN: usize = 4 + 4 + 8 + 8;
+    const CHUNKED_RULES_MIN_ROWS: usize = 8_192;
+
+    #[inline]
+    fn put_fixed_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn take_fixed_u32(input: &[u8], pos: &mut usize, context: &str) -> Result<u32, String> {
+        let end = pos
+            .checked_add(4)
+            .ok_or_else(|| format!("overflowing {context} offset"))?;
+        let bytes: [u8; 4] = input
+            .get(*pos..end)
+            .ok_or_else(|| format!("truncated {context} u32"))?
+            .try_into()
+            .expect("four-byte slice");
+        *pos = end;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn decode_simple_action(input: &[u8], pos: &mut usize) -> Result<Action, String> {
+        let tag = *input
+            .get(*pos)
+            .ok_or_else(|| "truncated simple GLR action tag".to_owned())?;
+        *pos += 1;
+        match tag {
+            0 => {
+                let target = take_fixed_u32(input, pos, "simple GLR shift target")?;
+                let replace = match input.get(*pos).copied() {
+                    Some(0) => false,
+                    Some(1) => true,
+                    Some(_) => return Err("invalid simple GLR shift replace flag".to_owned()),
+                    None => return Err("truncated simple GLR shift replace flag".to_owned()),
+                };
+                *pos += 1;
+                Ok(Action::Shift(target, replace))
+            }
+            1 => {
+                let nonterminal = take_fixed_u32(input, pos, "simple GLR reduce nonterminal")?;
+                let len = take_fixed_u32(input, pos, "simple GLR reduce length")?;
+                Ok(Action::Reduce(nonterminal, len))
+            }
+            2 => Ok(Action::Accept),
+            3 => Ok(Action::Skip),
+            4 => {
+                let flags = *input
+                    .get(*pos)
+                    .ok_or_else(|| "truncated simple GLR split flags".to_owned())?;
+                *pos += 1;
+                if flags & !0b111 != 0 || (flags & 0b10 != 0 && flags & 0b1 == 0) {
+                    return Err("invalid simple GLR split flags".to_owned());
+                }
+                let shift = if flags & 1 != 0 {
+                    let target = take_fixed_u32(input, pos, "simple GLR split target")?;
+                    Some((target, flags & 2 != 0))
+                } else {
+                    None
+                };
+                let reduce_count =
+                    take_fixed_u32(input, pos, "simple GLR split reduce count")? as usize;
+                let mut reduces = Vec::with_capacity(reduce_count);
+                for _ in 0..reduce_count {
+                    reduces.push((
+                        take_fixed_u32(input, pos, "simple GLR split nonterminal")?,
+                        take_fixed_u32(input, pos, "simple GLR split reduce length")?,
+                    ));
+                }
+                Ok(Action::Split {
+                    shift,
+                    reduces,
+                    accept: flags & 4 != 0,
+                })
+            }
+            _ => Err("invalid simple GLR action tag".to_owned()),
+        }
+    }
+
+    #[inline]
+    fn simple_action_supported(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::Shift(..)
+                | Action::Reduce(..)
+                | Action::Split { .. }
+                | Action::Accept
+                | Action::Skip
+        )
+    }
+
+    fn encode_simple_action(out: &mut Vec<u8>, action: &Action) {
+        match action {
+            Action::Shift(target, replace) => {
+                out.push(0);
+                put_fixed_u32(out, *target);
+                out.push(u8::from(*replace));
+            }
+            Action::Reduce(nonterminal, len) => {
+                out.push(1);
+                put_fixed_u32(out, *nonterminal);
+                put_fixed_u32(out, *len);
+            }
+            Action::Accept => out.push(2),
+            Action::Skip => out.push(3),
+            Action::Split {
+                shift,
+                reduces,
+                accept,
+            } => {
+                out.push(4);
+                let mut flags = u8::from(shift.is_some());
+                if shift.is_some_and(|(_, replace)| replace) {
+                    flags |= 2;
+                }
+                if *accept {
+                    flags |= 4;
+                }
+                out.push(flags);
+                if let Some((target, _)) = shift {
+                    put_fixed_u32(out, *target);
+                }
+                put_fixed_u32(out, reduces.len() as u32);
+                for &(nonterminal, len) in reduces {
+                    put_fixed_u32(out, nonterminal);
+                    put_fixed_u32(out, len);
+                }
+            }
+            _ => unreachable!("simple-action precheck rejected complex action"),
+        }
+    }
+
+    fn encode_simple_action_rows(rows: &[ActionRow]) -> Option<Vec<u8>> {
+        let simple = rows.iter().all(|row| {
+            !row.is_default_compressed()
+                && row.values().all(simple_action_supported)
+        });
+        if !simple {
+            return None;
+        }
+
+        let target_chunks = (rayon::current_num_threads() * 2).clamp(2, 16);
+        // Small-but-dense tables such as JS (~685 rows, mostly 50-70 actions
+        // per row) are dominated by independent hash-row construction. A 512
+        // row floor left only two jobs on a 16-thread host. Keep chunks large
+        // enough to amortize Rayon, but expose the row-allocation parallelism.
+        let chunk_size = rows.len().div_ceil(target_chunks).max(512);
+        let chunks = rows
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut body = Vec::new();
+                for row in chunk {
+                    put_fixed_u32(&mut body, row.len() as u32);
+                    for (terminal, action) in row.iter() {
+                        put_fixed_u32(&mut body, terminal);
+                        encode_simple_action(&mut body, action);
+                    }
+                }
+                body
+            })
+            .collect::<Vec<_>>();
+        let chunk_rows = rows
+            .chunks(chunk_size)
+            .map(|chunk| chunk.len())
+            .collect::<Vec<_>>();
+        let payload_len = chunks.iter().map(Vec::len).sum::<usize>();
+        let mut out = Vec::with_capacity(
+            CHUNKED_ACTION_HEADER_LEN + chunks.len() * (4 + 8) + payload_len,
+        );
+        out.extend_from_slice(SIMPLE_ACTION_MAGIC);
+        out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+        for (&row_count, bytes) in chunk_rows.iter().zip(&chunks) {
+            out.extend_from_slice(&(row_count as u32).to_le_bytes());
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        }
+        for bytes in chunks {
+            out.extend_from_slice(&bytes);
+        }
+        Some(out)
+    }
+
+    fn encode_action_rows(rows: &[ActionRow]) -> Vec<u8> {
+        let has_indexed_rows = rows
+            .iter()
+            .any(|row| matches!(row, ActionRow::Indexed { .. }));
+        if (has_indexed_rows
+            || (rows.len() >= SIMPLE_ACTION_MIN_ROWS && rayon::current_num_threads() > 1))
+            && let Some(bytes) = encode_simple_action_rows(rows)
+        {
+            return bytes;
+        }
+        if rows.len() < CHUNKED_ACTION_MIN_ROWS || rayon::current_num_threads() == 1 {
+            return bincode::serialize(rows).expect("GLR action serialization should succeed");
+        }
+        let target_chunks = (rayon::current_num_threads() * 2).clamp(2, 16);
+        let chunk_size = rows.len().div_ceil(target_chunks).max(512);
+        let chunks = rows
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                bincode::serialize(chunk).expect("GLR action chunk serialization should succeed")
+            })
+            .collect::<Vec<_>>();
+        let chunk_rows = rows
+            .chunks(chunk_size)
+            .map(|chunk| chunk.len())
+            .collect::<Vec<_>>();
+        debug_assert_eq!(chunks.len(), chunk_rows.len());
+        let payload_len = chunks.iter().map(Vec::len).sum::<usize>();
+        let mut out = Vec::with_capacity(
+            CHUNKED_ACTION_HEADER_LEN + chunks.len() * (4 + 8) + payload_len,
+        );
+        out.extend_from_slice(CHUNKED_ACTION_MAGIC);
+        out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+        for (&row_count, bytes) in chunk_rows.iter().zip(&chunks) {
+            out.extend_from_slice(&(row_count as u32).to_le_bytes());
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        }
+        for bytes in chunks {
+            out.extend_from_slice(&bytes);
+        }
+        out
+    }
+
+    fn decode_simple_action_chunk(
+        input: &[u8],
+        expected_rows: usize,
+    ) -> Result<Vec<ActionRow>, String> {
+        let mut pos = 0usize;
+        let mut rows = Vec::with_capacity(expected_rows);
+        for _ in 0..expected_rows {
+            let entry_count = take_fixed_u32(input, &mut pos, "simple GLR action")? as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                let terminal = take_fixed_u32(input, &mut pos, "simple GLR action terminal")?;
+                let action = decode_simple_action(input, &mut pos)?;
+                entries.push((terminal, action));
+            }
+            let row = ActionRow::from_indexed_entries(entries);
+            if row.len() != entry_count {
+                return Err("duplicate terminal in simple GLR action row".to_owned());
+            }
+            rows.push(row);
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in simple GLR action chunk".to_owned());
+        }
+        Ok(rows)
+    }
+
+    fn decode_action_rows(input: &[u8]) -> Result<Vec<ActionRow>, String> {
+        if input.starts_with(SIMPLE_ACTION_MAGIC) {
+            if input.len() < CHUNKED_ACTION_HEADER_LEN {
+                return Err("truncated simple GLR action header".to_owned());
+            }
+            let row_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+            let chunk_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
+            if chunk_count == 0 || chunk_count > row_count.max(1) {
+                return Err("invalid simple GLR action chunk count".to_owned());
+            }
+            let descriptor_bytes = chunk_count
+                .checked_mul(12)
+                .ok_or_else(|| "simple GLR action descriptor overflow".to_owned())?;
+            let mut pos = CHUNKED_ACTION_HEADER_LEN;
+            let payload_start = pos
+                .checked_add(descriptor_bytes)
+                .ok_or_else(|| "simple GLR action header overflow".to_owned())?;
+            if payload_start > input.len() {
+                return Err("truncated simple GLR action descriptors".to_owned());
+            }
+            let mut descriptors = Vec::<(usize, usize, usize)>::with_capacity(chunk_count);
+            let mut payload_pos = payload_start;
+            let mut described_rows = 0usize;
+            for _ in 0..chunk_count {
+                let rows = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap()) as usize;
+                let bytes = usize::try_from(u64::from_le_bytes(
+                    input[pos + 4..pos + 12].try_into().unwrap(),
+                ))
+                .map_err(|_| "simple GLR action length does not fit platform".to_owned())?;
+                pos += 12;
+                if rows == 0 {
+                    return Err("empty chunk in simple GLR action section".to_owned());
+                }
+                described_rows = described_rows
+                    .checked_add(rows)
+                    .ok_or_else(|| "simple GLR action row count overflow".to_owned())?;
+                let end = payload_pos
+                    .checked_add(bytes)
+                    .ok_or_else(|| "simple GLR action payload overflow".to_owned())?;
+                if end > input.len() {
+                    return Err("truncated simple GLR action payload".to_owned());
+                }
+                descriptors.push((rows, payload_pos, end));
+                payload_pos = end;
+            }
+            if described_rows != row_count || payload_pos != input.len() {
+                return Err("invalid simple GLR action row count or trailing bytes".to_owned());
+            }
+            let decoded = descriptors
+                .par_iter()
+                .map(|&(expected_rows, start, end)| {
+                    decode_simple_action_chunk(&input[start..end], expected_rows)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let mut rows = Vec::with_capacity(row_count);
+            for mut chunk in decoded {
+                rows.append(&mut chunk);
+            }
+            debug_assert_eq!(rows.len(), row_count);
+            return Ok(rows);
+        }
+        if !input.starts_with(CHUNKED_ACTION_MAGIC) {
+            return bincode::deserialize::<Vec<ActionRow>>(input).map_err(|err| err.to_string());
+        }
+        if input.len() < CHUNKED_ACTION_HEADER_LEN {
+            return Err("truncated chunked GLR action header".to_owned());
+        }
+        let row_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+        let chunk_count = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
+        if chunk_count == 0 || chunk_count > row_count.max(1) {
+            return Err("invalid chunked GLR action chunk count".to_owned());
+        }
+        let descriptor_bytes = chunk_count
+            .checked_mul(12)
+            .ok_or_else(|| "chunked GLR action descriptor overflow".to_owned())?;
+        let mut pos = CHUNKED_ACTION_HEADER_LEN;
+        let payload_start = pos
+            .checked_add(descriptor_bytes)
+            .ok_or_else(|| "chunked GLR action header overflow".to_owned())?;
+        if payload_start > input.len() {
+            return Err("truncated chunked GLR action descriptors".to_owned());
+        }
+        let mut descriptors = Vec::<(usize, usize, usize)>::with_capacity(chunk_count);
+        let mut payload_pos = payload_start;
+        let mut described_rows = 0usize;
+        for _ in 0..chunk_count {
+            let rows = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap()) as usize;
+            let bytes = usize::try_from(u64::from_le_bytes(
+                input[pos + 4..pos + 12].try_into().unwrap(),
+            ))
+            .map_err(|_| "chunked GLR action length does not fit platform".to_owned())?;
+            pos += 12;
+            if rows == 0 {
+                return Err("empty chunk in chunked GLR action section".to_owned());
+            }
+            described_rows = described_rows
+                .checked_add(rows)
+                .ok_or_else(|| "chunked GLR action row count overflow".to_owned())?;
+            let end = payload_pos
+                .checked_add(bytes)
+                .ok_or_else(|| "chunked GLR action payload overflow".to_owned())?;
+            if end > input.len() {
+                return Err("truncated chunked GLR action payload".to_owned());
+            }
+            descriptors.push((rows, payload_pos, end));
+            payload_pos = end;
+        }
+        if described_rows != row_count || payload_pos != input.len() {
+            return Err("invalid chunked GLR action row count or trailing bytes".to_owned());
+        }
+        let decoded = descriptors
+            .par_iter()
+            .map(|&(expected_rows, start, end)| {
+                let rows = bincode::deserialize::<Vec<ActionRow>>(&input[start..end])
+                    .map_err(|err| err.to_string())?;
+                if rows.len() != expected_rows {
+                    return Err("chunked GLR action row count mismatch".to_owned());
+                }
+                Ok(rows)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut rows = Vec::with_capacity(row_count);
+        for mut chunk in decoded {
+            rows.append(&mut chunk);
+        }
+        debug_assert_eq!(rows.len(), row_count);
+        Ok(rows)
+    }
+
+    fn encode_meta(table: &GLRTable) -> Vec<u8> {
+        if table.rules.len() < CHUNKED_RULES_MIN_ROWS || rayon::current_num_threads() == 1 {
+            return bincode::serialize(&CompactTableMetaRef {
+                num_states: table.num_states,
+                num_terminals: table.num_terminals,
+                num_rules: table.num_rules,
+                rules: &table.rules,
+                nonterminal_display_names: &table.nonterminal_display_names,
+                construction: table.construction,
+                admission_policy: table.admission_policy,
+                forwarded_shifts: &table.forwarded_shifts,
+                control_terminals: &table.control_terminals,
+                skip_terminals: &table.skip_terminals,
+                direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+            })
+            .expect("GLR metadata serialization should succeed");
+        }
+        let (rules, rest) = rayon::join(
+            || bincode::serialize(&table.rules).expect("GLR rules serialization should succeed"),
+            || {
+                bincode::serialize(&CompactTableMetaNoRulesRef {
+                    num_states: table.num_states,
+                    num_terminals: table.num_terminals,
+                    num_rules: table.num_rules,
+                    first_rule: table.rules.first(),
+                    nonterminal_display_names: &table.nonterminal_display_names,
+                    construction: table.construction,
+                    admission_policy: table.admission_policy,
+                    forwarded_shifts: &table.forwarded_shifts,
+                    control_terminals: &table.control_terminals,
+                    skip_terminals: &table.skip_terminals,
+                    direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+                })
+                .expect("GLR metadata serialization should succeed")
+            },
+        );
+        let mut out = Vec::with_capacity(DEFERRED_META_HEADER_LEN + rules.len() + rest.len());
+        out.extend_from_slice(DEFERRED_META_MAGIC);
+        out.extend_from_slice(&(table.rules.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(rules.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(rest.len() as u64).to_le_bytes());
+        out.extend_from_slice(&rules);
+        out.extend_from_slice(&rest);
+        out
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum DeferredRuleBytes {
+        Owned(std::sync::Arc<[u8]>),
+        Backed {
+            backing: std::sync::Arc<Vec<u8>>,
+            start: usize,
+            len: usize,
+        },
+    }
+
+    impl DeferredRuleBytes {
+        pub fn as_slice(&self) -> &[u8] {
+            match self {
+                Self::Owned(bytes) => bytes,
+                Self::Backed {
+                    backing,
+                    start,
+                    len,
+                } => &backing[*start..*start + *len],
+            }
+        }
+    }
+
+    fn decode_meta_deferred(
+        input: &[u8],
+        backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
+    ) -> Result<(CompactTableMeta, Option<DeferredRuleBytes>), String> {
+        if !input.starts_with(DEFERRED_META_MAGIC) {
+            return bincode::deserialize::<CompactTableMeta>(input)
+                .map(|meta| (meta, None))
+                .map_err(|err| err.to_string());
+        }
+        if input.len() < DEFERRED_META_HEADER_LEN {
+            return Err("truncated deferred GLR metadata header".to_owned());
+        }
+        let rule_count = u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize;
+        let rules_len = usize::try_from(u64::from_le_bytes(input[8..16].try_into().unwrap()))
+            .map_err(|_| "deferred GLR rules length does not fit platform".to_owned())?;
+        let rest_len = usize::try_from(u64::from_le_bytes(input[16..24].try_into().unwrap()))
+            .map_err(|_| "deferred GLR metadata length does not fit platform".to_owned())?;
+        let rules_end = DEFERRED_META_HEADER_LEN
+            .checked_add(rules_len)
+            .ok_or_else(|| "deferred GLR metadata rules overflow".to_owned())?;
+        let end = rules_end
+            .checked_add(rest_len)
+            .ok_or_else(|| "deferred GLR metadata payload overflow".to_owned())?;
+        if end != input.len() {
+            return Err("invalid deferred GLR metadata lengths".to_owned());
+        }
+        let rules_bytes = &input[DEFERRED_META_HEADER_LEN..rules_end];
+        let rest_bytes = &input[rules_end..end];
+        let rest = bincode::deserialize::<CompactTableMetaNoRules>(rest_bytes)
+            .map_err(|err| err.to_string())?;
+        if rule_count != rest.num_rules as usize {
+            return Err("deferred GLR metadata rule count mismatch".to_owned());
+        }
+        if (rule_count == 0) != rest.first_rule.is_none() {
+            return Err("deferred GLR metadata first-rule mismatch".to_owned());
+        }
+        let rules = rest.first_rule.into_iter().collect();
+        let deferred = if let Some((backing, meta_start)) = backing {
+            let start = meta_start
+                .checked_add(DEFERRED_META_HEADER_LEN)
+                .ok_or_else(|| "deferred GLR rules backing offset overflow".to_owned())?;
+            let end = start
+                .checked_add(rules_len)
+                .ok_or_else(|| "deferred GLR rules backing range overflow".to_owned())?;
+            if backing.get(start..end) != Some(rules_bytes) {
+                return Err("deferred GLR rules do not match artifact backing".to_owned());
+            }
+            DeferredRuleBytes::Backed {
+                backing,
+                start,
+                len: rules_len,
+            }
+        } else {
+            DeferredRuleBytes::Owned(std::sync::Arc::from(rules_bytes))
+        };
+        Ok((
+            CompactTableMeta {
+                num_states: rest.num_states,
+                num_terminals: rest.num_terminals,
+                num_rules: rest.num_rules,
+                rules,
+                nonterminal_display_names: rest.nonterminal_display_names,
+                construction: rest.construction,
+                admission_policy: rest.admission_policy,
+                forwarded_shifts: rest.forwarded_shifts,
+                control_terminals: rest.control_terminals,
+                skip_terminals: rest.skip_terminals,
+                direct_regular_wide_frontiers: rest.direct_regular_wide_frontiers,
+            },
+            Some(deferred),
+        ))
+    }
 
     fn assemble_table(
         action: Vec<ActionRow>,
         goto: Vec<GotoRow>,
         advance: CompactAdvance,
         meta: CompactTableMeta,
+        rules_deferred: bool,
     ) -> Result<GLRTable, String> {
         let row_count_valid = |len: usize| len == 0 || len == meta.num_states as usize;
         if !row_count_valid(action.len()) || !row_count_valid(goto.len()) {
@@ -300,7 +861,12 @@ pub mod artifact_serde {
                 meta.num_states,
             ));
         }
-        if meta.rules.len() != meta.num_rules as usize {
+        let rules_valid = if rules_deferred {
+            meta.rules.len() == usize::from(meta.num_rules != 0)
+        } else {
+            meta.rules.len() == meta.num_rules as usize
+        };
+        if !rules_valid {
             return Err("compact GLR table rule count does not match num_rules".to_owned());
         }
         let advance = advance.into_rows(meta.num_terminals)?;
@@ -325,6 +891,11 @@ pub mod artifact_serde {
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: meta.direct_regular_wide_frontiers,
         })
+    }
+
+    pub struct DecodedCompactTable {
+        pub table: GLRTable,
+        pub deferred_rules: Option<DeferredRuleBytes>,
     }
 
     fn placeholder() -> GLRTable {
@@ -373,9 +944,7 @@ pub mod artifact_serde {
     }
 
     pub fn to_compact_bytes(table: &GLRTable) -> Vec<u8> {
-        let encode_action = || {
-            bincode::serialize(&table.action).expect("GLR action serialization should succeed")
-        };
+        let encode_action = || encode_action_rows(&table.action);
         let encode_goto = || {
             bincode::serialize(&table.goto).expect("GLR goto serialization should succeed")
         };
@@ -383,22 +952,7 @@ pub mod artifact_serde {
             let compact = CompactAdvance::from_rows(&table.advance);
             bincode::serialize(&compact).expect("GLR advance serialization should succeed")
         };
-        let encode_meta = || {
-            bincode::serialize(&CompactTableMetaRef {
-                num_states: table.num_states,
-                num_terminals: table.num_terminals,
-                num_rules: table.num_rules,
-                rules: &table.rules,
-                nonterminal_display_names: &table.nonterminal_display_names,
-                construction: table.construction,
-                admission_policy: table.admission_policy,
-                forwarded_shifts: &table.forwarded_shifts,
-                control_terminals: &table.control_terminals,
-                skip_terminals: &table.skip_terminals,
-                direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
-            })
-            .expect("GLR metadata serialization should succeed")
-        };
+        let encode_meta = || encode_meta(table);
         // Scheduling four tiny bincode jobs costs more than the work for the
         // ordinary schema tables. Keep large tables parallel, but let compact
         // tables stay on one worker and in cache.
@@ -427,8 +981,13 @@ pub mod artifact_serde {
         out
     }
 
-    pub fn from_compact_bytes(input: &[u8]) -> Result<GLRTable, String> {
-        if input.starts_with(PARALLEL_TABLE_MAGIC) {
+    fn from_compact_bytes_deferred_impl(
+        input: &[u8],
+        backing: Option<(std::sync::Arc<Vec<u8>>, usize)>,
+    ) -> Result<DecodedCompactTable, String> {
+        if input.starts_with(PARALLEL_TABLE_MAGIC)
+            || input.starts_with(PARALLEL_TABLE_MAGIC_V2)
+        {
             let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
             if input.len() < PARALLEL_TABLE_HEADER_LEN {
                 return Err("truncated parallel GLR table header".to_owned());
@@ -459,11 +1018,11 @@ pub mod artifact_serde {
             let advance = &input[pos..pos + lengths[2]];
             pos += lengths[2];
             let meta = &input[pos..pos + lengths[3]];
+            let meta_offset = pos;
 
             let decode_action = || {
                 let started = profile.then(std::time::Instant::now);
-                let result = bincode::deserialize::<Vec<ActionRow>>(action)
-                    .map_err(|err| err.to_string());
+                let result = decode_action_rows(action);
                 if let Some(started) = started {
                     eprintln!(
                         "[glrmask/profile][table_decode] name=action ms={:.3} bytes={}",
@@ -501,18 +1060,24 @@ pub mod artifact_serde {
             };
             let decode_meta = || {
                 let started = profile.then(std::time::Instant::now);
-                let result = bincode::deserialize::<CompactTableMeta>(meta)
-                    .map_err(|err| err.to_string());
-                if profile && let Ok(decoded) = &result {
+                let meta_backing = backing.as_ref().map(|(backing, table_start)| {
+                    (
+                        std::sync::Arc::clone(backing),
+                        table_start + meta_offset,
+                    )
+                });
+                let result = decode_meta_deferred(meta, meta_backing);
+                let elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+                if profile && let Ok((decoded, deferred)) = &result {
                     eprintln!(
-                        "[glrmask/profile][table_meta_shape] rules={} names={} forwarded={} controls={} skips={} wide={} rule_bytes={} name_bytes={} forwarded_bytes={} control_bytes={} skip_bytes={} wide_bytes={}",
-                        decoded.rules.len(),
+                        "[glrmask/profile][table_meta_shape] rules={} deferred_rule_bytes={} names={} forwarded={} controls={} skips={} wide={} name_bytes={} forwarded_bytes={} control_bytes={} skip_bytes={} wide_bytes={}",
+                        decoded.num_rules,
+                        deferred.as_ref().map_or(0, |bytes| bytes.as_slice().len()),
                         decoded.nonterminal_display_names.len(),
                         decoded.forwarded_shifts.len(),
                         decoded.control_terminals.len(),
                         decoded.skip_terminals.len(),
                         decoded.direct_regular_wide_frontiers.len(),
-                        bincode::serialized_size(&decoded.rules).unwrap_or(0),
                         bincode::serialized_size(&decoded.nonterminal_display_names).unwrap_or(0),
                         bincode::serialized_size(&decoded.forwarded_shifts).unwrap_or(0),
                         bincode::serialized_size(&decoded.control_terminals).unwrap_or(0),
@@ -520,10 +1085,10 @@ pub mod artifact_serde {
                         bincode::serialized_size(&decoded.direct_regular_wide_frontiers).unwrap_or(0),
                     );
                 }
-                if let Some(started) = started {
+                if let Some(elapsed_ms) = elapsed_ms {
                     eprintln!(
                         "[glrmask/profile][table_decode] name=meta ms={:.3} bytes={}",
-                        started.elapsed().as_secs_f64() * 1000.0,
+                        elapsed_ms,
                         meta.len(),
                     );
                 }
@@ -540,11 +1105,22 @@ pub mod artifact_serde {
                 );
                 (action, goto, advance, meta)
             };
-            return assemble_table(action?, goto?, advance?, meta?);
+            let (meta, deferred_rules) = meta?;
+            let table = assemble_table(
+                action?,
+                goto?,
+                advance?,
+                meta,
+                deferred_rules.is_some(),
+            )?;
+            return Ok(DecodedCompactTable {
+                table,
+                deferred_rules,
+            });
         }
 
         let artifact: CompactTable = bincode::deserialize(input).map_err(|err| err.to_string())?;
-        assemble_table(
+        let table = assemble_table(
             artifact.action,
             artifact.goto,
             artifact.advance,
@@ -561,7 +1137,130 @@ pub mod artifact_serde {
                 skip_terminals: artifact.skip_terminals,
                 direct_regular_wide_frontiers: artifact.direct_regular_wide_frontiers,
             },
-        )
+            false,
+        )?;
+        Ok(DecodedCompactTable {
+            table,
+            deferred_rules: None,
+        })
+    }
+
+    pub fn from_compact_bytes_deferred(input: &[u8]) -> Result<DecodedCompactTable, String> {
+        from_compact_bytes_deferred_impl(input, None)
+    }
+
+    pub fn from_compact_bytes_deferred_backed(
+        input: &[u8],
+        backing: std::sync::Arc<Vec<u8>>,
+        section_start: usize,
+    ) -> Result<DecodedCompactTable, String> {
+        let section_end = section_start
+            .checked_add(input.len())
+            .ok_or_else(|| "GLR table backing range overflow".to_owned())?;
+        let backed = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "GLR table section is outside artifact backing".to_owned())?;
+        if backed.as_ptr() != input.as_ptr() || backed.len() != input.len() {
+            return Err("GLR table section does not match artifact backing".to_owned());
+        }
+        from_compact_bytes_deferred_impl(input, Some((backing, section_start)))
+    }
+
+    pub fn from_compact_bytes(input: &[u8]) -> Result<GLRTable, String> {
+        let mut decoded = from_compact_bytes_deferred(input)?;
+        if let Some(rules) = decoded.deferred_rules.take() {
+            let materialized = bincode::deserialize::<Vec<Rule>>(rules.as_slice())
+                .map_err(|err| err.to_string())?;
+            if materialized.len() != decoded.table.num_rules as usize {
+                return Err("deferred GLR rule count does not match num_rules".to_owned());
+            }
+            if materialized.first() != decoded.table.rules.first() {
+                return Err("deferred GLR augmented-start rule mismatch".to_owned());
+            }
+            decoded.table.rules = materialized;
+        }
+        Ok(decoded.table)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use super::super::row::SparseRow;
+
+        #[test]
+        fn simple_action_wire_roundtrips_inline_and_large_rows() {
+            let inline = ActionRow::from_iter([
+                (1, Action::Shift(11, false)),
+                (2, Action::Shift(12, true)),
+                (3, Action::Reduce(7, 4)),
+                (4, Action::Accept),
+                (5, Action::Skip),
+            ]);
+            let large = ActionRow::from_iter(
+                (0..9).map(|terminal| (terminal, Action::Shift(100 + terminal, false))),
+            );
+            let rows = vec![inline, large];
+
+            let bytes = encode_simple_action_rows(&rows).expect("rows are simple");
+            assert!(bytes.starts_with(SIMPLE_ACTION_MAGIC));
+            let decoded = decode_action_rows(&bytes).expect("simple action wire decodes");
+            assert_eq!(decoded.len(), rows.len());
+
+            for (before, after) in rows.iter().zip(&decoded) {
+                assert_eq!(before.len(), after.len());
+                for (terminal, action) in before.iter() {
+                    assert_eq!(after.get(&terminal), Some(action));
+                }
+            }
+
+            assert!(matches!(
+                decoded[0],
+                ActionRow::Sparse(SparseRow::Inline(_))
+            ));
+            assert!(matches!(
+                decoded[1],
+                ActionRow::Indexed { .. }
+            ));
+
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("one-thread test pool");
+            let reencoded = pool.install(|| encode_action_rows(&decoded));
+            assert!(
+                reencoded.starts_with(SIMPLE_ACTION_MAGIC),
+                "runtime Indexed rows must re-emit the stable GSA1 wire even with one worker",
+            );
+            let redecoded = decode_action_rows(&reencoded).expect("re-encoded GSA1 decodes");
+            assert_eq!(redecoded, decoded);
+        }
+
+        #[test]
+        fn simple_action_wire_falls_back_for_default_rows() {
+            let rows = vec![ActionRow::Default {
+                default: Action::Accept,
+                exceptions: SparseRow::default(),
+                num_terminals: 4,
+            }];
+            assert!(encode_simple_action_rows(&rows).is_none());
+        }
+
+        #[test]
+        fn simple_action_wire_rejects_trailing_or_invalid_action_bytes() {
+            let rows = vec![ActionRow::from_iter([(3, Action::Accept)])];
+            let bytes = encode_simple_action_rows(&rows).expect("rows are simple");
+
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert!(decode_action_rows(&trailing).is_err());
+
+            // One chunk: 12-byte header + 12-byte descriptor.  Its body starts
+            // with row entry-count (4), terminal id (4), then the action tag.
+            let mut invalid_tag = bytes;
+            let tag_offset = CHUNKED_ACTION_HEADER_LEN + 12 + 4 + 4;
+            invalid_tag[tag_offset] = 0xff;
+            assert!(decode_action_rows(&invalid_tag).is_err());
+        }
     }
 }
 
@@ -815,30 +1514,77 @@ impl GLRTable {
     }
 
     pub fn rebuild_unconditional_advance_rows(&mut self) {
+        use rayon::prelude::*;
+
         let terminal_count = self.num_terminals as usize;
         let build_row = |row: &ActionRow| {
-                let mut admitted = BitSet::new(terminal_count);
-                for (terminal, action) in row.iter() {
-                    let unconditional = match action {
-                        Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
-                        Action::Split { shift, accept, .. } => {
-                            shift.is_some() || (*accept && terminal == crate::glr::analysis::EOF)
+            let unconditional = |terminal: TerminalID, action: &Action| match action {
+                Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
+                Action::Split { shift, accept, .. } => {
+                    shift.is_some() || (*accept && terminal == crate::glr::analysis::EOF)
+                }
+                Action::StackShifts(_)
+                | Action::GuardedStackShifts(_)
+                | Action::Reduce(..)
+                | Action::Accept => false,
+            };
+            match row {
+                ActionRow::Sparse(row) => {
+                    let mut admitted = BitSet::new(terminal_count);
+                    for (terminal, action) in row.iter() {
+                        if (*terminal as usize) < terminal_count
+                            && unconditional(*terminal, action)
+                        {
+                            admitted.set(*terminal as usize);
                         }
+                    }
+                    admitted
+                }
+                ActionRow::Indexed { .. } => {
+                    let mut admitted = BitSet::new(terminal_count);
+                    for (terminal, action) in row.iter() {
+                        if (terminal as usize) < terminal_count && unconditional(terminal, action) {
+                            admitted.set(terminal as usize);
+                        }
+                    }
+                    admitted
+                }
+                ActionRow::Default {
+                    default,
+                    exceptions,
+                    num_terminals,
+                } => {
+                    debug_assert_eq!(*num_terminals as usize, terminal_count);
+                    let default_unconditional = match default {
+                        Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
+                        Action::Split { shift, .. } => shift.is_some(),
                         Action::StackShifts(_)
                         | Action::GuardedStackShifts(_)
                         | Action::Reduce(..)
                         | Action::Accept => false,
                     };
-                    if unconditional {
-                        admitted.set(terminal as usize);
+                    let mut admitted = if default_unconditional {
+                        BitSet::all(terminal_count)
+                    } else {
+                        BitSet::new(terminal_count)
+                    };
+                    for (terminal, action) in exceptions.iter() {
+                        let is_unconditional = action
+                            .as_ref()
+                            .is_some_and(|action| unconditional(*terminal, action));
+                        if is_unconditional {
+                            admitted.set(*terminal as usize);
+                        } else {
+                            admitted.clear(*terminal as usize);
+                        }
                     }
+                    admitted
                 }
-                admitted
-            };
+            }
+        };
         if rayon::current_num_threads() == 1 || self.action.len() < 128 {
             self.unconditional_advance = self.action.iter().map(build_row).collect();
         } else {
-            use rayon::prelude::*;
             self.unconditional_advance = self.action.par_iter().map(build_row).collect();
         }
     }
