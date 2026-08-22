@@ -1,5 +1,8 @@
-use crate::automata::lexer::Lexer;
-use std::collections::BTreeMap;
+use crate::automata::lexer::{
+    tokenizer::{Tokenizer, TokenizerStateSet},
+    Lexer,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use range_set_blaze::RangeSetBlaze;
@@ -12,17 +15,24 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::{Action, TableAmbiguity};
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    empty_dense_words, DenseAcceptanceRows, DirectRegularDynamicFrontierCacheEntry,
+    dynamic_mask_vocab_layout_class, empty_dense_words, DenseAcceptanceRows,
+    DirectRegularDynamicFrontierCacheEntry,
     DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
     DirectRegularParserStateAcceptance, DirectRegularWideFrontierAcceptance,
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
+    DynamicBoundedObservationSets,
+    DynamicConfigSubtreeCertificate,
+    DynamicFirstMatchPostRow,
+    DynamicFirstMatchSecondRow,
     DynamicSelfLoopProjection,
     DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
@@ -541,6 +551,152 @@ struct TokenMaskCacheBuildProfile {
     derived_ms: f64,
 }
 
+fn group_dynamic_effect_post_rows(
+    by_terminal: BTreeMap<TerminalID, Vec<u32>>,
+) -> Vec<DynamicFirstMatchPostRow> {
+    let mut terminals_by_tokens = BTreeMap::<Vec<u32>, Vec<TerminalID>>::new();
+    for (terminal, mut tokens) in by_terminal {
+        tokens.sort_unstable();
+        tokens.dedup();
+        if !tokens.is_empty() {
+            terminals_by_tokens.entry(tokens).or_default().push(terminal);
+        }
+    }
+    let mut rows = terminals_by_tokens
+        .into_iter()
+        .map(|(tokens, mut terminals)| {
+            terminals.sort_unstable();
+            terminals.dedup();
+            dynamic_effect_post_row(terminals, tokens)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|left, right| {
+        std::cmp::Reverse(left.tokens.len())
+            .cmp(&std::cmp::Reverse(right.tokens.len()))
+            .then_with(|| left.terminals.as_ref().cmp(right.terminals.as_ref()))
+    });
+    rows
+}
+
+fn dynamic_effect_post_row(
+    terminals: Vec<TerminalID>,
+    tokens: Vec<u32>,
+) -> DynamicFirstMatchPostRow {
+    // Above a few cache lines of token IDs, applying the row wordwise is both
+    // cheaper and more predictable.  Keep sparse rows sparse so the common
+    // tiny-mask case does not pay a 16 KiB dense-row scan.
+    const DENSE_MIN_TOKENS: usize = 1_024;
+    let dense_mask = if tokens.len() >= DENSE_MIN_TOKENS {
+        let words = tokens
+            .last()
+            .copied()
+            .map_or(0usize, |token| token as usize / 32 + 1);
+        let mut dense = vec![0u32; words];
+        for &token in &tokens {
+            dense[token as usize / 32] |= 1u32 << (token % 32);
+        }
+        dense
+    } else {
+        Vec::new()
+    };
+    DynamicFirstMatchPostRow {
+        terminals: Arc::from(terminals),
+        tokens: Arc::from(tokens),
+        dense_mask: Arc::from(dense_mask),
+    }
+}
+
+/// Build a reset-rooted lexical-effect program for concrete vocabulary
+/// suffixes.  Each row consumes one lexer terminal and then recursively
+/// describes the suffix after the lexer reset.  Residual no-finalization paths
+/// are returned separately as parser-admissibility rows at the current parser
+/// state.  Tokens whose match sequence exceeds `depth_left` are accumulated in
+/// `unresolved` for exact runtime fallback.
+fn build_dynamic_reset_effect_rows(
+    tokenizer: &Tokenizer,
+    mut entries: Vec<(u32, Vec<u8>)>,
+    depth_left: usize,
+    unresolved: &mut BTreeSet<u32>,
+) -> (Vec<DynamicFirstMatchPostRow>, Vec<DynamicFirstMatchSecondRow>) {
+    entries.sort_unstable();
+    entries.dedup();
+    let mut residual_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+    let mut exact_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+    let mut children_by_terminal = BTreeMap::<TerminalID, Vec<(u32, Vec<u8>)>>::new();
+
+    for (token_id, bytes) in entries {
+        if bytes.is_empty() {
+            unresolved.insert(token_id);
+            continue;
+        }
+        let execution = tokenizer.execute_from_state_all_widths(&bytes, tokenizer.start_state());
+        let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+        for &end_state in &execution.end_state {
+            futures.union_with(tokenizer.possible_future_terminals(end_state));
+        }
+        for future_terminal in futures.iter_ones() {
+            residual_by_terminal
+                .entry(future_terminal as TerminalID)
+                .or_default()
+                .push(token_id);
+        }
+
+        let mut branches = execution
+            .matches
+            .iter()
+            .map(|matched| (matched.id, matched.width))
+            .collect::<Vec<_>>();
+        branches.sort_unstable();
+        branches.dedup();
+        for (terminal, width) in branches {
+            if width == 0 || width > bytes.len() {
+                unresolved.insert(token_id);
+            } else if width == bytes.len() {
+                exact_by_terminal.entry(terminal).or_default().push(token_id);
+            } else if depth_left == 0 {
+                unresolved.insert(token_id);
+            } else {
+                children_by_terminal
+                    .entry(terminal)
+                    .or_default()
+                    .push((token_id, bytes[width..].to_vec()));
+            }
+        }
+    }
+
+    let post_rows = group_dynamic_effect_post_rows(residual_by_terminal);
+    let mut terminals = BTreeSet::<TerminalID>::new();
+    terminals.extend(exact_by_terminal.keys().copied());
+    terminals.extend(children_by_terminal.keys().copied());
+    let mut rows = Vec::<DynamicFirstMatchSecondRow>::new();
+    for terminal in terminals {
+        let mut exact_end_tokens = exact_by_terminal.remove(&terminal).unwrap_or_default();
+        exact_end_tokens.sort_unstable();
+        exact_end_tokens.dedup();
+        let child_entries = children_by_terminal.remove(&terminal).unwrap_or_default();
+        let (child_post_rows, next_rows) = if child_entries.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            build_dynamic_reset_effect_rows(
+                tokenizer,
+                child_entries,
+                depth_left.saturating_sub(1),
+                unresolved,
+            )
+        };
+        if !exact_end_tokens.is_empty() || !child_post_rows.is_empty() || !next_rows.is_empty() {
+            rows.push(DynamicFirstMatchSecondRow {
+                terminal,
+                exact_end_tokens: Arc::from(exact_end_tokens),
+                post_rows: Arc::from(child_post_rows),
+                next_rows: Arc::from(next_rows),
+            });
+        }
+    }
+    rows.sort_unstable_by_key(|row| row.terminal);
+    (post_rows, rows)
+}
+
 impl Constraint {
     #[inline]
     pub(crate) fn parser_state_domain_label(&self, parser_state: u32) -> Option<i32> {
@@ -705,7 +861,13 @@ impl Constraint {
         let aliases_ms = aliases_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let trie_started_at = profile.then(std::time::Instant::now);
-        let trie = Self::build_dynamic_mask_trie(&trie_entries);
+        // The runtime trie remains one flat radix-trie arena, but construction
+        // inserts one zero-byte structural child per character-type vocabulary
+        // partition. This deliberately separates lexically different token
+        // families without introducing a second trie type or per-partition
+        // dense masks. The ordinary walker treats these as no-op edges and can
+        // certify an entire partition subtree in one bounded-continuation test.
+        let trie = Self::build_dynamic_mask_trie_partitioned(&trie_entries);
         let trie_ms = trie_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
@@ -737,63 +899,496 @@ impl Constraint {
     fn dynamic_self_loop_projection_candidates(
         &self,
         vocab: &DynamicMaskVocab,
-    ) -> Vec<(u32, TerminalID)> {
-        let max_projections = if self.tokenizer.num_states() < 50_000 { 2 } else { 3 };
+        tokenizer: &Tokenizer,
+        bounded64: Option<&[U8Set]>,
+    ) -> Vec<(u32, Vec<TerminalID>, bool)> {
+        if let Ok(value) = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATES") {
+            let mut states = value
+                .split(',')
+                .filter_map(|value| value.trim().parse::<u32>().ok())
+                .map(|state| vocab.mask_projection_state(state))
+                .filter(|&state| state < tokenizer.num_states())
+                .collect::<Vec<_>>();
+            states.sort_unstable();
+            states.dedup();
+            let forced = states
+                .into_iter()
+                .filter_map(|state| {
+                    let futures = tokenizer
+                        .possible_future_terminals_iter(state)
+                        .collect::<Vec<_>>();
+                    (!futures.is_empty()).then_some((state, futures, false))
+                })
+                .collect::<Vec<_>>();
+            if !forced.is_empty() {
+                return forced;
+            }
+        }
+        if let Ok(value) = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_FORCE_STATE")
+            && let Ok(state) = value.trim().parse::<u32>()
+        {
+            let state = vocab.mask_projection_state(state);
+            if state >= tokenizer.num_states() {
+                return Vec::new();
+            }
+            let futures = tokenizer
+                .possible_future_terminals_iter(state)
+                .collect::<Vec<_>>();
+            if !futures.is_empty() {
+                return vec![(state, futures, false)];
+            }
+        }
+        if let Some(bounded64) = bounded64 {
+            let quotient_multiplicity = vocab.mask_projection_state_multiplicities();
+            let mut parser_rows_by_terminal = vec![0usize; self.table.num_terminals as usize];
+            for row in &self.table.advance {
+                for terminal in row.iter() {
+                    if let Some(count) = parser_rows_by_terminal.get_mut(terminal) {
+                        *count += 1;
+                    }
+                }
+            }
+            let mut ranked =
+                Vec::<(usize, usize, usize, usize, u32, Vec<TerminalID>)>::new();
+            for state in 0..tokenizer.num_states() {
+                let safe64_len = bounded64
+                    .get(state as usize)
+                    .map_or(0, |safe64| safe64.len());
+                let futures = tokenizer
+                    .possible_future_terminals_iter(state)
+                    .collect::<Vec<_>>();
+                if futures.is_empty() || futures.len() > 64 {
+                    continue;
+                }
+                let parser_rows = futures
+                    .iter()
+                    .filter_map(|&terminal| parser_rows_by_terminal.get(terminal as usize).copied())
+                    .max()
+                    .unwrap_or(0);
+                if parser_rows == 0 {
+                    continue;
+                }
+                let multiplicity = quotient_multiplicity
+                    .as_ref()
+                    .and_then(|counts| counts.get(state as usize))
+                    .copied()
+                    .unwrap_or(1);
+                // Synthesized residual roots added only to make the quotient
+                // proof total need not correspond to any exact runtime state.
+                // They can never be queried through full_to_mask_state.
+                if multiplicity == 0 {
+                    continue;
+                }
+                ranked.push((
+                    parser_rows,
+                    multiplicity,
+                    safe64_len,
+                    tokenizer.transitions_from(state).count(),
+                    state,
+                    futures,
+                ));
+            }
+            // A global parser-row-frequency rank badly starves structurally
+            // rare parser states that are nevertheless the hot generation
+            // state (large bounded-repeat/string interiors are a common
+            // example).  A projection is only useful for its own future
+            // terminal signature, so first preserve representation across
+            // signatures.  Within a signature, prefer a quotient state that
+            // represents many exact runtime states, then broad bounded-byte
+            // behavior and transition fanout.
+            let mut by_futures = BTreeMap::<
+                Vec<TerminalID>,
+                Vec<(usize, usize, usize, usize, u32, Vec<TerminalID>)>,
+            >::new();
+            for candidate in ranked.drain(..) {
+                by_futures
+                    .entry(candidate.5.clone())
+                    .or_default()
+                    .push(candidate);
+            }
+            let mut groups = by_futures
+                .into_iter()
+                .map(|(futures, mut candidates)| {
+                    let total_multiplicity = candidates
+                        .iter()
+                        .map(|candidate| candidate.1)
+                        .sum::<usize>();
+                    candidates.sort_unstable_by(|left, right| {
+                        (
+                            std::cmp::Reverse(left.3),
+                            std::cmp::Reverse(left.2),
+                            std::cmp::Reverse(left.1),
+                            left.4,
+                        )
+                            .cmp(&(
+                                std::cmp::Reverse(right.3),
+                                std::cmp::Reverse(right.2),
+                                std::cmp::Reverse(right.1),
+                                right.4,
+                            ))
+                    });
+                    (total_multiplicity, futures, candidates)
+                })
+                .collect::<Vec<_>>();
+            groups.sort_unstable_by(|left, right| {
+                (std::cmp::Reverse(left.0), &left.1)
+                    .cmp(&(std::cmp::Reverse(right.0), &right.1))
+            });
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+                if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
+                    let requested = value
+                        .split(',')
+                        .filter_map(|value| value.trim().parse::<u32>().ok())
+                        .map(|state| vocab.mask_projection_state(state))
+                        .collect::<BTreeSet<_>>();
+                    for (_, futures, candidates) in &groups {
+                        for (parser_rows, multiplicity, safe64, transitions, state, _) in candidates {
+                            if requested.contains(state) {
+                                eprintln!(
+                                    "[glrmask/profile][dynamic_projection_requested_candidate] state={} parser_rows={} multiplicity={} safe64={} transitions={} futures={:?} family_candidates={}",
+                                    state,
+                                    parser_rows,
+                                    multiplicity,
+                                    safe64,
+                                    transitions,
+                                    futures,
+                                    candidates.len(),
+                                );
+                            }
+                        }
+                    }
+                }
+                for parser_row_threshold in [1usize, 2, 4, 8, 16] {
+                    let eligible_groups = groups
+                        .iter()
+                        .filter(|(_, futures, candidates)| {
+                            futures.len() == 1
+                                && candidates.len() <= 64
+                                && candidates.first().map_or(0, |candidate| candidate.0)
+                                    >= parser_row_threshold
+                        })
+                        .count();
+                    let eligible_states = groups
+                        .iter()
+                        .filter(|(_, futures, candidates)| {
+                            futures.len() == 1
+                                && candidates.len() <= 64
+                                && candidates.first().map_or(0, |candidate| candidate.0)
+                                    >= parser_row_threshold
+                        })
+                        .map(|(_, _, candidates)| candidates.len())
+                        .sum::<usize>();
+                    eprintln!(
+                        "[glrmask/profile][dynamic_projection_probe_budget] parser_rows_min={} groups={} states={}",
+                        parser_row_threshold, eligible_groups, eligible_states,
+                    );
+                }
+                for (group_rank, (total_multiplicity, futures, candidates)) in
+                    groups.iter().take(64).enumerate()
+                {
+                    let (parser_rows, multiplicity, safe64_len, transitions, state, _) =
+                        &candidates[0];
+                    eprintln!(
+                        "[glrmask/profile][dynamic_quotient_projection_group] rank={} state={} parser_rows={} multiplicity={} group_multiplicity={} safe64={} transitions={} futures={:?} candidates={}",
+                        group_rank + 1,
+                        state,
+                        parser_rows,
+                        multiplicity,
+                        total_multiplicity,
+                        safe64_len,
+                        transitions,
+                        futures,
+                        candidates.len(),
+                    );
+                }
+            }
+            let max_projections = std::env::var("GLRMASK_DYNAMIC_QUOTIENT_PROJECTIONS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|&value| value > 0)
+                .unwrap_or(16);
+            let mut selected = Vec::with_capacity(max_projections);
+            if std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some() {
+                // H64 aliases make it worthwhile to seed several structurally
+                // distinct sources within a large single-future family.  A
+                // long bounded-repeat chain often has thousands of states with
+                // the same 146-byte row, followed by much smaller 145/144-byte
+                // boundary phases.  Picking the first N raw states therefore
+                // misses exactly the phases that dominate p85/p90.
+                //
+                // Keep this strictly a *selection* heuristic: correctness of
+                // sharing is established later by the exact H64 terminal-
+                // liveness partition.  Here we only ensure that large runtime
+                // state families seed one projection for each broad outgoing-
+                // row shape before spending slots on tiny signatures.
+                let mut active = groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (multiplicity, futures, _))| {
+                        *multiplicity >= 1_024 && futures.len() == 1
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                active.sort_unstable_by_key(|&index| std::cmp::Reverse(groups[index].0));
+
+                let alias_seed_budget = max_projections.saturating_mul(3) / 4;
+                let mut seen_transition_counts = vec![BTreeSet::<usize>::new(); groups.len()];
+                // One strongest representative per large single-future family.
+                for &group_index in &active {
+                    if selected.len() >= alias_seed_budget.max(active.len()).min(max_projections) {
+                        break;
+                    }
+                    let (_, _, candidates) = &groups[group_index];
+                    let (_, _, _, transitions, state, futures) = &candidates[0];
+                    selected.push((*state, futures.clone(), false));
+                    seen_transition_counts[group_index].insert(*transitions);
+                }
+                // Then round-robin over distinct outgoing-row widths.  The H64
+                // equivalence check may merge them further, but never aliases
+                // states merely because their widths happen to match.
+                while selected.len() < alias_seed_budget {
+                    let mut added = false;
+                    for &group_index in &active {
+                        if selected.len() == alias_seed_budget {
+                            break;
+                        }
+                        let (_, _, candidates) = &groups[group_index];
+                        let candidate = candidates.iter().find(|candidate| {
+                            !seen_transition_counts[group_index].contains(&candidate.3)
+                        });
+                        let Some((_, _, _, transitions, state, futures)) = candidate else {
+                            continue;
+                        };
+                        seen_transition_counts[group_index].insert(*transitions);
+                        selected.push((*state, futures.clone(), false));
+                        added = true;
+                    }
+                    if !added {
+                        break;
+                    }
+                }
+
+                // Preserve some exact-projection coverage for smaller or
+                // multi-future signatures as well.
+                for (_, _, candidates) in &groups {
+                    if selected.len() == max_projections {
+                        break;
+                    }
+                    let (_, _, _, _, state, futures) = &candidates[0];
+                    if !selected.iter().any(|(seen, _, _)| seen == state) {
+                        selected.push((*state, futures.clone(), false));
+                    }
+                }
+                // Small but highly parser-relevant single-terminal families are
+                // cheap enough to probe exhaustively.  Their raw-state count
+                // can be tiny even when they dominate runtime token boundaries
+                // (for example a short boundary stencil around a huge repeat).
+                // Build-time vocabulary projection equivalence will collapse
+                // these probes back to a few useful classes; until then, keep
+                // every source so the experiment measures the attainable
+                // runtime effect without trace-derived state selection.
+                for (_, futures, candidates) in &groups {
+                    let parser_rows = candidates.first().map_or(0, |candidate| candidate.0);
+                    if futures.len() != 1 || parser_rows < 16 || candidates.len() > 64 {
+                        continue;
+                    }
+                    for (_, _, _, _, state, candidate_futures) in candidates {
+                        if !selected.iter().any(|(seen, _, _)| seen == state) {
+                            selected.push((*state, candidate_futures.clone(), true));
+                        }
+                    }
+                }
+                return selected;
+            }
+            // First pass: one representative from every future signature, in
+            // descending exact-state coverage order.
+            for (_, _, candidates) in &groups {
+                if selected.len() == max_projections {
+                    break;
+                }
+                let (_, _, _, _, state, futures) = &candidates[0];
+                selected.push((*state, futures.clone(), false));
+            }
+            // Fill remaining slots round-robin so one long counter family
+            // cannot consume every projection while still allowing important
+            // families to receive more than one representative.
+            let mut offset = 1usize;
+            while selected.len() < max_projections {
+                let mut added = false;
+                for (_, _, candidates) in &groups {
+                    if selected.len() == max_projections {
+                        break;
+                    }
+                    let Some((_, _, _, _, state, futures)) = candidates.get(offset) else {
+                        continue;
+                    };
+                    selected.push((*state, futures.clone(), false));
+                    added = true;
+                }
+                if !added {
+                    break;
+                }
+                offset += 1;
+            }
+            return selected;
+        }
+
+        let max_projections = if tokenizer.num_states() < 50_000 { 2 } else { 3 };
         const MAX_BASE_PROJECTIONS: usize = 2;
-        // Small and medium tokenizers traverse cheaply enough that speculative
-        // projection construction does not pay for itself. Measurements across
-        // ordinary JSON schemas showed no runtime benefit at 357 and 567 states,
-        // while a 924-state tokenizer amortized the projection within a short
-        // output. Keep this a structural heuristic, independent of schema form.
-        const MIN_PROJECTION_TOKENIZER_STATES: u32 = 768;
-        if self.tokenizer.num_states() < MIN_PROJECTION_TOKENIZER_STATES {
+        // Trie-aware projections are cheap and useful for small/medium
+        // tokenizers, especially broad string states whose UTF-8 paths defeat
+        // byte-union certificates. Very large synthesized tokenizers are the
+        // opposite: walking the whole vocabulary through their transition
+        // product can cost hundreds of milliseconds, while the local bounded
+        // continuation certificate handles their counter chains cheaply.
+        // Keep both limits structural and overrideable for benchmarking.
+        let min_projection_tokenizer_states = std::env::var(
+            "GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_MIN_STATES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(128);
+        let max_projection_tokenizer_states = std::env::var(
+            "GLRMASK_DYNAMIC_SELF_LOOP_PROJECTION_MAX_STATES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(8_192);
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+            let started = std::time::Instant::now();
+            let mut parser_rows_by_terminal = vec![0usize; self.table.num_terminals as usize];
+            for row in &self.table.advance {
+                for terminal in row.iter() {
+                    if let Some(count) = parser_rows_by_terminal.get_mut(terminal) {
+                        *count += 1;
+                    }
+                }
+            }
+            let mut ranked = Vec::<(usize, usize, usize, u32, Vec<TerminalID>)>::new();
+            for state in 0..tokenizer.num_states() {
+                let Some(safe64) = vocab.bounded_observation_safe_bytes(state, 64) else {
+                    continue;
+                };
+                if safe64.len() < 64 {
+                    continue;
+                }
+                let futures = tokenizer
+                    .possible_future_terminals_iter(state)
+                    .collect::<Vec<_>>();
+                if futures.is_empty() || futures.len() > 64 {
+                    continue;
+                }
+                let transitions = tokenizer.transitions_from(state).count();
+                let parser_rows = futures
+                    .iter()
+                    .filter_map(|&terminal| parser_rows_by_terminal.get(terminal as usize).copied())
+                    .max()
+                    .unwrap_or(0);
+                ranked.push((parser_rows, safe64.len(), transitions, state, futures));
+            }
+            ranked.sort_unstable_by(|left, right| {
+                (
+                    std::cmp::Reverse(left.0),
+                    std::cmp::Reverse(left.1),
+                    std::cmp::Reverse(left.2),
+                    left.3,
+                )
+                    .cmp(&(
+                        std::cmp::Reverse(right.0),
+                        std::cmp::Reverse(right.1),
+                        std::cmp::Reverse(right.2),
+                        right.3,
+                    ))
+            });
+            eprintln!(
+                "[glrmask/profile][dynamic_projection_candidates] broad_states={} scan_ms={:.3}",
+                ranked.len(),
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let mut groups = BTreeMap::<(usize, Vec<TerminalID>), usize>::new();
+            for (parser_rows, _, _, _, futures) in &ranked {
+                *groups.entry((*parser_rows, futures.clone())).or_default() += 1;
+            }
+            let mut groups = groups.into_iter().collect::<Vec<_>>();
+            groups.sort_unstable_by(|left, right| {
+                (std::cmp::Reverse((left.0).0), std::cmp::Reverse(left.1), &(left.0).1)
+                    .cmp(&(
+                        std::cmp::Reverse((right.0).0),
+                        std::cmp::Reverse(right.1),
+                        &(right.0).1,
+                    ))
+            });
+            for ((parser_rows, futures), count) in groups.into_iter().take(16) {
+                eprintln!(
+                    "[glrmask/profile][dynamic_projection_candidate_group] parser_rows={} count={} futures={:?}",
+                    parser_rows,
+                    count,
+                    futures,
+                );
+            }
+            for (rank, (parser_rows, safe64, transitions, state, futures)) in
+                ranked.iter().take(64).enumerate()
+            {
+                eprintln!(
+                    "[glrmask/profile][dynamic_projection_candidate] rank={} state={} parser_rows={} safe64={} transitions={} futures={:?}",
+                    rank + 1,
+                    state,
+                    parser_rows,
+                    safe64,
+                    transitions,
+                    futures,
+                );
+            }
+        }
+        if tokenizer.num_states() < min_projection_tokenizer_states
+            || tokenizer.num_states() > max_projection_tokenizer_states
+        {
             return Vec::new();
         }
-        let mut best_by_terminal = BTreeMap::<TerminalID, (usize, u32)>::new();
-        for state in 0..self.tokenizer.num_states() {
-            if self.tokenizer.matched_terminals_iter(state).next().is_some()
-                || self.tokenizer.transitions_from(state).count() < 100
-            {
+        // Keep at most one strong source per exact future-terminal signature.
+        // This avoids spending projection slots on long counter chains whose
+        // states are lexer-observationally equivalent for our purpose.
+        let mut best_by_futures = BTreeMap::<Vec<TerminalID>, (usize, u32)>::new();
+        for state in 0..tokenizer.num_states() {
+            if tokenizer.transitions_from(state).count() < 100 {
                 continue;
             }
-            let mut futures = self.tokenizer.possible_future_terminals_iter(state);
-            let Some(required_terminal) = futures.next() else {
-                continue;
-            };
-            if futures.next().is_some() {
+            let futures = tokenizer
+                .possible_future_terminals_iter(state)
+                .collect::<Vec<_>>();
+            if futures.is_empty() {
                 continue;
             }
-            let loop_len = self.tokenizer.self_loop_bytes(state).len();
+            let loop_len = tokenizer.self_loop_bytes(state).len();
             if loop_len < 64 {
                 continue;
             }
-            let entry = best_by_terminal
-                .entry(required_terminal)
-                .or_insert((loop_len, state));
+            let entry = best_by_futures.entry(futures).or_insert((loop_len, state));
             if (loop_len, std::cmp::Reverse(state))
                 > (entry.0, std::cmp::Reverse(entry.1))
             {
                 *entry = (loop_len, state);
             }
         }
-        let mut ranked = best_by_terminal
+        let mut ranked = best_by_futures
             .into_iter()
-            .map(|(terminal, (loop_len, state))| (loop_len, state, terminal))
+            .map(|(futures, (loop_len, state))| (loop_len, state, futures))
             .collect::<Vec<_>>();
-        ranked.sort_unstable_by_key(|&(loop_len, state, terminal)| {
-            (std::cmp::Reverse(loop_len), state, terminal)
+        ranked.sort_unstable_by(|left, right| {
+            (std::cmp::Reverse(left.0), left.1, &left.2)
+                .cmp(&(std::cmp::Reverse(right.0), right.1, &right.2))
         });
         ranked.truncate(MAX_BASE_PROJECTIONS);
         let mut selected = ranked
             .into_iter()
-            .map(|(_, state, terminal)| (state, terminal))
+            .map(|(_, state, futures)| (state, futures, false))
             .collect::<Vec<_>>();
 
         if selected.len() < max_projections {
             let selected_targets = selected
                 .iter()
-                .copied()
-                .collect::<FxHashMap<u32, TerminalID>>();
+                .map(|(state, futures, _)| (*state, futures.clone()))
+                .collect::<FxHashMap<u32, Vec<TerminalID>>>();
             let root_byte_sizes = vocab
                 .trie
                 .children(0)
@@ -807,37 +1402,38 @@ impl Constraint {
                         .map(|byte| (byte, vocab.trie.subtree_tokens(edge.child).len()))
                 })
                 .collect::<FxHashMap<u8, usize>>();
-            let mut predecessors = Vec::<(usize, u32, TerminalID)>::new();
-            for state in 0..self.tokenizer.num_states() {
-                if selected.iter().any(|&(selected_state, _)| selected_state == state)
-                    || self.tokenizer.matched_terminals_iter(state).next().is_some()
+            let mut predecessors = Vec::<(usize, u32, Vec<TerminalID>)>::new();
+            for state in 0..tokenizer.num_states() {
+                if selected
+                    .iter()
+                    .any(|&(selected_state, _, _)| selected_state == state)
                 {
                     continue;
                 }
-                let mut futures = self.tokenizer.possible_future_terminals_iter(state);
-                let Some(required_terminal) = futures.next() else {
-                    continue;
-                };
-                if futures.next().is_some() {
+                let futures = tokenizer
+                    .possible_future_terminals_iter(state)
+                    .collect::<Vec<_>>();
+                if futures.is_empty() {
                     continue;
                 }
-                let mut transitions = self.tokenizer.transitions_from(state);
+                let mut transitions = tokenizer.transitions_from(state);
                 let Some((byte, target)) = transitions.next() else {
                     continue;
                 };
                 if transitions.next().is_some()
-                    || selected_targets.get(&target).copied() != Some(required_terminal)
+                    || selected_targets.get(&target) != Some(&futures)
                 {
                     continue;
                 }
                 let score = root_byte_sizes.get(&byte).copied().unwrap_or(0);
-                predecessors.push((score, state, required_terminal));
+                predecessors.push((score, state, futures));
             }
-            predecessors.sort_unstable_by_key(|&(score, state, terminal)| {
-                (std::cmp::Reverse(score), state, terminal)
+            predecessors.sort_unstable_by(|left, right| {
+                (std::cmp::Reverse(left.0), left.1, &left.2)
+                    .cmp(&(std::cmp::Reverse(right.0), right.1, &right.2))
             });
-            for (_, state, terminal) in predecessors {
-                selected.push((state, terminal));
+            for (_, state, futures) in predecessors {
+                selected.push((state, futures, false));
                 if selected.len() == max_projections {
                     break;
                 }
@@ -849,39 +1445,36 @@ impl Constraint {
     fn build_dynamic_self_loop_projections(
         &self,
         vocab: &DynamicMaskVocab,
-        fast_transitions: &FastTokenizerTransitions,
-    ) -> Vec<DynamicSelfLoopProjection> {
+        full_fast_transitions: &FastTokenizerTransitions,
+    ) -> (Vec<DynamicSelfLoopProjection>, Vec<u32>) {
         fn build_one(
             constraint: &Constraint,
+            tokenizer: &Tokenizer,
             vocab: &DynamicMaskVocab,
             fast_transitions: &FastTokenizerTransitions,
             source_state: u32,
-            required_terminal: TerminalID,
+            source_future_terminals: &[TerminalID],
         ) -> DynamicSelfLoopProjection {
             let trie = vocab.trie.as_ref();
             let mut safe_subtrees = vec![0u8; trie.node_count()];
+            let mut source_reentry_safe_subtrees = vec![0u8; trie.node_count()];
+            let mut common_future_masks = vec![0u64; trie.node_count()];
             let mut safe_no_match_mask = vec![0u32; constraint.mask_len()];
             fn advance_no_match_deterministic(
-                constraint: &Constraint,
+                tokenizer: &Tokenizer,
                 fast_transitions: &FastTokenizerTransitions,
                 mut state: u32,
                 bytes: &[u8],
             ) -> Option<u32> {
-                if constraint.tokenizer.state_has_epsilon_transitions(state) {
+                if tokenizer.state_has_epsilon_transitions(state) {
                     return None;
                 }
                 for &byte in bytes {
-                    let target = fast_transitions.transition(&constraint.tokenizer, state, byte);
+                    let target = fast_transitions.transition(tokenizer, state, byte);
                     if target == u32::MAX {
                         return None;
                     }
-                    if constraint.tokenizer.state_has_epsilon_transitions(target)
-                        || constraint
-                            .tokenizer
-                            .matched_terminals_iter(target)
-                            .next()
-                            .is_some()
-                    {
+                    if tokenizer.state_has_epsilon_transitions(target) {
                         return None;
                     }
                     state = target;
@@ -900,6 +1493,7 @@ impl Constraint {
 
             fn visit(
                 constraint: &Constraint,
+                tokenizer: &Tokenizer,
                 vocab: &DynamicMaskVocab,
                 fast_transitions: &FastTokenizerTransitions,
                 trie: &DynamicMaskTrie,
@@ -907,15 +1501,14 @@ impl Constraint {
                 tokenizer_state: u32,
                 source_state: u32,
                 source_loop_bytes: U8Set,
-                required_terminal: TerminalID,
+                source_future_terminals: &[TerminalID],
                 safe_subtrees: &mut [u8],
+                source_reentry_safe_subtrees: &mut [u8],
                 safe_no_match_mask: &mut [u32],
             ) -> bool {
-                let mut futures = constraint
-                    .tokenizer
-                    .possible_future_terminals_iter(tokenizer_state);
-                let state_remains_live = futures.next() == Some(required_terminal)
-                    && futures.next().is_none();
+                let state_remains_live = tokenizer
+                    .possible_future_terminals_iter(tokenizer_state)
+                    .eq(source_future_terminals.iter().copied());
                 let node_data = trie.node(node);
                 let token_safe = node_data.token_id.is_none() || state_remains_live;
                 if state_remains_live {
@@ -925,6 +1518,7 @@ impl Constraint {
                     {
                         mark_token_ids(safe_no_match_mask, vocab.subtree_original_tokens(node));
                         safe_subtrees[node as usize] = 1;
+                        source_reentry_safe_subtrees[node as usize] = 1;
                         return true;
                     }
                     if let Some(canonical_token) = node_data.token_id
@@ -937,7 +1531,7 @@ impl Constraint {
                 let mut all_children_safe = true;
                 for edge in trie.children(node) {
                     let child_safe = advance_no_match_deterministic(
-                        constraint,
+                        tokenizer,
                         fast_transitions,
                         tokenizer_state,
                         trie.edge_bytes(edge),
@@ -945,6 +1539,7 @@ impl Constraint {
                     .is_some_and(|end_state| {
                         visit(
                             constraint,
+                            tokenizer,
                             vocab,
                             fast_transitions,
                             trie,
@@ -952,8 +1547,9 @@ impl Constraint {
                             end_state,
                             source_state,
                             source_loop_bytes,
-                            required_terminal,
+                            source_future_terminals,
                             safe_subtrees,
+                            source_reentry_safe_subtrees,
                             safe_no_match_mask,
                         )
                     });
@@ -961,12 +1557,79 @@ impl Constraint {
                 }
                 let subtree_safe = token_safe && all_children_safe;
                 safe_subtrees[node as usize] = u8::from(subtree_safe);
+                if tokenizer_state == source_state && subtree_safe {
+                    source_reentry_safe_subtrees[node as usize] = 1;
+                }
                 subtree_safe
             }
 
-            let source_loop_bytes = constraint.tokenizer.self_loop_bytes(source_state);
+            fn visit_common_futures(
+                tokenizer: &Tokenizer,
+                vocab: &DynamicMaskVocab,
+                fast_transitions: &FastTokenizerTransitions,
+                trie: &DynamicMaskTrie,
+                node: u32,
+                tokenizer_state: u32,
+                source_future_terminals: &[TerminalID],
+                common_future_masks: &mut [u64],
+            ) -> u64 {
+                if source_future_terminals.is_empty() || source_future_terminals.len() > 64 {
+                    return 0;
+                }
+                let all = if source_future_terminals.len() == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << source_future_terminals.len()) - 1
+                };
+                let state_future_mask = || {
+                    let futures = tokenizer.possible_future_terminals(tokenizer_state);
+                    source_future_terminals
+                        .iter()
+                        .enumerate()
+                        .fold(0u64, |mask, (index, &terminal)| {
+                            mask | (u64::from(futures.contains(terminal as usize)) << index)
+                        })
+                };
+
+                let mut common = if trie.node(node).token_id.is_some() {
+                    state_future_mask()
+                } else {
+                    all
+                };
+                for edge in trie.children(node) {
+                    let child_common = advance_no_match_deterministic(
+                        tokenizer,
+                        fast_transitions,
+                        tokenizer_state,
+                        trie.edge_bytes(edge),
+                    )
+                    .map_or(0, |end_state| {
+                        visit_common_futures(
+                            tokenizer,
+                            vocab,
+                            fast_transitions,
+                            trie,
+                            edge.child,
+                            end_state,
+                            source_future_terminals,
+                            common_future_masks,
+                        )
+                    });
+                    common &= child_common;
+                    if common == 0 {
+                        // Descendants still need their own rows for runtime
+                        // subtree checks, so do not prune the traversal here.
+                    }
+                }
+                common_future_masks[node as usize] = common;
+                let _ = vocab;
+                common
+            }
+
+            let source_loop_bytes = tokenizer.self_loop_bytes(source_state);
             visit(
                 constraint,
+                tokenizer,
                 vocab,
                 fast_transitions,
                 trie,
@@ -974,10 +1637,802 @@ impl Constraint {
                 source_state,
                 source_state,
                 source_loop_bytes,
-                required_terminal,
+                source_future_terminals,
                 &mut safe_subtrees,
+                &mut source_reentry_safe_subtrees,
                 &mut safe_no_match_mask,
             );
+            visit_common_futures(
+                tokenizer,
+                vocab,
+                fast_transitions,
+                trie,
+                0,
+                source_state,
+                source_future_terminals,
+                &mut common_future_masks,
+            );
+            fn visit_candidate_frontier(
+                tokenizer: &Tokenizer,
+                fast_transitions: &FastTokenizerTransitions,
+                trie: &DynamicMaskTrie,
+                node: u32,
+                tokenizer_state: u32,
+                dead_nodes: &mut Vec<u32>,
+                frontier_nodes: &mut Vec<u32>,
+                live_nodes: &mut usize,
+                match_frontier_tokens: &mut usize,
+                reset_child_states: &mut FxHashMap<u32, (usize, usize)>,
+                reset_child_configs: &mut FxHashMap<Vec<u32>, (usize, usize)>,
+                reset_config_frontiers: &mut Vec<(u32, Vec<u32>)>,
+                reset_edge_second_matches: &mut usize,
+                reset_second_match_tokens: &mut usize,
+                reset_edge_unknown: &mut usize,
+                reset_unknown_tokens: &mut usize,
+            ) -> bool {
+                if tokenizer.state_has_epsilon_transitions(tokenizer_state) {
+                    *live_nodes += 1;
+                    return true;
+                }
+                let node_data = trie.node(node);
+                let mut any = node_data.token_id.is_some()
+                    && (tokenizer
+                        .possible_future_terminals(tokenizer_state)
+                        .iter()
+                        .next()
+                        .is_some()
+                        || tokenizer
+                            .matched_terminals_iter(tokenizer_state)
+                            .next()
+                            .is_some());
+                for edge in trie.children(node) {
+                    let mut state = tokenizer_state;
+                    let mut alive = true;
+                    let mut matched = false;
+                    let mut unknown = false;
+                    let edge_bytes = trie.edge_bytes(edge);
+                    let mut match_offset = None::<usize>;
+                    for (offset, &byte) in edge_bytes.iter().enumerate() {
+                        let target = fast_transitions.transition(tokenizer, state, byte);
+                        if target == u32::MAX {
+                            alive = false;
+                            break;
+                        }
+                        if tokenizer.state_has_epsilon_transitions(target) {
+                            unknown = true;
+                            break;
+                        }
+                        state = target;
+                        if tokenizer.matched_terminals_iter(state).next().is_some() {
+                            matched = true;
+                            match_offset = Some(offset);
+                            break;
+                        }
+                    }
+                    let child_any = if matched || unknown {
+                        frontier_nodes.push(edge.child);
+                        if matched {
+                            *match_frontier_tokens += trie.subtree_tokens(edge.child).len();
+                            if let Some(match_offset) = match_offset {
+                                let reset_execution = tokenizer.execute_from_state_all_widths(
+                                    &edge_bytes[match_offset + 1..],
+                                    tokenizer.start_state(),
+                                );
+                                if !reset_execution.matches.is_empty() {
+                                    *reset_edge_second_matches += 1;
+                                    *reset_second_match_tokens +=
+                                        trie.subtree_tokens(edge.child).len();
+                                } else if let [reset_state] = reset_execution.end_state.as_slice() {
+                                    let entry = reset_child_states.entry(*reset_state).or_default();
+                                    entry.0 += 1;
+                                    entry.1 += trie.subtree_tokens(edge.child).len();
+                                } else if !reset_execution.end_state.is_empty() {
+                                    let mut config = reset_execution.end_state.to_vec();
+                                    config.sort_unstable();
+                                    config.dedup();
+                                    reset_config_frontiers.push((edge.child, config.clone()));
+                                    let entry = reset_child_configs.entry(config).or_default();
+                                    entry.0 += 1;
+                                    entry.1 += trie.subtree_tokens(edge.child).len();
+                                } else {
+                                    *reset_edge_unknown += 1;
+                                    *reset_unknown_tokens +=
+                                        trie.subtree_tokens(edge.child).len();
+                                }
+                            } else {
+                                *reset_edge_unknown += 1;
+                                *reset_unknown_tokens += trie.subtree_tokens(edge.child).len();
+                            }
+                        }
+                        true
+                    } else if alive {
+                        let child_any = visit_candidate_frontier(
+                            tokenizer,
+                            fast_transitions,
+                            trie,
+                            edge.child,
+                            state,
+                            dead_nodes,
+                            frontier_nodes,
+                            live_nodes,
+                            match_frontier_tokens,
+                            reset_child_states,
+                            reset_child_configs,
+                            reset_config_frontiers,
+                            reset_edge_second_matches,
+                            reset_second_match_tokens,
+                            reset_edge_unknown,
+                            reset_unknown_tokens,
+                        );
+                        if !child_any {
+                            dead_nodes.push(edge.child);
+                        }
+                        child_any
+                    } else {
+                        dead_nodes.push(edge.child);
+                        false
+                    };
+                    any |= child_any;
+                }
+                if any {
+                    *live_nodes += 1;
+                }
+                any
+            }
+            let mut pre_match_dead_nodes = Vec::<u32>::new();
+            let mut pre_match_frontier_nodes = Vec::<u32>::new();
+            let mut live_nodes = 0usize;
+            let mut match_frontier_tokens = 0usize;
+            let mut reset_child_states = FxHashMap::<u32, (usize, usize)>::default();
+            let mut reset_child_configs = FxHashMap::<Vec<u32>, (usize, usize)>::default();
+            let mut reset_config_frontiers = Vec::<(u32, Vec<u32>)>::new();
+            let mut reset_edge_second_matches = 0usize;
+            let mut reset_second_match_tokens = 0usize;
+            let mut reset_edge_unknown = 0usize;
+            let mut reset_unknown_tokens = 0usize;
+            let _ = visit_candidate_frontier(
+                tokenizer,
+                fast_transitions,
+                trie,
+                0,
+                source_state,
+                &mut pre_match_dead_nodes,
+                &mut pre_match_frontier_nodes,
+                &mut live_nodes,
+                &mut match_frontier_tokens,
+                &mut reset_child_states,
+                &mut reset_child_configs,
+                &mut reset_config_frontiers,
+                &mut reset_edge_second_matches,
+                &mut reset_second_match_tokens,
+                &mut reset_edge_unknown,
+                &mut reset_unknown_tokens,
+            );
+            pre_match_dead_nodes.sort_unstable();
+            pre_match_dead_nodes.dedup();
+            pre_match_frontier_nodes.sort_unstable();
+            pre_match_frontier_nodes.dedup();
+            let pack_nodes = |nodes: &[u32]| {
+                let mut words = vec![0u64; trie.node_count().div_ceil(64)];
+                for &node in nodes {
+                    let word = node as usize >> 6;
+                    let bit = node & 63;
+                    words[word] |= 1u64 << bit;
+                }
+                words
+            };
+            let pre_match_dead_words = pack_nodes(&pre_match_dead_nodes);
+            let pre_match_frontier_words = pack_nodes(&pre_match_frontier_nodes);
+
+            let config_certificate_requested = std::env::var(
+                "GLRMASK_DYNAMIC_CONFIG_SUBTREE_CERT_STATES",
+            )
+            .ok()
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .filter_map(|value| value.trim().parse::<u32>().ok())
+                    .map(|state| vocab.mask_projection_state(state))
+                    .any(|state| state == source_state)
+            });
+            let mut config_subtree_certificates = Vec::<DynamicConfigSubtreeCertificate>::new();
+            if config_certificate_requested
+                && source_future_terminals.len() == 1
+                && match_frontier_tokens >= 4_096
+                && let Some((dominant_config, &(_, dominant_tokens))) = reset_child_configs
+                    .iter()
+                    .max_by_key(|entry| (entry.1).1)
+                && dominant_config.len() <= 16
+                && dominant_tokens.saturating_mul(4)
+                    >= match_frontier_tokens.saturating_mul(3)
+            {
+                fn config_futures_for_certificate(
+                    tokenizer: &Tokenizer,
+                    config: &[u32],
+                ) -> BitSet {
+                    let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+                    for &state in config {
+                        futures.union_with(tokenizer.possible_future_terminals(state));
+                    }
+                    futures
+                }
+
+                fn collect_config_certificates(
+                    tokenizer: &Tokenizer,
+                    trie: &DynamicMaskTrie,
+                    node: u32,
+                    config: &[u32],
+                ) -> (BitSet, Vec<DynamicConfigSubtreeCertificate>) {
+                    let mut common = if trie.node(node).token_id.is_some() {
+                        config_futures_for_certificate(tokenizer, config)
+                    } else {
+                        BitSet::all(tokenizer.num_terminals() as usize)
+                    };
+                    let mut descendant_certificates = Vec::<DynamicConfigSubtreeCertificate>::new();
+                    for edge in trie.children(node) {
+                        let mut next = TokenizerStateSet::from_iter(config.iter().copied());
+                        let mut matched = false;
+                        for &byte in trie.edge_bytes(edge) {
+                            next = tokenizer.step_all(next.as_slice(), byte);
+                            if next.is_empty() {
+                                break;
+                            }
+                            if next.iter().any(|&state| {
+                                tokenizer.matched_terminals_iter(state).next().is_some()
+                            }) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if matched || next.is_empty() {
+                            common.clear_all();
+                            continue;
+                        }
+                        let (child_common, mut child_certificates) = collect_config_certificates(
+                            tokenizer,
+                            trie,
+                            edge.child,
+                            next.as_slice(),
+                        );
+                        common.intersect_with(&child_common);
+                        descendant_certificates.append(&mut child_certificates);
+                    }
+                    if !common.is_empty() {
+                        let mut projected_config = config.to_vec();
+                        projected_config.sort_unstable();
+                        projected_config.dedup();
+                        let future_terminals = common
+                            .iter_ones()
+                            .map(|terminal| terminal as TerminalID)
+                            .collect::<Vec<_>>();
+                        // Keep the current maximal certificate, but do not
+                        // throw away more-specific descendants whose common
+                        // future set has grown.  Runtime may reject the broad
+                        // parent set for the current parser stack while a
+                        // narrower vocabulary region exposes an additional
+                        // admissible terminal.  Descendants with the *same*
+                        // terminal set are redundant: if the parent is
+                        // rejected they are rejected too, and if it is
+                        // accepted the whole parent subtree is already done.
+                        descendant_certificates.retain(|certificate| {
+                            certificate.common_future_terminals.as_ref()
+                                != future_terminals.as_slice()
+                        });
+                        descendant_certificates.push(DynamicConfigSubtreeCertificate {
+                            node,
+                            projected_config: Arc::from(projected_config),
+                            common_future_terminals: Arc::from(future_terminals),
+                        });
+                        return (
+                            common,
+                            descendant_certificates,
+                        );
+                    }
+                    (common, descendant_certificates)
+                }
+
+                for (node, config) in &reset_config_frontiers {
+                    if config != dominant_config {
+                        continue;
+                    }
+                    let (_, mut certificates) = collect_config_certificates(
+                        tokenizer,
+                        trie,
+                        *node,
+                        dominant_config,
+                    );
+                    config_subtree_certificates.append(&mut certificates);
+                }
+                config_subtree_certificates.sort_unstable_by(|left, right| {
+                    left.node
+                        .cmp(&right.node)
+                        .then_with(|| left.projected_config.as_ref().cmp(right.projected_config.as_ref()))
+                });
+                config_subtree_certificates.dedup_by(|left, right| {
+                    left.node == right.node
+                        && left.projected_config.as_ref() == right.projected_config.as_ref()
+                        && left.common_future_terminals.as_ref()
+                            == right.common_future_terminals.as_ref()
+                });
+                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    let covered = config_subtree_certificates
+                        .iter()
+                        .map(|certificate| trie.subtree_tokens(certificate.node).len())
+                        .sum::<usize>();
+                    eprintln!(
+                        "[glrmask/profile][dynamic_config_subtree_certificates] source_state={} dominant_config_states={} dominant_tokens={} certificates={} covered_tokens={}",
+                        source_state,
+                        dominant_config.len(),
+                        dominant_tokens,
+                        config_subtree_certificates.len(),
+                        covered,
+                    );
+                }
+            }
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_CANDIDATES").is_some() {
+                eprintln!(
+                    "[glrmask/profile][dynamic_projection_candidate_frontier] source_state={} futures={:?} live_nodes={} dead_subtrees={} frontier_nodes={} match_frontier_tokens={} reset_child_states={} reset_child_configs={} reset_edge_second_matches={} reset_second_match_tokens={} reset_edge_unknown={} reset_unknown_tokens={} reset_child_top={:?} reset_config_top={:?}",
+                    source_state,
+                    source_future_terminals,
+                    live_nodes,
+                    pre_match_dead_nodes.len(),
+                    pre_match_frontier_nodes.len(),
+                    match_frontier_tokens,
+                    reset_child_states.len(),
+                    reset_child_configs.len(),
+                    reset_edge_second_matches,
+                    reset_second_match_tokens,
+                    reset_edge_unknown,
+                    reset_unknown_tokens,
+                    {
+                        let mut rows = reset_child_states
+                            .iter()
+                            .map(|(&state, &(nodes, tokens))| (tokens, nodes, state))
+                            .collect::<Vec<_>>();
+                        rows.sort_unstable_by(|left, right| right.cmp(left));
+                        rows.truncate(12);
+                        rows
+                    },
+                    {
+                        let mut rows = reset_child_configs
+                            .iter()
+                            .map(|(config, &(nodes, tokens))| (tokens, nodes, config.len()))
+                            .collect::<Vec<_>>();
+                        rows.sort_unstable_by(|left, right| right.cmp(left));
+                        rows.truncate(12);
+                        rows
+                    },
+                );
+
+                if let Some((dominant_config, &(_, dominant_tokens))) = reset_child_configs
+                    .iter()
+                    .max_by_key(|entry| (entry.1).1)
+                {
+                    fn config_futures(tokenizer: &Tokenizer, config: &[u32]) -> BitSet {
+                        let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+                        for &state in config {
+                            futures.union_with(tokenizer.possible_future_terminals(state));
+                        }
+                        futures
+                    }
+
+                    fn project_config_common_futures(
+                        tokenizer: &Tokenizer,
+                        trie: &DynamicMaskTrie,
+                        node: u32,
+                        config: &[u32],
+                    ) -> (BitSet, usize, usize, usize) {
+                        let all = BitSet::all(tokenizer.num_terminals() as usize);
+                        let mut common = if trie.node(node).token_id.is_some() {
+                            config_futures(tokenizer, config)
+                        } else {
+                            all
+                        };
+                        let mut descendant_covered = 0usize;
+                        let mut descendant_safe_nodes = 0usize;
+                        let mut second_match_tokens = 0usize;
+                        for edge in trie.children(node) {
+                            let mut next = TokenizerStateSet::from_iter(config.iter().copied());
+                            let mut matched = false;
+                            for &byte in trie.edge_bytes(edge) {
+                                next = tokenizer.step_all(next.as_slice(), byte);
+                                if next.is_empty() {
+                                    break;
+                                }
+                                if next.iter().any(|&state| {
+                                    tokenizer.matched_terminals_iter(state).next().is_some()
+                                }) {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if matched {
+                                common.clear_all();
+                                second_match_tokens += trie.subtree_tokens(edge.child).len();
+                                continue;
+                            }
+                            if next.is_empty() {
+                                common.clear_all();
+                                continue;
+                            }
+                            let (child_common, child_covered, child_safe, child_second) =
+                                project_config_common_futures(
+                                    tokenizer,
+                                    trie,
+                                    edge.child,
+                                    next.as_slice(),
+                                );
+                            common.intersect_with(&child_common);
+                            descendant_covered += child_covered;
+                            descendant_safe_nodes += child_safe;
+                            second_match_tokens += child_second;
+                        }
+                        if !common.is_empty() {
+                            (common, trie.subtree_tokens(node).len(), 1, second_match_tokens)
+                        } else {
+                            (
+                                common,
+                                descendant_covered,
+                                descendant_safe_nodes,
+                                second_match_tokens,
+                            )
+                        }
+                    }
+
+                    let mut covered = 0usize;
+                    let mut safe_nodes = 0usize;
+                    let mut second_match_tokens = 0usize;
+                    let mut root_common_sizes = Vec::<usize>::new();
+                    let mut roots = 0usize;
+                    for (node, config) in &reset_config_frontiers {
+                        if config != dominant_config {
+                            continue;
+                        }
+                        roots += 1;
+                        let (common, root_covered, root_safe, root_second) =
+                            project_config_common_futures(
+                                tokenizer,
+                                trie,
+                                *node,
+                                dominant_config,
+                            );
+                        root_common_sizes.push(common.count_ones());
+                        covered += root_covered;
+                        safe_nodes += root_safe;
+                        second_match_tokens += root_second;
+                    }
+                    root_common_sizes.sort_unstable_by(|a, b| b.cmp(a));
+                    eprintln!(
+                        "[glrmask/profile][dynamic_reset_config_projection] source_state={} config_states={} frontier_roots={} dominant_tokens={} common_future_covered={} safe_nodes={} second_match_tokens={} root_common_sizes={:?}",
+                        source_state,
+                        dominant_config.len(),
+                        roots,
+                        dominant_tokens,
+                        covered,
+                        safe_nodes,
+                        second_match_tokens,
+                        root_common_sizes,
+                    );
+
+                    // The common-intersection certificate above is sufficient
+                    // but often much stronger than necessary.  For a fixed
+                    // parser admissible-terminal set A, a no-finalization
+                    // subtree is valid exactly when every token leaf's future
+                    // set F intersects A.  Represent that monotone condition
+                    // as the inclusion-minimal antichain of leaf future sets:
+                    // supersets add no constraint.  Measure how compact that
+                    // CNF is before committing to a runtime representation.
+                    let profile_cnf = std::env::var(
+                        "GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES",
+                    )
+                    .ok()
+                    .is_some_and(|value| {
+                        value
+                            .split(',')
+                            .filter_map(|value| value.trim().parse::<u32>().ok())
+                            .map(|state| vocab.mask_projection_state(state))
+                            .any(|state| state == source_state)
+                    });
+                    if profile_cnf {
+                        const THRESHOLDS: [usize; 6] = [1, 2, 4, 8, 16, 32];
+
+                        fn insert_minimal_clause(clauses: &mut Vec<BitSet>, clause: BitSet) {
+                            if clause.is_empty()
+                                || clauses.iter().any(|existing| existing.is_subset(&clause))
+                            {
+                                return;
+                            }
+                            clauses.retain(|existing| !clause.is_subset(existing));
+                            clauses.push(clause);
+                        }
+
+                        struct CnfAnalysis {
+                            complete: bool,
+                            clauses: Vec<BitSet>,
+                            covered: [usize; THRESHOLDS.len()],
+                            certificates: [usize; THRESHOLDS.len()],
+                            complete_clause_histogram: BTreeMap<usize, usize>,
+                            complete_token_histogram: BTreeMap<usize, usize>,
+                            max_clause_count: usize,
+                        }
+
+                        fn analyze_config_cnf(
+                            tokenizer: &Tokenizer,
+                            trie: &DynamicMaskTrie,
+                            node: u32,
+                            config: &[u32],
+                        ) -> CnfAnalysis {
+                            let mut complete = true;
+                            let mut clauses = Vec::<BitSet>::new();
+                            let mut covered = [0usize; THRESHOLDS.len()];
+                            let mut certificates = [0usize; THRESHOLDS.len()];
+                            let mut complete_clause_histogram = BTreeMap::<usize, usize>::new();
+                            let mut complete_token_histogram = BTreeMap::<usize, usize>::new();
+                            let mut max_clause_count = 0usize;
+
+                            if trie.node(node).token_id.is_some() {
+                                let future = config_futures(tokenizer, config);
+                                if future.is_empty() {
+                                    complete = false;
+                                } else {
+                                    insert_minimal_clause(&mut clauses, future);
+                                }
+                            }
+
+                            let mut child_analyses = Vec::<CnfAnalysis>::new();
+                            for edge in trie.children(node) {
+                                let mut next = TokenizerStateSet::from_iter(config.iter().copied());
+                                let mut matched = false;
+                                for &byte in trie.edge_bytes(edge) {
+                                    next = tokenizer.step_all(next.as_slice(), byte);
+                                    if next.is_empty() {
+                                        break;
+                                    }
+                                    if next.iter().any(|&state| {
+                                        tokenizer.matched_terminals_iter(state).next().is_some()
+                                    }) {
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                                if matched || next.is_empty() {
+                                    complete = false;
+                                    continue;
+                                }
+                                let child = analyze_config_cnf(
+                                    tokenizer,
+                                    trie,
+                                    edge.child,
+                                    next.as_slice(),
+                                );
+                                if !child.complete {
+                                    complete = false;
+                                }
+                                for clause in child.clauses.iter().cloned() {
+                                    insert_minimal_clause(&mut clauses, clause);
+                                }
+                                max_clause_count = max_clause_count.max(child.max_clause_count);
+                                for (&count, &nodes) in &child.complete_clause_histogram {
+                                    *complete_clause_histogram.entry(count).or_default() += nodes;
+                                }
+                                for (&count, &tokens) in &child.complete_token_histogram {
+                                    *complete_token_histogram.entry(count).or_default() += tokens;
+                                }
+                                child_analyses.push(child);
+                            }
+
+                            if complete {
+                                let clause_count = clauses.len();
+                                let tokens = trie.subtree_tokens(node).len();
+                                max_clause_count = max_clause_count.max(clause_count);
+                                *complete_clause_histogram.entry(clause_count).or_default() += 1;
+                                *complete_token_histogram.entry(clause_count).or_default() += tokens;
+                                for (index, threshold) in THRESHOLDS.iter().copied().enumerate() {
+                                    if clause_count <= threshold {
+                                        covered[index] = tokens;
+                                        certificates[index] = 1;
+                                    } else {
+                                        covered[index] = child_analyses
+                                            .iter()
+                                            .map(|child| child.covered[index])
+                                            .sum();
+                                        certificates[index] = child_analyses
+                                            .iter()
+                                            .map(|child| child.certificates[index])
+                                            .sum();
+                                    }
+                                }
+                            } else {
+                                for index in 0..THRESHOLDS.len() {
+                                    covered[index] = child_analyses
+                                        .iter()
+                                        .map(|child| child.covered[index])
+                                        .sum();
+                                    certificates[index] = child_analyses
+                                        .iter()
+                                        .map(|child| child.certificates[index])
+                                        .sum();
+                                }
+                            }
+
+                            CnfAnalysis {
+                                complete,
+                                clauses,
+                                covered,
+                                certificates,
+                                complete_clause_histogram,
+                                complete_token_histogram,
+                                max_clause_count,
+                            }
+                        }
+
+                        let mut total_covered = [0usize; THRESHOLDS.len()];
+                        let mut total_certificates = [0usize; THRESHOLDS.len()];
+                        let mut clause_histogram = BTreeMap::<usize, usize>::new();
+                        let mut token_histogram = BTreeMap::<usize, usize>::new();
+                        let mut max_clause_count = 0usize;
+                        let mut analyzed_roots = 0usize;
+                        for (node, config) in &reset_config_frontiers {
+                            if config != dominant_config {
+                                continue;
+                            }
+                            analyzed_roots += 1;
+                            let analysis = analyze_config_cnf(
+                                tokenizer,
+                                trie,
+                                *node,
+                                dominant_config,
+                            );
+                            max_clause_count = max_clause_count.max(analysis.max_clause_count);
+                            for index in 0..THRESHOLDS.len() {
+                                total_covered[index] += analysis.covered[index];
+                                total_certificates[index] += analysis.certificates[index];
+                            }
+                            for (count, nodes) in analysis.complete_clause_histogram {
+                                *clause_histogram.entry(count).or_default() += nodes;
+                            }
+                            for (count, tokens) in analysis.complete_token_histogram {
+                                *token_histogram.entry(count).or_default() += tokens;
+                            }
+                        }
+                        let coverage = THRESHOLDS
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &threshold)| {
+                                (threshold, total_covered[index], total_certificates[index])
+                            })
+                            .collect::<Vec<_>>();
+                        let histogram = clause_histogram
+                            .iter()
+                            .take(24)
+                            .map(|(&clauses, &nodes)| {
+                                (
+                                    clauses,
+                                    nodes,
+                                    token_histogram.get(&clauses).copied().unwrap_or(0),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "[glrmask/profile][dynamic_reset_config_cnf] source_state={} config_states={} roots={} dominant_tokens={} coverage={:?} max_clause_count={} clause_histogram={:?}",
+                            source_state,
+                            dominant_config.len(),
+                            analyzed_roots,
+                            dominant_tokens,
+                            coverage,
+                            max_clause_count,
+                            histogram,
+                        );
+                    }
+                }
+                if let [terminal] = source_future_terminals
+                    && std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES")
+                        .ok()
+                        .is_some_and(|value| {
+                            value
+                                .split(',')
+                                .filter_map(|value| value.trim().parse::<u32>().ok())
+                                .map(|state| vocab.mask_projection_state(state))
+                                .any(|state| state == source_state)
+                        })
+                {
+                    let vocab_bytes = constraint
+                        .token_bytes
+                        .values()
+                        .map(Vec::as_slice)
+                        .collect::<BTreeSet<_>>();
+                    let mut matched_tokens = 0usize;
+                    let mut continuation_live = 0usize;
+                    let mut matched_and_continuation_live = 0usize;
+                    let mut empty_suffix = 0usize;
+                    let mut suffix_is_vocab = 0usize;
+                    let mut any_match_suffix_is_vocab = 0usize;
+                    let mut all_match_suffix_pairs = 0usize;
+                    let mut suffix_counts = FxHashMap::<Vec<u8>, usize>::default();
+                    let mut full_match_states = FxHashMap::<u32, usize>::default();
+                    for bytes in constraint.token_bytes.values() {
+                        let execution = tokenizer.execute_from_state_all_widths(bytes, source_state);
+                        let first_match_width = execution
+                            .matches
+                            .iter()
+                            .filter(|matched| matched.id == *terminal)
+                            .map(|matched| matched.width)
+                            .min();
+                        let live = execution.end_state.iter().any(|&end_state| {
+                            tokenizer
+                                .possible_future_terminals(end_state)
+                                .contains(*terminal as usize)
+                        });
+                        continuation_live += usize::from(live);
+                        if let Some(width) = first_match_width {
+                            matched_tokens += 1;
+                            matched_and_continuation_live += usize::from(live);
+                            let suffix = &bytes[width..];
+                            empty_suffix += usize::from(suffix.is_empty());
+                            suffix_is_vocab += usize::from(vocab_bytes.contains(suffix));
+                            *suffix_counts.entry(suffix.to_vec()).or_default() += 1;
+                        }
+                        let mut token_has_vocab_suffix = false;
+                        for matched in execution.matches.iter().filter(|matched| matched.id == *terminal) {
+                            let suffix = &bytes[matched.width..];
+                            if !suffix.is_empty() && vocab_bytes.contains(suffix) {
+                                all_match_suffix_pairs += 1;
+                                token_has_vocab_suffix = true;
+                            }
+                        }
+                        any_match_suffix_is_vocab += usize::from(token_has_vocab_suffix);
+                    }
+                    if source_state < constraint.tokenizer.num_states()
+                        && constraint
+                            .tokenizer
+                            .possible_future_terminals(source_state)
+                            .contains(*terminal as usize)
+                    {
+                        for bytes in constraint.token_bytes.values() {
+                            let execution = constraint
+                                .tokenizer
+                                .execute_from_state_all_widths(bytes, source_state);
+                            let Some(first_width) = execution
+                                .matches
+                                .iter()
+                                .filter(|matched| matched.id == *terminal)
+                                .map(|matched| matched.width)
+                                .min()
+                            else {
+                                continue;
+                            };
+                            for matched in execution.matches.iter().filter(|matched| {
+                                matched.id == *terminal && matched.width == first_width
+                            }) {
+                                *full_match_states.entry(matched.end_state).or_default() += 1;
+                            }
+                        }
+                    }
+                    let mut top_suffixes = suffix_counts
+                        .iter()
+                        .map(|(suffix, &count)| (count, suffix.len()))
+                        .collect::<Vec<_>>();
+                    top_suffixes.sort_unstable_by(|left, right| right.cmp(left));
+                    top_suffixes.truncate(12);
+                    eprintln!(
+                        "[glrmask/profile][dynamic_projection_first_match_suffixes] source_state={} terminal={} matched_tokens={} unique_suffixes={} continuation_live={} matched_and_continuation_live={} empty_suffix={} suffix_is_vocab={} any_match_suffix_is_vocab={} all_match_suffix_pairs={} full_match_states={} top_count_len={:?}",
+                        source_state,
+                        terminal,
+                        matched_tokens,
+                        suffix_counts.len(),
+                        continuation_live,
+                        matched_and_continuation_live,
+                        empty_suffix,
+                        suffix_is_vocab,
+                        any_match_suffix_is_vocab,
+                        all_match_suffix_pairs,
+                        full_match_states.len(),
+                        top_suffixes,
+                    );
+                }
+            }
             if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
             {
@@ -989,38 +2444,184 @@ impl Constraint {
                     .iter()
                     .filter(|&&safe| safe != 0)
                     .count();
+                let source_reentry_safe_subtree_count = source_reentry_safe_subtrees
+                    .iter()
+                    .filter(|&&safe| safe != 0)
+                    .count();
+                let common_future_subtree_count = common_future_masks
+                    .iter()
+                    .filter(|&&mask| mask != 0)
+                    .count();
+                let common_future_fingerprint = common_future_masks.iter().fold(
+                    0xcbf29ce484222325u64,
+                    |hash, &mask| {
+                        (hash ^ mask)
+                            .wrapping_mul(0x100000001b3)
+                    },
+                );
                 eprintln!(
-                    "[glrmask/profile][dynamic_self_loop_projection_build] source_state={} terminal={} loop_bytes={} safe_tokens={} safe_subtrees={}",
+                    "[glrmask/profile][dynamic_self_loop_projection_build] source_state={} futures={:?} loop_bytes={} safe_tokens={} safe_subtrees={} source_reentry_safe_subtrees={} common_future_subtrees={} common_future_fingerprint={:016x}",
                     source_state,
-                    required_terminal,
+                    source_future_terminals,
                     source_loop_bytes.len(),
                     safe_tokens,
                     safe_subtree_count,
+                    source_reentry_safe_subtree_count,
+                    common_future_subtree_count,
+                    common_future_fingerprint,
                 );
             }
             DynamicSelfLoopProjection {
                 source_state,
-                required_terminal,
+                future_terminals: Arc::from(source_future_terminals),
                 safe_no_match_mask: Arc::from(safe_no_match_mask),
                 safe_subtrees: Arc::from(safe_subtrees),
+                source_reentry_safe_subtrees: Arc::from(source_reentry_safe_subtrees),
+                common_future_masks: Arc::from(common_future_masks),
+                pre_match_dead_words: Arc::from(pre_match_dead_words),
+                pre_match_frontier_words: Arc::from(pre_match_frontier_words),
+                first_match_fusion_source_state: u32::MAX,
+                first_match_fusion_match_state: u32::MAX,
+                first_match_fusion_candidate_mask: Arc::from(Vec::<u32>::new()),
+                first_match_fusion_candidate_subtrees: Arc::from(Vec::<u64>::new()),
+                first_match_fusions: Arc::from(Vec::<(u32, u32)>::new()),
+                first_match_step_source_state: u32::MAX,
+                first_match_step_root_live_tokens: Arc::from(Vec::<u32>::new()),
+                first_match_step_exact_end_tokens: Arc::from(Vec::<u32>::new()),
+                first_match_step_post_rows: Arc::from(Vec::<DynamicFirstMatchPostRow>::new()),
+                first_match_step_second_rows: Arc::from(Vec::<DynamicFirstMatchSecondRow>::new()),
+                first_match_step_unknown_tokens: Arc::from(Vec::<u32>::new()),
+                first_match_step_unknown_subtrees: Arc::from(Vec::<u64>::new()),
+                root_effect_source_state: u32::MAX,
+                root_effect_post_rows: Arc::from(Vec::<DynamicFirstMatchPostRow>::new()),
+                root_effect_rows: Arc::from(Vec::<DynamicFirstMatchSecondRow>::new()),
+                root_effect_unknown_tokens: Arc::from(Vec::<u32>::new()),
+                root_effect_unknown_subtrees: Arc::from(Vec::<u64>::new()),
+                config_subtree_certificates: Arc::from(
+                    config_subtree_certificates.into_boxed_slice(),
+                ),
             }
         }
 
-        let candidates = self.dynamic_self_loop_projection_candidates(vocab);
-        if candidates.len() <= 1 {
-            return candidates
-                .into_iter()
-                .map(|(source_state, required_terminal)| {
-                    build_one(self, vocab, fast_transitions, source_state, required_terminal)
-                })
-                .collect();
+        let projection_tokenizer = vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_STATES") {
+            let requested = value
+                .split(',')
+                .filter_map(|value| value.trim().parse::<u32>().ok())
+                .map(|state| vocab.mask_projection_state(state))
+                .filter(|&state| state < projection_tokenizer.num_states())
+                .collect::<Vec<_>>();
+            let mut by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+            for &state in &requested {
+                let futures = projection_tokenizer
+                    .possible_future_terminals_iter(state)
+                    .collect::<Vec<_>>();
+                if let [terminal] = futures.as_slice() {
+                    by_terminal.entry(*terminal).or_default().push(state);
+                }
+            }
+            for (terminal, states) in by_terminal {
+                let horizon = std::env::var("GLRMASK_PROFILE_DYNAMIC_FUTURE_QUOTIENT_HORIZON")
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u8>().ok())
+                    .filter(|&value| value > 0)
+                    .unwrap_or(64);
+                let started = std::time::Instant::now();
+                let classes = projection_tokenizer
+                    .bounded_terminal_future_partition(terminal, horizon);
+                let class_count = classes.iter().copied().max().unwrap_or(0) as usize + 1;
+                let mut single_future_class_counts = FxHashMap::<u32, usize>::default();
+                for state in 0..projection_tokenizer.num_states() {
+                    if projection_tokenizer
+                        .possible_future_terminals_iter(state)
+                        .eq(std::iter::once(terminal))
+                    {
+                        let class = classes[state as usize];
+                        *single_future_class_counts.entry(class).or_default() += 1;
+                    }
+                }
+                let requested_class_counts = single_future_class_counts.clone();
+                let mut single_future_classes = single_future_class_counts
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                single_future_classes.sort_unstable_by(|left, right| {
+                    (std::cmp::Reverse(left.1), left.0)
+                        .cmp(&(std::cmp::Reverse(right.1), right.0))
+                });
+                eprintln!(
+                    "[glrmask/profile][dynamic_future_quotient] terminal={} horizon={} states={} classes={} single_future_classes={} single_future_states={} largest_single_future_classes={:?} elapsed_ms={:.3}",
+                    terminal,
+                    horizon,
+                    projection_tokenizer.num_states(),
+                    class_count,
+                    single_future_classes.len(),
+                    single_future_classes.iter().map(|(_, count)| count).sum::<usize>(),
+                    single_future_classes.iter().take(16).collect::<Vec<_>>(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+                for state in states {
+                    let class = classes.get(state as usize).copied().unwrap_or(0);
+                    eprintln!(
+                        "[glrmask/profile][dynamic_future_quotient_state] terminal={} state={} class={} class_states={}",
+                        terminal,
+                        state,
+                        class,
+                        requested_class_counts.get(&class).copied().unwrap_or(0),
+                    );
+                }
+            }
         }
-        std::thread::scope(|scope| {
+        let quotient_bounded64 = vocab.mask_projection_tokenizer().map(|tokenizer| {
+            let (_, bounded64) = tokenizer.precompute_bounded_observation_safe_byte_sets();
+            bounded64
+        });
+        let projection_fast_owned = vocab
+            .mask_projection_tokenizer()
+            .map(Self::compute_tokenizer_fast_transitions_for);
+        let fast_transitions = projection_fast_owned
+            .as_ref()
+            .unwrap_or(full_fast_transitions);
+        let candidates = self.dynamic_self_loop_projection_candidates(
+            vocab,
+            projection_tokenizer,
+            quotient_bounded64.as_deref(),
+        );
+        let mut built = if candidates.len() <= 1 {
             candidates
                 .into_iter()
-                .map(|(source_state, required_terminal)| {
+                .map(|(source_state, future_terminals, probe)| {
+                    (
+                        build_one(
+                            self,
+                            projection_tokenizer,
+                            vocab,
+                            fast_transitions,
+                            source_state,
+                            &future_terminals,
+                        ),
+                        probe,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            std::thread::scope(|scope| {
+            candidates
+                .into_iter()
+                .map(|(source_state, future_terminals, probe)| {
                     scope.spawn(move || {
-                        build_one(self, vocab, fast_transitions, source_state, required_terminal)
+                        (
+                            build_one(
+                                self,
+                                projection_tokenizer,
+                                vocab,
+                                fast_transitions,
+                                source_state,
+                                &future_terminals,
+                            ),
+                            probe,
+                        )
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1031,7 +2632,1365 @@ impl Constraint {
                         .expect("dynamic self-loop projection worker panicked")
                 })
                 .collect()
-        })
+            })
+        };
+
+        // Experimental exact first-match/suffix fusion subset.  This is
+        // intentionally opt-in while its runtime value and construction cost
+        // are measured.  Only projection states with exactly one full-state
+        // preimage are eligible, so every remembered matched lexer state is in
+        // the exact runtime tokenizer coordinate rather than a quotient alias.
+        let fusion_states = std::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_FUSION_STATES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|value| value.trim().parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !fusion_states.is_empty() {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            let special_tokens = self
+                .special_token_terminals
+                .iter()
+                .map(|special| special.token_id)
+                .collect::<BTreeSet<_>>();
+            let mut ordinary_token_by_bytes = FxHashMap::<&[u8], u32>::default();
+            for (&token, bytes) in self.token_bytes.iter() {
+                if !special_tokens.contains(&token) {
+                    ordinary_token_by_bytes
+                        .entry(bytes.as_slice())
+                        .or_insert(token);
+                }
+            }
+
+            for full_source_state in fusion_states {
+                if full_source_state >= self.tokenizer.num_states() {
+                    continue;
+                }
+                let projection_state = vocab.mask_projection_state(full_source_state);
+                if multiplicities
+                    .as_ref()
+                    .and_then(|counts| counts.get(projection_state as usize))
+                    .copied()
+                    .unwrap_or(1)
+                    != 1
+                {
+                    continue;
+                }
+                let Some((projection, _)) = built
+                    .iter_mut()
+                    .find(|(projection, _)| projection.source_state == projection_state)
+                else {
+                    continue;
+                };
+                let [terminal] = projection.future_terminals.as_ref() else {
+                    continue;
+                };
+
+                let started = std::time::Instant::now();
+                let mut fusions = Vec::<(u32, u32)>::new();
+                let mut all_suffix_entries = Vec::<(usize, &[u8])>::new();
+                let mut common_match_state = None::<u32>;
+                let mut conflicting_match_state = false;
+                for (&fused_token, bytes) in self.token_bytes.iter() {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let execution = self
+                        .tokenizer
+                        .execute_from_state_all_widths(bytes, full_source_state);
+                    let Some(first_width) = execution
+                        .matches
+                        .iter()
+                        .filter(|matched| matched.id == *terminal)
+                        .map(|matched| matched.width)
+                        .min()
+                    else {
+                        continue;
+                    };
+                    if first_width >= bytes.len() {
+                        // The empty-suffix case is tiny and the ordinary walk
+                        // already handles it; keeping this subset to nonempty
+                        // suffix tokens simplifies candidate validation.
+                        continue;
+                    }
+                    let mut match_states = execution
+                        .matches
+                        .iter()
+                        .filter(|matched| matched.id == *terminal && matched.width == first_width)
+                        .map(|matched| matched.end_state);
+                    let Some(match_state) = match_states.next() else {
+                        continue;
+                    };
+                    if match_states.any(|state| state != match_state) {
+                        continue;
+                    }
+                    match common_match_state {
+                        None => common_match_state = Some(match_state),
+                        Some(existing) if existing == match_state => {}
+                        Some(_) => {
+                            conflicting_match_state = true;
+                            break;
+                        }
+                    }
+                    let suffix = &bytes[first_width..];
+                    all_suffix_entries.push((fused_token as usize, suffix));
+                    let Some(&suffix_token) = ordinary_token_by_bytes.get(suffix) else {
+                        continue;
+                    };
+                    fusions.push((fused_token, suffix_token));
+                }
+                if conflicting_match_state || fusions.is_empty() {
+                    continue;
+                }
+                let mut suffix_byte_set = BTreeSet::<&[u8]>::new();
+                let suffixes_unique = all_suffix_entries
+                    .iter()
+                    .all(|(_, suffix)| suffix_byte_set.insert(*suffix));
+                let suffix_trie_profile = suffixes_unique.then(|| {
+                    Self::build_dynamic_mask_trie_partitioned(&all_suffix_entries)
+                });
+                fusions.sort_unstable();
+                fusions.dedup();
+                let mut candidate_mask = vec![0u32; self.mask_len()];
+                for &(_, suffix_token) in &fusions {
+                    let word = suffix_token as usize / 32;
+                    if let Some(bits) = candidate_mask.get_mut(word) {
+                        *bits |= 1u32 << (suffix_token % 32);
+                    }
+                }
+                let ordered = vocab.trie.all_subtree_tokens();
+                let mut candidate_prefix = Vec::<u32>::with_capacity(ordered.len() + 1);
+                candidate_prefix.push(0);
+                let mut candidate_count = 0u32;
+                for &canonical_token in ordered {
+                    let is_candidate = vocab.token_ids(canonical_token).is_some_and(|aliases| {
+                        aliases.iter().any(|&token_id| {
+                            let word = token_id as usize / 32;
+                            let bit = token_id % 32;
+                            candidate_mask
+                                .get(word)
+                                .is_some_and(|bits| bits & (1u32 << bit) != 0)
+                        })
+                    });
+                    candidate_count += u32::from(is_candidate);
+                    candidate_prefix.push(candidate_count);
+                }
+                let mut candidate_subtrees =
+                    vec![0u64; vocab.trie.node_count().div_ceil(64)];
+                for node in 0..vocab.trie.node_count() as u32 {
+                    let range = vocab.trie.subtree_token_index_range(node);
+                    if candidate_prefix[range.start] != candidate_prefix[range.end] {
+                        candidate_subtrees[node as usize >> 6] |= 1u64 << (node & 63);
+                    }
+                }
+                projection.first_match_fusion_source_state = full_source_state;
+                projection.first_match_fusion_match_state = common_match_state.unwrap_or(u32::MAX);
+                projection.first_match_fusion_candidate_mask = Arc::from(candidate_mask);
+                projection.first_match_fusion_candidate_subtrees = Arc::from(candidate_subtrees);
+                projection.first_match_fusions = Arc::from(fusions.into_boxed_slice());
+                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_first_match_fusions] full_source={} projection_source={} terminal={} match_state={} fusions={} suffix_candidates={} elapsed_ms={:.3}",
+                        full_source_state,
+                        projection_state,
+                        terminal,
+                        projection.first_match_fusion_match_state,
+                        projection.first_match_fusions.len(),
+                        projection
+                            .first_match_fusion_candidate_mask
+                            .iter()
+                            .map(|word| word.count_ones() as usize)
+                            .sum::<usize>(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    if let Some(suffix_trie) = suffix_trie_profile.as_ref() {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_first_match_suffix_trie] full_source={} suffixes={} trie_nodes={} trie_edges={} trie_bytes={} max_depth_bytes={}",
+                            full_source_state,
+                            all_suffix_entries.len(),
+                            suffix_trie.nodes.len(),
+                            suffix_trie.edges.len(),
+                            suffix_trie.edge_bytes_len(),
+                            suffix_trie.subtree_max_byte_len(0),
+                        );
+                    } else {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_first_match_suffix_trie] full_source={} suffixes={} duplicate_suffixes=true",
+                            full_source_state,
+                            all_suffix_entries.len(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Exact one-finalization decomposition.  This is a stronger and more
+        // general version of the suffix-token fusion experiment above: suffix
+        // bytes do not need to be a vocabulary token themselves.  Instead we
+        // classify the concrete model token by the residual lexer terminals
+        // that remain possible after the first finalization/reset.  Any token
+        // that sees a second finalization (or has ambiguous first-match width)
+        // is left in `unknown` and therefore still goes through the ordinary
+        // exact dynamic walker at runtime.
+        let first_match_step_states =
+            std::env::var("GLRMASK_DYNAMIC_FIRST_MATCH_ONE_STEP_STATES")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter_map(|value| value.trim().parse::<u32>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+        if !first_match_step_states.is_empty() {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            let special_tokens = self
+                .special_token_terminals
+                .iter()
+                .map(|special| special.token_id)
+                .collect::<BTreeSet<_>>();
+
+            for full_source_state in first_match_step_states {
+                if full_source_state >= self.tokenizer.num_states() {
+                    continue;
+                }
+                let projection_state = vocab.mask_projection_state(full_source_state);
+                if multiplicities
+                    .as_ref()
+                    .and_then(|counts| counts.get(projection_state as usize))
+                    .copied()
+                    .unwrap_or(1)
+                    != 1
+                {
+                    continue;
+                }
+                let Some((projection, _)) = built
+                    .iter_mut()
+                    .find(|(projection, _)| projection.source_state == projection_state)
+                else {
+                    continue;
+                };
+                let [terminal] = projection.future_terminals.as_ref() else {
+                    continue;
+                };
+                if Some(*terminal) == self.ignore_terminal {
+                    continue;
+                }
+
+                let started = std::time::Instant::now();
+                let mut root_live_tokens = Vec::<u32>::new();
+                let mut exact_end_tokens = Vec::<u32>::new();
+                let mut unknown_tokens = Vec::<u32>::new();
+                let mut post_tokens_by_terminal =
+                    BTreeMap::<TerminalID, Vec<u32>>::new();
+                let mut known_reject = 0usize;
+
+                for (&token_id, bytes) in self.token_bytes.iter() {
+                    if special_tokens.contains(&token_id) || bytes.is_empty() {
+                        continue;
+                    }
+                    let execution = self
+                        .tokenizer
+                        .execute_from_state_all_widths(bytes, full_source_state);
+
+                    // A no-finalization continuation is already a complete
+                    // witness whenever the sole root terminal is parser-live.
+                    // Prefer it over the matched branch so the token need not
+                    // enter the unknown set merely because some *other* lexer
+                    // path also finalizes inside the token.
+                    let root_live = execution.end_state.iter().any(|&end_state| {
+                        self.tokenizer
+                            .possible_future_terminals(end_state)
+                            .contains(*terminal as usize)
+                    });
+                    if root_live {
+                        root_live_tokens.push(token_id);
+                        continue;
+                    }
+
+                    if execution.matches.iter().any(|matched| matched.id != *terminal) {
+                        unknown_tokens.push(token_id);
+                        continue;
+                    }
+                    let mut widths = execution
+                        .matches
+                        .iter()
+                        .filter(|matched| matched.id == *terminal)
+                        .map(|matched| matched.width)
+                        .collect::<Vec<_>>();
+                    widths.sort_unstable();
+                    widths.dedup();
+                    let [first_width] = widths.as_slice() else {
+                        if widths.is_empty() {
+                            known_reject += 1;
+                        } else {
+                            unknown_tokens.push(token_id);
+                        }
+                        continue;
+                    };
+                    if *first_width == bytes.len() {
+                        exact_end_tokens.push(token_id);
+                        continue;
+                    }
+
+                    let suffix = &bytes[*first_width..];
+                    let reset_execution = self
+                        .tokenizer
+                        .execute_from_state_all_widths(suffix, self.tokenizer.start_state());
+                    if !reset_execution.matches.is_empty() {
+                        unknown_tokens.push(token_id);
+                        continue;
+                    }
+                    let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
+                    for &end_state in &reset_execution.end_state {
+                        futures.union_with(self.tokenizer.possible_future_terminals(end_state));
+                    }
+                    if futures.is_empty() {
+                        known_reject += 1;
+                        continue;
+                    }
+                    for post_terminal in futures.iter_ones() {
+                        post_tokens_by_terminal
+                            .entry(post_terminal as TerminalID)
+                            .or_default()
+                            .push(token_id);
+                    }
+                }
+
+                root_live_tokens.sort_unstable();
+                root_live_tokens.dedup();
+                exact_end_tokens.sort_unstable();
+                exact_end_tokens.dedup();
+                unknown_tokens.sort_unstable();
+                unknown_tokens.dedup();
+
+                // Compile the remaining reset-suffix language into a short
+                // recursive lexical-effect program.  Each row consumes one
+                // parser terminal, then either ends the model token, reaches a
+                // residual future-terminal set at token boundary, or descends
+                // to another row after the lexer resets again.  The program is
+                // entirely vocabulary-derived; runtime still performs the real
+                // parser advances.  A bounded recursion depth keeps the
+                // construction predictable, with any unresolved token falling
+                // back to the exact byte-wise walker.
+                let first_step_unknown_count = unknown_tokens.len();
+
+                fn grouped_post_rows(
+                    by_terminal: BTreeMap<TerminalID, Vec<u32>>,
+                ) -> Vec<DynamicFirstMatchPostRow> {
+                    let mut terminals_by_tokens =
+                        BTreeMap::<Vec<u32>, Vec<TerminalID>>::new();
+                    for (terminal, mut tokens) in by_terminal {
+                        tokens.sort_unstable();
+                        tokens.dedup();
+                        if !tokens.is_empty() {
+                            terminals_by_tokens.entry(tokens).or_default().push(terminal);
+                        }
+                    }
+                    let mut rows = terminals_by_tokens
+                        .into_iter()
+                        .map(|(tokens, mut terminals)| {
+                            terminals.sort_unstable();
+                            terminals.dedup();
+                            dynamic_effect_post_row(terminals, tokens)
+                        })
+                        .collect::<Vec<_>>();
+                    rows.sort_unstable_by(|left, right| {
+                        std::cmp::Reverse(left.tokens.len())
+                            .cmp(&std::cmp::Reverse(right.tokens.len()))
+                            .then_with(|| {
+                                left.terminals.as_ref().cmp(right.terminals.as_ref())
+                            })
+                    });
+                    rows
+                }
+
+                fn build_reset_effect_rows(
+                    tokenizer: &Tokenizer,
+                    mut entries: Vec<(u32, Vec<u8>)>,
+                    depth_left: usize,
+                    unresolved: &mut BTreeSet<u32>,
+                ) -> (Vec<DynamicFirstMatchPostRow>, Vec<DynamicFirstMatchSecondRow>) {
+                    entries.sort_unstable();
+                    entries.dedup();
+                    let mut residual_by_terminal =
+                        BTreeMap::<TerminalID, Vec<u32>>::new();
+                    let mut exact_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+                    let mut children_by_terminal =
+                        BTreeMap::<TerminalID, Vec<(u32, Vec<u8>)>>::new();
+
+                    for (token_id, bytes) in entries {
+                        if bytes.is_empty() {
+                            unresolved.insert(token_id);
+                            continue;
+                        }
+                        let execution = tokenizer.execute_from_state_all_widths(
+                            &bytes,
+                            tokenizer.start_state(),
+                        );
+                        let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+                        for &end_state in &execution.end_state {
+                            futures.union_with(tokenizer.possible_future_terminals(end_state));
+                        }
+                        for future_terminal in futures.iter_ones() {
+                            residual_by_terminal
+                                .entry(future_terminal as TerminalID)
+                                .or_default()
+                                .push(token_id);
+                        }
+
+                        let mut branches = execution
+                            .matches
+                            .iter()
+                            .map(|matched| (matched.id, matched.width))
+                            .collect::<Vec<_>>();
+                        branches.sort_unstable();
+                        branches.dedup();
+                        for (terminal, width) in branches {
+                            if width == 0 || width > bytes.len() {
+                                unresolved.insert(token_id);
+                            } else if width == bytes.len() {
+                                exact_by_terminal.entry(terminal).or_default().push(token_id);
+                            } else if depth_left == 0 {
+                                unresolved.insert(token_id);
+                            } else {
+                                children_by_terminal
+                                    .entry(terminal)
+                                    .or_default()
+                                    .push((token_id, bytes[width..].to_vec()));
+                            }
+                        }
+                    }
+
+                    let post_rows = grouped_post_rows(residual_by_terminal);
+                    let mut terminals = BTreeSet::<TerminalID>::new();
+                    terminals.extend(exact_by_terminal.keys().copied());
+                    terminals.extend(children_by_terminal.keys().copied());
+                    let mut rows = Vec::<DynamicFirstMatchSecondRow>::new();
+                    for terminal in terminals {
+                        let mut exact_end_tokens =
+                            exact_by_terminal.remove(&terminal).unwrap_or_default();
+                        exact_end_tokens.sort_unstable();
+                        exact_end_tokens.dedup();
+                        let child_entries =
+                            children_by_terminal.remove(&terminal).unwrap_or_default();
+                        let (child_post_rows, next_rows) = if child_entries.is_empty() {
+                            (Vec::new(), Vec::new())
+                        } else {
+                            build_reset_effect_rows(
+                                tokenizer,
+                                child_entries,
+                                depth_left.saturating_sub(1),
+                                unresolved,
+                            )
+                        };
+                        if !exact_end_tokens.is_empty()
+                            || !child_post_rows.is_empty()
+                            || !next_rows.is_empty()
+                        {
+                            rows.push(DynamicFirstMatchSecondRow {
+                                terminal,
+                                exact_end_tokens: Arc::from(exact_end_tokens),
+                                post_rows: Arc::from(child_post_rows),
+                                next_rows: Arc::from(next_rows),
+                            });
+                        }
+                    }
+                    rows.sort_unstable_by_key(|row| row.terminal);
+                    (post_rows, rows)
+                }
+
+                let mut reset_entries = Vec::<(u32, Vec<u8>)>::new();
+                let mut unresolved = BTreeSet::<u32>::new();
+                for &token_id in &unknown_tokens {
+                    let Some(bytes) = self.token_bytes.get(&token_id) else {
+                        unresolved.insert(token_id);
+                        continue;
+                    };
+                    let execution = self
+                        .tokenizer
+                        .execute_from_state_all_widths(bytes, full_source_state);
+                    if execution.matches.iter().any(|matched| matched.id != *terminal) {
+                        unresolved.insert(token_id);
+                        continue;
+                    }
+                    let mut widths = execution
+                        .matches
+                        .iter()
+                        .filter(|matched| matched.id == *terminal)
+                        .map(|matched| matched.width)
+                        .collect::<Vec<_>>();
+                    widths.sort_unstable();
+                    widths.dedup();
+                    let [first_width] = widths.as_slice() else {
+                        unresolved.insert(token_id);
+                        continue;
+                    };
+                    if *first_width >= bytes.len() {
+                        unresolved.insert(token_id);
+                        continue;
+                    }
+                    reset_entries.push((token_id, bytes[*first_width..].to_vec()));
+                }
+
+                // The measured vocabulary needs at most five reset
+                // finalizations below the first match. Six leaves one level of
+                // safety margin while keeping pathological grammars bounded.
+                let (extra_post_rows, second_rows) = build_reset_effect_rows(
+                    &self.tokenizer,
+                    reset_entries,
+                    6,
+                    &mut unresolved,
+                );
+                for row in extra_post_rows {
+                    for &post_terminal in row.terminals.iter() {
+                        post_tokens_by_terminal
+                            .entry(post_terminal)
+                            .or_default()
+                            .extend(row.tokens.iter().copied());
+                    }
+                }
+                unknown_tokens = unresolved.into_iter().collect();
+
+                let mut unknown_mask = vec![0u32; self.mask_len()];
+                for &token_id in &unknown_tokens {
+                    let word = token_id as usize / 32;
+                    if let Some(bits) = unknown_mask.get_mut(word) {
+                        *bits |= 1u32 << (token_id % 32);
+                    }
+                }
+                let ordered = vocab.trie.all_subtree_tokens();
+                let mut unknown_prefix = Vec::<u32>::with_capacity(ordered.len() + 1);
+                unknown_prefix.push(0);
+                let mut unknown_count = 0u32;
+                for &canonical_token in ordered {
+                    let is_unknown = vocab.token_ids(canonical_token).is_some_and(|aliases| {
+                        aliases.iter().any(|&token_id| {
+                            let word = token_id as usize / 32;
+                            let bit = token_id % 32;
+                            unknown_mask
+                                .get(word)
+                                .is_some_and(|bits| bits & (1u32 << bit) != 0)
+                        })
+                    });
+                    unknown_count += u32::from(is_unknown);
+                    unknown_prefix.push(unknown_count);
+                }
+                let mut unknown_subtrees =
+                    vec![0u64; vocab.trie.node_count().div_ceil(64)];
+                for node in 0..vocab.trie.node_count() as u32 {
+                    let range = vocab.trie.subtree_token_index_range(node);
+                    if unknown_prefix[range.start] != unknown_prefix[range.end] {
+                        unknown_subtrees[node as usize >> 6] |= 1u64 << (node & 63);
+                    }
+                }
+
+                // Many schema terminals have different parser identities but
+                // exactly the same concrete-vocabulary residual language.
+                // Collapse them by their fused-token row so runtime performs
+                // one admitted-terminal intersection per distinct row rather
+                // than one test per grammar terminal.
+                let mut terminals_by_tokens =
+                    BTreeMap::<Vec<u32>, Vec<TerminalID>>::new();
+                for (post_terminal, mut tokens) in post_tokens_by_terminal {
+                    tokens.sort_unstable();
+                    tokens.dedup();
+                    if !tokens.is_empty() {
+                        terminals_by_tokens
+                            .entry(tokens)
+                            .or_default()
+                            .push(post_terminal);
+                    }
+                }
+                let mut post_rows = terminals_by_tokens
+                    .into_iter()
+                    .map(|(tokens, mut terminals)| {
+                        terminals.sort_unstable();
+                        terminals.dedup();
+                        dynamic_effect_post_row(terminals, tokens)
+                    })
+                    .collect::<Vec<_>>();
+                post_rows.sort_unstable_by(|left, right| {
+                    std::cmp::Reverse(left.tokens.len())
+                        .cmp(&std::cmp::Reverse(right.tokens.len()))
+                        .then_with(|| left.terminals.as_ref().cmp(right.terminals.as_ref()))
+                });
+
+                projection.first_match_step_source_state = full_source_state;
+                projection.first_match_step_root_live_tokens = Arc::from(root_live_tokens);
+                projection.first_match_step_exact_end_tokens = Arc::from(exact_end_tokens);
+                projection.first_match_step_post_rows = Arc::from(post_rows);
+                projection.first_match_step_second_rows = Arc::from(second_rows);
+                projection.first_match_step_unknown_tokens = Arc::from(unknown_tokens);
+                projection.first_match_step_unknown_subtrees = Arc::from(unknown_subtrees);
+
+                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    let mut unknown_second_pairs =
+                        FxHashMap::<Vec<(TerminalID, usize)>, usize>::default();
+                    let mut unknown_second_terminals = FxHashMap::<TerminalID, usize>::default();
+                    let mut unknown_multi_first = 0usize;
+                    let mut unknown_second_match = 0usize;
+                    let mut unknown_other = 0usize;
+                    let mut second_branches = 0usize;
+                    let mut second_exact_end_branches = 0usize;
+                    let mut second_residual_only_branches = 0usize;
+                    let mut third_match_branches = 0usize;
+                    let mut tokens_with_third_match = BTreeSet::<u32>::new();
+                    let mut remaining_depth_histogram = BTreeMap::<usize, usize>::new();
+                    let mut depth_memo = FxHashMap::<Vec<u8>, usize>::default();
+                    fn max_reset_finalization_depth(
+                        tokenizer: &Tokenizer,
+                        bytes: &[u8],
+                        memo: &mut FxHashMap<Vec<u8>, usize>,
+                    ) -> usize {
+                        if bytes.is_empty() {
+                            return 0;
+                        }
+                        if let Some(&cached) = memo.get(bytes) {
+                            return cached;
+                        }
+                        let execution = tokenizer.execute_from_state_all_widths(
+                            bytes,
+                            tokenizer.start_state(),
+                        );
+                        let mut branches = execution
+                            .matches
+                            .iter()
+                            .map(|matched| (matched.id, matched.width))
+                            .collect::<Vec<_>>();
+                        branches.sort_unstable();
+                        branches.dedup();
+                        let mut depth = 0usize;
+                        for (_, width) in branches {
+                            let child = if width < bytes.len() {
+                                max_reset_finalization_depth(tokenizer, &bytes[width..], memo)
+                            } else {
+                                0
+                            };
+                            depth = depth.max(1 + child);
+                        }
+                        memo.insert(bytes.to_vec(), depth);
+                        depth
+                    }
+                    for &token_id in projection.first_match_step_unknown_tokens.iter() {
+                        let Some(bytes) = self.token_bytes.get(&token_id) else {
+                            continue;
+                        };
+                        let execution = self
+                            .tokenizer
+                            .execute_from_state_all_widths(bytes, full_source_state);
+                        let mut widths = execution
+                            .matches
+                            .iter()
+                            .filter(|matched| matched.id == *terminal)
+                            .map(|matched| matched.width)
+                            .collect::<Vec<_>>();
+                        widths.sort_unstable();
+                        widths.dedup();
+                        let [first_width] = widths.as_slice() else {
+                            unknown_multi_first += 1;
+                            continue;
+                        };
+                        if *first_width >= bytes.len() {
+                            unknown_other += 1;
+                            continue;
+                        }
+                        let reset_execution = self.tokenizer.execute_from_state_all_widths(
+                            &bytes[*first_width..],
+                            self.tokenizer.start_state(),
+                        );
+                        let mut pairs = reset_execution
+                            .matches
+                            .iter()
+                            .map(|matched| (matched.id, matched.width))
+                            .collect::<Vec<_>>();
+                        pairs.sort_unstable();
+                        pairs.dedup();
+                        if pairs.is_empty() {
+                            unknown_other += 1;
+                            continue;
+                        }
+                        unknown_second_match += 1;
+                        for &(second_terminal, _) in &pairs {
+                            *unknown_second_terminals.entry(second_terminal).or_default() += 1;
+                        }
+                        *unknown_second_pairs.entry(pairs).or_default() += 1;
+
+                        // Classify each distinct second-finalization branch by
+                        // what remains after its reset.  This measures the
+                        // depth needed by the next exact static layer.
+                        let suffix = &bytes[*first_width..];
+                        let remaining_depth = max_reset_finalization_depth(
+                            &self.tokenizer,
+                            suffix,
+                            &mut depth_memo,
+                        );
+                        *remaining_depth_histogram.entry(remaining_depth).or_default() += 1;
+                        let mut branches = reset_execution
+                            .matches
+                            .iter()
+                            .map(|matched| (matched.id, matched.width))
+                            .collect::<Vec<_>>();
+                        branches.sort_unstable();
+                        branches.dedup();
+                        for (_second_terminal, second_width) in branches {
+                            second_branches += 1;
+                            if second_width == suffix.len() {
+                                second_exact_end_branches += 1;
+                                continue;
+                            }
+                            let third_execution = self.tokenizer.execute_from_state_all_widths(
+                                &suffix[second_width..],
+                                self.tokenizer.start_state(),
+                            );
+                            if third_execution.matches.is_empty() {
+                                second_residual_only_branches += 1;
+                            } else {
+                                third_match_branches += 1;
+                                tokens_with_third_match.insert(token_id);
+                            }
+                        }
+                    }
+                    let mut second_terminal_summary = unknown_second_terminals
+                        .into_iter()
+                        .map(|(terminal, count)| (count, terminal))
+                        .collect::<Vec<_>>();
+                    second_terminal_summary.sort_unstable_by(|a, b| b.cmp(a));
+                    second_terminal_summary.truncate(20);
+                    let mut second_pair_summary = unknown_second_pairs
+                        .into_iter()
+                        .map(|(pairs, count)| (count, pairs))
+                        .collect::<Vec<_>>();
+                    second_pair_summary.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                    second_pair_summary.truncate(20);
+                    let row_summary = projection
+                        .first_match_step_post_rows
+                        .iter()
+                        .take(16)
+                        .map(|row| (row.tokens.len(), row.terminals.len(), row.terminals.to_vec()))
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "[glrmask/profile][dynamic_first_match_one_step] full_source={} projection_source={} terminal={} root_live={} exact_end={} post_rows={} second_rows={} first_unknown={} fallback_unknown={} known_reject={} rows={:?} elapsed_ms={:.3}",
+                        full_source_state,
+                        projection_state,
+                        terminal,
+                        projection.first_match_step_root_live_tokens.len(),
+                        projection.first_match_step_exact_end_tokens.len(),
+                        projection.first_match_step_post_rows.len(),
+                        projection.first_match_step_second_rows.len(),
+                        first_step_unknown_count,
+                        projection.first_match_step_unknown_tokens.len(),
+                        known_reject,
+                        row_summary,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    eprintln!(
+                        "[glrmask/profile][dynamic_first_match_one_step_unknown] full_source={} unknown={} multi_first={} second_match={} other={} second_branches={} second_exact_end={} second_residual_only={} third_match_branches={} tokens_with_third_match={} remaining_depth_histogram={:?} second_terminals={:?} second_pairs={:?}",
+                        full_source_state,
+                        projection.first_match_step_unknown_tokens.len(),
+                        unknown_multi_first,
+                        unknown_second_match,
+                        unknown_other,
+                        second_branches,
+                        second_exact_end_branches,
+                        second_residual_only_branches,
+                        third_match_branches,
+                        tokens_with_third_match.len(),
+                        remaining_depth_histogram,
+                        second_terminal_summary,
+                        second_pair_summary,
+                    );
+                }
+            }
+        }
+
+        // General root lexical-effect program.  Unlike the single-future
+        // experiment above, this preserves every residual future terminal at
+        // the source state and every possible first terminal finalization.
+        // It is therefore applicable to the multi-future lexer states that now
+        // dominate the median after the single-future paths were accelerated.
+        let mut root_effect_states = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_STATES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|value| value.trim().parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(auto_limit) = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_LIMIT")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&limit| limit > 0)
+            && let Some(unique_full_states) = vocab.mask_projection_unique_full_states()
+        {
+            let max_first_byte_tokens = std::env::var(
+                "GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_MAX_FIRST_BYTE_TOKENS",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(4_096);
+            let mut first_byte_tokens = [0usize; 256];
+            for bytes in self.token_bytes.values() {
+                if let Some(&byte) = bytes.first() {
+                    first_byte_tokens[byte as usize] += 1;
+                }
+            }
+            let mut parser_rows_by_terminal = vec![0usize; self.table.num_terminals as usize];
+            for row in &self.table.advance {
+                for terminal in row.iter() {
+                    if let Some(count) = parser_rows_by_terminal.get_mut(terminal) {
+                        *count += 1;
+                    }
+                }
+            }
+            let already_selected = root_effect_states.iter().copied().collect::<BTreeSet<_>>();
+            let mut ranked = Vec::<(usize, usize, usize, u32)>::new();
+            for projection_state in 0..projection_tokenizer.num_states() {
+                let Some(&full_source_state) = unique_full_states.get(projection_state as usize)
+                else {
+                    continue;
+                };
+                if full_source_state == u32::MAX
+                    || already_selected.contains(&full_source_state)
+                    || self
+                        .tokenizer
+                        .matched_terminals_iter(full_source_state)
+                        .next()
+                        .is_some()
+                {
+                    continue;
+                }
+                let futures = self
+                    .tokenizer
+                    .possible_future_terminals_iter(full_source_state)
+                    .collect::<SmallVec<[TerminalID; 8]>>();
+                if futures.is_empty() || futures.len() > 8 {
+                    continue;
+                }
+                let mut transition_bytes = SmallVec::<[u8; 4]>::new();
+                for (byte, _) in self.tokenizer.transitions_from(full_source_state) {
+                    if !transition_bytes.contains(&byte) {
+                        transition_bytes.push(byte);
+                    }
+                    if transition_bytes.len() > 3 {
+                        break;
+                    }
+                }
+                if transition_bytes.is_empty() || transition_bytes.len() > 3 {
+                    continue;
+                }
+                let first_byte_support = transition_bytes
+                    .iter()
+                    .map(|&byte| first_byte_tokens[byte as usize])
+                    .sum::<usize>();
+                if first_byte_support == 0 || first_byte_support > max_first_byte_tokens {
+                    continue;
+                }
+                let parser_rows = futures
+                    .iter()
+                    .filter_map(|&terminal| {
+                        parser_rows_by_terminal.get(terminal as usize).copied()
+                    })
+                    .max()
+                    .unwrap_or(0);
+                if parser_rows == 0 {
+                    continue;
+                }
+                let score = parser_rows.saturating_mul(first_byte_support);
+                ranked.push((score, parser_rows, first_byte_support, full_source_state));
+            }
+            ranked.sort_unstable_by(|left, right| {
+                (
+                    std::cmp::Reverse(left.0),
+                    std::cmp::Reverse(left.1),
+                    std::cmp::Reverse(left.2),
+                    left.3,
+                )
+                    .cmp(&(
+                        std::cmp::Reverse(right.0),
+                        std::cmp::Reverse(right.1),
+                        std::cmp::Reverse(right.2),
+                        right.3,
+                    ))
+            });
+            let available = ranked.len();
+            root_effect_states.extend(
+                ranked
+                    .into_iter()
+                    .take(auto_limit)
+                    .map(|(_, _, _, full_source_state)| full_source_state),
+            );
+            if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            {
+                eprintln!(
+                    "[glrmask/profile][dynamic_root_effect_auto_narrow] limit={} available={} selected={} max_first_byte_tokens={}",
+                    auto_limit,
+                    available,
+                    root_effect_states.len().min(auto_limit),
+                    max_first_byte_tokens,
+                );
+            }
+        }
+        root_effect_states.sort_unstable();
+        root_effect_states.dedup();
+        if !root_effect_states.is_empty() {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            let special_tokens = self
+                .special_token_terminals
+                .iter()
+                .map(|special| special.token_id)
+                .collect::<BTreeSet<_>>();
+
+            for full_source_state in root_effect_states {
+                if full_source_state >= self.tokenizer.num_states() {
+                    continue;
+                }
+                let projection_state = vocab.mask_projection_state(full_source_state);
+                if multiplicities
+                    .as_ref()
+                    .and_then(|counts| counts.get(projection_state as usize))
+                    .copied()
+                    .unwrap_or(1)
+                    != 1
+                {
+                    continue;
+                }
+
+                if !built
+                    .iter()
+                    .any(|(projection, _)| projection.source_state == projection_state)
+                {
+                    let futures = projection_tokenizer
+                        .possible_future_terminals_iter(projection_state)
+                        .collect::<Vec<_>>();
+                    if futures.is_empty() {
+                        continue;
+                    }
+                    built.push((
+                        build_one(
+                            self,
+                            projection_tokenizer,
+                            vocab,
+                            fast_transitions,
+                            projection_state,
+                            &futures,
+                        ),
+                        false,
+                    ));
+                }
+                let Some((projection, _)) = built
+                    .iter_mut()
+                    .find(|(projection, _)| projection.source_state == projection_state)
+                else {
+                    continue;
+                };
+
+                let started = std::time::Instant::now();
+                let mut residual_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+                let mut exact_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+                let mut children_by_terminal =
+                    BTreeMap::<TerminalID, Vec<(u32, Vec<u8>)>>::new();
+                let mut unresolved = BTreeSet::<u32>::new();
+                let mut classified_tokens = 0usize;
+
+                // Execute the source lexer over the vocabulary radix trie
+                // rather than restarting from the source state for every
+                // complete model token.  All descendants of a trie node share
+                // the same consumed byte prefix, lexer configuration, and
+                // accumulated terminal finalizations, so this preserves the
+                // exact all-match-width semantics while avoiding repeated
+                // scans of common token prefixes.
+                struct RootEffectBuild<'a> {
+                    tokenizer: &'a Tokenizer,
+                    vocab: &'a DynamicMaskVocab,
+                    special_tokens: &'a BTreeSet<u32>,
+                    residual_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
+                    exact_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
+                    children_by_terminal:
+                        &'a mut BTreeMap<TerminalID, Vec<(u32, Vec<u8>)>>,
+                    unresolved: &'a mut BTreeSet<u32>,
+                    classified_tokens: &'a mut usize,
+                }
+
+                fn visit_root_effect_trie(
+                    build: &mut RootEffectBuild<'_>,
+                    node: u32,
+                    states: &TokenizerStateSet,
+                    matches: &[(TerminalID, usize)],
+                    prefix: &mut Vec<u8>,
+                ) {
+                    // If the source lexer has died before any terminal
+                    // finalization, no longer token sharing this prefix can
+                    // ever become relevant.  This is especially important
+                    // for narrow one-transition residual states: without the
+                    // cutoff we still walk the whole 128k-token vocabulary
+                    // merely to discover that almost every branch is dead.
+                    if states.is_empty() && matches.is_empty() {
+                        return;
+                    }
+                    let trie = build.vocab.trie.as_ref();
+                    if let Some(canonical_token) = trie.node(node).token_id
+                        && let Some(token_ids) = build.vocab.token_ids(canonical_token)
+                    {
+                        let mut futures = BitSet::new(build.tokenizer.num_terminals() as usize);
+                        for &end_state in states {
+                            futures.union_with(
+                                build.tokenizer.possible_future_terminals(end_state),
+                            );
+                        }
+                        let mut branches = matches.to_vec();
+                        branches.sort_unstable();
+                        branches.dedup();
+                        let classified = !futures.is_empty() || !branches.is_empty();
+
+                        for &token_id in token_ids {
+                            if build.special_tokens.contains(&token_id) || prefix.is_empty() {
+                                continue;
+                            }
+                            if classified {
+                                *build.classified_tokens += 1;
+                            }
+                            for future_terminal in futures.iter_ones() {
+                                build
+                                    .residual_by_terminal
+                                    .entry(future_terminal as TerminalID)
+                                    .or_default()
+                                    .push(token_id);
+                            }
+                            for &(terminal, width) in &branches {
+                                if width == 0 || width > prefix.len() {
+                                    build.unresolved.insert(token_id);
+                                } else if width == prefix.len() {
+                                    build
+                                        .exact_by_terminal
+                                        .entry(terminal)
+                                        .or_default()
+                                        .push(token_id);
+                                } else {
+                                    build
+                                        .children_by_terminal
+                                        .entry(terminal)
+                                        .or_default()
+                                        .push((token_id, prefix[width..].to_vec()));
+                                }
+                            }
+                        }
+                    }
+
+                    for edge in trie.children(node) {
+                        let old_prefix_len = prefix.len();
+                        let mut next_states = states.clone();
+                        let mut next_matches = matches.to_vec();
+                        for &byte in trie.edge_bytes(edge) {
+                            prefix.push(byte);
+                            if next_states.is_empty() {
+                                continue;
+                            }
+                            next_states = build.tokenizer.step_all(next_states.as_slice(), byte);
+                            if next_states.is_empty() {
+                                continue;
+                            }
+                            let width = prefix.len();
+                            for &state in &next_states {
+                                next_matches.extend(
+                                    build
+                                        .tokenizer
+                                        .matched_terminals_iter(state)
+                                        .map(|terminal| (terminal, width)),
+                                );
+                            }
+                        }
+                        visit_root_effect_trie(
+                            build,
+                            edge.child,
+                            &next_states,
+                            &next_matches,
+                            prefix,
+                        );
+                        prefix.truncate(old_prefix_len);
+                    }
+                }
+
+                let mut prefix = Vec::<u8>::with_capacity(
+                    vocab.trie.subtree_max_byte_len(0) as usize,
+                );
+                let initial_states = TokenizerStateSet::from_iter([full_source_state]);
+                let mut root_build = RootEffectBuild {
+                    tokenizer: &self.tokenizer,
+                    vocab,
+                    special_tokens: &special_tokens,
+                    residual_by_terminal: &mut residual_by_terminal,
+                    exact_by_terminal: &mut exact_by_terminal,
+                    children_by_terminal: &mut children_by_terminal,
+                    unresolved: &mut unresolved,
+                    classified_tokens: &mut classified_tokens,
+                };
+                visit_root_effect_trie(
+                    &mut root_build,
+                    0,
+                    &initial_states,
+                    &[],
+                    &mut prefix,
+                );
+
+                let root_post_rows = group_dynamic_effect_post_rows(residual_by_terminal);
+                let mut terminals = BTreeSet::<TerminalID>::new();
+                terminals.extend(exact_by_terminal.keys().copied());
+                terminals.extend(children_by_terminal.keys().copied());
+                let mut root_rows = Vec::<DynamicFirstMatchSecondRow>::new();
+                for terminal in terminals {
+                    let mut exact_end_tokens = exact_by_terminal.remove(&terminal).unwrap_or_default();
+                    exact_end_tokens.sort_unstable();
+                    exact_end_tokens.dedup();
+                    let children = children_by_terminal.remove(&terminal).unwrap_or_default();
+                    let (post_rows, next_rows) = if children.is_empty() {
+                        (Vec::new(), Vec::new())
+                    } else {
+                        build_dynamic_reset_effect_rows(
+                            &self.tokenizer,
+                            children,
+                            6,
+                            &mut unresolved,
+                        )
+                    };
+                    if !exact_end_tokens.is_empty() || !post_rows.is_empty() || !next_rows.is_empty()
+                    {
+                        root_rows.push(DynamicFirstMatchSecondRow {
+                            terminal,
+                            exact_end_tokens: Arc::from(exact_end_tokens),
+                            post_rows: Arc::from(post_rows),
+                            next_rows: Arc::from(next_rows),
+                        });
+                    }
+                }
+                root_rows.sort_unstable_by_key(|row| row.terminal);
+                let unknown_tokens = unresolved.into_iter().collect::<Vec<_>>();
+
+                let mut unknown_mask = vec![0u32; self.mask_len()];
+                for &token_id in &unknown_tokens {
+                    let word = token_id as usize / 32;
+                    if let Some(bits) = unknown_mask.get_mut(word) {
+                        *bits |= 1u32 << (token_id % 32);
+                    }
+                }
+                let ordered = vocab.trie.all_subtree_tokens();
+                let mut unknown_prefix = Vec::<u32>::with_capacity(ordered.len() + 1);
+                unknown_prefix.push(0);
+                let mut unknown_count = 0u32;
+                for &canonical_token in ordered {
+                    let is_unknown = vocab.token_ids(canonical_token).is_some_and(|aliases| {
+                        aliases.iter().any(|&token_id| {
+                            let word = token_id as usize / 32;
+                            let bit = token_id % 32;
+                            unknown_mask
+                                .get(word)
+                                .is_some_and(|bits| bits & (1u32 << bit) != 0)
+                        })
+                    });
+                    unknown_count += u32::from(is_unknown);
+                    unknown_prefix.push(unknown_count);
+                }
+                let mut unknown_subtrees =
+                    vec![0u64; vocab.trie.node_count().div_ceil(64)];
+                for node in 0..vocab.trie.node_count() as u32 {
+                    let range = vocab.trie.subtree_token_index_range(node);
+                    if unknown_prefix[range.start] != unknown_prefix[range.end] {
+                        unknown_subtrees[node as usize >> 6] |= 1u64 << (node & 63);
+                    }
+                }
+
+                projection.root_effect_source_state = full_source_state;
+                projection.root_effect_post_rows = Arc::from(root_post_rows);
+                projection.root_effect_rows = Arc::from(root_rows);
+                projection.root_effect_unknown_tokens = Arc::from(unknown_tokens);
+                projection.root_effect_unknown_subtrees = Arc::from(unknown_subtrees);
+
+                if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_root_effect] full_source={} projection_source={} futures={} classified_tokens={} post_rows={} root_rows={} fallback_unknown={} elapsed_ms={:.3}",
+                        full_source_state,
+                        projection_state,
+                        projection.future_terminals.len(),
+                        classified_tokens,
+                        projection.root_effect_post_rows.len(),
+                        projection.root_effect_rows.len(),
+                        projection.root_effect_unknown_tokens.len(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+            }
+        }
+
+        // Exhaustively probed small parser-relevant families are only an
+        // analysis device. Collapse them by the exact vocabulary-relative
+        // common-future projection they produced, retaining one canonical
+        // projection for each broad useful class and aliasing duplicate source
+        // states to it. Ordinary selected projections remain exact and are
+        // never discarded by this pass.
+        let profile_projection_classes = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let built_count = built.len();
+        let probe_count = built.iter().filter(|(_, probe)| *probe).count();
+        let mut projections = Vec::<DynamicSelfLoopProjection>::new();
+        let mut vocab_aliases = vec![u32::MAX; projection_tokenizer.num_states() as usize];
+        let broad_min_nodes = vocab.trie.node_count().div_ceil(4);
+        for (mut projection, probe) in built {
+            if !probe {
+                projections.push(projection);
+                continue;
+            }
+            let common_nodes = projection
+                .common_future_masks
+                .iter()
+                .filter(|&&mask| mask != 0)
+                .count();
+            if common_nodes < broad_min_nodes {
+                // A narrow probe may still be valuable for median masks when
+                // it proves branches dead before the first terminal match.
+                // Keep only that compact certificate: retaining the full
+                // per-node safe/common-future arrays for every narrow probe
+                // would cost hundreds of MB on a 128k-token vocabulary.
+                if projection.has_pre_match_dead_subtrees()
+                    || projection.first_match_step_source_state != u32::MAX
+                    || projection.root_effect_source_state != u32::MAX
+                {
+                    projection.safe_no_match_mask = Arc::from(Vec::<u32>::new());
+                    projection.safe_subtrees = Arc::from(Vec::<u8>::new());
+                    projection.source_reentry_safe_subtrees = Arc::from(Vec::<u8>::new());
+                    projection.common_future_masks = Arc::from(Vec::<u64>::new());
+                    projections.push(projection);
+                }
+                continue;
+            }
+            // Source-specific lexical-effect programs are exact in the full
+            // tokenizer coordinate.  Do not collapse their owning projection
+            // into a vocabulary/common-future alias: two source states may
+            // have identical ordinary projection rows while still requiring
+            // distinct root effect programs (and runtime must be able to find
+            // the program by the concrete source state).
+            if projection.first_match_step_source_state != u32::MAX
+                || projection.root_effect_source_state != u32::MAX
+            {
+                projections.push(projection);
+                continue;
+            }
+            let existing = projections.iter().position(|candidate| {
+                candidate.future_terminals.as_ref() == projection.future_terminals.as_ref()
+                    && candidate.common_future_masks.as_ref()
+                        == projection.common_future_masks.as_ref()
+            });
+            if let Some(index) = existing {
+                vocab_aliases[projection.source_state as usize] = index as u32;
+            } else {
+                projections.push(projection);
+            }
+        }
+        if profile_projection_classes {
+            eprintln!(
+                "[glrmask/profile][dynamic_projection_classes] built={} probes={} retained={} vocab_aliases={}",
+                built_count,
+                probe_count,
+                projections.len(),
+                vocab_aliases.iter().filter(|&&index| index != u32::MAX).count(),
+            );
+        }
+        (projections, vocab_aliases)
+    }
+
+    fn build_dynamic_projection_alias_h64(
+        &self,
+        vocab: &DynamicMaskVocab,
+        projections: &[DynamicSelfLoopProjection],
+    ) -> Vec<u32> {
+        let tokenizer = vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        let mut aliases = vec![u32::MAX; tokenizer.num_states() as usize];
+        let mut by_terminal = BTreeMap::<TerminalID, Vec<usize>>::new();
+        for (index, projection) in projections.iter().enumerate() {
+            if let [terminal] = projection.future_terminals.as_ref() {
+                by_terminal.entry(*terminal).or_default().push(index);
+            }
+        }
+        // Exact vocabulary-relative probing handles small boundary stencils
+        // more precisely and more cheaply than a whole-tokenizer H64
+        // refinement. Reserve H64 for genuinely large single-terminal
+        // residual families where exhaustive vocab probing would be expensive.
+        let mut single_future_counts = vec![0usize; self.table.num_terminals as usize];
+        for state in 0..tokenizer.num_states() {
+            let mut futures = tokenizer.possible_future_terminals_iter(state);
+            let Some(terminal) = futures.next() else {
+                continue;
+            };
+            if futures.next().is_none()
+                && let Some(count) = single_future_counts.get_mut(terminal as usize)
+            {
+                *count += 1;
+            }
+        }
+        let families = by_terminal
+            .into_iter()
+            .filter(|(terminal, _)| {
+                single_future_counts
+                    .get(*terminal as usize)
+                    .copied()
+                    .unwrap_or(0)
+                    >= 1_024
+            })
+            .collect::<Vec<_>>();
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let results = families
+            .into_par_iter()
+            .map(|(terminal, indices)| {
+                let started = profile.then(std::time::Instant::now);
+                let classes = tokenizer.bounded_terminal_future_partition(terminal, 64);
+                let mut projection_by_class = FxHashMap::<u32, u32>::default();
+                for index in indices {
+                    let source = projections[index].source_state as usize;
+                    let class = classes.get(source).copied().unwrap_or(0);
+                    if class != 0 {
+                        projection_by_class.entry(class).or_insert(index as u32);
+                    }
+                }
+                let mut mapped = Vec::<(usize, u32)>::new();
+                if !projection_by_class.is_empty() {
+                    mapped.reserve(classes.len() / 8);
+                    for (state, &class) in classes.iter().enumerate() {
+                        if let Some(&projection) = projection_by_class.get(&class) {
+                            mapped.push((state, projection));
+                        }
+                    }
+                }
+                if let Some(started) = started {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_projection_alias_h64] terminal={} family_states={} aliases={} elapsed_ms={:.3}",
+                        terminal,
+                        single_future_counts.get(terminal as usize).copied().unwrap_or(0),
+                        mapped.len(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                mapped
+            })
+            .collect::<Vec<_>>();
+        for mapped in results {
+            for (state, projection) in mapped {
+                aliases[state] = projection;
+            }
+        }
+        aliases
     }
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
@@ -1061,7 +4020,9 @@ impl Constraint {
                 let _ = dynamic_mask_vocab.materialize_pending_source();
             }
             if !dynamic_mask_vocab.is_initialized() {
-                dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+                let mut materialized = self.build_dynamic_mask_vocab();
+                materialized.inherit_mask_tokenizer_quotient_from(&dynamic_mask_vocab);
+                dynamic_mask_vocab = materialized;
             }
             let elapsed = started_at
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -1103,6 +4064,16 @@ impl Constraint {
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
+        let bounded_sets_started_at = profile.then(std::time::Instant::now);
+        let (bounded16, bounded64) = self
+            .tokenizer
+            .precompute_bounded_observation_safe_byte_sets();
+        let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
+        let bounded_state_count = bounded_sets.state_count();
+        let bounded_unique_set_count = bounded_sets.unique_set_count();
+        dynamic_mask_vocab.set_bounded_observation_sets(bounded_sets);
+        let bounded_sets_ms = bounded_sets_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_started_at = profile.then(std::time::Instant::now);
         let build_self_loop_projections = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
             .map(|value| {
@@ -1114,18 +4085,26 @@ impl Constraint {
                         && !value.eq_ignore_ascii_case("off"))
             })
             .unwrap_or(true);
-        let self_loop_projections = if build_self_loop_projections {
+        let (self_loop_projections, projection_alias_vocab) = if build_self_loop_projections {
             self.build_dynamic_self_loop_projections(
                 &dynamic_mask_vocab,
                 &tokenizer_fast_transitions,
             )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_count = self_loop_projections.len();
+        let projection_alias_h64 = if std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
+        {
+            self.build_dynamic_projection_alias_h64(&dynamic_mask_vocab, &self_loop_projections)
+        } else {
+            Vec::new()
+        };
         dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
+        dynamic_mask_vocab.set_projection_alias_vocab(projection_alias_vocab);
+        dynamic_mask_vocab.set_projection_alias_h64(projection_alias_h64);
         let hot_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_dynamic_hot_frontiers = self
             .compute_direct_regular_dynamic_hot_frontiers(
@@ -1138,13 +4117,16 @@ impl Constraint {
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} bounded_sets_ms={:.3} bounded_states={} bounded_unique_sets={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 tokenizer_fast_ms,
                 support_ms,
                 projection_ms,
                 projection_count,
+                bounded_sets_ms,
+                bounded_state_count,
+                bounded_unique_set_count,
                 hot_frontier_ms,
                 hot_frontier_count,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1168,6 +4150,27 @@ impl Constraint {
         parent_node_id: u32,
         trie: &mut DynamicMaskTrie,
     ) {
+        let child_edges = Self::build_dynamic_mask_trie_child_edges(
+            entries,
+            parent_prefix_len,
+            trie,
+        );
+
+        if !child_edges.is_empty() {
+            let first_child = trie.edges.len() as u32;
+            let child_len = child_edges.len() as u32;
+            trie.edges.extend(child_edges);
+            let parent = &mut trie.nodes[parent_node_id as usize];
+            parent.first_child = first_child;
+            parent.child_len = child_len;
+        }
+    }
+
+    fn build_dynamic_mask_trie_child_edges(
+        entries: &[(usize, &[u8])],
+        parent_prefix_len: usize,
+        trie: &mut DynamicMaskTrie,
+    ) -> SmallVec<[DynamicMaskTrieEdge; 4]> {
         let mut child_edges = SmallVec::<[DynamicMaskTrieEdge; 4]>::new();
         let mut index = 0usize;
         while index < entries.len() {
@@ -1188,15 +4191,7 @@ impl Constraint {
                 child,
             });
         }
-
-        if !child_edges.is_empty() {
-            let first_child = trie.edges.len() as u32;
-            let child_len = child_edges.len() as u32;
-            trie.edges.extend(child_edges);
-            let parent = &mut trie.nodes[parent_node_id as usize];
-            parent.first_child = first_child;
-            parent.child_len = child_len;
-        }
+        child_edges
     }
 
     fn build_dynamic_mask_trie_node(
@@ -1219,6 +4214,9 @@ impl Constraint {
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
+            subtree_first_bytes: [0; 4],
+            prefix_byte_len: 0,
+            subtree_max_byte_len: 0,
         });
 
         let child_entries = if has_token { &entries[1..] } else { entries };
@@ -1242,6 +4240,99 @@ impl Constraint {
         }
         if start != entries.len() {
             Self::build_dynamic_mask_trie_children(&entries[start..], 0, 0, &mut trie);
+        }
+
+        trie.finalize_subtree_metadata();
+        trie
+    }
+
+    pub(crate) fn build_dynamic_mask_trie_partitioned(
+        entries: &[(usize, &[u8])],
+    ) -> DynamicMaskTrie {
+        let mut ordered_entries = entries.to_vec();
+        ordered_entries.sort_unstable_by(|left, right| {
+            right
+                .1
+                .is_empty()
+                .cmp(&left.1.is_empty())
+                .then_with(|| {
+                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(left.1), left.1)
+                        .cmp(&dynamic_mask_vocab_layout_class(
+                            classify_vocab_char_type(right.1),
+                            right.1,
+                        ))
+                        .then_with(|| left.1.cmp(right.1))
+                        .then_with(|| left.0.cmp(&right.0))
+                })
+        });
+        let entries = ordered_entries.as_slice();
+        let mut trie = DynamicMaskTrie::new();
+        if entries.is_empty() {
+            return trie;
+        }
+
+        // Empty byte strings live directly on the global root. There can be at
+        // most one canonical entry after byte-string alias collapsing.
+        let mut start = 0usize;
+        if entries[0].1.is_empty() {
+            trie.nodes[0].token_id = Some(entries[0].0 as u32);
+            start = 1;
+        }
+
+        let mut partition_edges = SmallVec::<[DynamicMaskTrieEdge; 16]>::new();
+        let mut index = start;
+        while index < entries.len() {
+            let partition = dynamic_mask_vocab_layout_class(
+                classify_vocab_char_type(entries[index].1),
+                entries[index].1,
+            );
+            let partition_start = index;
+            index += 1;
+            while index < entries.len()
+                && dynamic_mask_vocab_layout_class(
+                    classify_vocab_char_type(entries[index].1),
+                    entries[index].1,
+                ) == partition
+            {
+                index += 1;
+            }
+            let partition_entries = &entries[partition_start..index];
+
+            // Structural partition node. Its incoming zero-byte edge consumes
+            // no vocabulary byte; below it the existing compressed radix-trie
+            // builder is used unchanged.
+            let partition_node = trie.nodes.len() as u32;
+            trie.nodes.push(super::artifact::DynamicMaskTrieNode {
+                token_id: None,
+                first_child: 0,
+                child_len: 0,
+                subtree_token_start: 0,
+                subtree_token_end: 0,
+                subtree_bytes: [0; 4],
+                subtree_first_bytes: [0; 4],
+                prefix_byte_len: 0,
+                subtree_max_byte_len: 0,
+            });
+            Self::build_dynamic_mask_trie_children(
+                partition_entries,
+                0,
+                partition_node,
+                &mut trie,
+            );
+            let (byte_start, byte_len) = trie.push_edge_bytes(&[]);
+            partition_edges.push(DynamicMaskTrieEdge {
+                byte_start,
+                byte_len,
+                child: partition_node,
+            });
+        }
+
+        if !partition_edges.is_empty() {
+            let first_child = trie.edges.len() as u32;
+            let child_len = partition_edges.len() as u32;
+            trie.edges.extend(partition_edges);
+            trie.nodes[0].first_child = first_child;
+            trie.nodes[0].child_len = child_len;
         }
 
         trie.finalize_subtree_metadata();
@@ -3027,11 +6118,15 @@ impl Constraint {
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
-        let num_states = self.tokenizer.num_states();
+        Self::compute_tokenizer_fast_transitions_for(&self.tokenizer)
+    }
+
+    fn compute_tokenizer_fast_transitions_for(tokenizer: &Tokenizer) -> FastTokenizerTransitions {
+        let num_states = tokenizer.num_states();
         let has_compressed =
-            (0..num_states).any(|state| self.tokenizer.has_compressed_transition_state(state));
+            (0..num_states).any(|state| tokenizer.has_compressed_transition_state(state));
         if !has_compressed {
-            let build = |state| self.tokenizer.transition_row(state);
+            let build = |state| tokenizer.transition_row(state);
             let rows = if rayon::current_num_threads() == 1 {
                 (0..num_states).map(build).collect()
             } else {
@@ -3041,17 +6136,17 @@ impl Constraint {
         }
 
         let dense_states = (0..num_states)
-            .filter(|&state| !self.tokenizer.has_compressed_transition_state(state))
+            .filter(|&state| !tokenizer.has_compressed_transition_state(state))
             .collect::<Vec<_>>();
         let dense_rows = if rayon::current_num_threads() == 1 {
             dense_states
                 .iter()
-                .map(|&state| self.tokenizer.transition_row(state))
+                .map(|&state| tokenizer.transition_row(state))
                 .collect::<Vec<_>>()
         } else {
             dense_states
                 .par_iter()
-                .map(|&state| self.tokenizer.transition_row(state))
+                .map(|&state| tokenizer.transition_row(state))
                 .collect::<Vec<_>>()
         };
         let mut state_to_dense_row = vec![u32::MAX; num_states as usize];

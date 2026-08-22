@@ -4623,6 +4623,78 @@ fn compile_dynamic_owned_impl(
     };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_some() {
+            let quotient_started_at = Instant::now();
+            let plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
+            let planned_ms = elapsed_ms(quotient_started_at);
+            let pair_started_at = Instant::now();
+            let pair = plan.as_ref().and_then(|plan| {
+                prepare_structural_tokenizer_pair(
+                    &prepared_grammar,
+                    plan,
+                    vocab,
+                    Some(false),
+                    true,
+                )
+            });
+            let pair_ms = elapsed_ms(pair_started_at);
+            if let Some((synthesized, full, certified)) = pair {
+                eprintln!(
+                    "[glrmask/profile][dynamic_mask_quotient_probe] selected=true full_states={} quotient_states={} map_states={} plan_ms={:.3} pair_ms={:.3} total_ms={:.3}",
+                    full.num_states(),
+                    synthesized.num_states(),
+                    certified.full_to_synthesized.len(),
+                    planned_ms,
+                    pair_ms,
+                    elapsed_ms(quotient_started_at),
+                );
+                let requested_states = std::env::var(
+                    "GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT_STATES",
+                )
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter_map(|state| state.trim().parse::<u32>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+                let mut requested_quotients = std::collections::BTreeSet::new();
+                for &full_state in &requested_states {
+                    let Some(&quotient_state) =
+                        certified.full_to_synthesized.get(full_state as usize)
+                    else {
+                        continue;
+                    };
+                    requested_quotients.insert(quotient_state);
+                    eprintln!(
+                        "[glrmask/profile][dynamic_mask_quotient_state] full={} quotient={} transitions={} matched={} futures={} loop_bytes={}",
+                        full_state,
+                        quotient_state,
+                        synthesized.transitions_from(quotient_state).count(),
+                        synthesized.matched_terminals_iter(quotient_state).count(),
+                        synthesized.possible_future_terminals_iter(quotient_state).count(),
+                        synthesized.self_loop_bytes(quotient_state).len(),
+                    );
+                }
+                if !requested_states.is_empty() {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_mask_quotient_requested] full_states={} unique_quotient_states={} quotient_states={:?}",
+                        requested_states.len(),
+                        requested_quotients.len(),
+                        requested_quotients,
+                    );
+                }
+            } else {
+                eprintln!(
+                    "[glrmask/profile][dynamic_mask_quotient_probe] selected=false planned={} plan_ms={:.3} pair_ms={:.3} total_ms={:.3}",
+                    plan.is_some(),
+                    planned_ms,
+                    pair_ms,
+                    elapsed_ms(quotient_started_at),
+                );
+            }
+        }
         let analysis_started_at = profile.then(Instant::now);
         // Move a complete direct automaton out of the grammar instead of
         // cloning its 20k-state graph into AnalyzedGrammar and cloning it again
@@ -4646,11 +4718,38 @@ fn compile_dynamic_owned_impl(
             .map(|automaton| automaton.states.len());
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let ((tokenizer, tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
+        let (((tokenizer, mask_tokenizer_quotient), tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
             || {
                 let started_at = Instant::now();
-                let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
-                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
+                    .is_some();
+                let quotient_pair = quotient_enabled
+                    .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
+                    .flatten()
+                    .and_then(|plan| {
+                        prepare_structural_tokenizer_pair(
+                            &prepared_grammar,
+                            &plan,
+                            vocab,
+                            Some(false),
+                            true,
+                        )
+                    });
+                let (mut tokenizer, mask_tokenizer_quotient) = if let Some((
+                    synthesized,
+                    full,
+                    certified,
+                )) = quotient_pair
+                {
+                    (
+                        full.finish(),
+                        Some((synthesized, certified.full_to_synthesized)),
+                    )
+                } else {
+                    let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
+                    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                    (tokenizer, None)
+                };
                 if tokenizer.has_epsilon_transitions() {
                     let source_states = tokenizer.num_states();
                     let source_transitions = tokenizer.transition_count();
@@ -4686,7 +4785,7 @@ fn compile_dynamic_owned_impl(
                         );
                     }
                 }
-                (tokenizer, elapsed_ms(started_at))
+                ((tokenizer, mask_tokenizer_quotient), elapsed_ms(started_at))
             },
             || rayon::join(
                 || {
@@ -4717,12 +4816,10 @@ fn compile_dynamic_owned_impl(
         );
 
         let finalize_started_at = profile.then(Instant::now);
-        let build_constraint = if finalize_runtime {
-            DynamicConstraint::from_parts_with_dynamic_vocab
-        } else {
-            DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized
-        };
-        let mut constraint = build_constraint(
+        // Build unfinalized so a mask-only finite-token quotient can be
+        // attached before dynamic runtime caches/projections are constructed.
+        // The exact full tokenizer above remains authoritative for commit.
+        let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             table,
             terminal_display_names,
             tokenizer,
@@ -4732,6 +4829,15 @@ fn compile_dynamic_owned_impl(
             vocab,
             dynamic_mask_vocab,
         );
+        if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .set_mask_tokenizer_quotient(mask_tokenizer, full_to_mask_state);
+        }
+        if finalize_runtime {
+            constraint.inner.rebuild_dynamic_runtime_caches();
+        }
         constraint
             .inner
             .table

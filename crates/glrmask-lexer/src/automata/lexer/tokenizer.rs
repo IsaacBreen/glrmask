@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
+use rayon::prelude::*;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -719,6 +720,7 @@ pub trait Lexer {
     fn start_state(&self) -> u32;
     fn num_terminals(&self) -> u32;
     fn has_epsilon_transitions(&self) -> bool;
+    fn state_has_epsilon_transitions(&self, state: u32) -> bool;
     fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_;
 
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
@@ -742,6 +744,87 @@ pub trait Lexer {
             }
         }
         bytes
+    }
+
+    /// Largest H<=`max_horizon` such that every byte string over `bytes` of
+    /// length at most H preserves the lexer observation of `source`.
+    ///
+    /// This is an exact local proof for scalar deterministic states. It follows
+    /// only states actually reachable from `source` under the requested byte
+    /// alphabet, deduplicating the frontier at every depth. Bounded-repeat
+    /// chains therefore cost O(H) states rather than an O(all-tokenizer-states)
+    /// prepass. If the reachable frontier becomes too wide, return the already
+    /// proved shorter horizon and let the ordinary exact runtime walk handle
+    /// the subtree.
+    fn bounded_observation_safe_horizon_from_state(
+        &self,
+        source: u32,
+        bytes: U8Set,
+        active_terminals: &BitSet,
+        max_horizon: u8,
+    ) -> u8 {
+        const MAX_FRONTIER_STATES: usize = 4_096;
+
+        #[inline]
+        fn equal_under_mask(left: &BitSet, right: &BitSet, mask: &BitSet) -> bool {
+            debug_assert_eq!(left.len(), right.len());
+            debug_assert_eq!(left.len(), mask.len());
+            left.words()
+                .iter()
+                .zip(right.words())
+                .zip(mask.words())
+                .all(|((&left, &right), &mask)| ((left ^ right) & mask) == 0)
+        }
+
+        if max_horizon == 0
+            || bytes.is_empty()
+            || source >= self.num_states()
+            || self.state_has_epsilon_transitions(source)
+        {
+            return 0;
+        }
+
+        let mut frontier = vec![source];
+        for depth in 1..=max_horizon {
+            let mut next = Vec::<u32>::new();
+            for &state in &frontier {
+                if self.state_has_epsilon_transitions(state) {
+                    return depth - 1;
+                }
+                for byte in bytes.iter() {
+                    let target = self.get_transition(state, byte);
+                    if target == u32::MAX || self.state_has_epsilon_transitions(target) {
+                        return depth - 1;
+                    }
+                    if !equal_under_mask(
+                        self.matched_terminal_bitset(target),
+                        self.matched_terminal_bitset(source),
+                        active_terminals,
+                    ) || !equal_under_mask(
+                        self.possible_future_terminals(target),
+                        self.possible_future_terminals(source),
+                        active_terminals,
+                    )
+                    {
+                        return depth - 1;
+                    }
+                    next.push(target);
+                }
+            }
+            next.sort_unstable();
+            next.dedup();
+            if next.len() > MAX_FRONTIER_STATES {
+                return depth - 1;
+            }
+            // The same closed deterministic frontier has reappeared. Every
+            // requested byte remains inside this already-validated set, so the
+            // certificate is valid for every longer horizon too.
+            if next == frontier {
+                return max_horizon;
+            }
+            frontier = next;
+        }
+        max_horizon
     }
 
     fn transition_count(&self) -> usize {
@@ -817,6 +900,73 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Exact finite-horizon quotient for the Boolean observation
+    /// `terminal is still a possible future terminal`.
+    ///
+    /// Class zero is the dead class: states from which `terminal` is already
+    /// impossible, epsilon-bearing states, and missing byte transitions all
+    /// behave identically for the no-finalization continuation proof used by
+    /// dynamic trie projections.  For each subsequent round we partition live
+    /// states by the byte -> previous-class map, omitting edges into class zero.
+    /// After H rounds, equal class ids therefore imply equal terminal-liveness
+    /// for every byte string of length at most H.
+    pub fn bounded_terminal_future_partition(
+        &self,
+        terminal: TerminalID,
+        horizon: u8,
+    ) -> Box<[u32]> {
+        use rustc_hash::FxHashMap;
+
+        let state_count = self.num_states() as usize;
+        let mut classes = vec![0u32; state_count];
+        for state in 0..state_count {
+            let state_u32 = state as u32;
+            if !self.state_has_epsilon_transitions(state_u32)
+                && self
+                    .possible_future_terminals(state_u32)
+                    .contains(terminal as usize)
+            {
+                classes[state] = 1;
+            }
+        }
+        if horizon == 0 {
+            return classes.into_boxed_slice();
+        }
+
+        // Most synthesized bounded-repeat rows have roughly 90 live bytes.
+        // Keep those signatures inline; only unusually broad rows allocate.
+        type Signature = SmallVec<[(u8, u32); 128]>;
+        let mut next = vec![0u32; state_count];
+        for _ in 0..horizon {
+            let mut ids = FxHashMap::<Signature, u32>::default();
+            let mut next_id = 1u32;
+            for state in 0..state_count {
+                if classes[state] == 0 {
+                    continue;
+                }
+                let mut signature = Signature::new();
+                for (byte, target) in self.transitions_from(state as u32) {
+                    let target_class = classes.get(target as usize).copied().unwrap_or(0);
+                    if target_class != 0 {
+                        signature.push((byte, target_class));
+                    }
+                }
+                let id = if let Some(&id) = ids.get(&signature) {
+                    id
+                } else {
+                    let id = next_id;
+                    next_id = next_id.saturating_add(1);
+                    ids.insert(signature, id);
+                    id
+                };
+                next[state] = id;
+            }
+            std::mem::swap(&mut classes, &mut next);
+            next.fill(0);
+        }
+        classes.into_boxed_slice()
+    }
+
     fn merged_terminal_exprs(
         tokenizers: &[(&Tokenizer, TerminalID)],
         total_terminals: TerminalID,
@@ -2523,6 +2673,370 @@ impl Tokenizer {
         bytes
     }
 
+    /// Optimized exact finite-horizon observation certificate for one scalar
+    /// tokenizer state. This shadows the generic [`Lexer`] default for the
+    /// concrete runtime tokenizer so compressed transition segments can be
+    /// consumed in their native byte-class form.
+    pub fn bounded_observation_safe_horizon_from_state(
+        &self,
+        source: u32,
+        bytes: U8Set,
+        active_terminals: &BitSet,
+        max_horizon: u8,
+    ) -> u8 {
+        self.bounded_observation_safe_horizon_with_witnesses(
+            source,
+            bytes,
+            active_terminals,
+            max_horizon,
+        )
+        .0
+    }
+
+    /// Precompute one canonical full-observation-stable byte alphabet per raw
+    /// tokenizer state for the two runtime horizons used by dynamic masking.
+    ///
+    /// `safe_h[state]` is a conservative alphabet B such that every B-string
+    /// of length at most H keeps both the complete finalizer set and complete
+    /// possible-future-terminal set equal to their values at `state`.
+    ///
+    /// A single alphabet cannot represent every safe subset exactly (safe
+    /// alphabets are not union-closed), so this computes one deterministic
+    /// closed alphabet by refinement.  Round 1 retains all observation-
+    /// preserving byte transitions.  Each later round intersects that set with
+    /// the previous-round safe alphabet of every destination reachable by a
+    /// currently retained byte.  The result is therefore sound for arbitrary
+    /// mixed byte sequences drawn from the returned set.
+    pub fn precompute_bounded_observation_safe_byte_sets(
+        &self,
+    ) -> (Box<[U8Set]>, Box<[U8Set]>) {
+        const DEAD: u32 = u32::MAX;
+        let state_count = self.num_states() as usize;
+        if state_count == 0 {
+            return (Box::new([]), Box::new([]));
+        }
+
+        // Literal self-loops are safe for every horizon and remain the fallback
+        // when a finite advancing family shrinks away before H.
+        let mut horizon16 = (0..state_count)
+            .into_par_iter()
+            .map(|state| self.self_loop_bytes(state as u32))
+            .collect::<Vec<_>>();
+        let mut horizon64 = horizon16.clone();
+
+        // Pick one canonical one-byte continuation family at every raw state:
+        // the largest set of bytes that all go to the same target while keeping
+        // the complete lexer observation unchanged. The target relation is
+        // therefore functional for every byte in the selected family.
+        let mut selected_sets = vec![U8Set::empty(); state_count];
+        let mut selected_targets = vec![DEAD; state_count];
+        let mut compressed = vec![false; state_count];
+        for segment in self.compressed_transition_segments.iter() {
+            let start = segment.state_offset as usize;
+            let end = start + segment.state_count as usize;
+            compressed[start..end].fill(true);
+        }
+
+        // Ordinary states are relatively few. Group their explicit byte edges
+        // by raw target directly.
+        for state in 0..state_count {
+            if compressed[state] || self.state_has_epsilon_transitions(state as u32) {
+                continue;
+            }
+            let mut groups = SmallVec::<[(u32, U8Set); 8]>::new();
+            for (byte, target) in self.transitions_from(state as u32) {
+                if let Some((_, bytes)) = groups.iter_mut().find(|(seen, _)| *seen == target) {
+                    bytes.insert(byte);
+                } else {
+                    let mut bytes = U8Set::empty();
+                    bytes.insert(byte);
+                    groups.push((target, bytes));
+                }
+            }
+            let source_finalizers = self.matched_terminal_bitset(state as u32);
+            let source_futures = self.possible_future_terminals(state as u32);
+            let mut best = U8Set::empty();
+            let mut best_target = DEAD;
+            for (target, candidate) in groups {
+                if self.state_has_epsilon_transitions(target)
+                    || self.matched_terminal_bitset(target) != source_finalizers
+                    || self.possible_future_terminals(target) != source_futures
+                {
+                    continue;
+                }
+                if candidate.len() > best.len()
+                    || (candidate.len() == best.len() && target < best_target)
+                {
+                    best = candidate;
+                    best_target = target;
+                }
+            }
+            selected_sets[state] = best;
+            selected_targets[state] = best_target;
+        }
+
+        // Large synthesized bounded-repeat products use compressed transition
+        // segments. Collapse all tokenizer byte classes sharing a raw target
+        // without expanding every byte transition for every million-state row.
+        for segment in self.compressed_transition_segments.iter() {
+            let segment_states = segment.state_count as usize;
+            if segment_states == 0 {
+                continue;
+            }
+            let class_sets = segment
+                .class_members
+                .iter()
+                .map(|members| U8Set::from_bytes(members))
+                .collect::<Vec<_>>();
+
+            // Scratch indexed by local target avoids one hash table allocation
+            // per row. `target_epoch` lazily clears `target_sets`.
+            let mut target_sets = vec![U8Set::empty(); segment_states];
+            let mut target_epoch = vec![0u32; segment_states];
+            let mut epoch = 0u32;
+            let mut touched = SmallVec::<[u32; 16]>::new();
+
+            for local_state in 0..segment_states {
+                let source_global = segment.state_offset + local_state as u32;
+                if self.state_has_epsilon_transitions(source_global) {
+                    continue;
+                }
+                epoch = epoch.wrapping_add(1);
+                if epoch == 0 {
+                    target_epoch.fill(0);
+                    epoch = 1;
+                }
+                touched.clear();
+                let row_start = segment.row_offsets[local_state] as usize;
+                let row_end = segment.row_offsets[local_state + 1] as usize;
+                for entry in row_start..row_end {
+                    let class = segment.entries.classes[entry] as usize;
+                    let target = segment.entries.target(entry) as usize;
+                    if target_epoch[target] != epoch {
+                        target_epoch[target] = epoch;
+                        target_sets[target] = U8Set::empty();
+                        touched.push(target as u32);
+                    }
+                    target_sets[target] |= class_sets[class];
+                }
+
+                let source_finalizers = self.matched_terminal_bitset(source_global);
+                let source_futures = self.possible_future_terminals(source_global);
+                let mut best = U8Set::empty();
+                let mut best_target = DEAD;
+                for &target_local in &touched {
+                    let target_global = segment.state_offset + target_local;
+                    if self.state_has_epsilon_transitions(target_global)
+                        || self.matched_terminal_bitset(target_global) != source_finalizers
+                        || self.possible_future_terminals(target_global) != source_futures
+                    {
+                        continue;
+                    }
+                    let candidate = target_sets[target_local as usize];
+                    if candidate.len() > best.len()
+                        || (candidate.len() == best.len() && target_global < best_target)
+                    {
+                        best = candidate;
+                        best_target = target_global;
+                    }
+                }
+                selected_sets[source_global as usize] = best;
+                selected_targets[source_global as usize] = best_target;
+            }
+        }
+
+        // For a chain S --B0--> T --B1--> U ..., any byte alphabet contained
+        // in every Bi follows the same raw-state chain and preserves the same
+        // full lexer observation at every prefix. Pointer doubling computes the
+        // intersection along 2^k edges, so rounds 4 and 6 give exact conservative
+        // 16- and 64-byte alphabets for this canonical chain.
+        let mut path_sets = selected_sets;
+        let mut jump = selected_targets;
+        let mut doubled_sets = vec![U8Set::empty(); state_count];
+        let mut doubled_jump = vec![DEAD; state_count];
+
+        for round in 1..=6 {
+            doubled_sets
+                .par_iter_mut()
+                .zip(doubled_jump.par_iter_mut())
+                .enumerate()
+                .for_each(|(state, (set_slot, jump_slot))| {
+                    let middle = jump[state];
+                    if middle == DEAD {
+                        *set_slot = U8Set::empty();
+                        *jump_slot = DEAD;
+                        return;
+                    }
+                    let middle = middle as usize;
+                    *set_slot = path_sets[state].intersection(&path_sets[middle]);
+                    *jump_slot = jump[middle];
+                });
+            std::mem::swap(&mut path_sets, &mut doubled_sets);
+            std::mem::swap(&mut jump, &mut doubled_jump);
+
+            if round == 4 {
+                horizon16
+                    .par_iter_mut()
+                    .zip(path_sets.par_iter())
+                    .for_each(|(current, candidate)| {
+                        if candidate.len() > current.len() {
+                            *current = *candidate;
+                        }
+                    });
+            } else if round == 6 {
+                horizon64
+                    .par_iter_mut()
+                    .zip(path_sets.par_iter())
+                    .for_each(|(current, candidate)| {
+                        if candidate.len() > current.len() {
+                            *current = *candidate;
+                        }
+                    });
+            }
+        }
+
+        (horizon16.into_boxed_slice(), horizon64.into_boxed_slice())
+    }
+
+    /// The same exact finite-horizon proof as
+    /// [`Self::bounded_observation_safe_horizon_from_state`], additionally
+    /// returning states reached while the proof remained valid and the depth
+    /// at which each was first observed.
+    ///
+    /// If the returned source horizon is `H`, a witness `(state, d)` with
+    /// `d <= H` is itself proved safe for at least `H - d` bytes: every such
+    /// continuation is also a continuation of the source of total length at
+    /// most `H`, and all observations through depth `H` equal the source
+    /// observation. Runtime masking uses these conservative lower bounds to
+    /// amortize one bounded-repeat proof across following counter layers.
+    pub fn bounded_observation_safe_horizon_with_witnesses(
+        &self,
+        source: u32,
+        bytes: U8Set,
+        active_terminals: &BitSet,
+        max_horizon: u8,
+    ) -> (u8, Vec<(u32, u8)>) {
+        const MAX_FRONTIER_STATES: usize = 4_096;
+        // Witnesses are an optional cache accelerator, never part of the
+        // correctness proof. Avoid retaining pathological wide-frontier
+        // traversals; the source result remains exact if this cap is exceeded.
+        const MAX_WITNESSES: usize = 16_384;
+
+        #[inline]
+        fn equal_under_mask(left: &BitSet, right: &BitSet, mask: &BitSet) -> bool {
+            debug_assert_eq!(left.len(), right.len());
+            debug_assert_eq!(left.len(), mask.len());
+            left.words()
+                .iter()
+                .zip(right.words())
+                .zip(mask.words())
+                .all(|((&left, &right), &mask)| ((left ^ right) & mask) == 0)
+        }
+
+        if max_horizon == 0
+            || bytes.is_empty()
+            || source >= self.num_states()
+            || self.state_has_epsilon_transitions(source)
+        {
+            return (0, Vec::new());
+        }
+
+        let source_finalizers = self.matched_terminal_bitset(source);
+        let source_futures = self.possible_future_terminals(source);
+
+        // Bounded-repeat products are represented by one compressed segment
+        // whose byte equivalence classes are stable across every state in the
+        // counter chain. Compute which of those classes intersect B once. A
+        // 53-byte ASCII alphabet commonly collapses to one class, replacing 53
+        // transition lookups at every depth with one row lookup.
+        let source_segment = self.compressed_segment_for_state(source);
+        let mut requested_source_classes = SmallVec::<[u8; 16]>::new();
+        if let Some(segment) = source_segment {
+            for byte in bytes.iter() {
+                let class = segment.byte_to_class[byte as usize];
+                if !requested_source_classes.contains(&class) {
+                    requested_source_classes.push(class);
+                }
+            }
+            requested_source_classes.sort_unstable();
+        }
+
+        let mut frontier = vec![source];
+        let mut next = Vec::<u32>::with_capacity(16);
+        let mut witnesses = Vec::<(u32, u8)>::with_capacity(128);
+        witnesses.push((source, 0));
+        let mut retain_witnesses = true;
+        for depth in 1..=max_horizon {
+            next.clear();
+            for &state in &frontier {
+                if self.state_has_epsilon_transitions(state) {
+                    return (depth - 1, witnesses);
+                }
+
+                let mut visit_target = |target: u32| -> bool {
+                    if target == u32::MAX || self.state_has_epsilon_transitions(target) {
+                        return false;
+                    }
+                    if !equal_under_mask(
+                        self.matched_terminal_bitset(target),
+                        source_finalizers,
+                        active_terminals,
+                    ) || !equal_under_mask(
+                        self.possible_future_terminals(target),
+                        source_futures,
+                        active_terminals,
+                    ) {
+                        return false;
+                    }
+                    next.push(target);
+                    true
+                };
+
+                if let Some(segment) = source_segment.filter(|segment| segment.contains_state(state)) {
+                    let local_state = state - segment.state_offset;
+                    let row_start = segment.row_offsets[local_state as usize] as usize;
+                    let row_end = segment.row_offsets[local_state as usize + 1] as usize;
+                    let row_classes = segment.entries.class_slice(row_start, row_end);
+                    for &class in &requested_source_classes {
+                        let Ok(index) = row_classes.binary_search(&class) else {
+                            return (depth - 1, witnesses);
+                        };
+                        let local_target = segment.entries.target(row_start + index);
+                        if !visit_target(segment.state_offset + local_target) {
+                            return (depth - 1, witnesses);
+                        }
+                    }
+                } else {
+                    for byte in bytes.iter() {
+                        if !visit_target(self.get_transition(state, byte)) {
+                            return (depth - 1, witnesses);
+                        }
+                    }
+                }
+            }
+
+            next.sort_unstable();
+            next.dedup();
+            if next.len() > MAX_FRONTIER_STATES {
+                return (depth - 1, witnesses);
+            }
+            if retain_witnesses {
+                if witnesses.len().saturating_add(next.len()) <= MAX_WITNESSES {
+                    witnesses.extend(next.iter().copied().map(|state| (state, depth)));
+                } else {
+                    // Keep the already collected prefix. It remains a valid
+                    // lower-bound witness set; simply stop adding more.
+                    retain_witnesses = false;
+                }
+            }
+            if next == frontier {
+                return (max_horizon, witnesses);
+            }
+            std::mem::swap(&mut frontier, &mut next);
+        }
+        (max_horizon, witnesses)
+    }
+
     fn transition_count(&self) -> usize {
         *self.transition_count_cache.get_or_init(|| {
             let compressed = self
@@ -3134,6 +3648,7 @@ impl Lexer for Tokenizer {
     fn start_state(&self) -> u32 { self.start_state() }
     fn num_terminals(&self) -> u32 { self.num_terminals() }
     fn has_epsilon_transitions(&self) -> bool { self.has_epsilon_transitions() }
+    fn state_has_epsilon_transitions(&self, state: u32) -> bool { self.state_has_epsilon_transitions(state) }
     fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ { self.transitions_from(state) }
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) { self.fill_transition_row(state, row); }
     fn transition_row(&self, state: u32) -> Box<[u32; 256]> { self.transition_row(state) }
@@ -3524,6 +4039,135 @@ mod tests {
     }
 
     #[test]
+    fn precomputed_bounded_observation_sets_respect_16_and_64_horizons() {
+        const BAD: u32 = 21;
+        let mut dfa = DFA::new((BAD + 1) as usize);
+        dfa.ensure_group_capacity(2);
+
+        let stable_finalizers = BitSet::new(2);
+        let mut stable_futures = BitSet::new(2);
+        stable_futures.set(0);
+        let mut bad_futures = BitSet::new(2);
+        bad_futures.set(1);
+
+        let string_bytes = (0x20u8..=0x7e)
+            .filter(|&byte| !matches!(byte, b'"' | b'\\'))
+            .collect::<Vec<_>>();
+        for state in 0..BAD {
+            dfa.overwrite_state_metadata(
+                state,
+                stable_finalizers.clone(),
+                stable_futures.clone(),
+            );
+            for &byte in &string_bytes {
+                if byte == b'0' {
+                    dfa.add_transition(state, byte, state);
+                } else {
+                    dfa.add_transition(state, byte, state + 1);
+                }
+            }
+        }
+        dfa.overwrite_state_metadata(BAD, BitSet::new(2), bad_futures);
+        dfa.add_transition(BAD, b'0', BAD);
+
+        let mut tokenizer = Tokenizer::from_parts(dfa, 2, None);
+        let advancing_bytes = string_bytes
+            .iter()
+            .copied()
+            .filter(|&byte| byte != b'0')
+            .collect::<Vec<_>>();
+        // Deliberately split the advancing family across two byte classes.
+        // The precompute must recover the larger semantic family by grouping
+        // classes with the same destination rather than selecting one class.
+        let advancing_a = advancing_bytes
+            .iter()
+            .copied()
+            .filter(|byte| byte & 1 == 0)
+            .collect::<Vec<_>>();
+        let advancing_b = advancing_bytes
+            .iter()
+            .copied()
+            .filter(|byte| byte & 1 != 0)
+            .collect::<Vec<_>>();
+        let mut byte_to_class = vec![3u8; 256];
+        for &byte in &advancing_a {
+            byte_to_class[byte as usize] = 0;
+        }
+        for &byte in &advancing_b {
+            byte_to_class[byte as usize] = 1;
+        }
+        byte_to_class[b'0' as usize] = 2;
+        let class_members = vec![
+            advancing_a.into_boxed_slice(),
+            advancing_b.into_boxed_slice(),
+            vec![b'0'].into_boxed_slice(),
+            (0u16..=255)
+                .map(|byte| byte as u8)
+                .filter(|byte| !advancing_bytes.contains(byte) && *byte != b'0')
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ];
+        let mut row_offsets = Vec::<u32>::with_capacity((BAD + 2) as usize);
+        let mut classes = Vec::<u8>::new();
+        let mut targets = Vec::<u32>::new();
+        row_offsets.push(0);
+        for state in 0..BAD {
+            classes.extend([0, 1, 2]);
+            targets.extend([state + 1, state + 1, state]);
+            row_offsets.push(classes.len() as u32);
+        }
+        classes.push(2);
+        targets.push(BAD);
+        row_offsets.push(classes.len() as u32);
+        tokenizer.compressed_transition_segments = Arc::from([CompressedTransitionSegment {
+            state_offset: 0,
+            state_count: BAD + 1,
+            byte_to_class: Arc::from(byte_to_class.into_boxed_slice()),
+            class_members: Arc::from(class_members.into_boxed_slice()),
+            row_offsets: Arc::from(row_offsets.into_boxed_slice()),
+            entries: CompressedTransitionEntries::from_parts(classes, targets),
+            expanded_transition_count: BAD as usize * 93 + 1,
+        }]);
+        let (safe16, safe64) = tokenizer.precompute_bounded_observation_safe_byte_sets();
+
+        // The 92 advancing bytes all co-target the same state and are stable
+        // for 16 steps from state 0, despite being split across two tokenizer
+        // classes. They can reach the observation-changing state before 64
+        // steps, so H64 falls back to the infinitely-safe literal self-loop.
+        assert!(safe16[0].contains(b'a'));
+        assert!(safe16[0].contains(b'Z'));
+        assert!(safe16[0].contains(b'_'));
+        assert!(!safe16[0].contains(b'0'));
+        assert_eq!(safe16[0].len(), 92);
+        assert!(!safe64[0].contains(b'a'));
+        assert!(safe64[0].contains(b'0'));
+
+        // Cross-check the advertised sets against the generic exact reference
+        // proof using the complete terminal domain as the observation mask.
+        let mut all_terminals = BitSet::new(2);
+        all_terminals.set(0);
+        all_terminals.set(1);
+        assert_eq!(
+            tokenizer.bounded_observation_safe_horizon_from_state(
+                0,
+                safe16[0],
+                &all_terminals,
+                16,
+            ),
+            16,
+        );
+        assert_eq!(
+            tokenizer.bounded_observation_safe_horizon_from_state(
+                0,
+                safe64[0],
+                &all_terminals,
+                64,
+            ),
+            64,
+        );
+    }
+
+    #[test]
     fn failed_or_noop_mutations_preserve_derived_caches() {
         let mut tokenizer = dispatch_prefix_tokenizer(false);
         let loops = tokenizer.all_self_loop_bytes();
@@ -3543,6 +4187,85 @@ mod tests {
             .augment_from_verified_component_prefixes(&incompatible, &tokenizer.clone(), &[])
             .is_none());
         assert!(Arc::ptr_eq(&loops, &tokenizer.all_self_loop_bytes()));
+    }
+
+    #[test]
+    fn compressed_bounded_observation_certificate_matches_generic_reference() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(1);
+        let mut live = BitSet::new(1);
+        live.set(0);
+        for state in 0..3u32 {
+            dfa.overwrite_state_metadata(state, BitSet::new(1), live.clone());
+        }
+        dfa.overwrite_state_metadata(3, live.clone(), live.clone());
+
+        let mut tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        let byte_to_class = vec![0u8; 256];
+        let class_members = vec![(0u16..=255)
+            .map(|byte| byte as u8)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()];
+        tokenizer.compressed_transition_segments = Arc::from([CompressedTransitionSegment {
+            state_offset: 0,
+            state_count: 4,
+            byte_to_class: Arc::from(byte_to_class.into_boxed_slice()),
+            class_members: Arc::from(class_members.into_boxed_slice()),
+            row_offsets: Arc::from([0u32, 1, 2, 3, 4]),
+            entries: CompressedTransitionEntries::from_parts(
+                vec![0, 0, 0, 0],
+                vec![1, 2, 3, 3],
+            ),
+            expanded_transition_count: 4 * 256,
+        }]);
+
+        let mut bytes = U8Set::empty();
+        bytes.insert(b'a');
+        bytes.insert(b'b');
+        let mut active = BitSet::new(1);
+        active.set(0);
+
+        for max_horizon in 1..=8 {
+            let optimized = tokenizer.bounded_observation_safe_horizon_from_state(
+                0,
+                bytes,
+                &active,
+                max_horizon,
+            );
+            let reference = <Tokenizer as Lexer>::bounded_observation_safe_horizon_from_state(
+                &tokenizer,
+                0,
+                bytes,
+                &active,
+                max_horizon,
+            );
+            assert_eq!(optimized, reference, "max_horizon={max_horizon}");
+        }
+        assert_eq!(
+            tokenizer.bounded_observation_safe_horizon_from_state(0, bytes, &active, 8),
+            2,
+        );
+
+        let (source_horizon, witnesses) = tokenizer
+            .bounded_observation_safe_horizon_with_witnesses(0, bytes, &active, 8);
+        assert_eq!(source_horizon, 2);
+        for (state, depth) in witnesses {
+            if depth > source_horizon {
+                continue;
+            }
+            let inherited = source_horizon - depth;
+            let reference = <Tokenizer as Lexer>::bounded_observation_safe_horizon_from_state(
+                &tokenizer,
+                state,
+                bytes,
+                &active,
+                inherited,
+            );
+            assert_eq!(
+                reference, inherited,
+                "witness state={state} depth={depth} did not inherit its conservative bound",
+            );
+        }
     }
 
     #[test]

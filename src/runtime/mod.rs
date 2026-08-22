@@ -9,9 +9,11 @@ mod serde;
 mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
+#[allow(unused_imports)]
 pub(crate) use artifact::{
-    CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
-    FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedParserComponent,
+    dynamic_mask_vocab_layout_class, CompositionGrammarSummary, ConstraintRuntimeBackend,
+    DynamicMaskTrie, DynamicMaskVocab,
+    FastCommitTemplateDfas, FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
 #[allow(unused_imports)]

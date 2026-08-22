@@ -19,6 +19,7 @@ use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 
 use super::mask_mapping::FinalMaskMapping;
 
@@ -552,6 +553,24 @@ pub(crate) struct DynamicMaskTrieNode {
     pub(crate) subtree_token_end: u32,
     /// Union of every byte on every edge strictly below this node.
     pub(crate) subtree_bytes: [u64; 4],
+    /// Bytes that may occur next on some non-empty token suffix below this
+    /// node. Unlike `subtree_bytes`, this records only the first consumed byte;
+    /// zero-byte structural layout edges transparently inherit their child's
+    /// first-byte set. Dynamic masking uses it to reject whole vocabulary
+    /// layout classes before entering the radix walk when the current lexer
+    /// configuration cannot consume any of their first bytes.
+    pub(crate) subtree_first_bytes: [u64; 4],
+    /// Number of vocabulary bytes consumed from the global trie root to reach
+    /// this node. Structural partition edges have length zero and therefore do
+    /// not affect it. This lets finite-horizon root-state certificates be
+    /// reused only for subtrees whose *complete token strings* fit the proof
+    /// horizon.
+    pub(crate) prefix_byte_len: u32,
+    /// Maximum number of token bytes still reachable strictly below this node.
+    /// This is a runtime-only certificate aid: dynamic masking can prove that
+    /// a lexer configuration stays safely live for this bounded horizon and
+    /// accept the whole subtree without walking every token edge.
+    pub(crate) subtree_max_byte_len: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -580,6 +599,47 @@ pub(crate) struct DynamicMaskTrie {
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
+}
+
+/// Vocab-only layout refinement used by the dynamic-mask radix trie.
+///
+/// `base_partition` is the existing p0/p1/... character-type class.  The
+/// extra bits deliberately describe only coarse byte shape, not grammar
+/// semantics: their job is to stop a few lexer-sensitive bytes from
+/// contaminating otherwise uniform large subtrees.  The runtime never
+/// interprets this value after construction.
+pub(crate) fn dynamic_mask_vocab_layout_class(base_partition: u8, bytes: &[u8]) -> u16 {
+    #[inline]
+    fn first_kind(byte: Option<u8>) -> u16 {
+        match byte {
+            None => 0,
+            Some(b' ') => 1,
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => 2,
+            Some(b'0'..=b'9') => 3,
+            Some(b'"' | b'\\' | b'\'') => 4,
+            Some(0..=31 | 127) => 5,
+            Some(128..=255) => 6,
+            Some(_) => 7,
+        }
+    }
+
+    let mut flags = 0u16;
+    for &byte in bytes {
+        flags |= match byte {
+            b'"' => 1 << 0,
+            b'\\' => 1 << 1,
+            b'\'' => 1 << 2,
+            0..=31 | 127 => 1 << 3,
+            b' ' => 1 << 4,
+            b'{' | b'}' | b'[' | b']' | b'(' | b')' | b',' | b':' | b';' => 1 << 5,
+            b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>' | b'!'
+            | b'?' | b'&' | b'|' | b'^' | b'~' | b'@' | b'#' | b'$' | b'`' => 1 << 6,
+            128..=255 => 1 << 7,
+            _ => 0,
+        };
+    }
+
+    (u16::from(base_partition) << 11) | (first_kind(bytes.first().copied()) << 8) | flags
 }
 
 impl DynamicMaskTrie {
@@ -653,6 +713,22 @@ impl DynamicMaskTrie {
         self.node(node).subtree_bytes
     }
 
+    #[inline]
+    pub(crate) fn subtree_first_bytes(&self, node: u32) -> [u64; 4] {
+        self.node(node).subtree_first_bytes
+    }
+
+    #[inline]
+    pub(crate) fn subtree_max_byte_len(&self, node: u32) -> u32 {
+        self.node(node).subtree_max_byte_len
+    }
+
+    #[inline]
+    pub(crate) fn subtree_max_total_byte_len(&self, node: u32) -> u32 {
+        let node = self.node(node);
+        node.prefix_byte_len.saturating_add(node.subtree_max_byte_len)
+    }
+
     pub(crate) fn push_edge_bytes(&mut self, bytes: &[u8]) -> (u32, u32) {
         let start = self.edge_bytes.len() as u32;
         self.edge_bytes.extend_from_slice(bytes);
@@ -664,7 +740,12 @@ impl DynamicMaskTrie {
         self.edge_bytes.len()
     }
 
-    fn collect_subtree_metadata(&mut self, node_id: u32) -> [u64; 4] {
+    fn collect_subtree_metadata(
+        &mut self,
+        node_id: u32,
+        prefix_byte_len: u32,
+    ) -> ([u64; 4], [u64; 4], u32) {
+        self.nodes[node_id as usize].prefix_byte_len = prefix_byte_len;
         let start = self.subtree_tokens.len() as u32;
         if let Some(token_id) = self.nodes[node_id as usize].token_id {
             self.subtree_tokens.push(token_id);
@@ -673,6 +754,8 @@ impl DynamicMaskTrie {
         let first_child = self.nodes[node_id as usize].first_child as usize;
         let child_len = self.nodes[node_id as usize].child_len as usize;
         let mut subtree_bytes = [0u64; 4];
+        let mut subtree_first_bytes = [0u64; 4];
+        let mut subtree_max_byte_len = 0u32;
         for edge_index in first_child..first_child + child_len {
             // Copy the compact edge fields before recursing so no borrow of
             // `self.edges` remains live across the mutable recursive call.
@@ -682,10 +765,27 @@ impl DynamicMaskTrie {
             for &byte in &self.edge_bytes[byte_start..byte_end] {
                 subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
             }
-            let child_bytes = self.collect_subtree_metadata(edge.child);
+            let child_prefix_byte_len = prefix_byte_len
+                .checked_add(edge.byte_len)
+                .expect("dynamic mask trie token byte length exceeds u32");
+            let (child_bytes, child_first_bytes, child_max_byte_len) =
+                self.collect_subtree_metadata(edge.child, child_prefix_byte_len);
             for (target, child) in subtree_bytes.iter_mut().zip(child_bytes) {
                 *target |= child;
             }
+            if edge.byte_len == 0 {
+                for (target, child) in subtree_first_bytes.iter_mut().zip(child_first_bytes) {
+                    *target |= child;
+                }
+            } else {
+                let first = self.edge_bytes[byte_start];
+                subtree_first_bytes[first as usize >> 6] |= 1u64 << (first & 63);
+            }
+            subtree_max_byte_len = subtree_max_byte_len.max(
+                edge.byte_len
+                    .checked_add(child_max_byte_len)
+                    .expect("dynamic mask trie token byte length exceeds u32"),
+            );
         }
 
         let end = self.subtree_tokens.len() as u32;
@@ -693,14 +793,16 @@ impl DynamicMaskTrie {
         node.subtree_token_start = start;
         node.subtree_token_end = end;
         node.subtree_bytes = subtree_bytes;
-        subtree_bytes
+        node.subtree_first_bytes = subtree_first_bytes;
+        node.subtree_max_byte_len = subtree_max_byte_len;
+        (subtree_bytes, subtree_first_bytes, subtree_max_byte_len)
     }
 
     pub(crate) fn finalize_subtree_metadata(&mut self) {
         self.subtree_tokens.clear();
         self.subtree_tokens.reserve(self.nodes.len());
         if !self.nodes.is_empty() {
-            self.collect_subtree_metadata(0);
+            self.collect_subtree_metadata(0, 0);
         }
         self.finalize_walk_edges();
     }
@@ -748,6 +850,9 @@ impl DynamicMaskTrie {
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
+            subtree_first_bytes: [0; 4],
+            prefix_byte_len: 0,
+            subtree_max_byte_len: 0,
         });
 
         let children = node.children();
@@ -829,6 +934,9 @@ impl DynamicMaskTrie {
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
+            subtree_first_bytes: [0; 4],
+            prefix_byte_len: 0,
+            subtree_max_byte_len: 0,
         });
         output
             .edges
@@ -851,6 +959,84 @@ impl DynamicMaskTrie {
             output.nodes.append(&mut fragment.nodes);
             output.edges.append(&mut fragment.edges);
             let (byte_start, byte_len) = output.push_edge_bytes(&root_edge);
+            output.edges[root_slot] = DynamicMaskTrieEdge {
+                byte_start,
+                byte_len,
+                child: node_base,
+            };
+        }
+
+        output.finalize_subtree_metadata();
+        output
+    }
+
+    /// Build the same flat runtime radix-trie representation, but place one
+    /// zero-byte structural node above each caller-supplied vocabulary layout
+    /// class. `entries` must be ordered by `(class, token_bytes)` and token byte
+    /// strings must already be canonical/deduplicated.
+    ///
+    /// The structural edges are a layout device only: they consume no input
+    /// and are invisible to lexer semantics. Their purpose is to keep token
+    /// families with different byte behaviour from contaminating one another's
+    /// subtree metadata, so the generic runtime subtree certificates can skip
+    /// large groups without any partition-specific masking logic.
+    pub(crate) fn from_partitioned_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
+        let mut output = Self::new();
+        if entries.is_empty() {
+            return output;
+        }
+
+        // Empty-token aliases are canonicalized before this stage, so at most
+        // one canonical empty byte string may exist. Keep it on the true root.
+        let mut start = 0usize;
+        if entries[0].2.is_empty() {
+            output.nodes[0].token_id = Some(entries[0].1 as u32);
+            start = 1;
+        }
+
+        let mut groups = Vec::<Self>::new();
+        let mut index = start;
+        while index < entries.len() {
+            let class = entries[index].0;
+            let group_start = index;
+            index += 1;
+            while index < entries.len() && entries[index].0 == class {
+                index += 1;
+            }
+            let refs = entries[group_start..index]
+                .iter()
+                .map(|(_, token_id, bytes)| (*token_id, *bytes))
+                .collect::<Vec<_>>();
+            debug_assert!(refs.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+            let tree = VocabPrefixTree::build_presorted(&refs);
+            groups.push(Self::from_vocab_prefix_tree_node(&tree.root));
+        }
+
+        let root_child_count = groups.len();
+        output.edges.resize_with(root_child_count, DynamicMaskTrieEdge::default);
+        output.nodes[0].first_child = 0;
+        output.nodes[0].child_len = root_child_count as u32;
+
+        for (root_slot, mut fragment) in groups.into_iter().enumerate() {
+            let node_base = output.nodes.len() as u32;
+            let edge_base = output.edges.len() as u32;
+            let byte_base = output.edge_bytes.len() as u32;
+
+            output.edge_bytes.extend_from_slice(&fragment.edge_bytes);
+            for node in &mut fragment.nodes {
+                if node.child_len != 0 {
+                    node.first_child += edge_base;
+                }
+            }
+            for edge in &mut fragment.edges {
+                edge.byte_start += byte_base;
+                edge.child += node_base;
+            }
+            output.nodes.append(&mut fragment.nodes);
+            output.edges.append(&mut fragment.edges);
+
+            // Structural class edge: no lexer byte is consumed here.
+            let (byte_start, byte_len) = output.push_edge_bytes(&[]);
             output.edges[root_slot] = DynamicMaskTrieEdge {
                 byte_start,
                 byte_len,
@@ -1324,11 +1510,128 @@ pub(crate) type DynamicMaskStateKey =
     Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
 
 #[derive(Debug, Clone)]
+pub(crate) struct DynamicConfigSubtreeCertificate {
+    pub(crate) node: u32,
+    /// Lexer NFA configuration in the mask-tokenizer quotient coordinate.
+    pub(crate) projected_config: Arc<[u32]>,
+    /// Every vocabulary token below `node`, when entered in
+    /// `projected_config`, reaches token boundary without another lexer
+    /// finalization while retaining at least one of these terminals as a
+    /// possible future.  Runtime needs only one terminal to be parser-admissible.
+    pub(crate) common_future_terminals: Arc<[TerminalID]>,
+}
+
+/// Exact vocabulary-relative continuation row after one lexer terminal has
+/// finalized inside a model token and the lexer has reset.  Every token in
+/// `tokens` reaches token boundary without a second lexer finalization and is
+/// live for at least one terminal in `terminals`.  `terminals` are grouped by
+/// exact equality of their fused-token set, so runtime normally tests only a
+/// handful of rows even when many grammar terminals share the same lexical
+/// continuation language.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicFirstMatchPostRow {
+    pub(crate) terminals: Arc<[TerminalID]>,
+    pub(crate) tokens: Arc<[u32]>,
+    /// Prepacked token mask for broad rows.  Sparse rows leave this empty and
+    /// are cheaper to apply by setting their handful of token IDs directly.
+    pub(crate) dense_mask: Arc<[u32]>,
+}
+
+/// Second-finalization continuation from a first-match one-step projection.
+/// `terminal` is consumed on the post-first parser stack.  Exact-end tokens
+/// become immediately valid after that parser advance; `post_rows` describe
+/// residual lexer futures after the second reset for branches that reach token
+/// boundary without a third finalization.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicFirstMatchSecondRow {
+    pub(crate) terminal: TerminalID,
+    pub(crate) exact_end_tokens: Arc<[u32]>,
+    pub(crate) post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    /// Additional terminal finalizations after this terminal resets the lexer.
+    /// The row type is recursive so a short vocabulary-relative lexical-effect
+    /// program can represent arbitrarily many in-token finalizations without
+    /// returning to byte-wise trie traversal.
+    pub(crate) next_rows: Arc<[DynamicFirstMatchSecondRow]>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DynamicSelfLoopProjection {
     pub(crate) source_state: u32,
-    pub(crate) required_terminal: TerminalID,
+    /// Exact possible-future terminal set at `source_state`. Projection token
+    /// leaves are certified only when they restore this complete set, making
+    /// the projection independent of parser context. Runtime needs only one of
+    /// these terminals to be parser-admissible for the continuing witness.
+    pub(crate) future_terminals: Arc<[TerminalID]>,
     pub(crate) safe_no_match_mask: Arc<[u32]>,
     pub(crate) safe_subtrees: Arc<[u8]>,
+    /// Nodes whose complete suffix language is safe when entered with
+    /// `source_state` itself. `safe_subtrees` is relative to the state reached
+    /// by consuming the node's root prefix during projection construction; an
+    /// intermediate runtime walk may only reuse a projection at nodes where
+    /// that reached state has returned to the projection source.
+    pub(crate) source_reentry_safe_subtrees: Arc<[u8]>,
+    /// For a projection rooted at `source_state`, row `node` is a bitmask over
+    /// `future_terminals`: bit i is set iff that terminal remains a live
+    /// no-finalization continuation for every vocabulary token below `node`.
+    /// This is stronger than the historical exact-future-set projection for
+    /// accepting+continuing lexer states: unrelated finalizers/futures may
+    /// churn as long as one common continuing terminal witnesses the subtree.
+    pub(crate) common_future_masks: Arc<[u64]>,
+    /// Sparse trie nodes that are provably useless while following the
+    /// no-finalization path from `source_state`: every token below the node
+    /// dies before any lexer terminal can match and no token can end with a
+    /// live residual lexer state.  This certificate is parser-independent.
+    pub(crate) pre_match_dead_words: Arc<[u64]>,
+    /// Sparse trie nodes whose incoming radix edge reaches the first lexer
+    /// terminal match from `source_state`.  The dead-node certificate above is
+    /// no longer applicable below these nodes because parser-dependent reset
+    /// branches become possible there.
+    pub(crate) pre_match_frontier_words: Arc<[u64]>,
+    /// Experimental exact subset for tokens that first finalize the sole
+    /// future terminal from one concrete full tokenizer state and whose
+    /// post-reset byte suffix is itself an ordinary vocabulary token.
+    ///
+    /// Runtime validates only the suffix-token candidates after advancing the
+    /// parser once on `future_terminals[0]`; an accepted suffix then certifies
+    /// the corresponding fused original token.  This is deliberately a
+    /// one-sided baseline: tokens not represented here still go through the
+    /// ordinary exact dynamic walk.
+    pub(crate) first_match_fusion_source_state: u32,
+    pub(crate) first_match_fusion_match_state: u32,
+    pub(crate) first_match_fusion_candidate_mask: Arc<[u32]>,
+    /// One bit per dynamic vocabulary-trie node: set iff the subtree contains
+    /// at least one suffix token from `first_match_fusion_candidate_mask`.
+    pub(crate) first_match_fusion_candidate_subtrees: Arc<[u64]>,
+    /// `(fused_original_token, suffix_original_token)` pairs.
+    pub(crate) first_match_fusions: Arc<[(u32, u32)]>,
+    /// Experimental exact one-finalization decomposition for a concrete full
+    /// tokenizer state.  It is deliberately vocabulary-relative: tokens with
+    /// more than one possible first-match width or any second finalization
+    /// after reset are listed in `first_match_step_unknown_tokens` and are
+    /// validated by the ordinary exact dynamic walker.
+    pub(crate) first_match_step_source_state: u32,
+    pub(crate) first_match_step_root_live_tokens: Arc<[u32]>,
+    pub(crate) first_match_step_exact_end_tokens: Arc<[u32]>,
+    pub(crate) first_match_step_post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    pub(crate) first_match_step_second_rows: Arc<[DynamicFirstMatchSecondRow]>,
+    pub(crate) first_match_step_unknown_tokens: Arc<[u32]>,
+    /// One bit per runtime vocabulary-trie node, set iff that subtree contains
+    /// at least one token from `first_match_step_unknown_tokens`.
+    pub(crate) first_match_step_unknown_subtrees: Arc<[u64]>,
+    /// General vocabulary-relative lexical-effect program rooted directly at
+    /// a concrete tokenizer state. Unlike `first_match_step_*`, this does not
+    /// require a sole first terminal: residual no-finalization futures live in
+    /// `root_effect_post_rows`, while `root_effect_rows` encode arbitrary
+    /// terminal-finalization/reset sequences. Runtime executes only the parser
+    /// effects; unresolved depth-limited tokens fall back to the exact walker.
+    pub(crate) root_effect_source_state: u32,
+    pub(crate) root_effect_post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    pub(crate) root_effect_rows: Arc<[DynamicFirstMatchSecondRow]>,
+    pub(crate) root_effect_unknown_tokens: Arc<[u32]>,
+    pub(crate) root_effect_unknown_subtrees: Arc<[u64]>,
+    /// Sparse post-finalization certificates discovered from repeated reset-NFA
+    /// configurations below this projection's first-match frontier.
+    pub(crate) config_subtree_certificates: Arc<[DynamicConfigSubtreeCertificate]>,
 }
 
 impl DynamicSelfLoopProjection {
@@ -1338,12 +1641,147 @@ impl DynamicSelfLoopProjection {
             .get(node as usize)
             .is_some_and(|&safe| safe != 0)
     }
+
+    #[inline]
+    pub(crate) fn subtree_is_safe_from_source(&self, node: u32) -> bool {
+        self.source_reentry_safe_subtrees
+            .get(node as usize)
+            .is_some_and(|&safe| safe != 0)
+    }
+
+    #[inline]
+    pub(crate) fn subtree_common_future_mask(&self, node: u32) -> u64 {
+        self.common_future_masks
+            .get(node as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[inline]
+    pub(crate) fn pre_match_subtree_is_dead(&self, node: u32) -> bool {
+        let word = node as usize >> 6;
+        let bit = node & 63;
+        self.pre_match_dead_words
+            .get(word)
+            .is_some_and(|bits| bits & (1u64 << bit) != 0)
+    }
+
+    #[inline]
+    pub(crate) fn pre_match_subtree_is_frontier(&self, node: u32) -> bool {
+        let word = node as usize >> 6;
+        let bit = node & 63;
+        self.pre_match_frontier_words
+            .get(word)
+            .is_some_and(|bits| bits & (1u64 << bit) != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_pre_match_dead_subtrees(&self) -> bool {
+        self.pre_match_dead_words.iter().any(|&word| word != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_first_match_fusions_from(&self, full_source_state: u32) -> bool {
+        self.first_match_fusion_source_state == full_source_state
+            && self.first_match_fusion_match_state != u32::MAX
+            && !self.first_match_fusions.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn has_root_effect_from(&self, full_source_state: u32) -> bool {
+        self.root_effect_source_state == full_source_state
+    }
+
+    #[inline]
+    pub(crate) fn has_first_match_step_from(&self, full_source_state: u32) -> bool {
+        self.first_match_step_source_state == full_source_state
+            && self.future_terminals.len() == 1
+            && (!self.first_match_step_root_live_tokens.is_empty()
+                || !self.first_match_step_exact_end_tokens.is_empty()
+                || !self.first_match_step_post_rows.is_empty()
+                || !self.first_match_step_unknown_tokens.is_empty())
+    }
+
+    #[inline]
+    pub(crate) fn config_subtree_certificates_for_node(
+        &self,
+        node: u32,
+    ) -> &[DynamicConfigSubtreeCertificate] {
+        let certificates = self.config_subtree_certificates.as_ref();
+        let start = certificates.partition_point(|certificate| certificate.node < node);
+        let end = start
+            + certificates[start..]
+                .partition_point(|certificate| certificate.node == node);
+        &certificates[start..end]
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocabSource {
     pub(crate) trie: Arc<VocabPrefixTree>,
     pub(crate) token_aliases: Arc<Vec<Vec<u32>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DynamicBoundedObservationSets {
+    pool: Arc<[U8Set]>,
+    horizon16: Arc<[u32]>,
+    horizon64: Arc<[u32]>,
+}
+
+impl DynamicBoundedObservationSets {
+    pub(crate) fn from_raw(horizon16: Box<[U8Set]>, horizon64: Box<[U8Set]>) -> Self {
+        debug_assert_eq!(horizon16.len(), horizon64.len());
+        let mut ids = FxHashMap::<U8Set, u32>::default();
+        let mut pool = Vec::<U8Set>::new();
+        let mut intern = |set: U8Set| -> u32 {
+            if let Some(&id) = ids.get(&set) {
+                return id;
+            }
+            let id = pool.len() as u32;
+            pool.push(set);
+            ids.insert(set, id);
+            id
+        };
+        let horizon16 = horizon16
+            .iter()
+            .copied()
+            .map(&mut intern)
+            .collect::<Vec<_>>();
+        let horizon64 = horizon64
+            .iter()
+            .copied()
+            .map(&mut intern)
+            .collect::<Vec<_>>();
+        Self {
+            pool: Arc::from(pool),
+            horizon16: Arc::from(horizon16),
+            horizon64: Arc::from(horizon64),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn safe_bytes(&self, state: u32, required_horizon: u32) -> Option<U8Set> {
+        let ids = if required_horizon <= 16 {
+            self.horizon16.as_ref()
+        } else if required_horizon <= 64 {
+            self.horizon64.as_ref()
+        } else {
+            return None;
+        };
+        let id = *ids.get(state as usize)? as usize;
+        self.pool.get(id).copied()
+    }
+
+    #[inline]
+    pub(crate) fn state_count(&self) -> usize {
+        self.horizon16.len()
+    }
+
+    #[inline]
+    pub(crate) fn unique_set_count(&self) -> usize {
+        self.pool.len()
+    }
 }
 
 /// Runtime-only vocabulary data for direct dynamic mask generation.
@@ -1364,6 +1802,16 @@ pub(crate) struct DynamicMaskVocab {
     direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, usize>>>,
     direct_regular_terminal_support: Arc<DirectRegularTerminalSupport>,
     self_loop_projections: Arc<Vec<DynamicSelfLoopProjection>>,
+    projection_by_source: Arc<[u32]>,
+    projection_alias_vocab: Arc<[u32]>,
+    projection_alias_h64: Arc<[u32]>,
+    bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
+    /// Optional mask-only finite-token quotient. Commit continues to use the
+    /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
+    /// built in this smaller coordinate and indexed from exact runtime states
+    /// through `full_to_mask_state`.
+    mask_tokenizer: Option<Arc<Tokenizer>>,
+    full_to_mask_state: Arc<[u32]>,
 }
 
 impl DynamicMaskVocab {
@@ -1417,6 +1865,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1453,6 +1907,12 @@ impl DynamicMaskVocab {
                 DirectRegularTerminalSupport::default(),
             ),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1472,6 +1932,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1508,6 +1974,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1699,16 +2171,175 @@ impl DynamicMaskVocab {
         &mut self,
         projections: Vec<DynamicSelfLoopProjection>,
     ) {
+        let state_count = self.mask_tokenizer.as_ref().map_or_else(
+            || {
+                projections
+                    .iter()
+                    .map(|projection| projection.source_state as usize + 1)
+                    .max()
+                    .unwrap_or(0)
+            },
+            |tokenizer| tokenizer.num_states() as usize,
+        );
+        let mut by_source = vec![u32::MAX; state_count];
+        for (index, projection) in projections.iter().enumerate() {
+            if let Some(slot) = by_source.get_mut(projection.source_state as usize) {
+                *slot = index as u32;
+            }
+        }
+        self.projection_by_source = Arc::from(by_source);
         self.self_loop_projections = Arc::new(projections);
+    }
+
+    pub(crate) fn set_projection_alias_vocab(&mut self, aliases: Vec<u32>) {
+        self.projection_alias_vocab = Arc::from(aliases);
+    }
+
+    pub(crate) fn set_projection_alias_h64(&mut self, aliases: Vec<u32>) {
+        self.projection_alias_h64 = Arc::from(aliases);
+    }
+
+    pub(crate) fn set_mask_tokenizer_quotient(
+        &mut self,
+        tokenizer: Tokenizer,
+        full_to_mask_state: Vec<u32>,
+    ) {
+        debug_assert!(!full_to_mask_state.is_empty());
+        debug_assert!(full_to_mask_state
+            .iter()
+            .all(|&state| state < tokenizer.num_states()));
+        self.mask_tokenizer = Some(Arc::new(tokenizer));
+        self.full_to_mask_state = Arc::from(full_to_mask_state);
+    }
+
+    /// Preserve mask-only quotient metadata when a deferred dynamic-vocabulary
+    /// placeholder is replaced by its fully materialized runtime trie.
+    ///
+    /// The quotient is constraint/lexer derived while the trie is vocabulary
+    /// derived, so deferred dynamic compilation may construct them at different
+    /// times. Sharing the immutable Arc-backed metadata avoids cloning the
+    /// quotient tokenizer during that handoff.
+    pub(crate) fn inherit_mask_tokenizer_quotient_from(&mut self, source: &Self) {
+        self.mask_tokenizer = source.mask_tokenizer.clone();
+        self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
+    }
+
+    pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
+        self.mask_tokenizer.as_ref().map(|tokenizer| {
+            ((**tokenizer).clone(), self.full_to_mask_state.as_ref().to_vec())
+        })
+    }
+
+    #[inline]
+    pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
+        self.mask_tokenizer.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
+        self.full_to_mask_state
+            .get(full_state as usize)
+            .copied()
+            .unwrap_or(full_state)
+    }
+
+    pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
+        let tokenizer = self.mask_tokenizer.as_ref()?;
+        let mut counts = vec![0usize; tokenizer.num_states() as usize];
+        for &state in self.full_to_mask_state.iter() {
+            if let Some(count) = counts.get_mut(state as usize) {
+                *count += 1;
+            }
+        }
+        Some(counts)
+    }
+
+    /// Exact full-tokenizer preimage for quotient states that have exactly one
+    /// runtime source.  Non-unique and unreachable quotient states are
+    /// represented by `u32::MAX`.
+    pub(crate) fn mask_projection_unique_full_states(&self) -> Option<Vec<u32>> {
+        let tokenizer = self.mask_tokenizer.as_ref()?;
+        let mut unique = vec![u32::MAX; tokenizer.num_states() as usize];
+        let mut duplicate = vec![false; tokenizer.num_states() as usize];
+        for (full_state, &mask_state) in self.full_to_mask_state.iter().enumerate() {
+            let index = mask_state as usize;
+            if index >= unique.len() {
+                continue;
+            }
+            if unique[index] == u32::MAX && !duplicate[index] {
+                unique[index] = full_state as u32;
+            } else {
+                duplicate[index] = true;
+                unique[index] = u32::MAX;
+            }
+        }
+        Some(unique)
     }
 
     pub(crate) fn self_loop_projection(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        self.self_loop_projections
-            .iter()
-            .find(|projection| projection.source_state == source_state)
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_by_source.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    pub(crate) fn self_loop_projection_alias_h64(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSelfLoopProjection> {
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_alias_h64.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    pub(crate) fn self_loop_projection_alias_vocab(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSelfLoopProjection> {
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_alias_vocab.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    #[inline]
+    pub(crate) fn has_self_loop_projections(&self) -> bool {
+        !self.self_loop_projections.is_empty()
+    }
+
+    pub(crate) fn set_bounded_observation_sets(
+        &mut self,
+        sets: DynamicBoundedObservationSets,
+    ) {
+        self.bounded_observation_sets = Arc::new(sets);
+    }
+
+    #[inline]
+    pub(crate) fn bounded_observation_safe_bytes(
+        &self,
+        source: u32,
+        required_horizon: u32,
+    ) -> Option<U8Set> {
+        self.bounded_observation_sets
+            .safe_bytes(source, required_horizon)
+    }
+
+    #[inline]
+    pub(crate) fn bounded_observation_set_counts(&self) -> (usize, usize) {
+        (
+            self.bounded_observation_sets.state_count(),
+            self.bounded_observation_sets.unique_set_count(),
+        )
     }
 
     pub(crate) fn cached_direct_regular_frontier(
@@ -1811,6 +2442,12 @@ impl Default for DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 }
