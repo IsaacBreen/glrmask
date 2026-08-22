@@ -18,7 +18,10 @@
 //! ```
 //!
 //! V1 declarations use `=` and terminate with semicolons. Epsilon is written
-//! explicitly as `eps`; empty alternatives and empty groups are errors. Exact
+//! explicitly as `eps`; empty alternatives and empty groups are errors. Single
+//! and double quoted literals have the same byte-string semantics; the v1
+//! formatter chooses the delimiter requiring fewer escapes and prefers double
+//! quotes on a tie. Exact
 //! model-token IDs do not appear in v1 source: `extern t NAME;` declares a
 //! parser-visible exact-token terminal whose ID or IDs are supplied by the host.
 //! External terminals may appear in nonterminal expressions and nonterminal FA
@@ -93,13 +96,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // Dumper
 // ============================================================
 
-/// Serialise `grammar` to the GLRM text format.
-pub fn to_glrm(grammar: &NamedGrammar) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("start {};\n", grammar.start));
-    if let Some(ref ign) = grammar.ignore {
-        out.push_str(&format!("ignore {};\n", ign));
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DumpFlavor {
+    Legacy,
+    V1,
+}
+
+fn lexer_groups_for_dump(grammar: &NamedGrammar, flavor: DumpFlavor) -> Vec<(String, Vec<String>)> {
     let anonymous_literals = grammar.emitted_anonymous_literals();
     let literal_selector_partition = if !anonymous_literals.is_empty()
         && anonymous_literals
@@ -144,7 +147,7 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
         lexer_groups
             .entry(partition.as_str())
             .or_default()
-            .push(format!("\"{}\"", escape_bytes_for_string(literal)));
+            .push(format_literal(literal, flavor));
     }
     if let Some(partition) = literal_selector_partition {
         lexer_groups
@@ -158,8 +161,24 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
             .or_default()
             .push("*".to_string());
     }
-    for (partition, mut members) in lexer_groups {
-        members.sort_unstable();
+
+    lexer_groups
+        .into_iter()
+        .map(|(partition, mut members)| {
+            members.sort_unstable();
+            (partition.to_string(), members)
+        })
+        .collect()
+}
+
+/// Serialise `grammar` to the legacy, unversioned GLRM text format.
+pub fn to_glrm(grammar: &NamedGrammar) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("start {};\n", grammar.start));
+    if let Some(ref ign) = grammar.ignore {
+        out.push_str(&format!("ignore {};\n", ign));
+    }
+    for (partition, members) in lexer_groups_for_dump(grammar, DumpFlavor::Legacy) {
         out.push_str(&format!(
             "lexer group {} ::= {};\n",
             partition,
@@ -217,22 +236,19 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
         return Err(err("cannot dump bound exact-token IDs as GLRM v1; source-level external terminal names are not retained in NamedGrammar"));
     }
 
-    let legacy = to_glrm(grammar);
-    let lexer_groups = legacy
-        .lines()
-        .filter(|line| line.starts_with("lexer group "))
-        .map(|line| line.replacen(" ::= ", " = ", 1))
-        .collect::<Vec<_>>();
+    let lexer_groups = lexer_groups_for_dump(grammar, DumpFlavor::V1);
     let mut out = format!("glrm 1;\nstart {};\n", grammar.start);
     if let Some(ignore) = &grammar.ignore {
         out.push_str(&format!("ignore {ignore};\n"));
     }
     if !lexer_groups.is_empty() {
         out.push_str("pragma glrmask {\n");
-        for group in lexer_groups {
-            out.push_str("  ");
-            out.push_str(&group);
-            out.push('\n');
+        for (partition, members) in lexer_groups {
+            out.push_str(&format!(
+                "  lexer group {} = {};\n",
+                partition,
+                members.join(", "),
+            ));
         }
         out.push_str("}\n");
     }
@@ -251,7 +267,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
             out.push_str(&format!(
                 "{prefix} {} = {};\n",
                 rule.name,
-                dump_nt_expr(&rule.expr, false)
+                dump_nt_expr_v1(&rule.expr, false)
             ));
         }
     }
@@ -285,7 +301,7 @@ fn dump_expr_nfa_v1(expr_nfa: &ExprNFA) -> String {
         for (&label, targets) in &state.transitions {
             let symbol = expr_nfa
                 .symbol_for_label(label)
-                .map(|expr| dump_nt_expr(expr, false))
+                .map(|expr| dump_nt_expr_v1(expr, false))
                 .unwrap_or_else(|| "eps".to_string());
             for &to in targets {
                 out.push_str(&format!("  {from} -> {}: {symbol};\n", expr_nfa.state_name(to)));
@@ -356,61 +372,65 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
 // ---- NT-expression dumper --------------------------------------------------
 
 fn dump_nt_expr(expr: &GrammarExpr, needs_parens: bool) -> String {
+    dump_nt_expr_with_flavor(expr, needs_parens, DumpFlavor::Legacy)
+}
+
+fn dump_nt_expr_v1(expr: &GrammarExpr, needs_parens: bool) -> String {
+    dump_nt_expr_with_flavor(expr, needs_parens, DumpFlavor::V1)
+}
+
+fn dump_nt_expr_with_flavor(
+    expr: &GrammarExpr,
+    needs_parens: bool,
+    flavor: DumpFlavor,
+) -> String {
     match expr {
         GrammarExpr::Choice(alts) => {
-            let inner = alts.iter()
-                .map(|a| dump_nt_seq(a))
+            let inner = alts
+                .iter()
+                .map(|a| dump_nt_seq(a, flavor))
                 .collect::<Vec<_>>()
                 .join(" | ");
             if needs_parens && alts.len() > 1 {
-                format!("({})", inner)
+                format!("({inner})")
             } else {
                 inner
             }
         }
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            let lhs = dump_set_operand(inner);
+            let lhs = dump_set_operand(inner, flavor);
             let rhs = match exclude.as_ref() {
                 GrammarExpr::Choice(alts) if !alts.is_empty() => alts
                     .iter()
-                    .map(dump_set_operand)
+                    .map(|expr| dump_set_operand(expr, flavor))
                     .collect::<Vec<_>>()
                     .join(" - "),
-                _ => dump_set_operand(exclude),
+                _ => dump_set_operand(exclude, flavor),
             };
-            let infix = format!("{} - {}", lhs, rhs);
-            if needs_parens {
-                format!("({})", infix)
-            } else {
-                infix
-            }
+            let infix = format!("{lhs} - {rhs}");
+            if needs_parens { format!("({infix})") } else { infix }
         }
         GrammarExpr::Intersect { expr: inner, intersect } => {
             let infix = format!(
                 "{} & {}",
-                dump_set_operand(inner),
-                dump_set_operand(intersect)
+                dump_set_operand(inner, flavor),
+                dump_set_operand(intersect, flavor)
             );
-            if needs_parens {
-                format!("({})", infix)
-            } else {
-                infix
-            }
+            if needs_parens { format!("({infix})") } else { infix }
         }
-        _ => dump_nt_seq(expr),
+        _ => dump_nt_seq(expr, flavor),
     }
 }
 
 /// Dump a sequence (or a single non-choice item).
-fn dump_nt_seq(expr: &GrammarExpr) -> String {
+fn dump_nt_seq(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Sequence(items) => {
-            items.iter()
-                .map(|e| dump_nt_postfix(e))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        _ => dump_nt_postfix(expr),
+        GrammarExpr::Sequence(items) => items
+            .iter()
+            .map(|expr| dump_nt_postfix(expr, flavor))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => dump_nt_postfix(expr, flavor),
     }
 }
 
@@ -419,124 +439,149 @@ fn dump_quantifier(quantifier: &Quantifier) -> String {
         Quantifier::Optional => "?".to_string(),
         Quantifier::ZeroPlus => "*".to_string(),
         Quantifier::OnePlus => "+".to_string(),
-        Quantifier::Range(min, Some(max)) if min == max => format!("{{{}}}", min),
-        Quantifier::Range(min, Some(max)) => format!("{{{},{}}}", min, max),
-        Quantifier::Range(min, None) => format!("{{{},}}", min),
+        Quantifier::Range(min, Some(max)) if min == max => format!("{{{min}}}"),
+        Quantifier::Range(min, Some(max)) => format!("{{{min},{max}}}"),
+        Quantifier::Range(min, None) => format!("{{{min},}}"),
     }
 }
 
-fn dump_nt_postfix(expr: &GrammarExpr) -> String {
+fn dump_nt_postfix(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Quantified(inner, Quantifier::Optional) => format!("{}?", dump_nt_atom(inner)),
-        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => format!("{}*", dump_nt_atom(inner)),
-        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => format!("{}+", dump_nt_atom(inner)),
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => {
+            format!("{}?", dump_nt_atom(inner, flavor))
+        }
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
+            format!("{}*", dump_nt_atom(inner, flavor))
+        }
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
+            format!("{}+", dump_nt_atom(inner, flavor))
+        }
         GrammarExpr::Quantified(inner, Quantifier::Range(min, max)) => match max {
-            Some(max) if min == max => format!("{}{{{}}}", dump_nt_atom(inner), min),
-            Some(max) => format!("{}{{{},{}}}", dump_nt_atom(inner), min, max),
-            None => format!("{}{{{},}}", dump_nt_atom(inner), min),
+            Some(max) if min == max => format!("{}{{{min}}}", dump_nt_atom(inner, flavor)),
+            Some(max) => format!("{}{{{min},{max}}}", dump_nt_atom(inner, flavor)),
+            None => format!("{}{{{min},}}", dump_nt_atom(inner, flavor)),
         },
-        _ => dump_nt_atom(expr),
+        _ => dump_nt_atom(expr, flavor),
     }
 }
 
-fn dump_nt_atom(expr: &GrammarExpr) -> String {
+fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Ref(name) => name.clone(),
-        GrammarExpr::Grouped(inner) => format!("({})", dump_nt_expr(inner, false)),
-        GrammarExpr::Literal(bytes) => format!("\"{}\"", escape_bytes_for_string(bytes)),
+        GrammarExpr::Grouped(inner) => {
+            format!("({})", dump_nt_expr_with_flavor(inner, false, flavor))
+        }
+        GrammarExpr::Literal(bytes) => format_literal(bytes, flavor),
         GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
         GrammarExpr::RawRegex(pat) => format!("/{}/", escape_regex_for_slash(pat)),
         GrammarExpr::CharClass { def, negate, utf8 } => {
-            let inner = if *negate { format!("^{}", def) } else { def.clone() };
+            let inner = if *negate { format!("^{def}") } else { def.clone() };
             let suffix = if *utf8 { "/utf8" } else { "" };
-            format!("[{}]{}", inner, suffix)
+            format!("[{inner}]{suffix}")
         }
         GrammarExpr::LexerDfa(_) => "LexerDfa".to_string(),
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            let lhs = dump_set_operand(inner);
+            let lhs = dump_set_operand(inner, flavor);
             match exclude.as_ref() {
                 GrammarExpr::Choice(alts) if !alts.is_empty() => {
                     let rhs = alts
                         .iter()
-                        .map(dump_set_operand)
+                        .map(|expr| dump_set_operand(expr, flavor))
                         .collect::<Vec<_>>()
                         .join(" - ");
-                    format!("({} - {})", lhs, rhs)
+                    format!("({lhs} - {rhs})")
                 }
-                _ => format!("({} - {})", lhs, dump_set_operand(exclude)),
+                _ => format!("({lhs} - {})", dump_set_operand(exclude, flavor)),
             }
         }
-        GrammarExpr::Intersect { expr: inner, intersect } => {
-            format!(
-                "({} & {})",
-                dump_set_operand(inner),
-                dump_set_operand(intersect)
-            )
-        }
+        GrammarExpr::Intersect { expr: inner, intersect } => format!(
+            "({} & {})",
+            dump_set_operand(inner, flavor),
+            dump_set_operand(intersect, flavor)
+        ),
         GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
-            let sep_str = dump_nt_atom(separator);
-            let items_str = items.iter()
-                .map(|(e, quantifier)| {
-                    let mut s = dump_nt_atom(e);
+            let sep_str = dump_nt_atom(separator, flavor);
+            let items_str = items
+                .iter()
+                .map(|(expr, quantifier)| {
+                    let mut text = dump_nt_atom(expr, flavor);
                     if let Some(quantifier) = quantifier {
-                        s.push_str(&dump_quantifier(quantifier));
+                        text.push_str(&dump_quantifier(quantifier));
                     }
-                    s
+                    text
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
             if *allow_empty {
-                format!("{} ~ ( {} )", sep_str, items_str)
+                format!("{sep_str} ~ ( {items_str} )")
             } else {
-                format!("{} ~+ ( {} )", sep_str, items_str)
+                format!("{sep_str} ~+ ( {items_str} )")
             }
         }
-        GrammarExpr::ExprNFA(expr_nfa) => {
-            format!(
-                "ExprNFA(states={}, symbols={})",
-                expr_nfa.nfa.states.len(),
-                expr_nfa.symbols.len()
-            )
-        }
-        // For compound exprs that need parens as atoms:
+        GrammarExpr::ExprNFA(expr_nfa) => format!(
+            "ExprNFA(states={}, symbols={})",
+            expr_nfa.nfa.states.len(),
+            expr_nfa.symbols.len()
+        ),
         GrammarExpr::Sequence(_) | GrammarExpr::Choice(_) => {
-            format!("({})", dump_nt_expr(expr, false))
+            format!("({})", dump_nt_expr_with_flavor(expr, false, flavor))
         }
-        // Quantifiers that appear here need parens around their inner:
-        GrammarExpr::Quantified(_, Quantifier::Optional) | GrammarExpr::Quantified(_, Quantifier::ZeroPlus) | GrammarExpr::Quantified(_, Quantifier::OnePlus)
+        GrammarExpr::Quantified(_, Quantifier::Optional)
+        | GrammarExpr::Quantified(_, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(_, Quantifier::OnePlus)
         | GrammarExpr::Quantified(_, Quantifier::Range(_, _)) => {
-            format!("({})", dump_nt_postfix(expr))
+            format!("({})", dump_nt_postfix(expr, flavor))
         }
     }
 }
 
-fn dump_set_operand(expr: &GrammarExpr) -> String {
+fn dump_set_operand(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Choice(_) | GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
-            format!("({})", dump_nt_expr(expr, false))
+            format!("({})", dump_nt_expr_with_flavor(expr, false, flavor))
         }
-        _ => dump_nt_expr(expr, false),
+        _ => dump_nt_expr_with_flavor(expr, false, flavor),
     }
 }
 
 // ---- Helpers ---------------------------------------------------------------
 
-fn escape_bytes_for_string(bytes: &[u8]) -> String {
+fn escape_bytes_for_delimiter(bytes: &[u8], delimiter: u8) -> String {
+    debug_assert!(delimiter == b'"' || delimiter == b'\'');
     let mut out = String::new();
-    for &b in bytes {
-        match b {
+    for &byte in bytes {
+        match byte {
             b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
             b'\n' => out.push_str("\\n"),
             b'\r' => out.push_str("\\r"),
             b'\t' => out.push_str("\\t"),
-            0x20..=0x7E => out.push(b as char),
-            _ => out.push_str(&format!("\\x{:02X}", b)),
+            byte if byte == delimiter => {
+                out.push('\\');
+                out.push(byte as char);
+            }
+            0x20..=0x7E => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02X}")),
         }
     }
     out
+}
+
+fn format_literal(bytes: &[u8], flavor: DumpFlavor) -> String {
+    let double_quoted = escape_bytes_for_delimiter(bytes, b'"');
+    if flavor == DumpFlavor::Legacy {
+        return format!("\"{double_quoted}\"");
+    }
+
+    let single_quoted = escape_bytes_for_delimiter(bytes, b'\'');
+    if single_quoted.len() < double_quoted.len() {
+        format!("'{single_quoted}'")
+    } else {
+        // GLRM v1 prefers double quotes when both spellings require the same
+        // amount of escaping.
+        format!("\"{double_quoted}\"")
+    }
 }
 
 fn escape_regex_for_slash(pat: &str) -> String {
@@ -4001,6 +4046,43 @@ nt document ::= left right;
     }
 
     #[test]
+    fn glrm_v1_quote_styles_have_the_same_literal_semantics() {
+        for (single, double) in [
+            ("'true'", "\"true\""),
+            ("'\"'", "\"\\\"\""),
+            ("'\\\''", "\"'\""),
+        ] {
+            let single = from_glrm(&format!(
+                "glrm 1; start start; nt start = {single};"
+            ))
+            .unwrap();
+            let double = from_glrm(&format!(
+                "glrm 1; start start; nt start = {double};"
+            ))
+            .unwrap();
+            assert_eq!(single.rules, double.rules);
+        }
+    }
+
+    #[test]
+    fn glrm_v1_formatter_minimizes_literal_quote_escaping() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start start;
+nt start = '"' | "'" | "plain";
+"#,
+        )
+        .unwrap();
+        let dumped = to_glrm_v1(&grammar).unwrap();
+        assert!(dumped.contains("'\"'"), "{dumped}");
+        assert!(dumped.contains("\"'\""), "{dumped}");
+        assert!(dumped.contains("\"plain\""), "{dumped}");
+        assert!(!dumped.contains("\\\""), "{dumped}");
+        assert_eq!(from_glrm(&dumped).unwrap().rules, grammar.rules);
+    }
+
+    #[test]
     fn glrm_v1_rejects_numeric_token_syntax_and_implicit_epsilon() {
         let error = from_glrm("glrm 1; start start; nt start = @token(7);")
             .unwrap_err()
@@ -4009,6 +4091,7 @@ nt document ::= left right;
 
         assert!(from_glrm("start start; nt start ::= 'a' |;").is_ok());
         assert!(from_glrm("glrm 1; start start; nt start = 'a' |;").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = ();").is_err());
         assert!(from_glrm("glrm 1; start start; nt start = 'a' | eps;").is_ok());
     }
 
