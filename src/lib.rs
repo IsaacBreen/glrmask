@@ -267,6 +267,7 @@ pub mod __private {
                 }
                 inputs.push(CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: child,
                 });
             }

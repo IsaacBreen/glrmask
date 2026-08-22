@@ -663,6 +663,7 @@ impl Constraint {
                 composition_inputs.push(
                     crate::compiler::constraint_compose::CompiledSubgrammarInput {
                         placeholder_terminal,
+                        additional_placeholder_terminals: &[],
                         constraint: child,
                     },
                 );

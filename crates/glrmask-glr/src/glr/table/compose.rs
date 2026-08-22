@@ -18,6 +18,10 @@ pub struct SubgrammarTableInput<'a> {
     /// start row. The terminal remains in the merged ID domain but becomes
     /// unreachable from the merged lexer/table.
     pub placeholder_terminal: TerminalID,
+    /// Additional parent terminals that call the same compiled child. The
+    /// child table/tokenizer/parser coordinate is incorporated only once; all
+    /// listed terminals are equivalent linker call sites into that one child.
+    pub additional_placeholder_terminals: &'a [TerminalID],
     pub table: &'a GLRTable,
     /// Ignore terminal local to this component, when one exists.  The legacy
     /// splice path does not inspect it; the explicit-control reference path
@@ -27,6 +31,14 @@ pub struct SubgrammarTableInput<'a> {
     /// standalone compiled table intentionally omits a root-only epsilon path,
     /// so composition must carry this fact separately.
     pub start_nullable: bool,
+}
+
+impl<'a> SubgrammarTableInput<'a> {
+    #[inline]
+    fn placeholder_terminals(&self) -> impl Iterator<Item = TerminalID> + '_ {
+        std::iter::once(self.placeholder_terminal)
+            .chain(self.additional_placeholder_terminals.iter().copied())
+    }
 }
 
 #[derive(Debug)]
@@ -39,6 +51,9 @@ pub struct ComposedTable {
     /// cached terminal-adjacency summaries algebraically instead of rebuilding
     /// FIRST/FOLLOW over the fully merged rule graph.
     pub placeholder_terminals: Vec<TerminalID>,
+    /// Component index (parent=0, first child=1, ...) for each entry in
+    /// `placeholder_terminals`. Multiple entries may name the same child.
+    pub placeholder_component_indices: Vec<usize>,
     /// One relation per input table, parent first. A local parser state may map
     /// to several merged states: a standalone child start state maps to every
     /// parent call-site state, and its accept state maps to the corresponding
@@ -488,7 +503,7 @@ pub fn compose_subgrammar_tables(
     let placeholder_entry_terminals = children
         .iter()
         .enumerate()
-        .map(|(child_index, input)| {
+        .flat_map(|(child_index, input)| {
             let terminal_offset = terminal_offsets[child_index + 1];
             let mut entries = input
                 .table
@@ -500,7 +515,9 @@ pub fn compose_subgrammar_tables(
             if let Some(ignore) = input.ignore_terminal {
                 entries.insert(ignore + terminal_offset);
             }
-            (input.placeholder_terminal, entries)
+            input
+                .placeholder_terminals()
+                .map(move |placeholder| (placeholder, entries.clone()))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -526,45 +543,45 @@ pub fn compose_subgrammar_tables(
         let child_accept = accept_state(child)?;
 
         // Keep the rule metadata semantically aligned with the manually
-        // spliced table. Replacing a placeholder terminal by the child's root
-        // nonterminal preserves RHS length, so existing reduce actions and
-        // parser states remain valid, while FOLLOW/template analysis can now
-        // see nullable children and true parent↔child adjacency.
+        // spliced table. Every placeholder owned by this child is replaced by
+        // the same child root; the compiled child is still incorporated once.
+        let child_placeholders = child_input.placeholder_terminals().collect::<Vec<_>>();
         for rule in &mut rules[..parent_rule_count] {
             for symbol in &mut rule.rhs {
-                if *symbol == Symbol::Terminal(child_input.placeholder_terminal) {
+                if let Symbol::Terminal(terminal) = *symbol
+                    && child_placeholders.contains(&terminal)
+                {
                     *symbol = Symbol::Nonterminal(child_root);
                 }
             }
         }
 
-        let mut call_sites = Vec::<(u32, u32, bool)>::new();
-        let mut precursor_actions = Vec::<(u32, Action)>::new();
-        for state in 0..parent.num_states {
-            let Some(placeholder_action) = parent.action(state, child_input.placeholder_terminal)
-            else {
-                continue;
-            };
-            let Some((target, replace)) = simple_shift(placeholder_action) else {
-                if reduction_only(placeholder_action) {
-                    precursor_actions.push((state, placeholder_action.clone()));
+        let mut call_sites = Vec::<(TerminalID, u32, u32, bool)>::new();
+        let mut precursor_actions = Vec::<(TerminalID, u32, Action)>::new();
+        for &placeholder in &child_placeholders {
+            for state in 0..parent.num_states {
+                let Some(placeholder_action) = parent.action(state, placeholder) else {
                     continue;
-                }
-                return Err(format!(
-                    "placeholder terminal {} has unsupported action {:?} in parent state {state}",
-                    child_input.placeholder_terminal, placeholder_action
-                ));
-            };
-            call_sites.push((state, target, replace));
+                };
+                let Some((target, replace)) = simple_shift(placeholder_action) else {
+                    if reduction_only(placeholder_action) {
+                        precursor_actions.push((placeholder, state, placeholder_action.clone()));
+                        continue;
+                    }
+                    return Err(format!(
+                        "placeholder terminal {placeholder} has unsupported action {placeholder_action:?} in parent state {state}",
+                    ));
+                };
+                call_sites.push((placeholder, state, target, replace));
+            }
         }
         if call_sites.is_empty() {
             return Err(format!(
-                "placeholder terminal {} has no shift call sites in the parent table",
-                child_input.placeholder_terminal
+                "placeholder terminals {child_placeholders:?} have no shift call sites in the parent table",
             ));
         }
         let mut continuation_terminals = BTreeSet::<TerminalID>::new();
-        for &(_, target, _) in &call_sites {
+        for &(_, _, target, _) in &call_sites {
             continuation_terminals.extend(parent.action[target as usize].keys());
         }
         if let Some(ignore) = parent_scoped_ignore_terminal {
@@ -583,16 +600,17 @@ pub fn compose_subgrammar_tables(
         // placeholder is replaced, those precursor reductions must be keyed
         // by every real child-entry lookahead instead. Otherwise later
         // sequential subgrammar calls fail before reaching their caller row.
-        let mut child_entry_terminals = placeholder_entry_terminals
-            .get(&child_input.placeholder_terminal)
+        let mut child_entry_terminals = child_placeholders
+            .first()
+            .and_then(|placeholder| placeholder_entry_terminals.get(placeholder))
             .cloned()
             .unwrap_or_default();
         if child_input.start_nullable {
             child_entry_terminals.extend(continuation_terminals.iter().copied());
         }
-        for (state, precursor_action) in precursor_actions {
+        for (placeholder, state, precursor_action) in precursor_actions {
             rows_needing_compress.insert(state as usize);
-            action[state as usize].remove(&child_input.placeholder_terminal);
+            action[state as usize].remove(&placeholder);
             for &terminal in &child_entry_terminals {
                 merge_action_cell(
                     &mut action[state as usize],
@@ -622,7 +640,7 @@ pub fn compose_subgrammar_tables(
         // transition: the first child-ignore token replaces caller -> phase.
         let mut child_scope_phase = BTreeMap::<u32, u32>::new();
         if child_input.ignore_terminal.is_some() {
-            for &(caller, _, _) in &call_sites {
+            for &(_, caller, _, _) in &call_sites {
                 let phase = next_state;
                 next_state += 1;
                 action.push(ActionRow::default());
@@ -633,11 +651,11 @@ pub fn compose_subgrammar_tables(
 
         let mut child_relation = vec![Vec::<u32>::new(); child.num_states as usize];
         child_relation[child_start as usize] =
-            call_sites.iter().map(|&(caller, _, _)| caller).collect();
+            call_sites.iter().map(|&(_, caller, _, _)| caller).collect();
         child_relation[child_start as usize]
             .extend(child_scope_phase.values().copied());
         child_relation[child_accept as usize] =
-            call_sites.iter().map(|&(_, target, _)| target).collect();
+            call_sites.iter().map(|&(_, _, target, _)| target).collect();
         for child_state in 0..child.num_states {
             let mapped = child_state_map[child_state as usize];
             if mapped != u32::MAX {
@@ -723,9 +741,9 @@ pub fn compose_subgrammar_tables(
             );
         }
 
-        for &(caller_state, placeholder_target, placeholder_replace) in &call_sites {
+        for &(placeholder, caller_state, placeholder_target, placeholder_replace) in &call_sites {
             rows_needing_compress.insert(caller_state as usize);
-            action[caller_state as usize].remove(&child_input.placeholder_terminal);
+            action[caller_state as usize].remove(&placeholder);
             for (terminal, child_action) in child.action[child_start as usize].iter() {
                 let mapped_action = remap_action(
                     child_action,
@@ -881,7 +899,7 @@ pub fn compose_subgrammar_tables(
 
         for &(state, terminal) in &child.forwarded_shifts {
             if state == child_start {
-                for &(caller, _, _) in &call_sites {
+                for &(_, caller, _, _) in &call_sites {
                     forwarded_shifts.insert((caller, terminal + terminal_offset));
                 }
             } else if state != child_accept {
@@ -898,7 +916,7 @@ pub fn compose_subgrammar_tables(
             let source_states = if frontier.source_state == child_start {
                 call_sites
                     .iter()
-                    .map(|&(caller, _, _)| caller)
+                    .map(|&(_, caller, _, _)| caller)
                     .collect::<Vec<_>>()
             } else {
                 vec![child_state_map[frontier.source_state as usize]]
@@ -987,7 +1005,14 @@ pub fn compose_subgrammar_tables(
         terminal_offsets,
         placeholder_terminals: children
             .iter()
-            .map(|child| child.placeholder_terminal)
+            .flat_map(SubgrammarTableInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(child_index, child)| {
+                child.placeholder_terminals().map(move |_| child_index + 1)
+            })
             .collect(),
         state_relations,
         boundary_nonterminals,
@@ -1022,6 +1047,15 @@ pub fn compose_subgrammar_tables_explicit(
     parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
+    if children
+        .iter()
+        .any(|child| !child.additional_placeholder_terminals.is_empty())
+    {
+        return Err(
+            "explicit-control subgrammar composition does not support multiple placeholders for one child"
+                .into(),
+        );
+    }
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
     terminal_offsets.push(0);
     let mut next_terminal = parent.num_terminals;
@@ -1310,7 +1344,14 @@ pub fn compose_subgrammar_tables_explicit(
         terminal_offsets,
         placeholder_terminals: children
             .iter()
-            .map(|child| child.placeholder_terminal)
+            .flat_map(SubgrammarTableInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(child_index, child)| {
+                child.placeholder_terminals().map(move |_| child_index + 1)
+            })
             .collect(),
         state_relations,
         boundary_nonterminals,
@@ -1649,6 +1690,7 @@ mod tests {
             None,
             &[SubgrammarTableInput {
                 placeholder_terminal: placeholder,
+                additional_placeholder_terminals: &[],
                 table: &child,
                 ignore_terminal: None,
                 start_nullable: false,
@@ -1696,6 +1738,118 @@ mod tests {
     }
 
     #[test]
+    fn composed_table_reuses_one_child_for_distinct_placeholder_terminals() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt document ::= "<" LEFT ">" RIGHT "!";
+            "#,
+        );
+        let (monolithic, monolithic_analysis) = table(
+            r#"
+                start document;
+                g inner ::= {
+                    start child;
+                    nt child ::= "a" "b";
+                };
+                nt document ::= "<" inner ">" inner "!";
+            "#,
+        );
+
+        let left = terminal(&parent_analysis, "LEFT");
+        let right = terminal(&parent_analysis, "RIGHT");
+        let composed = compose_subgrammar_tables(
+            &parent,
+            None,
+            &[SubgrammarTableInput {
+                placeholder_terminal: left,
+                additional_placeholder_terminals: &[right],
+                table: &child,
+                ignore_terminal: None,
+                start_nullable: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(composed.state_relations.len(), 2);
+        assert_eq!(composed.state_relations[1][0].len(), 2);
+        assert_eq!(composed.placeholder_terminals, vec![left, right]);
+        assert_eq!(composed.placeholder_component_indices, vec![1, 1]);
+
+        let composed_alphabet = [
+            terminal(&parent_analysis, "<"),
+            composed.terminal_offsets[1] + terminal(&child_analysis, "a"),
+            composed.terminal_offsets[1] + terminal(&child_analysis, "b"),
+            terminal(&parent_analysis, ">"),
+            terminal(&parent_analysis, "!"),
+        ];
+        let monolithic_alphabet = [
+            terminal(&monolithic_analysis, "<"),
+            terminal(&monolithic_analysis, "a"),
+            terminal(&monolithic_analysis, "b"),
+            terminal(&monolithic_analysis, ">"),
+            terminal(&monolithic_analysis, "!"),
+        ];
+        enumerate_words(&composed_alphabet, 7, |composed_word| {
+            let monolithic_word = composed_word
+                .iter()
+                .map(|terminal| {
+                    let index = composed_alphabet
+                        .iter()
+                        .position(|candidate| candidate == terminal)
+                        .unwrap();
+                    monolithic_alphabet[index]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                accepts(&composed.table, composed_word),
+                accepts(&monolithic, &monolithic_word),
+                "language mismatch for distinct-placeholder shared child",
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_control_rejects_multiple_placeholders_for_one_child() {
+        let (child, _) = table(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt document ::= LEFT RIGHT;
+            "#,
+        );
+        let left = terminal(&parent_analysis, "LEFT");
+        let right = terminal(&parent_analysis, "RIGHT");
+        let error = compose_subgrammar_tables_explicit(
+            &parent,
+            None,
+            &[SubgrammarTableInput {
+                placeholder_terminal: left,
+                additional_placeholder_terminals: &[right],
+                table: &child,
+                ignore_terminal: None,
+                start_nullable: false,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.contains("does not support multiple placeholders"));
+    }
+
+    #[test]
     fn explicit_control_table_matches_optimized_splice_without_scoped_ignore() {
         let (child, child_analysis) = table(
             r#"
@@ -1712,6 +1866,7 @@ mod tests {
         );
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: None,
             start_nullable: false,
@@ -1760,6 +1915,7 @@ mod tests {
         );
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: None,
             start_nullable: true,
@@ -1800,6 +1956,7 @@ mod tests {
         );
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: None,
             start_nullable: false,
@@ -1846,6 +2003,7 @@ mod tests {
         );
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: None,
             start_nullable: true,
@@ -1895,6 +2053,7 @@ mod tests {
         let child_ws = terminal(&child_analysis, "C_WS");
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: Some(child_ws),
             start_nullable: false,
@@ -1943,6 +2102,7 @@ mod tests {
         );
         let middle_input = SubgrammarTableInput {
             placeholder_terminal: terminal(&middle_analysis, "LEAF"),
+            additional_placeholder_terminals: &[],
             table: &leaf,
             ignore_terminal: None,
             start_nullable: false,
@@ -1965,6 +2125,7 @@ mod tests {
         );
         let outer_input = SubgrammarTableInput {
             placeholder_terminal: terminal(&outer_analysis, "CHILD"),
+            additional_placeholder_terminals: &[],
             table: &middle.table,
             ignore_terminal: None,
             start_nullable: false,
@@ -2016,6 +2177,7 @@ mod tests {
         );
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: None,
             start_nullable: false,
@@ -2063,6 +2225,7 @@ mod tests {
         let child_ws = terminal(&child_analysis, "C_WS");
         let input = SubgrammarTableInput {
             placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            additional_placeholder_terminals: &[],
             table: &child,
             ignore_terminal: Some(child_ws),
             start_nullable: false,
@@ -2141,6 +2304,7 @@ mod tests {
             None,
             &[SubgrammarTableInput {
                 placeholder_terminal: terminal(&parent_analysis, "SUB"),
+                additional_placeholder_terminals: &[],
                 table: &child,
                 ignore_terminal: None,
                 start_nullable: true,
@@ -2212,12 +2376,14 @@ mod tests {
             &[
                 SubgrammarTableInput {
                     placeholder_terminal: terminal(&parent_analysis, "LEFT"),
+                    additional_placeholder_terminals: &[],
                     table: &left,
                     ignore_terminal: None,
                     start_nullable: false,
                 },
                 SubgrammarTableInput {
                     placeholder_terminal: terminal(&parent_analysis, "RIGHT"),
+                    additional_placeholder_terminals: &[],
                     table: &right,
                     ignore_terminal: None,
                     start_nullable: false,

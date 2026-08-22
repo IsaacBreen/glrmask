@@ -443,6 +443,7 @@ fn compose_named_parent_owned(
                 as u32;
             crate::compiler::constraint_compose::CompiledSubgrammarInput {
                 placeholder_terminal,
+                additional_placeholder_terminals: &[],
                 constraint: child,
             }
         })
@@ -650,6 +651,7 @@ fn profile_owned_parent_tokenizer(
                 .expect("benchmark placeholder terminal") as u32;
             crate::compiler::glr::table::SubgrammarTableInput {
                 placeholder_terminal,
+                additional_placeholder_terminals: &[],
                 table: &child.table,
                 ignore_terminal: child.ignore_terminal,
                 start_nullable: child.table.embedded_start_nullable(),
