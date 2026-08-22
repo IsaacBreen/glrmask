@@ -206,6 +206,19 @@ impl AnalyzedGrammar {
         }
     }
 
+    pub fn from_grammar_def_with_protected_shift_terminals(
+        g: &GrammarDef,
+        protected: impl IntoIterator<Item = TerminalID>,
+    ) -> Self {
+        let mut analyzed = Self::from_grammar_def(g);
+        for terminal in protected {
+            if terminal < analyzed.num_terminals {
+                analyzed.protected_shift_terminals.set(terminal as usize);
+            }
+        }
+        analyzed
+    }
+
     fn from_direct_regular_grammar_def(g: &GrammarDef) -> Self {
         let num_terminals = g.num_terminals();
         let mut protected_shift_terminals = BitSet::new(num_terminals as usize);

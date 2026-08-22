@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
     compile_owned_with_table_construction,
+    compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
     emit_compile_profile_summary,
@@ -235,6 +236,30 @@ fn compile_from_named_grammar(
     })?;
     constraint.table.set_embedded_end_token_ids(end_token_ids);
     Ok(constraint)
+}
+
+pub(crate) fn compile_glrm_with_protected_shift_terminals(
+    glrm: &str,
+    protected_terminal_names: &[&str],
+    vocab: &crate::Vocab,
+) -> crate::Result<Constraint> {
+    with_large_import_stack(glrm.len(), || {
+        let named = parse_glrm_to_named(glrm)?;
+        let factored = factor_named_grammar(named);
+        let grammar = ast::lower(&factored)?;
+        let protected = protected_terminal_names
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        crate::error::catch_internal_invariant(|| {
+            compile_owned_with_table_construction_and_protected_shift_terminal_names(
+                grammar,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                protected,
+            )
+        })
+    })
 }
 
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
