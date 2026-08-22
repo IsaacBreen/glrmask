@@ -12,7 +12,7 @@ let vocab = Vocab::new(vec![
     (1, b"b".to_vec()),
     (2, b"x".to_vec()),
 ]);
-let options = CompileOptions::default().end_tokens(&[64]);
+let options = CompileOptions::default().end_token_ids(&[64]);
 let constraint = Constraint::compile(
     Grammar::ebnf(r#"start ::= "a" "b""#),
     &vocab,

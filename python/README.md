@@ -108,9 +108,10 @@ payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
 
 constraint = glrmask.Constraint.from_glrm_grammar(
     '''
+    glrm 1;
     start document;
     extern g payload;
-    nt document ::= "{" payload "}";
+    nt document = "{" payload "}";
     ''',
     vocab,
     subgrammars={"payload": payload},
@@ -169,9 +170,34 @@ state = constraint.start()
 
 ## Grammar formats
 
-GLRM is GLRMask's native EBNF-like syntax and supports exact model-token terminals with `@token(<id>)`. The package also accepts Lark and EBNF grammars, plus JSON Schema through `from_json_schema()`.
+GLRM is GLRMask's native grammar format. New grammars should start with `glrm 1;` and use `=` declarations:
 
-See the [root README](../README.md#grammar-formats) for the format overview and special-token examples.
+```glrm
+glrm 1;
+start value;
+t NUMBER = /-?(0|[1-9][0-9]*)/;
+nt value = NUMBER | "null";
+```
+
+Exact model-token terminals are named in GLRM v1 and bound outside the grammar:
+
+```python
+grammar = '''
+glrm 1;
+start message;
+extern t END_TURN;
+nt message = "hello" END_TURN;
+'''
+constraint = glrmask.Constraint.from_glrm_grammar(
+    grammar,
+    vocab,
+    bindings={"END_TURN": end_turn_id},
+)
+```
+
+A binding value may be one token ID or a list of interchangeable IDs. Unversioned GLRM remains the legacy compatibility format and continues to accept `::=` and numeric `@token(<id>)`. Lark and EBNF retain their existing `@token(<id>)` syntax.
+
+See the [root README](../README.md#grammar-formats) for the fuller format overview.
 
 ## Source builds
 

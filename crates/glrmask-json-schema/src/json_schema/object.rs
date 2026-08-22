@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use rayon::prelude::*;
 
-use crate::grammar::expr_nfa::{ExprNFA, ExprNfaBuilder};
+use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{
@@ -2839,18 +2839,11 @@ impl<'a> Lowerer<'a> {
             )
         });
         if let Some((template_key, symbols)) = &template_symbols
-            && let Some(template_nfa) = self.fixed_object_nfa_templates.get(template_key).cloned()
+            && let Some(mut template_nfa) = self.fixed_object_nfa_templates.get(template_key).cloned()
         {
             let rule_name = self.fresh_rule_name("json_closed_object_body");
-            let body = GrammarExpr::ExprNFA(Box::new(ExprNFA {
-                nfa: template_nfa.nfa,
-                symbols: symbols.clone(),
-                state_names: template_nfa.state_names,
-                is_determinized_and_minimized: template_nfa.is_determinized_and_minimized,
-                prefer_direct_nfa_emission: template_nfa.prefer_direct_nfa_emission,
-                complete_parser_language: template_nfa.complete_parser_language,
-                canonical_dfa: template_nfa.canonical_dfa,
-            }));
+            template_nfa.symbols = symbols.clone();
+            let body = GrammarExpr::ExprNFA(Box::new(template_nfa));
             self.add_nonterminal_rule(&rule_name, body);
 
             let total_ms = profile_started_at

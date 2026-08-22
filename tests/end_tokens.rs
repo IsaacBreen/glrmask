@@ -36,7 +36,7 @@ fn all_importers_support_grammar_level_end_tokens() {
     let lark = r#"start: "a""#;
     let glrm = "start start;\nt A ::= 'a';\nnt start ::= A;";
     let end_tokens = [64];
-    let options = CompileOptions::default().end_tokens(&end_tokens);
+    let options = CompileOptions::default().end_token_ids(&end_tokens);
 
     assert_static(Constraint::compile(Grammar::json_schema(json), &json_vocab, &options).unwrap().start());
     assert_static(Constraint::compile(Grammar::ebnf(ebnf), &grammar_vocab, &options).unwrap().start());
@@ -53,7 +53,7 @@ fn all_importers_support_grammar_level_end_tokens() {
 fn end_token_can_also_keep_byte_semantics() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (64, b"z".to_vec())]);
     let end_tokens = [64];
-    let options = CompileOptions::default().end_tokens(&end_tokens);
+    let options = CompileOptions::default().end_token_ids(&end_tokens);
     let constraint = Constraint::compile(Grammar::ebnf(r#"start ::= "a""#), &vocab, &options).unwrap();
     let mut state = constraint.start();
     assert!(!allowed(&state.mask(), 64));

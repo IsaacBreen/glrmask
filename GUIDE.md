@@ -160,39 +160,59 @@ Use `DynamicConstraint::compile(...)` with the same `Grammar` and `CompileOption
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
-GLRM is GLRMask's native, EBNF-like grammar syntax. It supports exact model-token terminals with `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
+GLRM is GLRMask's native grammar format. New grammars should use the versioned GLRM v1 syntax:
+
+```glrm
+glrm 1;
+start value;
+
+t NUMBER = /-?(0|[1-9][0-9]*)/;
+nt value = NUMBER | "null";
+```
+
+GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
 ### Reusing compiled subgrammars
 
-Declare an external grammar with `extern g name;`, then bind an independently
-compiled constraint by name. Hidden call terminals and cross-boundary token
-paths are handled automatically:
+Declare an external grammar with `extern g name;`, then bind an independently compiled constraint by name. Hidden call terminals and cross-boundary token paths are handled automatically:
 
 ```python
 payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
 
 document = glrmask.Constraint.from_glrm_grammar(
     '''
+    glrm 1;
     start document;
     extern g payload;
-    nt document ::= "{" payload "}";
+    nt document = "{" payload "}";
     ''',
     vocab,
     subgrammars={"payload": payload},
 )
 ```
 
-Inline `g name ::= { ... };` and externally bound `extern g name;` have the
-same language semantics, including scope-local ignores and model tokens that
-cross parent/child boundaries.
+Inline `g name = { ... };` and externally bound `extern g name;` have the same language semantics, including scope-local ignores and model tokens that cross parent/child boundaries.
 
 ## Special tokens
 
-Use `@token(<id>)` in GLRM, Lark, or EBNF to match an exact model token:
+GLRM v1 declares exact model-token terminals by name and binds their token IDs outside the grammar:
 
-```text
-start ::= "hello" @token(128009)
+```python
+grammar = '''
+glrm 1;
+start message;
+extern t END_TURN;
+nt message = "hello" END_TURN;
+'''
+
+constraint = glrmask.Constraint.from_glrm_grammar(
+    grammar,
+    vocab,
+    bindings={"END_TURN": end_turn_id},
+)
 ```
+
+A binding may also be a list of interchangeable exact token IDs. `extern t` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Legacy unversioned GLRM, Lark, and EBNF continue to support numeric `@token(<id>)` syntax.
 
 Use `end_token_ids` to require one of the specified model tokens after the grammar completes:
 

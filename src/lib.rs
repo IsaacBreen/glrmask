@@ -38,19 +38,25 @@
 //!
 //! # Grammar inputs
 //!
-//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. [`CompileOptions`]
-//! carries optional end-token IDs and compiled GLRM subgrammar bindings. Use the
-//! same [`Constraint::compile`] / [`DynamicConstraint::compile`] shape for both
-//! execution modes.
+//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. New GLRM grammars use
+//! the versioned `glrm 1;` syntax; unversioned GLRM remains the legacy
+//! compatibility format. [`CompileOptions`] carries optional end-token IDs,
+//! named GLRM external-terminal bindings, and compiled GLRM subgrammar bindings.
+//! Use the same [`Constraint::compile`] / [`DynamicConstraint::compile`] shape
+//! for both execution modes.
 //!
 //! # Persistence
 //!
 //! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
 //! constraints across requests or process restarts.
 //!
-//! # Reusing compiled subgrammars
+//! # GLRM external bindings
 //!
-//! GLRM can declare typed external subgrammars with `extern g name;`. Bind
+//! GLRM v1 can declare exact model-token terminals with `extern t NAME;`. Bind
+//! those names through [`CompileOptions::external_terminal_bindings`] using
+//! [`ExternalTerminalBinding`]. Token IDs stay outside the grammar source.
+//!
+//! GLRM can also declare typed external subgrammars with `extern g name;`. Bind
 //! already-compiled children through [`CompileOptions::subgrammars`]. The compiler
 //! allocates hidden call placeholders automatically and links the components
 //! exactly, including model tokens that cross grammar boundaries.
@@ -78,7 +84,7 @@ pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
-pub use public_api::{CompileOptions, Grammar};
+pub use public_api::{CompileOptions, ExternalTerminalBinding, Grammar};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]

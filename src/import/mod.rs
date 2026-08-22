@@ -35,6 +35,20 @@ fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(crate::grammar::glrm::from_glrm(source)?)
 }
 
+fn parse_glrm_with_external_terminal_bindings(
+    source: &str,
+    bindings: &[crate::ExternalTerminalBinding<'_>],
+) -> crate::Result<ast::NamedGrammar> {
+    let bindings = bindings
+        .iter()
+        .map(|binding| (binding.name(), binding.token_ids()))
+        .collect::<Vec<_>>();
+    Ok(crate::grammar::glrm::from_glrm_with_external_terminals(
+        source,
+        &bindings,
+    )?)
+}
+
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
     Ok(json_schema::prepare_named_grammar(grammar)?)
 }
@@ -293,7 +307,15 @@ fn dynamic_named_alternatives(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<Vec<ast::NamedGrammar>> {
-    let mut factored = factor_named_grammar(parse(source)?);
+    dynamic_named_alternatives_from_named(parse(source)?, transform, end_token_ids)
+}
+
+fn dynamic_named_alternatives_from_named(
+    named: ast::NamedGrammar,
+    transform: Option<NamedGrammarTransform>,
+    end_token_ids: &[u32],
+) -> crate::Result<Vec<ast::NamedGrammar>> {
+    let mut factored = factor_named_grammar(named);
     if let Some(transform) = transform {
         transform(&mut factored)?;
     }
@@ -341,6 +363,25 @@ fn dynamic_named_alternatives(
         alternatives.push(alternative);
     }
     Ok(alternatives)
+}
+
+fn compile_dynamic_from_named(
+    named: ast::NamedGrammar,
+    vocab: &crate::Vocab,
+    default_table_construction: GlrTableConstruction,
+    end_token_ids: &[u32],
+) -> crate::Result<DynamicConstraint> {
+    let alternatives = dynamic_named_alternatives_from_named(named, None, end_token_ids)?;
+    let mut compiled = Vec::with_capacity(alternatives.len());
+    for alternative in alternatives {
+        let grammar = ast::lower(&alternative)?;
+        compiled.push(compile_dynamic_owned_with_table_construction(
+            grammar,
+            vocab,
+            default_table_construction,
+        ));
+    }
+    Ok(DynamicConstraint::from_alternatives(compiled))
 }
 
 fn compile_dynamic_from_source(
@@ -551,14 +592,22 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_bindings_and_end_tokens(glrm, vocab, &[], end_token_ids)
+    }
+
+    pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        bindings: &[crate::ExternalTerminalBinding<'_>],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
-            compile_from_source(
-                glrm,
+            let named = parse_glrm_with_external_terminal_bindings(glrm, bindings)?;
+            compile_from_named_grammar(
+                named,
                 vocab,
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                parse_glrm_to_named,
-                None,
                 end_token_ids,
             )
         })
@@ -588,9 +637,29 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+            glrm,
+            children,
+            vocab,
+            &[],
+            end_token_ids,
+        )
+    }
+
+    pub(crate) fn from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+        glrm: &str,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+        terminal_bindings: &[crate::ExternalTerminalBinding<'_>],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_external_subgrammars(
+            let terminal_bindings = terminal_bindings
+                .iter()
+                .map(|binding| (binding.name(), binding.token_ids()))
+                .collect::<Vec<_>>();
+            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 end_token_ids.iter().copied().chain(
@@ -603,6 +672,7 @@ impl Constraint {
                                 .map(|special| special.token_id)
                         }),
                 ),
+                &terminal_bindings,
             )?;
 
             let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
@@ -909,13 +979,21 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_bindings_and_end_tokens(glrm, vocab, &[], end_token_ids)
+    }
+
+    pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        bindings: &[crate::ExternalTerminalBinding<'_>],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
-            compile_dynamic_from_source(
-                glrm,
+            let named = parse_glrm_with_external_terminal_bindings(glrm, bindings)?;
+            compile_dynamic_from_named(
+                named,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                parse_glrm_to_named,
-                None,
                 end_token_ids,
             )
         })
