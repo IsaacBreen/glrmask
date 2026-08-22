@@ -3,7 +3,7 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 > **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/1c5f3449e3d6392e4a08a5c1da1fd2cb64a944ef/docs/assets/benchmark-tbm-2026-08-22-v4.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/2f8b1505d0cba2467a458eb8b45c4879710468dd/docs/assets/benchmark-tbm-tail-2026-08-21.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 ## Installation
@@ -215,15 +215,11 @@ Latest corrected engineering result: the **9,558 official JSONSchemaBench schema
 | maximum | 779,588 µs | **81,104 µs** |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/1c5f3449e3d6392e4a08a5c1da1fd2cb64a944ef/docs/assets/benchmark-tbm-2026-08-22-v4.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/fbc60288c7d86701a03a3100fa7acfa3dc8fc5fd/docs/assets/benchmark-tbm-2026-08-21-v3.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/1c5f3449e3d6392e4a08a5c1da1fd2cb64a944ef/docs/assets/benchmark-ttfm-2026-08-22-v4.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/fbc60288c7d86701a03a3100fa7acfa3dc8fc5fd/docs/assets/benchmark-ttfm-2026-08-21-v3.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
 </p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/1c5f3449e3d6392e4a08a5c1da1fd2cb64a944ef/docs/assets/benchmark-bars-legend-2026-08-22-v4.webp" alt="Legend: GLRMask and LLGuidance" width="100%">
-</p>
-
 
 The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final native runner uses a different, stricter methodology. See the [20 August engineering benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-full-2026-08-20.md) for the exact corpus, hardware, fix/rerun provenance, build numbers, and interpretation limits.
