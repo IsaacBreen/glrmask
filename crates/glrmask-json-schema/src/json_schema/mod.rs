@@ -307,6 +307,20 @@ pub fn schema_to_named_grammar_with_dynamic_value_token(
     schema_to_named_grammar_with_config(schema, config)
 }
 
+
+/// Convert JSON Schema for first-class programmatic JavaScript tool calls.
+/// The root schema remains structural/static, while every nested value position
+/// is replaced by the caller-supplied ordinary JavaScript expression child.
+pub fn schema_to_named_grammar_with_programmatic_value_token(
+    schema: &Value,
+    value_token_id: u32,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.dynamic_value_token_id = Some(value_token_id);
+    config.programmatic_unconstrained_values = true;
+    schema_to_named_grammar_with_config(schema, config)
+}
+
 /// Convert JSON Schema for programmatic JavaScript values. `value_token_id`
 /// supplies opaque runtime values; `condition_token_id` supplies ordinary JS
 /// conditional tests. Conditional result arms remain recursively schema-aware.

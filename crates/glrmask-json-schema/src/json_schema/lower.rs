@@ -41,6 +41,8 @@ pub const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub const JSON_NULL_RULE: &str = "JSON_NULL";
+pub const PROGRAMMATIC_DYNAMIC_VALUE_SLOT_RULE: &str = "__GLRMASK_PROGRAMMATIC_DYNAMIC_VALUE_SLOT";
+pub const PROGRAMMATIC_CONDITION_SLOT_RULE: &str = "__GLRMASK_PROGRAMMATIC_CONDITION_SLOT";
 pub const JSON_SEPARATOR_WS_REGEX: &str = r#" "#;
 pub const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
 pub const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
@@ -242,45 +244,67 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn wrap_programmatic_value_expr(&mut self, static_expr: GrammarExpr) -> GrammarExpr {
-        let Some(value_token_id) = self.config.dynamic_value_token_id else {
+        if self.config.dynamic_value_token_id.is_none() {
             return static_expr;
-        };
+        }
 
         let rule_name = self.fresh_rule_name("programmatic_schema_value");
-        let mut alternatives = vec![static_expr, GrammarExpr::SpecialToken(value_token_id)];
-        if let Some(condition_token_id) = self.config.dynamic_condition_token_id {
+        let mut alternatives = vec![static_expr, r(PROGRAMMATIC_DYNAMIC_VALUE_SLOT_RULE)];
+        if self.config.dynamic_condition_token_id.is_some() {
             // A conditional's test is ordinary JavaScript and does not become
             // the property's value. Both result branches recursively remain
             // schema-aware, so e.g. an enum cannot be bypassed by putting an
             // invalid literal in one arm. Parenthesized schema values are also
             // useful inside larger JavaScript expressions.
             alternatives.push(seq(vec![
-                GrammarExpr::SpecialToken(condition_token_id),
-                GrammarExpr::RawRegex(r"[ \t\n\r]*\?[ \t\n\r]*".to_string()),
+                r(PROGRAMMATIC_CONDITION_SLOT_RULE),
+                lit("?"),
                 r(&rule_name),
-                GrammarExpr::RawRegex(r"[ \t\n\r]*:[ \t\n\r]*".to_string()),
+                lit(":"),
                 r(&rule_name),
             ]));
-            alternatives.push(seq(vec![
-                GrammarExpr::RawRegex(r"\([ \t\n\r]*".to_string()),
-                r(&rule_name),
-                GrammarExpr::RawRegex(r"[ \t\n\r]*\)".to_string()),
-            ]));
+            alternatives.push(seq(vec![lit("("), r(&rule_name), lit(")")]));
         }
         self.add_nonterminal_rule(&rule_name, choice(alternatives));
         r(&rule_name)
     }
 
-    /// Lower a schema used as a nested JSON value. In programmatic-value mode
-    /// the ordinary schema-valid literal language remains one branch, while a
-    /// bound external subgrammar may supply an opaque runtime value. A second
-    /// optional child parses JavaScript conditional tests; both result arms are
-    /// recursively constrained by this same schema. The schema root itself is
-    /// lowered through `lower_schema` directly, so neither escape can replace
-    /// the entire tool-arguments object.
+    /// Lower a schema used as a nested JSON value.
+    ///
+    /// First-class programmatic-JavaScript mode intentionally does *not* try to
+    /// prove the runtime value of a JavaScript expression against JSON Schema.
+    /// Every nested value position is therefore the shared JS expression slot.
+    /// The root schema is still lowered through `lower_schema` directly, which
+    /// preserves the tool-arguments object's structural/key constraints.
+    ///
+    /// The older dynamic-value API keeps its historical `static | dynamic`
+    /// behavior and is intentionally separate from this mode.
     pub fn lower_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        if self.config.programmatic_unconstrained_values {
+            debug_assert!(self.config.dynamic_value_token_id.is_some());
+            if self.schema_is_object_like_resolved(schema)? {
+                return self.lower_schema(schema);
+            }
+            return Ok(r(PROGRAMMATIC_DYNAMIC_VALUE_SLOT_RULE));
+        }
         let static_expr = self.lower_schema(schema)?;
         Ok(self.wrap_programmatic_value_expr(static_expr))
+    }
+
+    /// Lower a value specifically after an object property key. In first-class
+    /// PTC mode the shared JS-expression child owns the leading `:` so the
+    /// schema→JS lexical boundary is key→colon instead of colon→arbitrary-JS.
+    /// Object-valued schemas remain structural and therefore keep the colon in
+    /// this parent grammar before recursively lowering the nested object.
+    pub fn lower_object_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        if self.config.programmatic_unconstrained_values {
+            debug_assert!(self.config.dynamic_value_token_id.is_some());
+            if self.schema_is_object_like_resolved(schema)? {
+                return Ok(seq(vec![lit(":"), self.lower_schema(schema)?]));
+            }
+            return Ok(r(PROGRAMMATIC_DYNAMIC_VALUE_SLOT_RULE));
+        }
+        self.lower_value_schema(schema)
     }
 
     fn new(document: &'a SchemaDocument, config: JsonSchemaConfig) -> Self {
@@ -635,6 +659,19 @@ impl<'a> Lowerer<'a> {
                 r(JSON_OBJECT_RULE),
             ]),
         );
+
+        if let Some(value_token_id) = self.config.dynamic_value_token_id {
+            self.add_nonterminal_rule(
+                PROGRAMMATIC_DYNAMIC_VALUE_SLOT_RULE,
+                GrammarExpr::SpecialToken(value_token_id),
+            );
+        }
+        if let Some(condition_token_id) = self.config.dynamic_condition_token_id {
+            self.add_nonterminal_rule(
+                PROGRAMMATIC_CONDITION_SLOT_RULE,
+                GrammarExpr::SpecialToken(condition_token_id),
+            );
+        }
     }
 
     pub fn item_separator_expr(&self) -> GrammarExpr {
@@ -642,10 +679,17 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn key_separator_expr(&self) -> GrammarExpr {
-        r(JSON_KEY_SEPARATOR_RULE)
+        if self.config.programmatic_unconstrained_values {
+            GrammarExpr::Epsilon
+        } else {
+            r(JSON_KEY_SEPARATOR_RULE)
+        }
     }
 
     fn separator_regex(&self, separator: &str) -> String {
+        if self.dynamic_value_enabled() {
+            return format!("(?:{separator})");
+        }
         match separator {
             "," | ":" => format!("(?:{separator}{JSON_SEPARATOR_WS_REGEX})"),
             _ => format!("(?:{separator})"),

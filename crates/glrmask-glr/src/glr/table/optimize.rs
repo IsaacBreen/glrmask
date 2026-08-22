@@ -529,12 +529,18 @@ fn control_elimination_has_known_tops(
 
 impl GLRTable {
     pub(super) fn canonicalize_stack_shift_predecessors(&mut self) {
+        let protected = BitSet::new(self.num_terminals as usize);
+        self.canonicalize_stack_shift_predecessors_except(&protected);
+    }
+
+    pub(super) fn canonicalize_stack_shift_predecessors_except(&mut self, protected: &BitSet) {
         self.canonicalize_stack_shift_predecessors_with_enabled(
             stack_shift_predecessor_canonicalization_enabled(),
+            protected,
         );
     }
 
-    fn canonicalize_stack_shift_predecessors_with_enabled(&mut self, enabled: bool) {
+    fn canonicalize_stack_shift_predecessors_with_enabled(&mut self, enabled: bool, protected: &BitSet) {
         if !enabled {
             return;
         }
@@ -542,6 +548,9 @@ impl GLRTable {
         for state in 0..self.num_states as usize {
             let terminals: Vec<TerminalID> = self.action[state].keys().collect();
             for terminal in terminals {
+                if protected.get(terminal as usize) {
+                    continue;
+                }
                 let Some(Action::StackShifts(shifts)) = self.action[state].get(&terminal).cloned() else {
                     continue;
                 };
@@ -3042,6 +3051,11 @@ impl GLRTable {
     /// table-level: it does not change import, grammar lowering, or parser
     /// runtime behavior.
     pub(super) fn quotient_recognizer_stack_suffixes(&mut self) {
+        let protected = BitSet::new(self.num_terminals as usize);
+        self.quotient_recognizer_stack_suffixes_except(&protected);
+    }
+
+    pub(super) fn quotient_recognizer_stack_suffixes_except(&mut self, protected: &BitSet) {
         if !recognizer_suffix_quotient_enabled() {
             return;
         }
@@ -3053,6 +3067,9 @@ impl GLRTable {
         for state in 0..original_states {
             let terminals: Vec<TerminalID> = self.action[state].keys().collect();
             for terminal in terminals {
+                if protected.get(terminal as usize) {
+                    continue;
+                }
                 let Some(action) = self.action[state].get(&terminal).cloned() else {
                     continue;
                 };
@@ -7428,7 +7445,7 @@ mod tests {
             ],
         );
 
-        table.canonicalize_stack_shift_predecessors_with_enabled(false);
+        table.canonicalize_stack_shift_predecessors_with_enabled(false, &BitSet::new(table.num_terminals as usize));
 
         assert_eq!(
             stack_shifts_at_start(&table),

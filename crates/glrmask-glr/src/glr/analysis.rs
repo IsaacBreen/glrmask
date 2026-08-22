@@ -75,6 +75,10 @@ pub struct AnalyzedGrammar {
     /// so lowering them into origin-dependent stack effects would destroy the
     /// composable call-site boundary.
     pub protected_shift_terminals: BitSet,
+    /// Whether the source grammar has a global ignore terminal. Ignore loops
+    /// make the nominal L1 terminal family deeper than one parser step, so
+    /// depth-one L1 fast-path assertions must not be applied to such grammars.
+    pub has_ignore_terminal: bool,
     pub num_nonterminals: u32,
     pub nonterminal_display_names: Vec<String>,
     pub residual_isolation_classes: BTreeMap<TerminalID, u32>,
@@ -134,6 +138,7 @@ impl AnalyzedGrammar {
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
             protected_shift_terminals,
+            has_ignore_terminal: g.ignore_terminal.is_some(),
             num_nonterminals,
             nonterminal_display_names: (0..num_nonterminals)
                 .map(|nonterminal| {
@@ -192,6 +197,7 @@ impl AnalyzedGrammar {
             num_terminals,
             terminal_display_names,
             protected_shift_terminals: BitSet::new(num_terminals as usize),
+            has_ignore_terminal: false,
             num_nonterminals,
             nonterminal_display_names,
             residual_isolation_classes: BTreeMap::new(),
@@ -204,6 +210,19 @@ impl AnalyzedGrammar {
             follow,
             rules_by_lhs,
         }
+    }
+
+    pub fn from_grammar_def_with_protected_shift_terminals(
+        g: &GrammarDef,
+        protected: impl IntoIterator<Item = TerminalID>,
+    ) -> Self {
+        let mut analyzed = Self::from_grammar_def(g);
+        for terminal in protected {
+            if terminal < analyzed.num_terminals {
+                analyzed.protected_shift_terminals.set(terminal as usize);
+            }
+        }
+        analyzed
     }
 
     fn from_direct_regular_grammar_def(g: &GrammarDef) -> Self {
@@ -221,6 +240,7 @@ impl AnalyzedGrammar {
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
             protected_shift_terminals,
+            has_ignore_terminal: g.ignore_terminal.is_some(),
             num_nonterminals: 0,
             nonterminal_display_names: Vec::new(),
             residual_isolation_classes: g.residual_isolation_classes.clone(),

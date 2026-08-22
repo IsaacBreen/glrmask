@@ -1539,48 +1539,35 @@ impl<'a> Lowerer<'a> {
         prefix: &[u8],
         key: &str,
     ) -> GrammarExpr {
-        let exact = self.lower_literal_key_colon_exact_with_prefix(prefix, key);
-        if !self.dynamic_value_enabled() || !is_ascii_js_identifier_name(key) {
-            return exact;
+        if !self.dynamic_value_enabled() {
+            return self.lower_literal_key_colon_exact_with_prefix(prefix, key);
         }
 
-        // JavaScript object literals permit both quoted and IdentifierName keys
-        // with arbitrary token whitespace around `:` and after a separating
-        // comma. Keep the ordinary JSON spelling as an alternative so this
-        // mode only broadens key syntax.
+        // Programmatic JavaScript deliberately keeps the value boundary as a
+        // real common `:` terminal. Ordinary JSON lowering fuses
+        // prefix+key+colon+formatting into property-specific lexer terminals,
+        // which is excellent for static JSON but turns one reusable JS-value
+        // call site into hundreds of distinct lexical boundary interfaces.
+        // Global JS IGNORE already owns whitespace/comments in this mode, so
+        // splitting punctuation is language-equivalent and gives every fixed
+        // object value the same immediate lexical predecessor.
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        let encoded_regex = encoded_json_key_regex(&encoded);
-        let key_regex = regex_escape(key);
-        let (quoted, unquoted) = if prefix == b", " {
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#",{PROGRAMMATIC_JS_WS_REGEX}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#",{PROGRAMMATIC_JS_WS_REGEX}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        } else if prefix.is_empty() {
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#"{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#"{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        } else {
-            let prefix_regex = regex_escape(&String::from_utf8_lossy(prefix));
-            (
-                GrammarExpr::RawRegex(format!(
-                    r#"{prefix_regex}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-                GrammarExpr::RawRegex(format!(
-                    r#"{prefix_regex}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
-                )),
-            )
-        };
-        choice(vec![exact, quoted, unquoted])
+        let mut key_alternatives = vec![lit_bytes(encoded.into_bytes())];
+        if is_ascii_js_identifier_name(key) {
+            key_alternatives.push(lit_bytes(key.as_bytes().to_vec()));
+        }
+
+        let mut parts = Vec::with_capacity(3);
+        if prefix == b", " {
+            parts.push(lit_bytes(vec![b',']));
+        } else if !prefix.is_empty() {
+            parts.push(lit_bytes(prefix.to_vec()));
+        }
+        parts.push(choice(key_alternatives));
+        if !self.config.programmatic_unconstrained_values {
+            parts.push(lit_bytes(vec![b':']));
+        }
+        seq(parts)
     }
 
     pub fn lower_literal_key_colon_with_prefix_and_suffix(
@@ -1683,8 +1670,16 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn pattern_key_colon_regex_for_mode(&self, pattern: &str) -> ImportResult<String> {
+        if self.config.programmatic_unconstrained_values {
+            pattern_key_regex(pattern)
+        } else {
+            pattern_key_colon_regex(pattern)
+        }
+    }
+
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
-        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
+        Ok(GrammarExpr::RawRegex(self.pattern_key_colon_regex_for_mode(pattern)?))
     }
 
     fn pattern_key_colon_full_language(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
@@ -1698,7 +1693,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn pattern_key_colon_full_terminal_language(&self, pattern: &str) -> ImportResult<GrammarExpr> {
-        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
+        Ok(GrammarExpr::RawRegex(self.pattern_key_colon_regex_for_mode(pattern)?))
     }
 
     fn pattern_key_colon_shared_addback_alternatives(
@@ -1706,7 +1701,7 @@ impl<'a> Lowerer<'a> {
         pattern: &str,
     ) -> ImportResult<Vec<GrammarExpr>> {
         let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
-        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
+        let key_colon = GrammarExpr::RawRegex(self.pattern_key_colon_regex_for_mode(pattern)?);
         let pattern_expr = if global_overlaps.is_empty() {
             key_colon
         } else {
@@ -1756,10 +1751,10 @@ impl<'a> Lowerer<'a> {
             };
             let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
             let expr = if global_overlaps.is_empty() {
-                seq(vec![r(key_string_rule), r(JSON_KEY_SEPARATOR_RULE)])
+                seq(vec![r(key_string_rule), self.key_separator_expr()])
             } else {
                 GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![r(key_string_rule), r(JSON_KEY_SEPARATOR_RULE)])),
+                    expr: Box::new(seq(vec![r(key_string_rule), self.key_separator_expr()])),
                     exclude: Box::new(choice(
                         global_overlaps
                             .iter()
@@ -1781,7 +1776,7 @@ impl<'a> Lowerer<'a> {
         let expr = if global_overlaps.is_empty() {
             self.lower_pattern_key_colon_expr(pattern)?
         } else {
-            let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
+            let key_colon = GrammarExpr::RawRegex(self.pattern_key_colon_regex_for_mode(pattern)?);
             let excluded = global_overlaps
                 .iter()
                 .map(|key| self.lower_literal_key_colon(key))
@@ -2232,7 +2227,7 @@ impl<'a> Lowerer<'a> {
             .map(|key| self.lower_literal_key_colon(&key))
             .collect::<Vec<_>>();
         for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
+            excluded.push(GrammarExpr::RawRegex(self.pattern_key_colon_regex_for_mode(&pattern)?));
         }
 
         self.add_pattern_terminal_rule(
@@ -2893,6 +2888,16 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
         ),
         _ => None,
     }
+}
+
+fn pattern_key_regex(pattern: &str) -> ImportResult<String> {
+    let context = if preprocess_ascii_shorthand(pattern).is_empty() {
+        JsonStringContext::KeyAdditional
+    } else {
+        JsonStringContext::KeyStrict
+    };
+    let body = string_pattern_as_body_regex(pattern, context)?;
+    Ok(format!(r#""{body}""#))
 }
 
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {

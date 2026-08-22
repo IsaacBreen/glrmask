@@ -1372,12 +1372,12 @@ fn assert_commit_fast_path_equivalence(
 
 #[inline]
 fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
-    end_state == constraint.runtime_commit_initial_state()
-        || parser_may_advance_on_any(
-            constraint,
-            gss,
-            constraint.tokenizer.possible_future_terminals(end_state),
-        )
+    if end_state == constraint.runtime_commit_initial_state() {
+        return true;
+    }
+    let raw_future = constraint.tokenizer.possible_future_terminals(end_state);
+    let widened = terminal_set_in_constraint_domain(constraint, raw_future);
+    parser_may_advance_on_any(constraint, gss, widened.as_ref().unwrap_or(raw_future))
 }
 
 /// For a tokenizer execution that produced several end states against the same
@@ -1399,23 +1399,26 @@ fn batched_end_state_admitted_terminals(
     end_states: &[u32],
 ) -> Option<crate::ds::bitset::BitSet> {
     let initial = constraint.runtime_commit_initial_state();
-    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    // Owned tokenizer composition deliberately leaves old parent-state terminal
+    // bitsets at their original width: appended child terminal IDs are
+    // semantically false for those states. End states from different components
+    // can therefore expose exact future sets with different bitset widths. Build
+    // the union in the final constraint terminal domain instead of requiring
+    // equal physical widths.
+    let mut candidates = crate::ds::bitset::BitSet::new(constraint.tokenizer.num_terminals() as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if end_state == initial {
             continue;
         }
         non_initial += 1;
-        let future = constraint.tokenizer.possible_future_terminals(end_state);
-        match &mut candidates {
-            Some(acc) => acc.union_with(future),
-            None => candidates = Some(future.clone()),
+        for terminal in constraint.tokenizer.possible_future_terminals(end_state).iter() {
+            candidates.set(terminal);
         }
     }
     if non_initial <= 1 {
         return None;
     }
-    let candidates = candidates?;
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
         let mut admitted = candidates;
         admitted.intersect_with(&direct);
@@ -1599,23 +1602,24 @@ fn cached_batched_end_state_admission(
     cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> Option<usize> {
     let initial = constraint.runtime_commit_initial_state();
-    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    // A disjoint owned tokenizer may retain narrow future-terminal bitsets on
+    // old parent states while appended child states use the final terminal
+    // width. Accumulate by terminal ID into the final domain rather than
+    // requiring equal physical bitset widths.
+    let mut candidates = crate::ds::bitset::BitSet::new(constraint.tokenizer.num_terminals() as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if end_state == initial {
             continue;
         }
         non_initial += 1;
-        let future = constraint.tokenizer.possible_future_terminals(end_state);
-        match &mut candidates {
-            Some(acc) => acc.union_with(future),
-            None => candidates = Some(future.clone()),
+        for terminal in constraint.tokenizer.possible_future_terminals(end_state).iter() {
+            candidates.set(terminal);
         }
     }
     if non_initial <= 1 {
         return None;
     }
-    let candidates = candidates?;
     let index = admission_cache_entry_index(cache, gss, candidates.len());
     let delta = candidates.difference(&cache[index].tested);
     if !delta.is_empty() {
@@ -1631,6 +1635,40 @@ fn cached_batched_end_state_admission(
 /// batched query has already classified all future terminals, answer directly
 /// from the pointwise cache. Otherwise cache the old exact existential result
 /// for this complete future set.
+#[inline]
+fn terminal_set_in_constraint_domain(
+    constraint: &Constraint,
+    source: &crate::ds::bitset::BitSet,
+) -> Option<crate::ds::bitset::BitSet> {
+    let width = constraint.tokenizer.num_terminals() as usize;
+    if source.len() == width {
+        return None;
+    }
+    let mut out = crate::ds::bitset::BitSet::new(width);
+    for terminal in source.iter() {
+        if terminal < width {
+            out.set(terminal);
+        }
+    }
+    Some(out)
+}
+
+#[inline]
+fn terminal_sets_intersect_mixed_width(
+    left: &crate::ds::bitset::BitSet,
+    right: &crate::ds::bitset::BitSet,
+) -> bool {
+    if left.len() == right.len() {
+        return !left.is_disjoint(right);
+    }
+    let (small, large) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    small.iter().any(|terminal| terminal < large.len() && large.contains(terminal))
+}
+
 fn cached_single_end_state_may_advance(
     constraint: &Constraint,
     gss: &ParserGSS,
@@ -1640,7 +1678,9 @@ fn cached_single_end_state_may_advance(
     if end_state == constraint.runtime_commit_initial_state() {
         return true;
     }
-    let future = constraint.tokenizer.possible_future_terminals(end_state);
+    let raw_future = constraint.tokenizer.possible_future_terminals(end_state);
+    let widened = terminal_set_in_constraint_domain(constraint, raw_future);
+    let future = widened.as_ref().unwrap_or(raw_future);
     let index = admission_cache_entry_index(cache, gss, future.len());
     {
         let entry = &cache[index];
@@ -1671,7 +1711,8 @@ fn end_state_may_advance_from_cache_entry(
     entry: &ParserAdmissionCacheEntry,
 ) -> bool {
     end_state == constraint.runtime_commit_initial_state()
-        || !entry.admitted.is_disjoint(
+        || terminal_sets_intersect_mixed_width(
+            &entry.admitted,
             constraint.tokenizer.possible_future_terminals(end_state),
         )
 }
@@ -1688,7 +1729,8 @@ fn end_state_may_advance_with_batch(
         return true;
     }
     match admitted {
-        Some(admitted) => !admitted.is_disjoint(
+        Some(admitted) => terminal_sets_intersect_mixed_width(
+            admitted,
             constraint.tokenizer.possible_future_terminals(end_state),
         ),
         None => end_state_may_advance(constraint, gss, end_state),

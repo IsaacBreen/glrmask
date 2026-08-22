@@ -590,10 +590,31 @@ impl PyVocab {
 }
 
 // ---------------------------------------------------------------------------
+// PyProgrammaticJsSchema
+// ---------------------------------------------------------------------------
+
+/// Intermediate schema template used only by ProgrammaticJsCompiler.
+#[pyclass(name = "ProgrammaticJsSchema")]
+pub struct PyProgrammaticJsSchema {
+    inner: Arc<glrmask::ProgrammaticJsSchema>,
+}
+
+
+// ---------------------------------------------------------------------------
+// PyProgrammaticJsDispatcher
+// ---------------------------------------------------------------------------
+
+/// Intermediate dispatcher used only by ProgrammaticJsCompiler.
+#[pyclass(name = "ProgrammaticJsDispatcher")]
+pub struct PyProgrammaticJsDispatcher {
+    inner: Arc<glrmask::ProgrammaticJsDispatcher>,
+}
+
+// ---------------------------------------------------------------------------
 // PyProgrammaticJsCompiler
 // ---------------------------------------------------------------------------
 
-/// Reusable compiler for schema-aware JavaScript programmatic tool calling.
+/// Reusable compiler for structurally constrained JavaScript programmatic tool calling.
 #[pyclass(name = "ProgrammaticJsCompiler")]
 pub struct PyProgrammaticJsCompiler {
     inner: glrmask::ProgrammaticJsCompiler,
@@ -617,73 +638,67 @@ impl PyProgrammaticJsCompiler {
         )
     }
 
-    /// Compile the shared opaque-runtime-value grammar independently.
+    /// Compile the shared unrestricted JavaScript value-expression grammar.
     #[staticmethod]
-    fn compile_dynamic_value(vocab: &PyVocab) -> PyResult<PyConstraint> {
+    fn compile_value_expression(vocab: &PyVocab) -> PyResult<PyConstraint> {
         PyConstraint::from_constraint_result(
-            glrmask::ProgrammaticJsCompiler::compile_dynamic_value(&vocab.inner),
+            glrmask::ProgrammaticJsCompiler::compile_value_expression(&vocab.inner),
             vocab,
         )
     }
 
-    /// Compile the shared JavaScript-condition grammar independently.
+    /// Backward-compatible name for the shared value-expression grammar.
     #[staticmethod]
-    fn compile_condition(vocab: &PyVocab) -> PyResult<PyConstraint> {
-        PyConstraint::from_constraint_result(
-            glrmask::ProgrammaticJsCompiler::compile_condition(&vocab.inner),
-            vocab,
-        )
+    fn compile_dynamic_value(vocab: &PyVocab) -> PyResult<PyConstraint> {
+        Self::compile_value_expression(vocab)
     }
 
     /// Assemble a reusable compiler from separately compiled shared parts.
     #[staticmethod]
     fn from_components(
         parent: &PyConstraint,
-        dynamic_value: &PyConstraint,
-        condition: &PyConstraint,
+        value_expression: &PyConstraint,
     ) -> PyResult<Self> {
         Ok(Self {
             inner: constraint_result(glrmask::ProgrammaticJsCompiler::from_components(
                 parent.inner.as_ref().clone(),
-                dynamic_value.inner.as_ref().clone(),
-                condition.inner.as_ref().clone(),
+                value_expression.inner.as_ref().clone(),
             ))?,
         })
     }
 
     /// Compile one tool-arguments schema against the shared JS value grammars.
-    fn compile_schema(&self, schema: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-        PyConstraint::from_constraint_result(self.inner.compile_schema(schema, &vocab.inner), vocab)
+    fn compile_schema(&self, schema: &str, vocab: &PyVocab) -> PyResult<PyProgrammaticJsSchema> {
+        let schema = constraint_result(self.inner.compile_schema(schema, &vocab.inner))?;
+        Ok(PyProgrammaticJsSchema { inner: Arc::new(schema) })
     }
 
     /// Compile the named tool dispatcher without linking the outer JS parent.
     fn compile_dispatcher(
         &self,
         py: Python<'_>,
-        tools: BTreeMap<String, Py<PyConstraint>>,
+        tools: BTreeMap<String, Py<PyProgrammaticJsSchema>>,
         vocab: &PyVocab,
-    ) -> PyResult<PyConstraint> {
+    ) -> PyResult<PyProgrammaticJsDispatcher> {
         let owned = tools
             .into_iter()
-            .map(|(name, constraint)| {
-                let constraint = constraint.borrow(py);
-                (name, Arc::clone(&constraint.inner))
+            .map(|(name, schema)| {
+                let schema = schema.borrow(py);
+                (name, Arc::clone(&schema.inner))
             })
             .collect::<Vec<_>>();
         let borrowed = owned
             .iter()
-            .map(|(name, constraint)| (name.as_str(), constraint.as_ref()))
+            .map(|(name, schema)| (name.as_str(), schema.as_ref()))
             .collect::<Vec<_>>();
-        PyConstraint::from_constraint_result(
-            self.inner.compile_dispatcher(&borrowed, &vocab.inner),
-            vocab,
-        )
+        let dispatcher = constraint_result(self.inner.compile_dispatcher(&borrowed, &vocab.inner))?;
+        Ok(PyProgrammaticJsDispatcher { inner: Arc::new(dispatcher) })
     }
 
     /// Link a compiled dispatcher into the reusable full-JavaScript parent.
     fn compose_dispatcher(
         &self,
-        dispatcher: &PyConstraint,
+        dispatcher: &PyProgrammaticJsDispatcher,
         vocab: &PyVocab,
     ) -> PyResult<PyConstraint> {
         PyConstraint::from_constraint_result(
@@ -696,7 +711,7 @@ impl PyProgrammaticJsCompiler {
     fn compose_tools(
         &self,
         py: Python<'_>,
-        tools: BTreeMap<String, Py<PyConstraint>>,
+        tools: BTreeMap<String, Py<PyProgrammaticJsSchema>>,
         vocab: &PyVocab,
     ) -> PyResult<PyConstraint> {
         let owned = tools
@@ -1811,6 +1826,8 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyProgrammaticJsCompiler>()?;
+    m.add_class::<PyProgrammaticJsSchema>()?;
+    m.add_class::<PyProgrammaticJsDispatcher>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
     m.add_class::<PyDynamicConstraint>()?;
@@ -1821,6 +1838,8 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         [
             "Vocab",
             "ProgrammaticJsCompiler",
+            "ProgrammaticJsSchema",
+            "ProgrammaticJsDispatcher",
             "Constraint",
             "ConstraintState",
             "DynamicConstraint",

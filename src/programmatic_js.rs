@@ -3,95 +3,95 @@
 //! [`ProgrammaticJsCompiler`] separates the reusable JavaScript work from the
 //! per-tool-set work:
 //!
-//! 1. compile the full JavaScript parent and a conservative dynamic-value
-//!    expression grammar once per vocabulary;
-//! 2. compile each tool's JSON Schema with the shared dynamic-value grammar at
-//!    nested property/array value positions;
+//! 1. compile the full JavaScript parent and one ordinary JavaScript
+//!    `assignment_expression` child once per vocabulary;
+//! 2. compile each tool's JSON Schema structurally: object-shaped nested values
+//!    recurse, while non-object value positions become the shared JS expression
+//!    slot;
 //! 3. compose those compiled schemas into a tool dispatcher, then link that
 //!    dispatcher into `tools.<name>(...)` call sites in the full JS parent.
 //!
-//! Literal values still take the ordinary schema branch. Dynamic expressions
-//! are deliberately excluded at the schema root so a computed expression
-//! cannot replace the entire arguments object and bypass its shape.
+//! The schema root is never replaced by the expression child, so the top-level
+//! tool-arguments object and its required/allowed keys remain constrained.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use crate::compiler::constraint_compose::{CompiledSubgrammarInput, compose_constraints};
+use crate::compiler::constraint_compose::CompiledSubgrammarInput;
 use crate::{Constraint, GlrMaskError, Vocab};
 
 const JAVASCRIPT_GLRM: &str = include_str!("programmatic_js/javascript.glrm");
 const PARENT_PLACEHOLDER_NAME: &str = "PROGRAMMATIC_TOOL_SUFFIX";
 
-const DYNAMIC_VALUE_RULES: &str = r#"
-// Opaque runtime values only. These forms retrieve/produce a runtime value
-// without embedding a statically visible literal as the value itself. In
-// particular there are deliberately no arithmetic/logical/conditional tails:
-// schema-aware constructions such as `cond ? "open" : "closed"` are lowered
-// by the JSON-Schema layer, where each result arm can be checked.
-nt dynamic_value_expression ::=
-    dynamic_reference_expression
-  | 'await' dynamic_reference_expression
-  ;
 
-nt dynamic_reference_expression ::=
-    IDENTIFIER dynamic_reference_suffix*
-  | 'this' dynamic_reference_suffix*
-  | 'new' '.' 'target' dynamic_reference_suffix*
-  | 'import' '(' assignment_expression ')' dynamic_reference_suffix*
-  | 'import' '.' 'meta' dynamic_reference_suffix*
-  ;
-
-nt dynamic_reference_suffix ::=
-    '[' expression ']'
-  | '?.' '[' expression ']'
-  | '.' IDENTIFIER
-  | '?.' IDENTIFIER
-  | '.' private_identifier
-  | '?.' private_identifier
-  | arguments
-  | '?.' arguments
-  | TEMPLATE_LITERAL
-  ;
+pub(crate) const JAVASCRIPT_IGNORE_RULES_GLRM: &str = r#"
+ignore IGNORE;
+t IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | _COMMENT ;
+t _COMMENT ::= _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT ;
+t _SINGLE_LINE_COMMENT ::= '//' ( [^\n\r]/utf8 )* ( '\r\n' | '\r' | '\n' ) ;
+t _MULTI_LINE_COMMENT ::= '/*' ( [^*]/utf8 | '*' [^/]/utf8 )* '*/' ;
 "#;
 
 
 
+
+
+
+
+/// Intermediate compiled tool-arguments schema. Hidden JavaScript-value linker
+/// terminals remain unresolved until sibling tool schemas have been combined,
+/// so one shared expression child serves every non-object value position.
+#[derive(Debug)]
+pub struct ProgrammaticJsSchema {
+    constraint: Constraint,
+    protected_terminals: Vec<u32>,
+}
+
+/// Tool dispatcher with schema call sites assembled but the shared JavaScript
+/// value child still unresolved. Keeping this intermediate typed
+/// prevents an unfinished constraint from being mistaken for a runnable one.
+#[derive(Debug)]
+pub struct ProgrammaticJsDispatcher {
+    constraint: Constraint,
+}
+
 /// Reusable compiler for programmatic JavaScript tool calling.
 #[derive(Debug)]
 pub struct ProgrammaticJsCompiler {
-    parent: Constraint,
-    dynamic_value: Constraint,
-    condition: Constraint,
+    parent: Arc<Constraint>,
+    value_expression: Arc<Constraint>,
     parent_placeholder_terminal: u32,
 }
 
 impl ProgrammaticJsCompiler {
     /// Compile all reusable programmatic-JavaScript components for `vocab`.
     pub fn new(vocab: &Vocab) -> crate::Result<Self> {
-        let parent = Self::compile_parent(vocab)?;
-        let dynamic_value = Self::compile_dynamic_value(vocab)?;
-        let condition = Self::compile_condition(vocab)?;
-        Self::from_components(parent, dynamic_value, condition)
+        let parent = Arc::new(Self::compile_parent(vocab)?);
+        let value_expression = Arc::new(Self::compile_value_expression(vocab)?);
+        Self::from_shared_components(parent, value_expression)
     }
 
     /// Compile the reusable full-JavaScript parent containing the reserved
     /// `tools` dispatcher boundary. This is independent of any concrete tool
     /// schemas and may be built once per vocabulary.
     pub fn compile_parent(vocab: &Vocab) -> crate::Result<Constraint> {
-        let placeholder_token_id =
-            crate::import::external_placeholder_token_id_avoiding(vocab, std::iter::empty())?;
-        Constraint::from_glrm_grammar(&programmatic_parent_source(placeholder_token_id)?, vocab)
+        crate::import::compile_glrm_with_protected_shift_terminals(
+            &programmatic_parent_source()?,
+            &[PARENT_PLACEHOLDER_NAME],
+            vocab,
+        )
     }
 
-    /// Compile the reusable opaque-runtime-value expression subgrammar.
+    /// Compile the reusable ordinary JavaScript value-expression subgrammar.
+    /// Non-object schema value positions accept this language without attempting
+    /// static JSON-Schema type/enum validation.
+    pub fn compile_value_expression(vocab: &Vocab) -> crate::Result<Constraint> {
+        Constraint::from_glrm_grammar(&value_expression_source()?, vocab)
+    }
+
+    /// Backward-compatible name for the shared value-expression component.
     pub fn compile_dynamic_value(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&dynamic_value_source()?, vocab)
-    }
-
-    /// Compile the reusable unrestricted JavaScript condition subgrammar used
-    /// only as the test of schema-aware conditional expressions.
-    pub fn compile_condition(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&condition_source()?, vocab)
+        Self::compile_value_expression(vocab)
     }
 
     /// Assemble a reusable compiler from independently compiled shared parts.
@@ -99,11 +99,20 @@ impl ProgrammaticJsCompiler {
     /// component separately without changing programmatic-tool semantics.
     pub fn from_components(
         parent: Constraint,
-        dynamic_value: Constraint,
-        condition: Constraint,
+        value_expression: Constraint,
+    ) -> crate::Result<Self> {
+        Self::from_shared_components(Arc::new(parent), Arc::new(value_expression))
+    }
+
+    /// Assemble from shared component artifacts without deep cloning. This is
+    /// used by language bindings and serving systems that already cache the
+    /// reusable constraints behind `Arc`.
+    pub fn from_shared_components(
+        parent: Arc<Constraint>,
+        value_expression: Arc<Constraint>,
     ) -> crate::Result<Self> {
         let parent_placeholder_terminal = parent
-            .terminal_display_names
+            .terminal_display_names()
             .iter()
             .position(|name| name == PARENT_PLACEHOLDER_NAME)
             .map(|index| index as u32)
@@ -114,27 +123,50 @@ impl ProgrammaticJsCompiler {
             })?;
         Ok(Self {
             parent,
-            dynamic_value,
-            condition,
+            value_expression,
             parent_placeholder_terminal,
         })
     }
 
-    /// The reusable dynamic-value child used by every schema compiled through
-    /// this compiler.
-    pub fn dynamic_value_constraint(&self) -> &Constraint {
-        &self.dynamic_value
+    /// The reusable JavaScript expression child used by every non-object nested
+    /// schema value compiled through this compiler.
+    pub fn value_expression_constraint(&self) -> &Constraint {
+        self.value_expression.as_ref()
     }
 
-    /// Compile one tool arguments schema. The schema root stays static; nested
-    /// object-property and array-item values may be dynamic JS expressions.
-    pub fn compile_schema(&self, schema: &str, vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_json_schema_with_programmatic_values(
-            schema,
-            &self.dynamic_value,
-            &self.condition,
-            vocab,
-        )
+    /// Backward-compatible accessor name.
+    pub fn dynamic_value_constraint(&self) -> &Constraint {
+        self.value_expression_constraint()
+    }
+
+    /// Compile one tool arguments schema. The schema root stays structural;
+    /// nested object-valued schemas recurse, while non-object values become
+    /// arbitrary JavaScript assignment expressions.
+    pub fn compile_schema(
+        &self,
+        schema: &str,
+        vocab: &Vocab,
+    ) -> crate::Result<ProgrammaticJsSchema> {
+        let constraint = Constraint::from_json_schema_with_programmatic_placeholders(schema, vocab)?;
+        let protected_terminals = ["__GLRMASK_PTC_VALUE"]
+            .into_iter()
+            .map(|marker| {
+                constraint
+                    .terminal_display_names()
+                    .iter()
+                    .position(|name| name == marker)
+                    .map(|index| index as u32)
+                    .ok_or_else(|| {
+                        GlrMaskError::Compilation(format!(
+                            "programmatic schema lost protected linker terminal {marker:?}"
+                        ))
+                    })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        Ok(ProgrammaticJsSchema {
+            constraint,
+            protected_terminals,
+        })
     }
 
     /// Compile a named tool dispatcher from already-compiled tool schemas.
@@ -142,9 +174,9 @@ impl ProgrammaticJsCompiler {
     /// configure the two composition stages independently.
     pub fn compile_dispatcher(
         &self,
-        tools: &[(&str, &Constraint)],
+        tools: &[(&str, &ProgrammaticJsSchema)],
         vocab: &Vocab,
-    ) -> crate::Result<Constraint> {
+    ) -> crate::Result<ProgrammaticJsDispatcher> {
         validate_tool_names(tools.iter().map(|(name, _)| *name))?;
         if tools.is_empty() {
             return Err(GlrMaskError::Compilation(
@@ -152,42 +184,184 @@ impl ProgrammaticJsCompiler {
             ));
         }
 
-        let dispatcher_source = dispatcher_source(tools.iter().map(|(name, _)| *name));
-        let bindings = tools
+        let (dispatcher_source, argument_markers) =
+            dispatcher_source(tools.iter().map(|(name, _)| *name));
+        let protected_names = argument_markers.iter().map(String::as_str).collect::<Vec<_>>();
+        let dispatcher_parent = crate::import::compile_glrm_with_protected_shift_terminals(
+            &dispatcher_source,
+            &protected_names,
+            vocab,
+        )?;
+        let placeholder_terminals = argument_markers
             .iter()
-            .enumerate()
-            .map(|(index, (_, schema))| (format!("args_{index}"), *schema))
-            .collect::<Vec<_>>();
-        let borrowed = bindings
+            .map(|marker| {
+                dispatcher_parent
+                    .terminal_display_names()
+                    .iter()
+                    .position(|name| name == marker)
+                    .map(|index| index as u32)
+                    .ok_or_else(|| {
+                        GlrMaskError::Compilation(format!(
+                            "programmatic dispatcher lost argument linker terminal {marker:?}"
+                        ))
+                    })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let composition_inputs = tools
             .iter()
-            .map(|(name, schema)| (name.as_str(), *schema))
+            .zip(placeholder_terminals.iter())
+            .map(|((_, schema), &placeholder_terminal)| CompiledSubgrammarInput {
+                placeholder_terminal,
+                additional_placeholder_terminals: &[],
+                constraint: &schema.constraint,
+                protected_terminals: &schema.protected_terminals,
+            })
             .collect::<Vec<_>>();
-        Constraint::from_glrm_grammar_with_subgrammars(&dispatcher_source, &borrowed, vocab)
+        let profile = std::env::var_os("GLRMASK_PROFILE_PROGRAMMATIC_JS").is_some();
+        let dispatcher_started = std::time::Instant::now();
+        let dispatcher = crate::compiler::constraint_compose::compose_constraints_owned_parent(
+            dispatcher_parent,
+            &composition_inputs,
+            vocab,
+        )
+        .map(|composition| composition.constraint)
+        .map_err(GlrMaskError::Compilation)?;
+        if profile {
+            eprintln!(
+                "[glrmask/ptc-profile] schema_dispatcher_ms={:.3}",
+                dispatcher_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(ProgrammaticJsDispatcher {
+            constraint: dispatcher,
+        })
     }
 
     /// Link a compiled tool dispatcher into the reusable full-JavaScript parent.
     pub fn compose_dispatcher(
         &self,
-        dispatcher: &Constraint,
+        dispatcher: &ProgrammaticJsDispatcher,
         vocab: &Vocab,
     ) -> crate::Result<Constraint> {
-        compose_constraints(
-            &self.parent,
-            &[CompiledSubgrammarInput {
-                placeholder_terminal: self.parent_placeholder_terminal,
-                constraint: dispatcher,
-            }],
+        self.compose_dispatcher_constraint(dispatcher.constraint.clone(), vocab)
+    }
+
+    /// Consuming variant that avoids cloning the intermediate dispatcher.
+    pub fn compose_dispatcher_owned(
+        &self,
+        dispatcher: ProgrammaticJsDispatcher,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        self.compose_dispatcher_constraint(dispatcher.constraint, vocab)
+    }
+
+    fn bind_named_markers(
+        &self,
+        parent: Constraint,
+        marker: &str,
+        child: &Arc<Constraint>,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        let marker_suffix = format!("::{marker}");
+        let terminals = parent
+            .terminal_display_names()
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.as_str() == marker || name.ends_with(&marker_suffix))
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        if terminals.is_empty() {
+            return Err(GlrMaskError::Compilation(format!(
+                "programmatic constraint lost marker terminal {marker:?}"
+            )));
+        }
+        let (&placeholder_terminal, additional_placeholder_terminals) = terminals
+            .split_first()
+            .expect("non-empty marker terminal list was checked above");
+        let input = CompiledSubgrammarInput {
+            placeholder_terminal,
+            additional_placeholder_terminals,
+            constraint: child.as_ref(),
+            protected_terminals: &[],
+        };
+        let composition = if std::env::var_os("GLRMASK_PTC_DYNAMIC_COMPOSITION").is_some() {
+            // Experimental exact low-build-latency path: the generic linker can
+            // publish the composed table/tokenizer directly as a Dynamic runtime
+            // constraint, avoiding static boundary-DWA construction entirely.
+            crate::compiler::constraint_compose::compose_constraints(
+                &parent,
+                std::slice::from_ref(&input),
+                vocab,
+            )
+        } else {
+            crate::compiler::constraint_compose::compose_constraints_owned_parent_shared(
+                parent,
+                std::slice::from_ref(&input),
+                std::slice::from_ref(child),
+                vocab,
+            )
+        };
+        composition
+            .map(|composition| composition.constraint)
+            .map_err(GlrMaskError::Compilation)
+    }
+
+    fn compose_dispatcher_constraint(
+        &self,
+        mut dispatcher: Constraint,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_PROGRAMMATIC_JS").is_some();
+        let started = std::time::Instant::now();
+        dispatcher = self.bind_named_markers(
+            dispatcher,
+            "__GLRMASK_PTC_VALUE",
+            &self.value_expression,
             vocab,
-        )
-        .map(|composition| composition.constraint)
-        .map_err(GlrMaskError::Compilation)
+        )?;
+        if profile {
+            eprintln!(
+                "[glrmask/ptc-profile] bind_all_values ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        let started = std::time::Instant::now();
+        let input = CompiledSubgrammarInput {
+            placeholder_terminal: self.parent_placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: &dispatcher,
+            protected_terminals: &[],
+        };
+        let composition = if std::env::var_os("GLRMASK_PTC_DYNAMIC_COMPOSITION").is_some() {
+            crate::compiler::constraint_compose::compose_constraints(
+                self.parent.as_ref(),
+                std::slice::from_ref(&input),
+                vocab,
+            )
+        } else {
+            crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                self.parent.as_ref().clone(),
+                std::slice::from_ref(&input),
+                vocab,
+            )
+        };
+        let result = composition
+            .map(|composition| composition.constraint)
+            .map_err(GlrMaskError::Compilation);
+        if profile {
+            eprintln!(
+                "[glrmask/ptc-profile] outer_js_link ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        result
     }
 
     /// Compose already-compiled tool schemas into a named dispatcher and link
     /// it into the reusable full-JavaScript parent.
     pub fn compose_tools(
         &self,
-        tools: &[(&str, &Constraint)],
+        tools: &[(&str, &ProgrammaticJsSchema)],
         vocab: &Vocab,
     ) -> crate::Result<Constraint> {
         let dispatcher = self.compile_dispatcher(tools, vocab)?;
@@ -225,20 +399,20 @@ pub fn javascript_glrm() -> &'static str {
     JAVASCRIPT_GLRM
 }
 
-fn reserve_tools_identifier(grammar: &mut crate::grammar::ast::NamedGrammar) -> crate::Result<()> {
-    use crate::grammar::ast::GrammarExpr;
-
-    let identifier = grammar
-        .rules
-        .iter_mut()
-        .find(|rule| rule.name == "IDENTIFIER")
-        .ok_or_else(|| {
-            GlrMaskError::Compilation("bundled JavaScript grammar has no IDENTIFIER terminal".into())
-        })?;
-    identifier.expr = GrammarExpr::Exclude {
-        expr: Box::new(identifier.expr.clone()),
-        exclude: Box::new(GrammarExpr::Literal(b"tools".to_vec())),
-    };
+fn reserve_tools_identifier_source(source: &mut String) -> crate::Result<()> {
+    // IDENTIFIER is already encoded as a trie that excludes JavaScript
+    // keywords. Reserve one additional exact identifier using the same shape
+    // instead of a generic language subtraction: `IDENTIFIER - "tools"`
+    // creates a very large weighted terminal DWA on real model vocabularies.
+    const OLD: &str = "  | 't' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqstuvwxz0123456789$_] _IDENTIFIER_PART*";
+    const NEW: &str = "  | 't' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnpqstuvwxz0123456789$_] _IDENTIFIER_PART*\n  | 'to'\n  | 'to' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*\n  | 'too'\n  | 'too' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*\n  | 'tool'\n  | 'tool' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*\n  | 'tools' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*";
+    let count = source.matches(OLD).count();
+    if count != 1 {
+        return Err(GlrMaskError::Compilation(format!(
+            "bundled JavaScript IDENTIFIER trie changed unexpectedly (expected one tools-reservation insertion point, found {count})"
+        )));
+    }
+    *source = source.replacen(OLD, NEW, 1);
     Ok(())
 }
 
@@ -252,9 +426,9 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     }
     source.replace_range(..start.len(), &format!("start {start_rule};"));
     source.push_str(extra_rules);
+    reserve_tools_identifier_source(&mut source)?;
 
     let mut grammar = crate::grammar::glrm::from_glrm(&source)?;
-    reserve_tools_identifier(&mut grammar)?;
     // The generic reachability pass follows grammar references from `start`,
     // while `ignore IGNORE` is metadata. Temporarily root IGNORE through a
     // synthetic rule so its lexical dependency closure survives pruning.
@@ -277,64 +451,62 @@ fn pruned_javascript_source(start_rule: &str, extra_rules: &str) -> crate::Resul
     Ok(crate::grammar::glrm::to_glrm(&grammar))
 }
 
-fn dynamic_value_source() -> crate::Result<String> {
-    pruned_javascript_source("dynamic_value_expression", DYNAMIC_VALUE_RULES)
+fn value_expression_source() -> crate::Result<String> {
+    pruned_javascript_source(
+        "programmatic_value_expression",
+        "nt programmatic_value_expression ::= ':' assignment_expression;\n",
+    )
 }
 
-fn condition_source() -> crate::Result<String> {
-    pruned_javascript_source("coalesce_expression", "")
-}
+fn programmatic_parent_source() -> crate::Result<String> {
+    let mut source = JAVASCRIPT_GLRM.to_owned();
+    reserve_tools_identifier_source(&mut source)?;
 
-fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String> {
-    use crate::grammar::ast::{GrammarExpr, NamedRule};
-
-    let mut grammar = crate::grammar::glrm::from_glrm(JAVASCRIPT_GLRM)?;
-    // `tools` is a reserved namespace in programmatic-tool mode. Without this
-    // subtraction, `tools.foo(...)` can take the ordinary IDENTIFIER/call path
-    // and bypass the schema dispatcher entirely.
-    reserve_tools_identifier(&mut grammar)?;
-
-    let member = grammar
-        .rules
-        .iter_mut()
-        .find(|rule| rule.name == "member_expression_with_suffixes")
-        .ok_or_else(|| GlrMaskError::Compilation(
-            "bundled JavaScript grammar has no member_expression_with_suffixes rule".into(),
-        ))?;
-    let tool_expr = GrammarExpr::Sequence(vec![
-        GrammarExpr::Literal(b"tools".to_vec()),
-        GrammarExpr::Ref(PARENT_PLACEHOLDER_NAME.to_string()),
-    ]);
-    member.expr = match std::mem::replace(&mut member.expr, GrammarExpr::Epsilon) {
-        GrammarExpr::Choice(mut alternatives) => {
-            alternatives.insert(0, tool_expr);
-            GrammarExpr::Choice(alternatives)
-        }
-        other => GrammarExpr::Choice(vec![tool_expr, other]),
-    };
-    grammar.rules.push(NamedRule {
-        name: PARENT_PLACEHOLDER_NAME.to_string(),
-        expr: GrammarExpr::SpecialToken(placeholder_token_id),
-        is_terminal: true,
-        is_internal: false,
-    });
-    Ok(crate::grammar::glrm::to_glrm(&grammar))
-}
-
-fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
-    let names = names.into_iter().collect::<Vec<_>>();
-    let mut source = String::new();
-    for index in 0..names.len() {
-        source.push_str(&format!("extern g args_{index};\n"));
+    // Keep the canonical grammar text intact apart from the one PTC branch.
+    // This intentionally mirrors the previously benchmarked CFA parent path
+    // and avoids an AST dump/reparse of the full JavaScript grammar.
+    const NEEDLE: &str = "nt member_expression_with_suffixes ::=\n    primary_expression";
+    let replacement = format!(
+        "nt member_expression_with_suffixes ::=\n    'tools' {PARENT_PLACEHOLDER_NAME}\n  | primary_expression"
+    );
+    if source.matches(NEEDLE).count() != 1 {
+        return Err(GlrMaskError::Compilation(
+            "bundled JavaScript member-expression grammar changed unexpectedly".into(),
+        ));
     }
-    source.push_str("start suffix;\nnt suffix ::=\n");
+    source = source.replacen(NEEDLE, &replacement, 1);
+    source.push_str(&format!(
+        "\n// hidden programmatic-tools linker terminal\nt {PARENT_PLACEHOLDER_NAME} ::= '__GLRMASK_PTC_DISPATCH_7F3A9C__';\n"
+    ));
+    Ok(source)
+}
+
+fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> (String, Vec<String>) {
+    let names = names.into_iter().collect::<Vec<_>>();
+    let argument_markers = (0..names.len())
+        .map(|index| format!("PROGRAMMATIC_ARGS_{index}"))
+        .collect::<Vec<_>>();
+    let mut source = String::new();
+    source.push_str("start suffix;\n");
+    source.push_str(JAVASCRIPT_IGNORE_RULES_GLRM);
+    for (index, marker) in argument_markers.iter().enumerate() {
+        let bytes = serde_json::to_string(&format!(
+            "__GLRMASK_PTC_ARGS_{index}_7F3A9C__"
+        ))
+        .expect("argument marker is UTF-8");
+        source.push_str(&format!("t {marker} ::= {bytes};\n"));
+    }
+    source.push_str("nt suffix ::=\n");
     for (index, name) in names.iter().enumerate() {
         let prefix = if index == 0 { "    " } else { "  | " };
         let head = serde_json::to_string(&format!(".{name}(")).expect("tool name is UTF-8");
-        source.push_str(&format!("{prefix}{head} args_{index} ')'\n"));
+        source.push_str(&format!(
+            "{prefix}{head} {} ')'\n",
+            argument_markers[index]
+        ));
     }
     source.push_str("  ;\n");
-    source
+    (source, argument_markers)
 }
 
 fn validate_tool_names<'a>(names: impl IntoIterator<Item = &'a str>) -> crate::Result<()> {
@@ -387,18 +559,21 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_expression_grammar_excludes_bare_literals() {
+    fn value_expression_grammar_accepts_arbitrary_javascript_values() {
         let vocab = vocab();
         let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
-        let dynamic = compiler.dynamic_value_constraint();
-        assert!(accepts_bytes(dynamic, b"customer"));
-        assert!(accepts_bytes(dynamic, b"customer.id"));
-        assert!(!accepts_bytes(dynamic, b"x + 1"));
-        assert!(!accepts_bytes(dynamic, b"123"));
-        assert!(!accepts_bytes(dynamic, br#""abc""#));
-        assert!(!accepts_bytes(dynamic, br#"{"wrong": 123}"#));
-        assert!(!accepts_bytes(dynamic, br#"[1, 2]"#));
-        assert!(!accepts_bytes(dynamic, b"tools.lookup()"));
+        let value = compiler.value_expression_constraint();
+        assert!(accepts_bytes(value, b":customer"));
+        assert!(accepts_bytes(value, b":customer.id"));
+        assert!(accepts_bytes(value, b":customer /* comment */ . id"));
+        assert!(accepts_bytes(value, b":x + 1"));
+        assert!(accepts_bytes(value, b":123"));
+        assert!(accepts_bytes(value, br#":"abc""#));
+        assert!(accepts_bytes(value, br#":({wrong: 123})"#));
+        assert!(accepts_bytes(value, br#":[1, 2]"#));
+        // `tools` remains reserved so nested tool calls cannot bypass the
+        // schema dispatcher. Bind a tool result to a variable first instead.
+        assert!(!accepts_bytes(value, b":tools.lookup()"));
     }
 
     #[test]
@@ -443,7 +618,41 @@ mod tests {
     }
 
     #[test]
-    fn programmatic_enum_allows_opaque_and_schema_checked_conditional() {
+    fn programmatic_reuses_one_dynamic_child_across_multiple_tool_schemas() {
+        let vocab = vocab();
+        let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
+        let schema = r#"{
+          "type":"object",
+          "properties":{"customer_id":{"type":"string"}},
+          "required":["customer_id"],
+          "additionalProperties":false
+        }"#;
+        let left = compiler.compile_schema(schema, &vocab).unwrap();
+        let right = compiler.compile_schema(schema, &vocab).unwrap();
+        let dispatcher = compiler
+            .compile_dispatcher(&[("lookup", &left), ("other", &right)], &vocab)
+            .unwrap();
+        let value_markers = dispatcher
+            .constraint
+            .terminal_display_names()
+            .iter()
+            .filter(|name| name.ends_with("::__GLRMASK_PTC_VALUE"))
+            .count();
+        assert_eq!(value_markers, 2);
+        let constraint = compiler.compose_dispatcher(&dispatcher, &vocab).unwrap();
+        assert!(accepts_bytes(
+            &constraint,
+            b"tools.lookup({customer_id: customer.id});"
+        ));
+        assert!(accepts_bytes(
+            &constraint,
+            b"tools.other({customer_id: customer.id});"
+        ));
+        assert!(!accepts_bytes(&constraint, b"tools.other(customer);"));
+    }
+
+    #[test]
+    fn programmatic_scalar_values_are_unconstrained_javascript() {
         let vocab = vocab();
         let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
         let schema = r#"{
@@ -464,15 +673,15 @@ mod tests {
             &constraint,
             br#"tools.lookup({status: x ? "open" : "closed"});"#,
         ));
-        assert!(!accepts_bytes(
+        assert!(accepts_bytes(
             &constraint,
             br#"tools.lookup({status: x ? "open" : "bogus"});"#,
         ));
-        assert!(!accepts_bytes(
+        assert!(accepts_bytes(
             &constraint,
             br#"tools.lookup({status: "open" + x});"#,
         ));
-        assert!(!accepts_bytes(
+        assert!(accepts_bytes(
             &constraint,
             br#"tools.lookup({status: "bogus"});"#,
         ));
@@ -484,7 +693,7 @@ mod tests {
             &constraint,
             br#"tools.lookup({status: x ? (customer.ready ? "open" : "closed") : "open"});"#,
         ));
-        assert!(!accepts_bytes(
+        assert!(accepts_bytes(
             &constraint,
             br#"tools.lookup({status: x ? (customer.ready ? "open" : "bogus") : "closed"});"#,
         ));
@@ -499,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn programmatic_nested_object_and_array_values_stay_schema_aware() {
+    fn programmatic_nested_objects_stay_structural_but_leaf_values_are_unconstrained() {
         let vocab = vocab();
         let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
         let schema = r#"{
@@ -528,13 +737,21 @@ mod tests {
             &constraint,
             br#"tools.lookup({meta: {status: x ? "open" : "closed"}, ids: [customer.id]});"#,
         ));
-        assert!(!accepts_bytes(
+        assert!(accepts_bytes(
             &constraint,
             br#"tools.lookup({meta: {status: "bogus"}, ids: [customer.id]});"#,
         ));
-        assert!(accepts_bytes(
+        // `meta` is itself schema-declared as an object, so it must retain the
+        // nested object structure rather than being replaced wholesale by a JS
+        // expression. Its leaf `status` value is unrestricted.
+        assert!(!accepts_bytes(
             &constraint,
             br#"tools.lookup({meta: customer, ids: [customer.id]});"#,
+        ));
+        // Arrays are ordinary value expressions under the current PTC policy.
+        assert!(accepts_bytes(
+            &constraint,
+            br#"tools.lookup({meta: {status: whatever}, ids: customer.ids});"#,
         ));
         assert!(!accepts_bytes(
             &constraint,

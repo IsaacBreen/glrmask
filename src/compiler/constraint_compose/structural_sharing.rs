@@ -365,7 +365,9 @@ pub(super) fn composition_terminal_classes(
     for child in children {
         // Placeholder terminals are linker controls even on the legacy splice
         // path where they are removed rather than retained in control_terminals.
-        ineligible.set(child.placeholder_terminal as usize);
+        for terminal in child.placeholder_terminals() {
+            ineligible.set(terminal as usize);
+        }
     }
 
     let components = std::iter::once(parent)
@@ -1202,13 +1204,57 @@ pub(super) fn contextually_share_composed_states(
         return (0, 0);
     }
     let groups_started_at = compose_profile_enabled().then(Instant::now);
-    let groups = component_structural_state_groups(
+    let mut groups = component_structural_state_groups(
         parent,
         children,
         composed,
         terminal_classes,
         nonterminal_classes,
     );
+
+    // A child may still contain unresolved linker call sites that will be
+    // replaced by another compiled subgrammar after this composition. Context-
+    // distinguishable sharing synthesizes guarded macro actions, which are exact
+    // for ordinary runtime terminals but are not a valid subgrammar-call ABI.
+    // Freeze every state that observes such a protected terminal and every
+    // simple continuation target reached by that terminal. All unrelated states
+    // remain eligible for the exact quotient.
+    let mut protected_global = BitSet::new(composed.table.num_terminals as usize);
+    for (child_index, child) in children.iter().enumerate() {
+        let offset = composed.terminal_offsets[child_index + 1];
+        for &terminal in child.protected_terminals {
+            protected_global.set((offset + terminal) as usize);
+        }
+    }
+    if protected_global.count_ones() != 0 {
+        let mut frozen = vec![false; composed.table.num_states as usize];
+        for state in 0..composed.table.num_states as usize {
+            for terminal in protected_global.iter() {
+                let Some(action) = composed.table.action[state].get(&(terminal as u32)) else {
+                    continue;
+                };
+                frozen[state] = true;
+                match action {
+                    Action::Shift(target, _) => {
+                        if let Some(slot) = frozen.get_mut(*target as usize) {
+                            *slot = true;
+                        }
+                    }
+                    Action::Split { shift: Some((target, _)), .. } => {
+                        if let Some(slot) = frozen.get_mut(*target as usize) {
+                            *slot = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        groups.retain(|group| {
+            !group
+                .iter()
+                .any(|&state| frozen.get(state as usize).copied().unwrap_or(true))
+        });
+    }
     let groups_ms = groups_started_at.map_or(0.0, |started_at| {
         started_at.elapsed().as_secs_f64() * 1000.0
     });

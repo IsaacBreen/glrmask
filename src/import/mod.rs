@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
     compile_owned_with_table_construction,
+    compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
     emit_compile_profile_summary,
@@ -36,6 +37,47 @@ fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
 
 fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
     Ok(json_schema::prepare_named_grammar(grammar)?)
+}
+
+
+
+fn install_programmatic_js_ignore(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
+    const NAMES: [&str; 4] = [
+        "IGNORE",
+        "_COMMENT",
+        "_SINGLE_LINE_COMMENT",
+        "_MULTI_LINE_COMMENT",
+    ];
+    if grammar.ignore.is_some() {
+        return Err(crate::GlrMaskError::Compilation(
+            "programmatic JSON Schema unexpectedly already has an ignore terminal".into(),
+        ));
+    }
+    let source_text = format!(
+        "start __ptc_ignore_dummy;\nnt __ptc_ignore_dummy ::= 'x';\n{}",
+        crate::programmatic_js::JAVASCRIPT_IGNORE_RULES_GLRM,
+    );
+    let source = crate::grammar::glrm::from_glrm(&source_text)?;
+    for name in NAMES {
+        if grammar.rules.iter().any(|rule| rule.name == name) {
+            return Err(crate::GlrMaskError::Compilation(format!(
+                "programmatic JSON Schema rule {name:?} collides with JavaScript trivia support"
+            )));
+        }
+        let rule = source
+            .rules
+            .iter()
+            .find(|rule| rule.name == name)
+            .cloned()
+            .ok_or_else(|| {
+                crate::GlrMaskError::Compilation(format!(
+                    "canonical JavaScript trivia grammar lost rule {name:?}"
+                ))
+            })?;
+        grammar.rules.push(rule);
+    }
+    grammar.ignore = Some("IGNORE".to_string());
+    Ok(())
 }
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
@@ -211,13 +253,37 @@ fn compile_from_named_grammar(
     default_table_construction: GlrTableConstruction,
     end_token_ids: &[u32],
 ) -> crate::Result<Constraint> {
+    compile_from_named_grammar_with_protected_shift_terminals(
+        named,
+        vocab,
+        source_kind,
+        default_table_construction,
+        end_token_ids,
+        &[],
+    )
+}
+
+fn compile_from_named_grammar_with_protected_shift_terminals(
+    named: ast::NamedGrammar,
+    vocab: &crate::Vocab,
+    source_kind: &str,
+    default_table_construction: GlrTableConstruction,
+    end_token_ids: &[u32],
+    protected_terminal_names: &[&str],
+) -> crate::Result<Constraint> {
     let import_started_at = std::time::Instant::now();
     let mut factored = factor_named_grammar(named);
     append_end_token_choice(&mut factored, end_token_ids);
     let grammar = ast::lower(&factored)?;
+    let protected_shift_terminal_names = protected_terminal_names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
     let import_ms = import_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    if compile_profile_enabled() || compile_top_profile_enabled() {
+    if protected_shift_terminal_names.is_empty()
+        && (compile_profile_enabled() || compile_top_profile_enabled())
+    {
         let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {
             compile_owned_profiled_with_table_construction(
                 grammar,
@@ -231,10 +297,37 @@ fn compile_from_named_grammar(
     }
 
     let mut constraint = crate::error::catch_internal_invariant(|| {
-        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+        if protected_shift_terminal_names.is_empty() {
+            compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+        } else {
+            compile_owned_with_table_construction_and_protected_shift_terminal_names(
+                grammar,
+                vocab,
+                default_table_construction,
+                protected_shift_terminal_names,
+            )
+        }
     })?;
     constraint.table.set_embedded_end_token_ids(end_token_ids);
     Ok(constraint)
+}
+
+pub(crate) fn compile_glrm_with_protected_shift_terminals(
+    glrm: &str,
+    protected_terminal_names: &[&str],
+    vocab: &crate::Vocab,
+) -> crate::Result<Constraint> {
+    with_large_import_stack(glrm.len(), || {
+        let named = parse_glrm_to_named(glrm)?;
+        compile_from_named_grammar_with_protected_shift_terminals(
+            named,
+            vocab,
+            "glrm_protected_linker",
+            GlrTableConstruction::ExperimentalCoreMerged,
+            &[],
+            protected_terminal_names,
+        )
+    })
 }
 
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
@@ -605,12 +698,98 @@ impl Constraint {
                 parent,
                 &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: dynamic_value,
+                    protected_terminals: &[],
                 }],
                 vocab,
             )
             .map(|composition| composition.constraint)
             .map_err(crate::GlrMaskError::Compilation)
+        })
+    }
+
+    pub(crate) fn from_json_schema_with_programmatic_placeholders(
+        schema: &str,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        const VALUE_TOKEN: u32 = u32::MAX;
+        const VALUE_RULE: &str = "__GLRMASK_PTC_VALUE";
+
+        fn rewrite(expr: &mut ast::GrammarExpr, value_token: u32) {
+            use ast::GrammarExpr;
+            match expr {
+                GrammarExpr::SpecialToken(token_id) if *token_id == value_token => {
+                    *expr = GrammarExpr::Ref(VALUE_RULE.to_string());
+                }
+                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                    rewrite(inner, value_token);
+                }
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    for part in parts {
+                        rewrite(part, value_token);
+                    }
+                }
+                GrammarExpr::Exclude { expr, exclude } => {
+                    rewrite(expr, value_token);
+                    rewrite(exclude, value_token);
+                }
+                GrammarExpr::Intersect { expr, intersect } => {
+                    rewrite(expr, value_token);
+                    rewrite(intersect, value_token);
+                }
+                GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                    for (item, _) in items {
+                        rewrite(item, value_token);
+                    }
+                    rewrite(separator, value_token);
+                }
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    for symbol in &mut expr_nfa.symbols {
+                        rewrite(symbol, value_token);
+                    }
+                }
+                GrammarExpr::Ref(_)
+                | GrammarExpr::Epsilon
+                | GrammarExpr::Literal(_)
+                | GrammarExpr::SpecialToken(_)
+                | GrammarExpr::CharClass { .. }
+                | GrammarExpr::RawRegex(_)
+                | GrammarExpr::LexerDfa(_)
+                | GrammarExpr::AnyByte => {}
+            }
+        }
+
+        with_large_import_stack(schema.len(), || {
+            let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
+                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+            })?;
+            let mut named = json_schema::schema_to_named_grammar_with_programmatic_value_token(
+                &schema_value,
+                VALUE_TOKEN,
+            )?;
+            for rule in &mut named.rules {
+                rewrite(&mut rule.expr, VALUE_TOKEN);
+            }
+            named.rules.push(ast::NamedRule {
+                name: VALUE_RULE.to_string(),
+                expr: ast::GrammarExpr::Literal(b"\0GLRMASK_PTC_VALUE\xff".to_vec()),
+                is_terminal: true,
+                is_internal: false,
+            });
+            install_programmatic_js_ignore(&mut named)?;
+            if std::env::var_os("GLRMASK_DUMP_PTC_SCHEMA").is_some() {
+                eprintln!("[glrmask/dump][ptc_schema]\n{}", crate::grammar::glrm::to_glrm(&named));
+            }
+            prepare_json_schema_named(&mut named)?;
+            compile_from_named_grammar_with_protected_shift_terminals(
+                named,
+                vocab,
+                "json_schema_programmatic_template",
+                GlrTableConstruction::LegacyRowBisim,
+                &[],
+                &[VALUE_RULE],
+            )
         })
     }
 
@@ -675,7 +854,9 @@ impl Constraint {
                 parent,
                 &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
                     placeholder_terminal: value_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: dynamic_value,
+                    protected_terminals: &[],
                 }],
                 vocab,
             )
@@ -693,7 +874,9 @@ impl Constraint {
                 with_value,
                 &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
                     placeholder_terminal: condition_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: condition,
+                    protected_terminals: &[],
                 }],
                 vocab,
             )
@@ -825,7 +1008,9 @@ impl Constraint {
                 composition_inputs.push(
                     crate::compiler::constraint_compose::CompiledSubgrammarInput {
                         placeholder_terminal,
+                        additional_placeholder_terminals: &[],
                         constraint: child,
+                        protected_terminals: &[],
                     },
                 );
             }

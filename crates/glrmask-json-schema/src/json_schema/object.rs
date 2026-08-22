@@ -543,7 +543,7 @@ impl<'a> Lowerer<'a> {
         if !can_parallelize || worker_count < 2 {
             return cases
                 .iter()
-                .map(|(_, payload_schema)| self.lower_value_schema(payload_schema))
+                .map(|(_, payload_schema)| self.lower_object_value_schema(payload_schema))
                 .collect();
         }
 
@@ -564,7 +564,7 @@ impl<'a> Lowerer<'a> {
                     let mut lowerer = parent.isolated_fragment_lowerer(namespace);
                     let expressions = chunk
                         .iter()
-                        .map(|(_, payload_schema)| lowerer.lower_value_schema(payload_schema))
+                        .map(|(_, payload_schema)| lowerer.lower_object_value_schema(payload_schema))
                         .collect::<ImportResult<Vec<_>>>()?;
                     Ok::<_, SchemaImportError>((
                         expressions,
@@ -855,7 +855,7 @@ impl<'a> Lowerer<'a> {
                     r(JSON_VALUE_RULE),
                 ])),
                 AdditionalProperties::Schema(value_schema) => {
-                    let value = self.lower_value_schema(value_schema)?;
+                    let value = self.lower_object_value_schema(value_schema)?;
                     Some(seq(vec![
                         self.lower_object_additional_key_colon(
                             fixed_names
@@ -940,7 +940,7 @@ impl<'a> Lowerer<'a> {
                     .as_ref()
                     .expect("pattern properties require fixed property names"),
             )?;
-            let value = self.lower_value_schema(&pattern_property.schema)?;
+            let value = self.lower_object_value_schema(&pattern_property.schema)?;
             tail_pairs.push(seq(vec![key, value]));
         }
 
@@ -971,7 +971,7 @@ impl<'a> Lowerer<'a> {
             AdditionalProperties::Deny => {}
             AdditionalProperties::Schema(_) if max_properties_filled_by_required => {}
             AdditionalProperties::Schema(value_schema) => {
-                let value = self.lower_value_schema(value_schema)?;
+                let value = self.lower_object_value_schema(value_schema)?;
                 let key_colon = if fixed_names
                     .as_ref()
                     .expect("pattern properties require fixed property names")
@@ -1540,7 +1540,7 @@ impl<'a> Lowerer<'a> {
         let mut items = Vec::with_capacity(object.properties.len());
         for property in &object.properties {
             let lower_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let value_expr = self.lower_value_schema(&property.schema)?;
+            let value_expr = self.lower_object_value_schema(&property.schema)?;
             if let (Some(lower_started_at), Some(profile)) = (lower_started_at, profile.as_deref_mut()) {
                 profile.lower_property_ms += lower_started_at.elapsed().as_secs_f64() * 1000.0;
             }
@@ -1695,7 +1695,7 @@ impl<'a> Lowerer<'a> {
             }
             items.push(AnyOfFixedObjectItem {
                 key: property.name.clone(),
-                value_expr: self.lower_value_schema(&effective_schema)?,
+                value_expr: self.lower_object_value_schema(&effective_schema)?,
                 value_identity: exact_property_value_identity(&effective_schema),
                 schema: effective_schema,
                 required: normalized.required.contains(&property.name),
@@ -1705,14 +1705,14 @@ impl<'a> Lowerer<'a> {
         let mut pattern_pairs = Vec::with_capacity(normalized.pattern_properties.len());
         for pattern_property in &normalized.pattern_properties {
             let key = self.lower_pattern_key_colon_appearance(&pattern_property.pattern, &fixed_keys)?;
-            let value = self.lower_value_schema(&pattern_property.schema)?;
+            let value = self.lower_object_value_schema(&pattern_property.schema)?;
             pattern_pairs.push(seq(vec![key, value]));
         }
 
         let additional_value_expr = match &normalized.additional_properties {
             AdditionalProperties::AllowAny => Some(r(JSON_VALUE_RULE)),
             AdditionalProperties::Deny => None,
-            AdditionalProperties::Schema(value_schema) => Some(self.lower_value_schema(value_schema)?),
+            AdditionalProperties::Schema(value_schema) => Some(self.lower_object_value_schema(value_schema)?),
         };
 
         Ok(Some((
@@ -3662,6 +3662,20 @@ impl<'a> Lowerer<'a> {
                 exclusive_group,
             });
         }
+        // Programmatic JavaScript keeps key/colon/container boundaries grammar-visible.
+        // Fusing a JSON key with a nested `[`/`{` hardcodes quoted JSON spelling
+        // and JSON whitespace, which would reject valid JS identifier keys/trivia.
+        if self.config.programmatic_unconstrained_values {
+            return Ok(ObjectItem {
+                key: property.name.clone(),
+                pair: seq(vec![key, value.clone()]),
+                separator_pair: seq(vec![separator_key, value]),
+                required,
+                satisfies_any_group,
+                exclusive_group,
+            });
+        }
+
         let (key, separator_key, value) = if let Some(rest) =
             Self::strip_leading_literal_byte(value.clone(), b'[')
         {
@@ -3896,6 +3910,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_object_property_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        if self.config.programmatic_unconstrained_values {
+            return self.lower_object_value_schema(schema);
+        }
         let static_expr = self.lower_object_property_value_schema_static(schema)?;
         Ok(self.wrap_programmatic_value_expr(static_expr))
     }

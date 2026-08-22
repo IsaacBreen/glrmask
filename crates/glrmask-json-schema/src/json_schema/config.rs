@@ -26,6 +26,15 @@ pub struct JsonSchemaConfig {
     /// the sentinel to an actual compiled child constraint through the facade
     /// API, so an unbound placeholder can never leak into a user grammar.
     pub dynamic_value_token_id: Option<u32>,
+    /// First-class programmatic-JavaScript mode: nested JSON Schema value
+    /// positions are replaced entirely by the caller-supplied JavaScript
+    /// expression child. The schema root remains ordinary/static, so a tool
+    /// arguments object cannot itself be replaced by an arbitrary expression.
+    ///
+    /// Keep this separate from `dynamic_value_token_id`: the older dynamic-value
+    /// API deliberately means `schema_value | dynamic_child`, whereas PTC means
+    /// simply `dynamic_child` at nested value positions.
+    pub programmatic_unconstrained_values: bool,
     /// Optional non-vocabulary sentinel for an unrestricted JavaScript
     /// condition expression used by schema-aware conditional values. This is
     /// meaningful only when `dynamic_value_token_id` is also configured.
@@ -97,6 +106,7 @@ impl Default for JsonSchemaConfig {
             },
             object_merging: ObjectMergeConfig { closed_objects: false, open_objects: false },
             dynamic_value_token_id: None,
+            programmatic_unconstrained_values: false,
             dynamic_condition_token_id: None,
         }
     }

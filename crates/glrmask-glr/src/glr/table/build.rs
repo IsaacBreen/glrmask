@@ -1508,12 +1508,12 @@ pub(super) fn build_table_with_default_construction(
     // artifacts. Running the recognizer-only equivalence pass here costs more
     // on large schemas than it saves in later phases.
     if construction == GlrTableConstruction::LegacyRowBisim {
-        table.canonicalize_stack_shift_predecessors();
+        table.canonicalize_stack_shift_predecessors_except(&grammar.protected_shift_terminals);
     }
     let stack_shift_canon_ms = stack_shift_canon_started_at.elapsed().as_secs_f64() * 1000.0;
     let suffix_quotient_started_at = std::time::Instant::now();
     if construction == GlrTableConstruction::LegacyRowBisim {
-        table.quotient_recognizer_stack_suffixes();
+        table.quotient_recognizer_stack_suffixes_except(&grammar.protected_shift_terminals);
     }
     let suffix_quotient_ms = suffix_quotient_started_at.elapsed().as_secs_f64() * 1000.0;
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;

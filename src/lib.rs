@@ -78,7 +78,7 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-pub use programmatic_js::ProgrammaticJsCompiler;
+pub use programmatic_js::{ProgrammaticJsCompiler, ProgrammaticJsDispatcher, ProgrammaticJsSchema};
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 
@@ -274,7 +274,9 @@ pub mod __private {
                 }
                 inputs.push(CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: child,
+                    protected_terminals: &[],
                 });
             }
             compose_constraints_owned_parent(self, &inputs, vocab)
@@ -313,7 +315,9 @@ pub mod __private {
                 }
                 inputs.push(CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: child.as_ref(),
+                    protected_terminals: &[],
                 });
                 shared.push(Arc::clone(child));
             }

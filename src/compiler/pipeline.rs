@@ -2238,6 +2238,7 @@ fn build_parser_dwa_for_terminal_family(
             )
         };
     if family_name == "l1"
+        && !grammar.has_ignore_terminal
         && family.artifact().num_states() == 2
         && table.admission_policy
             == crate::compiler::glr::table::AdmissionPolicy::RowPresenceExact
@@ -3195,6 +3196,7 @@ fn compile_prepared_with_profile(
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
         None,
+        None,
     )
 }
 
@@ -3203,6 +3205,7 @@ fn compile_prepared_with_profile_and_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
+    protected_shift_terminals: Option<Arc<Vec<u32>>>,
 ) -> (Constraint, CompilePhaseProfile) {
     // Synthetic lexer planning may certify a smaller exact tokenizer against
     // the vocabulary. Install the cross-crate certifier before planning on
@@ -3671,7 +3674,13 @@ fn compile_prepared_with_profile_and_table_construction(
 
             scope.spawn(move |scope| {
                 let analyze_grammar_started_at = Instant::now();
-                let analyzed_grammar = Arc::new(AnalyzedGrammar::from_grammar_def(prepared_grammar_ref));
+                let analyzed_grammar = Arc::new(match protected_shift_terminals.as_deref() {
+                    Some(protected) => AnalyzedGrammar::from_grammar_def_with_protected_shift_terminals(
+                        prepared_grammar_ref,
+                        protected.iter().copied(),
+                    ),
+                    None => AnalyzedGrammar::from_grammar_def(prepared_grammar_ref),
+                });
                 let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
                 if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
                     panic!("[glrmask] grammar precondition violations:\n{}", message);
@@ -4779,6 +4788,60 @@ pub(crate) fn compile_owned_with_table_construction(
     constraint
 }
 
+pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal_names(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    protected_shift_terminal_names: Vec<String>,
+) -> Constraint {
+    let start_nullable = grammar.start_is_nullable();
+    let prepared_grammar = prepare_grammar(grammar);
+    let protected_shift_terminals = protected_shift_terminal_names
+        .iter()
+        .map(|name| {
+            prepared_grammar
+                .terminal_names
+                .iter()
+                .find_map(|(&terminal, candidate)| (candidate == name).then_some(terminal))
+                .unwrap_or_else(|| panic!("protected shift terminal {name:?} disappeared during grammar preparation"))
+        })
+        .collect::<Vec<_>>();
+    if std::env::var_os("GLRMASK_PROFILE_PROGRAMMATIC_JS").is_some() {
+        eprintln!("[glrmask/ptc-profile] protected_names={protected_shift_terminal_names:?} protected_ids={protected_shift_terminals:?}");
+    }
+    let mut constraint = compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+        None,
+        Some(Arc::new(protected_shift_terminals.clone())),
+    )
+    .0;
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
+    if std::env::var_os("GLRMASK_PROFILE_PROGRAMMATIC_JS").is_some() {
+        for (&terminal, name) in protected_shift_terminals.iter().zip(protected_shift_terminal_names.iter()) {
+            let mut simple = 0usize;
+            let mut stack = 0usize;
+            let mut guarded = 0usize;
+            let mut other = 0usize;
+            for row in &constraint.table.action {
+                if let Some(action) = row.get(&terminal) {
+                    match action {
+                        crate::compiler::glr::table::Action::Shift(..) => simple += 1,
+                        crate::compiler::glr::table::Action::StackShifts(..) => stack += 1,
+                        crate::compiler::glr::table::Action::GuardedStackShifts(..) => guarded += 1,
+                        _ => other += 1,
+                    }
+                }
+            }
+            eprintln!("[glrmask/ptc-profile] protected_final name={name} id={terminal} shift={simple} stack={stack} guarded={guarded} other={other}");
+        }
+    }
+    constraint
+}
+
 pub(crate) fn compile_prepared_with_table_construction(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
@@ -4789,6 +4852,7 @@ pub(crate) fn compile_prepared_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
         None,
     )
     .0;
@@ -4811,6 +4875,7 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
         Some(adaptive),
+        None,
     )
     .0;
     constraint
@@ -4845,6 +4910,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
         None,
     );
     constraint

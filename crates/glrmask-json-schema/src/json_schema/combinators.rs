@@ -3161,7 +3161,7 @@ impl<'a> Lowerer<'a> {
         self.object_like_distribution_schema_inner(self.resolve_ref_target(pointer)?, ref_depth + 1)
     }
 
-    fn schema_is_object_like_resolved(&self, schema: &Schema) -> ImportResult<bool> {
+    pub(super) fn schema_is_object_like_resolved(&self, schema: &Schema) -> ImportResult<bool> {
         self.schema_is_object_like_resolved_inner(schema, 0)
     }
 
