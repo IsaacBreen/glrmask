@@ -598,8 +598,6 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
-            max_rollback_tokens: 0,
-            history: Default::default(),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -4341,11 +4339,6 @@ impl Constraint {
 
     /// Create a fresh state for one generated sequence.
     pub fn start(&self) -> ConstraintState<'_> {
-        self.start_with_rollback(0)
-    }
-
-    /// Create a state retaining up to `max_rollback_tokens` token snapshots.
-    pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
         if self.tokenizer_has_epsilon_transitions {
             drop(self.tokenizer.all_singleton_epsilon_closures());
@@ -4358,8 +4351,6 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
-            max_rollback_tokens,
-            history: Default::default(),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -4375,8 +4366,6 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
-            max_rollback_tokens: 0,
-            history: Default::default(),
         };
         state.reserve_linear_stack_hot_path();
         state

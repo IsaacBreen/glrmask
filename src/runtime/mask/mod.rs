@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_dag_cache_stays_exact_across_commits_and_rollback() {
+    fn indexed_dag_cache_stays_exact_across_commits_and_restore() {
         let vocab = Vocab::new(
             ["a", "b", "ab", "ba", "aa", "bb"]
                 .into_iter()
@@ -1167,10 +1167,11 @@ mod tests {
             &vocab,
         )
         .expect("persistent indexed-DAG parity grammar should compile");
-        let mut state = constraint.start_with_rollback(8);
+        let mut state = constraint.start();
         let sequence: [&[u8]; 4] = [b"a", b"a", b"a", b"b"];
+        let mut checkpoint = None;
 
-        for bytes in sequence {
+        for (index, bytes) in sequence.into_iter().enumerate() {
             let mut expected = vec![0u32; constraint.mask_len()];
             state.fill_mask_dynamic(&mut expected);
             if state.has_parser_ambiguity() {
@@ -1181,19 +1182,21 @@ mod tests {
                 assert_eq!(first, expected);
                 assert_eq!(second, expected, "same-state cache hit changed the mask");
             }
-            state.record_pre_commit_snapshot();
             state
                 .commit_bytes(bytes)
                 .expect("test sequence should remain valid");
+            if index == 1 {
+                checkpoint = Some(state.clone());
+            }
         }
 
-        state.rollback(2).expect("test rollback should be retained");
+        state = checkpoint.expect("checkpoint should be captured");
         let mut expected = vec![0u32; constraint.mask_len()];
         state.fill_mask_dynamic(&mut expected);
         if state.has_parser_ambiguity() {
             let mut actual = vec![0u32; constraint.mask_len()];
             assert!(state.fill_mask_indexed_dag(&mut actual, true));
-            assert_eq!(actual, expected, "post-rollback indexed mask diverged");
+            assert_eq!(actual, expected, "restored indexed mask diverged");
         }
     }
 }
@@ -2361,8 +2364,6 @@ impl<'a> ConstraintState<'a> {
                 mask_scratch: Mutex::new(MaskScratch::for_constraint(
                     component.constraint.as_ref(),
                 )),
-                max_rollback_tokens: 0,
-                history: Default::default(),
             };
             shadow.fill_mask_uncached(&mut component_buf);
             shadow.update_control_special_token_mask(&mut component_buf);
@@ -3401,7 +3402,7 @@ impl<'a> ConstraintState<'a> {
                 }
             }
         }
-        if !used_direct_final && !self.is_complete() {
+        if !used_direct_final && !self.is_accepting() {
             restore_scratch(merged, output_scratch, single_path_aux, single_path_acc);
             return false;
         }
@@ -4845,7 +4846,7 @@ impl<'a> ConstraintState<'a> {
 
     fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {
         let reset_state = self.constraint.runtime_commit_initial_state();
-        let mut shadow = self.clone_without_history();
+        let mut shadow = self.clone();
         shadow.state.clear();
         shadow.state.insert_flat_alternative(reset_state, gss.clone());
         if let Some(factored) = shadow.lookahead_factored_mask_shadow() {
@@ -5048,7 +5049,7 @@ impl<'a> ConstraintState<'a> {
             return None;
         }
 
-        let mut shadow = self.clone_without_history();
+        let mut shadow = self.clone();
         for (tokenizer_state, factored) in additions {
             shadow
                 .state

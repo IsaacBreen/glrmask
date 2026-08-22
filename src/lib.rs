@@ -2,7 +2,7 @@
 
 //! Extremely fast grammar-constrained decoding for LLMs.
 //!
-//! GLRMask compiles a grammar together with a model vocabulary into a reusable
+//! GLRMask compiles a [`Grammar`] together with a model vocabulary into a reusable
 //! [`Constraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
 //! obtain the next-token mask, sample a token, then commit that token to advance
 //! the parser state.
@@ -14,18 +14,15 @@
 //! # Quickstart
 //!
 //! ```
-//! use glrmask::{Constraint, Vocab};
+//! use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
 //!
 //! let vocab = Vocab::new(vec![
 //!     (0, b"hello".to_vec()),
 //!     (1, b" ".to_vec()),
 //!     (2, b"world".to_vec()),
 //! ]);
-//! let constraint = Constraint::from_ebnf(
-//!     r#"start ::= "hello" " " "world""#,
-//!     &vocab,
-//! )
-//! .unwrap();
+//! let grammar = Grammar::ebnf(r#"start ::= "hello" " " "world""#);
+//! let constraint = Constraint::compile(grammar, &vocab, &CompileOptions::default()).unwrap();
 //!
 //! let mut state = constraint.start();
 //! assert_ne!(state.mask()[0] & (1 << 0), 0);
@@ -33,7 +30,7 @@
 //! assert_ne!(state.mask()[0] & (1 << 1), 0);
 //! state.commit_token(1).unwrap();
 //! state.commit_token(2).unwrap();
-//! assert!(state.is_finished());
+//! assert!(state.is_accepting());
 //! ```
 //!
 //! Masks in the Rust API are packed `u32` bitsets. Bit `token_id % 32` of word
@@ -41,10 +38,10 @@
 //!
 //! # Grammar inputs
 //!
-//! [`Constraint`] and [`DynamicConstraint`] can be compiled from JSON Schema,
-//! GLRM, Lark, or EBNF. Constructors ending in `_with_end_tokens` additionally
-//! declare model token IDs that may terminate generation once the grammar is
-//! complete.
+//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. [`CompileOptions`]
+//! carries optional end-token IDs and compiled GLRM subgrammar bindings. Use the
+//! same [`Constraint::compile`] / [`DynamicConstraint::compile`] shape for both
+//! execution modes.
 //!
 //! # Persistence
 //!
@@ -53,10 +50,10 @@
 //!
 //! # Reusing compiled subgrammars
 //!
-//! GLRM can declare typed external subgrammars with `extern g name;`. Bind an
-//! already-compiled child with [`Constraint::from_glrm_grammar_with_subgrammars`].
-//! The compiler allocates hidden call placeholders automatically and links the
-//! components exactly, including model tokens that cross grammar boundaries.
+//! GLRM can declare typed external subgrammars with `extern g name;`. Bind
+//! already-compiled children through [`CompileOptions::subgrammars`]. The compiler
+//! allocates hidden call placeholders automatically and links the components
+//! exactly, including model tokens that cross grammar boundaries.
 //!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.
@@ -69,6 +66,7 @@ pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
+mod public_api;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
 pub(crate) mod runtime;
@@ -79,6 +77,8 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
+pub use error::{Error, Result};
+pub use public_api::{CompileOptions, Grammar};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -121,7 +121,7 @@ mod grammar_cross_tests;
 #[cfg(test)]
 mod terminal_dwa_cross_tests;
 
-pub(crate) use error::{GlrMaskError, Result};
+pub(crate) use error::GlrMaskError;
 
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
@@ -219,6 +219,51 @@ pub mod __private {
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
+    }
+
+    pub trait DynamicConstraintExt: Sized {
+        fn compile_ebnf_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)>;
+        fn compile_lark_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)>;
+        fn compile_json_schema_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)>;
+        fn compile_glrm_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)>;
+        fn compile_ebnf_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>>;
+        fn compile_lark_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>>;
+        fn compile_json_schema_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>>;
+        fn compile_glrm_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>>;
+        fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> Result<Self>;
+        fn max_original_token_id(&self) -> Option<u32>;
     }
 
     impl ConstraintExt for Constraint {
@@ -349,11 +394,95 @@ pub mod __private {
         }
     }
 
-    pub trait DynamicConstraintExt {
-        fn max_original_token_id(&self) -> Option<u32>;
-    }
-
     impl DynamicConstraintExt for DynamicConstraint {
+        fn compile_ebnf_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)> {
+            DynamicConstraint::compile_ebnf_serialized_profiled_with_end_tokens(
+                source,
+                vocab,
+                end_token_ids,
+            )
+        }
+
+        fn compile_lark_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)> {
+            DynamicConstraint::compile_lark_serialized_profiled_with_end_tokens(
+                source,
+                vocab,
+                end_token_ids,
+            )
+        }
+
+        fn compile_json_schema_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)> {
+            DynamicConstraint::compile_json_schema_serialized_profiled_with_end_tokens(
+                source,
+                vocab,
+                end_token_ids,
+            )
+        }
+
+        fn compile_glrm_serialized_profiled_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<(Vec<u8>, u64, u64)> {
+            DynamicConstraint::compile_glrm_serialized_profiled_with_end_tokens(
+                source,
+                vocab,
+                end_token_ids,
+            )
+        }
+
+        fn compile_ebnf_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>> {
+            DynamicConstraint::compile_ebnf_serialized_with_end_tokens(source, vocab, end_token_ids)
+        }
+
+        fn compile_lark_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>> {
+            DynamicConstraint::compile_lark_serialized_with_end_tokens(source, vocab, end_token_ids)
+        }
+
+        fn compile_json_schema_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>> {
+            DynamicConstraint::compile_json_schema_serialized_with_end_tokens(
+                source,
+                vocab,
+                end_token_ids,
+            )
+        }
+
+        fn compile_glrm_serialized_with_end_tokens(
+            source: &str,
+            vocab: &Vocab,
+            end_token_ids: &[u32],
+        ) -> Result<Vec<u8>> {
+            DynamicConstraint::compile_glrm_serialized_with_end_tokens(source, vocab, end_token_ids)
+        }
+
+        fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> Result<Self> {
+            DynamicConstraint::load_with_vocab(bytes, vocab)
+        }
+
         fn max_original_token_id(&self) -> Option<u32> {
             DynamicConstraint::max_original_token_id(self)
         }

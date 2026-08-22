@@ -40,7 +40,7 @@ fn test_resjson_recursive_ref() {
         }
     }"##;
 
-    let result = Constraint::from_json_schema(schema, &vocab);
+    let result = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default());
     // Should either succeed or return an error, NOT segfault
     match result {
         Ok(_) => println!("Compiled successfully"),

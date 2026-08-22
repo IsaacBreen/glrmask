@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();
@@ -15,10 +15,16 @@ fn main() {
         "additionalProperties": false
     }"#;
 
-    let constraint = Constraint::from_json_schema(schema, &byte_vocab()).unwrap();
+    let vocab = byte_vocab();
+    let constraint = Constraint::compile(
+        Grammar::json_schema(schema),
+        &vocab,
+        &CompileOptions::default(),
+    )
+    .unwrap();
     let mut state = constraint.start();
     state.commit_bytes(br#"{"ok": true}"#).unwrap();
 
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
     println!("accepted: {{\"ok\": true}}");
 }

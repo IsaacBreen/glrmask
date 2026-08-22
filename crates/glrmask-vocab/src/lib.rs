@@ -10,12 +10,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 ///
 /// Entries map model token IDs to their exact byte sequences. Token IDs may be
 /// sparse; masks are indexed by the original model token IDs.
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
-    #[serde(skip)]
     compiler_cache: VocabCompilerCache,
-    #[serde(skip)]
     max_token_byte_len: OnceLock<usize>,
 }
 
@@ -100,6 +97,7 @@ impl Vocab {
     /// Fresh vocabularies compute this while being constructed. Deserialized
     /// vocabularies fill it lazily on first use, after which clones preserve the
     /// value instead of rescanning every token for every grammar compilation.
+    #[doc(hidden)]
     pub fn max_token_byte_len(&self) -> usize {
         *self
             .max_token_byte_len
@@ -107,6 +105,7 @@ impl Vocab {
     }
 
     /// Sorted byte alphabet observed anywhere in the vocabulary.
+    #[doc(hidden)]
     pub fn relevant_bytes(&self) -> Arc<[u8]> {
         if let Some(cached) = self.vocab_derived_cache_get_internal::<VocabRelevantBytes>() {
             return Arc::clone(&cached.bytes);

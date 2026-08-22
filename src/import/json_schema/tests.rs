@@ -757,7 +757,7 @@ fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
     let mut state = constraint.start();
-    state.commit_bytes(input).is_ok() && state.is_complete()
+    state.commit_bytes(input).is_ok() && state.is_accepting()
 }
 
 #[test]
@@ -908,7 +908,7 @@ fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
     let mut state = constraint.start();
     state.commit_bytes(input).expect("input should be accepted");
-    assert!(state.is_complete(), "input should finish the schema");
+    assert!(state.is_accepting(), "input should finish the schema");
     state.parser_path_count(limit)
 }
 
@@ -4378,8 +4378,8 @@ fn complex_anchored_pattern_split_matches_monolithic_masks() {
             ^ walk.wrapping_mul(0x5851_f42d_4c95_7f2d);
         for step in 0..96 {
             assert_eq!(
-                split_state.is_finished(),
-                monolithic_state.is_finished(),
+                split_state.is_accepting(),
+                monolithic_state.is_accepting(),
                 "finished mismatch walk={walk} step={step}"
             );
             let split_mask = split_state.mask();
@@ -4389,7 +4389,7 @@ fn complex_anchored_pattern_split_matches_monolithic_masks() {
                 "mask mismatch walk={walk} step={step}"
             );
             compared += 1;
-            if split_state.is_finished() {
+            if split_state.is_accepting() {
                 break;
             }
             let Some(token) = choose_token(&split_mask, next_random(&mut seed)) else {
@@ -9227,7 +9227,7 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
         let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
         let accepts = |input: &[u8]| {
             let mut state = constraint.start();
-            state.commit_bytes(input).is_ok() && state.is_complete()
+            state.commit_bytes(input).is_ok() && state.is_accepting()
         };
         assert!(accepts(br#"{"value": "////////////////////"}"#));
         assert!(!accepts(br#"{"value": "///////////////////"}"#));

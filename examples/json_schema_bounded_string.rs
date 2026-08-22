@@ -23,7 +23,7 @@ fn main() {
     );
 
     let started_at = Instant::now();
-    let _constraint = Constraint::from_json_schema(&schema, &byte_vocab()).unwrap();
+    let _constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &byte_vocab(), &glrmask::CompileOptions::default()).unwrap();
     println!(
         "compiled bounded string maxLength={} in {:.3}s",
         max_length,

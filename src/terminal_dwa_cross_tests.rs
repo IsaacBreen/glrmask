@@ -348,7 +348,7 @@ mod synthetic_state_facade_tests {
         assert_eq!(mask[0] & (1 << 3), 0, "68th a must be rejected");
         static_state.commit_token(0).expect("closing quote");
         dynamic_state.commit_token(0).expect("closing quote");
-        assert_eq!(static_state.is_finished(), dynamic_state.is_finished());
+        assert_eq!(static_state.is_accepting(), dynamic_state.is_accepting());
         assert_eq!(static_state.mask(), dynamic_state.mask());
     }
 

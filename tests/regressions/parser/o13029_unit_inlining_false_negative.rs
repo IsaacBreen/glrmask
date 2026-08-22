@@ -24,7 +24,7 @@ fn origin_dependent_unit_reduce_singleton_pushes_preserve_string_branch_context(
     // pushed branch targets must remain reductions. Collapsing them into a
     // replace shift loses the branch-specific context needed for the later
     // string value and incorrectly rejects the disputed token.
-    let constraint = Constraint::from_json_schema(MINIMIZED_SCHEMA, &byte_vocab_with_disputed_token()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(MINIMIZED_SCHEMA), &byte_vocab_with_disputed_token(), &glrmask::CompileOptions::default()).unwrap();
 
     let mut base = constraint.start();
     base.commit_bytes(PREFIX).unwrap();

@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
 
 fn token_allowed(mask: &[u32], token_id: usize) -> bool {
     let word = token_id / 32;
@@ -13,9 +13,10 @@ fn main() {
             (2, b"world".to_vec()),
         ]);
 
-    let constraint = Constraint::from_ebnf(
-        r#"start ::= "hello" " " "world""#,
+    let constraint = Constraint::compile(
+        Grammar::ebnf(r#"start ::= "hello" " " "world""#),
         &vocab,
+        &CompileOptions::default(),
     )
     .unwrap();
 
@@ -26,6 +27,6 @@ fn main() {
     state.commit_token(1).unwrap();
     state.commit_token(2).unwrap();
 
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
     println!("accepted: hello world");
 }

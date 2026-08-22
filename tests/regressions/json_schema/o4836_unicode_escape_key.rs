@@ -70,7 +70,7 @@ fn o4836_pattern_property_key_allows_partial_unicode_escape_token() {
     }"#;
     let prefix = br#"{"attributes": {""#;
     let token = br#"\uC"#;
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
 
     let mut token_state = constraint.start();
     token_state.commit_bytes(prefix).unwrap();
@@ -83,7 +83,7 @@ fn string_rejects_partial_unicode_escape_token_like_llguidance_native() {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
     let schema = r#"{"type": "string"}"#;
     let token = br#"\uC"#;
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
 
     let mut token_state = constraint.start();
     token_state.commit_bytes(b"\"").unwrap();
@@ -98,10 +98,7 @@ fn string_mask_allows_bare_unicode_escape_prefix_token_but_rejects_partial_hex_t
     let bare_unicode_prefix = br#"\u"#;
     let partial_hex_escape = br#"\uC"#;
     let newline_escape = br#"\n"#;
-    let constraint = Constraint::from_json_schema(
-        schema,
-        &vocab(&[bare_unicode_prefix, partial_hex_escape, newline_escape]),
-    )
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[bare_unicode_prefix, partial_hex_escape, newline_escape]), &glrmask::CompileOptions::default())
     .unwrap();
 
     let mut token_state = constraint.start();
@@ -118,7 +115,7 @@ fn unrestricted_object_key_rejects_partial_unicode_escape_token_like_llguidance_
     let schema = r#"{"type": "object", "additionalProperties": true}"#;
     let prefix = br#"{""#;
     let token = br#"\uC"#;
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
 
     let mut token_state = constraint.start();
     token_state.commit_bytes(prefix).unwrap();

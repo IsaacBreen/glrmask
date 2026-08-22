@@ -60,12 +60,12 @@ fn assert_quote_mask_commit_alignment(constraint: &Constraint) {
 
 #[test]
 fn schema_witness_has_quote_mask_commit_alignment_with_two_token_vocab() {
-    let constraint = Constraint::from_json_schema(SCHEMA, &minimized_vocab()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(SCHEMA), &minimized_vocab(), &glrmask::CompileOptions::default()).unwrap();
     assert_quote_mask_commit_alignment(&constraint);
 }
 
 #[test]
 fn glrm_witness_has_quote_mask_commit_alignment_with_two_token_vocab() {
-    let constraint = Constraint::from_glrm_grammar(GLRM_WITNESS, &minimized_vocab()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(GLRM_WITNESS), &minimized_vocab(), &glrmask::CompileOptions::default()).unwrap();
     assert_quote_mask_commit_alignment(&constraint);
 }

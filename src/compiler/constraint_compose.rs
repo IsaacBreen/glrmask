@@ -15486,7 +15486,7 @@ table: &child.constraint.table,
         );
         let mut actual = runtime_composed.start();
         actual.commit_token(0).unwrap();
-        assert!(actual.is_finished());
+        assert!(actual.is_accepting());
 
     }
 
@@ -15644,7 +15644,7 @@ table: &child.constraint.table,
             for token in suffix {
                 cursor.commit_token(token).unwrap();
             }
-            assert!(cursor.is_finished());
+            assert!(cursor.is_accepting());
         }
     }
 
@@ -15730,7 +15730,7 @@ table: &child.constraint.table,
                 for &byte in bytes {
                     state.commit_token(byte as u32).unwrap();
                 }
-                assert!(state.is_finished(), "recomposed runtime-product child rejected {bytes:?}");
+                assert!(state.is_accepting(), "recomposed runtime-product child rejected {bytes:?}");
             }
         }
     }
@@ -16137,12 +16137,12 @@ table: &child.table,
     fn assert_accepts(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
         state.commit_bytes(bytes).unwrap();
-        assert!(state.is_finished(), "expected {:?} to finish", bytes);
+        assert!(state.is_accepting(), "expected {:?} to finish", bytes);
     }
 
     fn assert_rejects(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
-        let accepted = state.commit_bytes(bytes).is_ok() && state.is_finished();
+        let accepted = state.commit_bytes(bytes).is_ok() && state.is_accepting();
         assert!(!accepted, "expected {:?} to reject", bytes);
     }
 
@@ -16218,8 +16218,8 @@ table: &child.table,
                 );
                 if compare_completion {
                     assert_eq!(
-                        actual_state.is_finished(),
-                        expected_state.is_finished(),
+                        actual_state.is_accepting(),
+                        expected_state.is_accepting(),
                         "completion mismatch after reachable prefix {prefix:?}",
                     );
                 }
@@ -16722,9 +16722,9 @@ table: &child.table,
             }
             assert_eq!(actual.mask(), expected.mask());
             assert_eq!(cached.mask(), expected.mask());
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert_eq!(cached.is_finished(), expected.is_finished());
-            assert!(actual.is_finished(), "sequence {sequence:?} should finish");
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert_eq!(cached.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting(), "sequence {sequence:?} should finish");
         }
     }
 
@@ -16903,9 +16903,9 @@ table: &child.table,
                 "loaded token {token}",
             );
             assert_eq!(reference.commit_token(token).is_ok(), expected, "reference token {token}");
-            assert_eq!(actual.is_complete(), expected, "token {token}");
-            assert_eq!(loaded_state.is_complete(), expected, "loaded token {token}");
-            assert_eq!(reference.is_complete(), expected, "reference token {token}");
+            assert_eq!(actual.is_accepting(), expected, "token {token}");
+            assert_eq!(loaded_state.is_accepting(), expected, "loaded token {token}");
+            assert_eq!(reference.is_accepting(), expected, "reference token {token}");
         }
     }
 
@@ -17027,9 +17027,9 @@ table: &child.table,
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete(), "composed incomplete for {sequence:?}");
-            assert!(restored.is_complete(), "loaded incomplete for {sequence:?}");
-            assert!(expected.is_complete(), "reference incomplete for {sequence:?}");
+            assert!(actual.is_accepting(), "composed incomplete for {sequence:?}");
+            assert!(restored.is_accepting(), "loaded incomplete for {sequence:?}");
+            assert!(expected.is_accepting(), "reference incomplete for {sequence:?}");
         }
 
         // Parent trivia must not become active while the child scope is still
@@ -17102,14 +17102,14 @@ table: &child.table,
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete(), "outer incomplete for {sequence:?}");
-            assert!(expected.is_complete(), "outer reference incomplete for {sequence:?}");
+            assert!(actual.is_accepting(), "outer incomplete for {sequence:?}");
+            assert!(expected.is_accepting(), "outer reference incomplete for {sequence:?}");
         }
 
         let mut actual = outer.start();
         let mut expected = outer_monolithic.start();
         assert_eq!(actual.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
-        assert!(!expected.is_complete());
+        assert!(!expected.is_accepting());
     }
 
     #[test]
@@ -17211,8 +17211,8 @@ table: &child.table,
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         // Leading RIGHT trivia also begins only after return-from-LEFT followed
         // by enter-RIGHT, and must preserve that scope across the token.
@@ -17226,8 +17226,8 @@ table: &child.table,
         reference.commit_token(3).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         // A multi-byte token containing only RIGHT trivia must itself be a
         // boundary-begin path: return from LEFT, enter RIGHT, consume trivia,
@@ -17246,8 +17246,8 @@ table: &child.table,
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
     }
 
     #[test]
@@ -17300,8 +17300,8 @@ table: &child.table,
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
@@ -17389,9 +17389,9 @@ table: &child.table,
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete());
-            assert!(restored.is_complete());
-            assert!(expected.is_complete());
+            assert!(actual.is_accepting());
+            assert!(restored.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -17463,9 +17463,9 @@ table: &child.table,
                 restored_actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete());
-            assert!(restored_actual.is_complete());
-            assert!(expected.is_complete());
+            assert!(actual.is_accepting());
+            assert!(restored_actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17682,10 +17682,10 @@ constraint: &third,
 
         let mut composed_bytes = composed.start();
         composed_bytes.commit_bytes(b"[a|b|c]").unwrap();
-        assert!(composed_bytes.is_finished());
+        assert!(composed_bytes.is_accepting());
         let mut monolithic_bytes = monolithic.start();
         monolithic_bytes.commit_bytes(b"[a|b|c]").unwrap();
-        assert!(monolithic_bytes.is_finished());
+        assert!(monolithic_bytes.is_accepting());
 
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
@@ -17695,7 +17695,7 @@ constraint: &third,
         );
         let mut fused = composed.start();
         fused.commit_token(0).unwrap();
-        assert!(fused.is_finished());
+        assert!(fused.is_accepting());
     }
 
     #[test]
@@ -17757,8 +17757,8 @@ constraint: &third,
             assert_eq!(actual.forced(), vec![END_TOKEN]);
             actual.commit_token(END_TOKEN).unwrap();
             expected.commit_token(END_TOKEN).unwrap();
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let loaded = Constraint::load(&composed.save()).unwrap();
@@ -17767,7 +17767,7 @@ constraint: &third,
         loaded_state.commit_token(0).unwrap();
         assert_eq!(loaded_state.forced(), vec![END_TOKEN]);
         loaded_state.commit_token(END_TOKEN).unwrap();
-        assert!(loaded_state.is_finished());
+        assert!(loaded_state.is_accepting());
     }
 
     #[test]
@@ -17823,8 +17823,8 @@ constraint: &third,
             assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
             actual.commit_token(SPECIAL_TOKEN).unwrap();
             expected.commit_token(SPECIAL_TOKEN).unwrap();
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17874,8 +17874,8 @@ constraint: &third,
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17970,8 +17970,8 @@ constraint: &third,
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let outer = Constraint::from_glrm_grammar(
@@ -18115,8 +18115,8 @@ constraint: &child,
             expected.commit_bytes(&[byte]).unwrap();
         }
         assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
 
         for bytes in [
             b"<ab>ab!".as_slice(),
@@ -18127,9 +18127,9 @@ constraint: &child,
             b"<ab><ab>!".as_slice(),
         ] {
             let mut expected = monolithic.start();
-            let expected_accepts = expected.commit_bytes(bytes).is_ok() && expected.is_finished();
+            let expected_accepts = expected.commit_bytes(bytes).is_ok() && expected.is_accepting();
             let mut actual = composed.start();
-            let actual_accepts = actual.commit_bytes(bytes).is_ok() && actual.is_finished();
+            let actual_accepts = actual.commit_bytes(bytes).is_ok() && actual.is_accepting();
             assert_eq!(actual_accepts, expected_accepts, "language mismatch for {bytes:?}");
         }
         assert_accepts(&composed, valid);
@@ -18196,8 +18196,8 @@ constraint: &child,
             expected.commit_bytes(&[byte]).unwrap();
         }
         assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
         assert_accepts(&composed, valid);
         assert_rejects(&composed, b"<ab>a!");
     }
@@ -18262,8 +18262,8 @@ constraint: &child,
             actual.commit_token(token).unwrap();
             expected.commit_token(token).unwrap();
         }
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
     }
 
     #[test]
@@ -18353,8 +18353,8 @@ constraint: &right,
             actual_separate.commit_token(token).unwrap();
             expected_separate.commit_token(token).unwrap();
         }
-        assert!(actual_separate.is_finished());
-        assert!(expected_separate.is_finished());
+        assert!(actual_separate.is_accepting());
+        assert!(expected_separate.is_accepting());
 
         let mut expected = monolithic.start();
         let mut actual = composed.start();
@@ -18363,8 +18363,8 @@ constraint: &right,
             actual.commit_token(token).unwrap();
             expected.commit_token(token).unwrap();
         }
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
     }
 
     #[test]
@@ -18423,8 +18423,8 @@ constraint: &right,
                     actual.commit_token(token).unwrap();
                     expected.commit_token(token).unwrap();
                 }
-                assert_eq!(actual.is_finished(), expected.is_finished());
-                assert!(actual.is_finished());
+                assert_eq!(actual.is_accepting(), expected.is_accepting());
+                assert!(actual.is_accepting());
             }
         }
     }
@@ -18530,9 +18530,9 @@ constraint: &right,
                 restored.commit_token(byte as u32).unwrap();
                 expected.commit_token(byte as u32).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(restored.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(restored.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -18597,8 +18597,8 @@ constraint: &right,
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert!(actual.is_finished());
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting());
         }
     }
 
@@ -18690,8 +18690,8 @@ constraint: &middle,
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert!(actual.is_finished());
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting());
         }
     }
 
@@ -18778,14 +18778,14 @@ constraint: &middle,
                 roundtripped.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(roundtripped.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(roundtripped.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let mut crossed = composed.start();
         crossed.commit_token(0).unwrap();
-        assert!(crossed.commit_token(3).is_err() || !crossed.is_finished());
+        assert!(crossed.commit_token(3).is_err() || !crossed.is_accepting());
     }
 
     fn sizeable_json_schema(prefix: &str, choices: usize) -> String {
@@ -18943,7 +18943,7 @@ constraint: &middle,
                 for &token in sequence {
                     total += state.commit_token_timed_ns(token).unwrap();
                 }
-                assert!(state.is_complete());
+                assert!(state.is_accepting());
                 samples.push(total);
             }
             samples.sort_unstable();

@@ -247,7 +247,7 @@ obj_ord_0_0_nc: "\"certificationConditions\": " JSON_STRING ", " "\"certificatio
 start: "{" obj_ord_0_0_nc "}"
 "#;
 
-    let c = Constraint::from_lark(lark, &vocab).unwrap();
+    let c = Constraint::compile(glrmask::Grammar::lark(lark), &vocab, &glrmask::CompileOptions::default()).unwrap();
     let mut s = c.start();
     s.commit_bytes(b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \"")
         .unwrap();

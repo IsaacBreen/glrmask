@@ -3179,7 +3179,7 @@ nt start ::= A B | A;
         assert!(token_allowed(&state.mask(), 2));
 
         state.commit_token(2).unwrap();
-        assert!(state.is_finished());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
@@ -3254,7 +3254,7 @@ nt start ::= A B;
         assert!(token_allowed(&state.mask(), 3));
 
         state.commit_token(3).unwrap();
-        assert!(state.is_finished());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
@@ -3538,7 +3538,7 @@ nt start ::= A A;
         state.commit_token(1).unwrap();
         assert_dynamic_parity(&state);
         state.commit_token(0).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
@@ -3590,7 +3590,7 @@ nt start ::= U* 'a';
             state.commit_bytes(bytes).unwrap();
             assert_dynamic_parity(&state);
         }
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -3625,7 +3625,7 @@ nt start ::= A C | B D;
         assert_dynamic_parity(&state);
         assert!(token_allowed(&direct_mask(&state), 1));
         state.commit_token(1).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
@@ -3744,7 +3744,7 @@ nt start ::= A;
         // derived from the sole global-L1 transition.
         let mut after_a = constraint.start();
         after_a.commit_token(0).unwrap();
-        assert!(after_a.is_complete());
+        assert!(after_a.is_accepting());
         assert!(after_a.state.values().any(|gss| {
             !gss.all_accs_satisfy(|excluded: &TerminalsDisallowed| excluded.is_empty())
         }));
@@ -3789,7 +3789,7 @@ nt start ::= A B;
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
         state.commit_token(3).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
@@ -3817,7 +3817,7 @@ nt start ::= A;
         assert!(token_allowed(&state.mask(), 3));
         assert!(!token_allowed(&state.mask(), 4));
         state.commit_token(3).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
 
