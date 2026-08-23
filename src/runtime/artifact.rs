@@ -2513,8 +2513,287 @@ pub(crate) struct SegmentedBoundaryParser {
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
 /// [`Constraint::start`] to create a mutable per-sequence state.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Constraint {
+    pub(crate) runtime_backend: ConstraintRuntimeBackend,
+    pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    /// Runtime-derived exact original-token sets for `Skip` terminals in a
+    /// composed grammar. Each token is wholly in `L(skip)+`: it can be
+    /// consumed as one or more complete instances of that scoped-ignore
+    /// terminal with a lexer reset between instances. This is deliberately
+    /// not serialized; it is cheap to rebuild from the retained terminal
+    /// expression and vocabulary and therefore does not change artifact wire
+    /// compatibility.
+    pub(crate) scoped_ignore_only_tokens: Vec<(TerminalID, Box<[u32]>)>,
+    /// Exact byte-token fusions `(fused, suffix)` grouped by scoped Skip. The
+    /// fused token begins with one or more complete instances of the Skip
+    /// language and the remaining bytes equal `suffix` exactly. If `suffix`
+    /// is admitted by the ordinary static mask, `fused` is therefore admitted
+    /// as well. Runtime-only for the same wire-compatibility reason as above.
+    pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
+    pub(crate) parser_dwa: DWA,
+    /// Exact depth-one parser acceptance kept separate from the deeper parser
+    /// DWA. Keys are encoded parser-state labels; values are already the
+    /// transition/final-weight intersection for accepting after that one
+    /// stack symbol.
+    pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
+    /// Uncombined exact depth-one acceptance parts. Direct-regular grammars
+    /// retain terminal completion weights separately to avoid constructing one
+    /// large union weight per parser state at compile time.
+    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
+    /// Immediate-completion L1 terminal weights for direct-regular parsers.
+    /// Kept once per grammar terminal rather than duplicated across every
+    /// epsilon-closed parser row.
+    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    /// Runtime-derived exact acceptance summaries for wide direct-regular
+    /// replace-top frontiers. Rebuilt after compile/load from the table and
+    /// parser-top acceptance artifacts.
+    pub(crate) direct_regular_wide_frontier_acceptance:
+        Vec<DirectRegularWideFrontierAcceptance>,
+    /// Runtime-only exact transition maps for the direct automaton's initial
+    /// frontier and its single widest successor frontier. Dynamic masking
+    /// repeatedly queries these two frontiers at token boundaries.
+    pub(crate) direct_regular_dynamic_hot_frontiers:
+        Vec<DirectRegularDynamicHotFrontier>,
+    /// Runtime-derived exact dense acceptance for the broadest direct-regular
+    /// parser row(s). This avoids replaying thousands of L1 terminal weights on
+    /// every mask while keeping the cached result source-state exact.
+    pub(crate) direct_regular_parser_state_acceptance:
+        Vec<DirectRegularParserStateAcceptance>,
+    /// Sparse terminal-level automaton retained for exact direct-regular
+    /// runtime indexes. Static artifact format versioning covers this field.
+    pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
+    pub(crate) table: GLRTable,
+    pub(crate) terminal_display_names: Vec<String>,
+    pub(crate) tokenizer: Tokenizer,
+    /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
+    /// scans every tokenizer state, so runtime dispatch must not recompute it.
+    pub(crate) tokenizer_has_epsilon_transitions: bool,
+    pub(crate) ignore_terminal: Option<TerminalID>,
+    pub(crate) special_token_terminals: Vec<SpecialTokenTerminal>,
+
+    /// Runtime-only vocabulary data for direct dynamic masking.
+    pub(crate) dynamic_mask_vocab: DynamicMaskVocab,
+    /// Lazily materialized static-mode fallback vocabulary. Ordinary static
+    /// masking never touches this; it is initialized only if an empty
+    /// possible-matches table encounters a token-start exclusion.
+    pub(crate) lazy_dynamic_mask_vocab: OnceLock<DynamicMaskVocab>,
+
+    /// possible_matches keyed by grammar terminal id.
+    ///
+    /// An empty table may represent deferred possible-match construction in
+    /// legacy code only.
+    ///
+    /// IMPORTANT: the dynamic possible-matches fallback is intentionally
+    /// terrible and is planned for removal. New compiler paths MUST construct
+    /// complete exact possible matches and MUST NOT set
+    /// `possible_matches_complete` to false as an implementation shortcut.
+    /// DO NOT REMOVE OR WEAKEN THIS COMMENT.
+    ///
+    /// Each Weight maps final shared internal tokenizer-state ids to token sets
+    /// in the final shared constraint-internal vocab space. Parser-DWA weights
+    /// and possible_matches weights are reconciled into this same space during
+    /// compilation.
+    pub(crate) possible_matches: PossibleMatchesByTerminal,
+    /// Whether `possible_matches` is a complete table. New static constraints
+    /// must set this to true. False exists only for legacy dynamic/deferred
+    /// construction and is not permitted as a fallback strategy for new
+    /// compiler features.
+    pub(crate) possible_matches_complete: bool,
+    pub(crate) state_to_internal_tsid: Vec<u32>,
+    pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Composition-preparation cache: row `t` lists original model-token IDs
+    /// which, from this component's lexer reset, complete terminal `t` exactly
+    /// at the end of the model token.  This is not part of the historical inner
+    /// `Constraint` bincode layout; artifact V13 stores it in the outer
+    /// envelope so V12 constraints remain loadable unchanged.
+    pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    /// Composition-time parser stack-effect templates retained from the
+    /// original compile. These are the unspecialized per-terminal DFAs used to
+    /// build parser DWAs, so a later linker can transport unchanged component
+    /// behavior instead of re-characterizing the component LR table.
+    /// Stored in the outer versioned artifact envelope for compatibility with
+    /// older inner `Constraint` bincode layouts.
+    pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
+    /// Composition-time symbolic parser characterizations retained from the
+    /// original compile. A later linker can append only the boundary-induced
+    /// reductions/rereductions and recompile affected terminal templates,
+    /// rather than re-solving the component's reduction closure from scratch.
+    pub(crate) composition_parser_characterizations_by_terminal:
+        Vec<Option<TerminalCharacterization>>,
+    /// Composition-time grammar adjacency summary. Stored in the outer
+    /// versioned artifact envelope so older inner `Constraint` layouts remain
+    /// loadable unchanged.
+    pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
+    /// Runtime-only inverse lexer-metadata index used by compiled-constraint
+    /// composition. Row `t` lists exactly the raw tokenizer states whose
+    /// epsilon closure has terminal `t` matched or still reachable.
+    pub(crate) terminal_live_states: Vec<Vec<u32>>,
+    /// Runtime-only CSR view of the exact state -> internal-TSID relation.
+    /// Ordinary tokenizers have one entry per state. A fully determinized
+    /// runtime lexer may represent several old lexer states and therefore
+    /// several independent TSID lanes in one physical state.
+    pub(crate) state_internal_tsid_offsets: Vec<u32>,
+    pub(crate) state_internal_tsids: Vec<u32>,
+    /// Final-runtime subset states followed by an exact copy of the source
+    /// tokenizer. `runtime_source_state_offset` is the boundary between the
+    /// two coordinates. Empty metadata means no runtime-only determinization.
+    pub(crate) runtime_source_state_offset: Option<u32>,
+    /// CSR offsets for product-state -> exact source-state subset. There is one
+    /// row per product state and therefore `product_state_count + 1` offsets.
+    pub(crate) runtime_product_source_offsets: Vec<u32>,
+    pub(crate) runtime_product_source_states: Vec<u32>,
+    /// Scalar source representative for product states that are exactly one
+    /// source state's epsilon closure; `u32::MAX` otherwise.
+    pub(crate) runtime_product_exact_source_states: Vec<u32>,
+    /// Runtime-only inverse used to re-coalesce a uniform source frontier.
+    pub(crate) runtime_product_state_by_source_subset: FxHashMap<Box<[u32]>, u32>,
+    pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
+    /// Runtime-only compact transition view for commit template products.
+    pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
+    /// Original token -> final shared constraint-internal token id.
+    ///
+    /// This is not necessarily equal to the parser-DWA compaction vocab map
+    /// produced before possible-match reconciliation. It may contain additional
+    /// splits required by possible_matches.
+    pub(crate) original_token_to_internal: Vec<u32>,
+    /// Final shared constraint-internal token id -> original token ids.
+    ///
+    /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
+    /// final internal token ids.
+    pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
+    pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
+    pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
+    pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
+
+    /// Precomputed bitmask fragments for each internal token.
+    /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
+    /// for all original tokens that map to internal token `i`.
+    pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
+    /// Precomputed combined buf output for each group of 64 internal tokens.
+    /// `word_group_buf_masks[w]` is the combined mask for internal tokens [w*64 .. (w+1)*64).
+    /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
+    pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 128 internal tokens.
+    pub(crate) pair_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 256 internal tokens.
+    pub(crate) quad_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 512 internal tokens.
+    pub(crate) super_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 1024 internal tokens.
+    pub(crate) mega_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Precomputed dense output masks for groups of 2048 internal tokens.
+    pub(crate) giga_word_group_buf_masks: Vec<Box<[u32]>>,
+    /// Sparse OR-union for each 64-token internal word group.
+    pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense prefix-unions of 64-token internal word groups.
+    ///
+    /// `word_group_prefix_buf_masks[i]` is the OR-union of word groups
+    /// `[0, i)`. Internal-token groups are disjoint in original-token space,
+    /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
+    /// internal-word run `[start, end)`.
+    pub(crate) word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    /// Prefix sums of `word_group_sparse_masks[i].len()`.
+    pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
+    pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense output masks for quad groups whose sparse replay is more
+    /// expensive than a sequential output-buffer scan.
+    pub(crate) quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
+    pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense output masks for byte groups whose sparse replay is more
+    /// expensive than a sequential output-buffer scan.
+    pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
+    pub(crate) word_group_sparse_total_entries: usize,
+    pub(crate) word_group_sparse_max_entries: usize,
+    /// Precomputed buf output for the full internal token universe (OR of all word_group_buf_masks).
+    pub(crate) all_tokens_buf_mask: Box<[u32]>,
+    pub(crate) internal_token_dense_words: usize,
+    pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
+    pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
+    pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
+    /// Final-weight token sets eligible for the direct sparse-intersection
+    /// path. Their full output masks are intentionally not materialized: the
+    /// runtime intersects them with the current dense state on every use.
+    pub(crate) direct_sparse_weight_token_sets: DirectSparseWeightTokenSetCache,
+    /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
+    /// the dense bitmap of internal tokens that terminal covers in that state.
+    pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
+    /// Exact masks lazily materialized for delayed-exclusion pairs that are not
+    /// represented by `possible_matches`. Shared across sequence states cloned
+    /// from this immutable constraint.
+    pub(crate) seed_terminal_dense_fallback: Arc<Mutex<SeedTerminalDenseMasks>>,
+    /// Dense bitmap of the full internal token universe.
+    pub(crate) seed_universe_dense: DenseWords,
+    /// Fast DWA transition lookup (FxHashMap instead of BTreeMap).
+    /// Built from parser_dwa.states at load/build time.
+    pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Runtime-only readiness marker for caches derived from the final parser
+    /// DWA and final internal-token coordinate. Composition may build these at
+    /// the final parser-union boundary so generic post-link finalization does
+    /// not rescan the same parser artifact.
+    pub(crate) parser_runtime_caches_prebuilt: bool,
+    /// Runtime-only parser-DWA transitions with exact dense masks materialized
+    /// for the final internal tokenizer states present in each transition
+    /// weight; absent states are implicitly empty. Indexed-DAG masking uses
+    /// this table directly instead of hashing a transition tuple and lazily
+    /// rebuilding the same dense transition record at runtime.
+    pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
+    /// Runtime-only exact dense final weights, indexed by parser-DWA state.
+    /// This is the final-weight analogue of `indexed_dag_dense_transitions`:
+    /// absent tokenizer states are empty, and full final weights stay implicit.
+    pub(crate) indexed_dag_dense_finals: Vec<IndexedDagDenseTransitionMasks>,
+    /// Dense tokenizer transition lookup for commit-time byte scans.
+    pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
+    /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
+    /// Indexed by internal token ID; None for light tokens.
+    pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
+    /// Flattened contiguous array of all internal token buf mask entries.
+    /// All tokens' (word_index, or_mask) pairs concatenated in token order.
+    /// Improves cache locality vs separate Vec allocations per token.
+    pub(crate) internal_token_buf_flat: Box<[(u16, u32)]>,
+    /// Offsets into `internal_token_buf_flat` for each internal token.
+    /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
+    /// Length = n_internal + 1 (sentinel at end).
+    pub(crate) internal_token_buf_offsets: Box<[u32]>,
+    /// Pre-computed total cost (sum of entry counts) for all internal tokens.
+    /// Used to avoid O(n_internal) cost analysis in the convert phase.
+    pub(crate) total_internal_buf_cost: usize,
+    /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
+    pub(crate) heavy_token_indices: Vec<usize>,
+    /// Total cost of all heavy tokens combined (n_heavy × buf_len).
+    pub(crate) heavy_total_cost: usize,
+    /// Average cost per light token: (total_cost - heavy_total) / n_light.
+    /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
+    pub(crate) light_avg_cost_x256: usize,
+    /// Exact materialization cost per internal token, after heavy-token dense masks
+    /// have been chosen.
+    pub(crate) internal_token_buf_op_costs: Vec<usize>,
+    /// Exact materialization cost per 64-token internal word group.
+    pub(crate) word_group_buf_op_costs: Vec<usize>,
+    /// Self-contained final internal-token -> original-token bitset materializer.
+    pub(crate) final_mask_mapping: FinalMaskMapping,
+    /// Optional exact quotient of positive parser-state labels used by composed
+    /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
+    /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
+    /// transitions always take precedence, followed by this label, then the
+    /// ordinary global DEFAULT. Empty for ordinary non-composed constraints.
+    pub(crate) parser_state_domain_labels: Vec<i32>,
+    /// Exact source expression for the globally erasable ignore terminal.
+    ///
+    /// Tokenizer source expressions are compile-time data and are normally
+    /// omitted from artifacts. Retaining this one expression lets a loaded
+    /// compiled constraint participate in later subgrammar composition without
+    /// conservatively degrading an identical global ignore into scoped skips.
+    pub(crate) ignore_expr: Option<Expr>,
+}
+
+// Private Serde definition used only by the versioned artifact encoder/decoder.
+// Keeping this remote definition separate prevents `Constraint` itself from
+// implementing Serde, so `Constraint::save`/`Constraint::load` remain the only
+// public persistence contract.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(remote = "Constraint")]
+pub(crate) struct ConstraintSerde {
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(default)]

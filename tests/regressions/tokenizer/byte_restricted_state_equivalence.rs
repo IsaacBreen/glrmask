@@ -26,7 +26,7 @@ fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token(
 
     // Exactly one grammar terminal, and exactly the two necessary tokens.
     let vocab = Vocab::new(vec![(0, b"{\"".to_vec()), (1, b"a".to_vec())]);
-    let constraint = Constraint::from_lark("start: A\nA: \"{\\\"a\"", &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::lark("start: A\nA: \"{\\\"a\""), &vocab, &glrmask::CompileOptions::default()).unwrap();
 
     let mut state = constraint.start();
     assert!(
@@ -36,5 +36,5 @@ fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token(
     state.commit_token(0).unwrap();
     assert!(contains(&state.mask(), 1));
     state.commit_token(1).unwrap();
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
 }

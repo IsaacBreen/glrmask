@@ -1,3 +1,4 @@
+use crate::runtime::artifact::ConstraintSerde;
 use crate::runtime::Constraint;
 use crate::automata::regex::Expr;
 use serde::{Deserialize, Serialize};
@@ -18,20 +19,59 @@ const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
 const CONSTRAINT_SERIALIZATION_BUFFER_LEN: usize = 128 * 1024;
 
+fn serialize_constraint<S>(constraint: &&Constraint, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    ConstraintSerde::serialize(*constraint, serializer)
+}
+
+fn deserialize_constraint<'de, D>(deserializer: D) -> Result<Constraint, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ConstraintSerde::deserialize(deserializer)
+}
+
+struct DeserializedConstraint(Constraint);
+
+impl<'de> serde::Deserialize<'de> for DeserializedConstraint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ConstraintSerde::deserialize(deserializer).map(Self)
+    }
+}
+
+struct SerializedConstraint<'a>(&'a Constraint);
+
+impl serde::Serialize for SerializedConstraint<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ConstraintSerde::serialize(self.0, serializer)
+    }
+}
+
 #[derive(Serialize)]
 struct ConstraintArtifactV10Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV10 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
 }
 
 #[derive(Serialize)]
 struct ConstraintArtifactV11Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -39,6 +79,7 @@ struct ConstraintArtifactV11Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV11 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -46,6 +87,7 @@ struct ConstraintArtifactV11 {
 
 #[derive(Serialize)]
 struct ConstraintArtifactV12Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -54,6 +96,7 @@ struct ConstraintArtifactV12Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV12 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -62,6 +105,7 @@ struct ConstraintArtifactV12 {
 
 #[derive(Serialize)]
 struct ConstraintArtifactV13Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -71,6 +115,7 @@ struct ConstraintArtifactV13Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV13 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -80,6 +125,7 @@ struct ConstraintArtifactV13 {
 
 #[derive(Serialize)]
 struct ConstraintArtifactV14Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -91,6 +137,7 @@ struct ConstraintArtifactV14Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV14 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -102,6 +149,7 @@ struct ConstraintArtifactV14 {
 
 #[derive(Serialize)]
 struct ConstraintArtifactV15Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -115,6 +163,7 @@ struct ConstraintArtifactV15Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV15 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -128,6 +177,7 @@ struct ConstraintArtifactV15 {
 
 #[derive(Serialize)]
 struct ConstraintArtifactV16Ref<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
     ignore_expr: &'a Option<Expr>,
     terminal_exprs: Option<&'a [Expr]>,
@@ -143,6 +193,7 @@ struct ConstraintArtifactV16Ref<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactV16 {
+    #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
     terminal_exprs: Option<Vec<Expr>>,
@@ -442,8 +493,9 @@ impl Constraint {
             constraint.ignore_expr = artifact.ignore_expr;
             constraint
         } else {
-            bincode::deserialize(serialized)
+            bincode::deserialize::<DeserializedConstraint>(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .0
         };
         if !constraint.parser_state_domain_labels.is_empty() {
             if constraint.parser_state_domain_labels.len() != constraint.table.num_states as usize {
@@ -521,11 +573,11 @@ mod tests {
         let constraint = tiny_constraint();
         let saved = constraint.save();
         assert!(saved.starts_with(&CONSTRAINT_MAGIC));
-        assert!(bincode::deserialize::<Constraint>(&saved).is_err());
+        assert!(bincode::deserialize::<DeserializedConstraint>(&saved).is_err());
         let loaded = Constraint::load(&saved).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());
 
-        let raw = bincode::serialize(&constraint).unwrap();
+        let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
         assert!(Constraint::load(&raw)
             .unwrap_err()
             .to_string()
@@ -554,7 +606,7 @@ mod tests {
             u16::from_le_bytes([saved[8], saved[9]]),
             CONSTRAINT_VERSION
         );
-        let raw = bincode::serialize(&constraint).unwrap();
+        let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
 
         let loaded = Constraint::load(&envelope(LEGACY_CONSTRAINT_VERSION, &raw))
             .expect("legacy artifact should remain loadable");
@@ -566,7 +618,7 @@ mod tests {
     fn constraint_envelope_loads_previous_compressed_payload_without_ignore_descriptor() {
         let constraint = ignored_constraint();
         assert!(constraint.ignore_expr.is_some());
-        let raw = bincode::serialize(&constraint).unwrap();
+        let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
         let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
         let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
@@ -839,7 +891,7 @@ mod tests {
     #[test]
     fn constraint_envelope_rejects_invalid_compressed_payloads() {
         let constraint = tiny_constraint();
-        let raw = bincode::serialize(&constraint).unwrap();
+        let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
         let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
 
         let mut wrong_raw_len = Vec::with_capacity(8 + compressed.len());

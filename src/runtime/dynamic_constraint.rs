@@ -709,7 +709,7 @@ impl DynamicConstraint {
 
     /// Load either a self-contained artifact or a transfer artifact whose
     /// vocabulary bytes are supplied out of band.
-    pub fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
+    pub(crate) fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
         if !bytes.starts_with(&DYNAMIC_TRANSFER_MAGIC) {
             return Self::load(bytes);
         }
@@ -961,6 +961,7 @@ impl DynamicConstraint {
 }
 
 /// Mutable per-sequence state for a [`DynamicConstraint`].
+#[derive(Clone)]
 pub struct DynamicConstraintState<'a> {
     alternatives: Vec<ConstraintState<'a>>,
     mask_len: usize,
@@ -980,21 +981,30 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
     /// Advance the state by raw bytes.
-    pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.retain_committing(|state| state.commit_bytes(bytes))
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
+        self.commit_bytes_raw(bytes).map_err(crate::Error::State)
+    }
+
+    fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.retain_committing(|state| state.commit_bytes_raw(bytes))
     }
 
     /// Advance the state by one model token ID.
-    pub fn commit_token(&mut self, token_id: u32) -> Result<(), String> {
-        self.retain_committing(|state| state.commit_token_dynamic(token_id))
+    pub fn commit_token(&mut self, token_id: u32) -> crate::Result<()> {
+        if self
+            .alternatives
+            .iter()
+            .all(|state| !state.knows_token_id(token_id))
+        {
+            return Err(crate::Error::State(format!(
+                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+            )));
+        }
+        self.commit_token_raw(token_id).map_err(crate::Error::State)
     }
 
-    /// Advance the state by a sequence of model token IDs.
-    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> Result<(), String> {
-        for &token_id in token_ids {
-            self.commit_token(token_id)?;
-        }
-        Ok(())
+    fn commit_token_raw(&mut self, token_id: u32) -> Result<(), String> {
+        self.retain_committing(|state| state.commit_token_dynamic(token_id))
     }
 
     /// Fill `buf` with the allowed-token mask as a packed bitset.
@@ -1018,25 +1028,6 @@ impl<'a> DynamicConstraintState<'a> {
         }
     }
 
-    /// Fill the mask, returning an error if generation exceeds `timeout_ms`.
-    pub fn fill_mask_bounded(&self, buf: &mut [u32], timeout_ms: u64) -> Result<(), String> {
-        assert!(buf.len() >= self.mask_len, "mask buffer is smaller than constraint mask");
-        buf.fill(0);
-        let Some((first, rest)) = self.alternatives.split_first() else {
-            return Ok(());
-        };
-        first.fill_mask_dynamic_bounded(buf, timeout_ms)?;
-        let mut scratch = vec![0u32; buf.len()];
-        for state in rest {
-            state.fill_mask_dynamic_bounded(&mut scratch, timeout_ms)?;
-            for (target, source) in buf.iter_mut().zip(&scratch) {
-                *target |= *source;
-            }
-            scratch.fill(0);
-        }
-        Ok(())
-    }
-
     /// Return a forced token sequence when one can be determined.
     pub fn forced(&self) -> Vec<u32> {
         let Some((first, rest)) = self.alternatives.split_first() else {
@@ -1049,14 +1040,16 @@ impl<'a> DynamicConstraintState<'a> {
             .unwrap_or_default()
     }
 
-    /// Return whether the committed prefix completes the grammar.
-    pub fn is_complete(&self) -> bool {
-        self.alternatives.iter().any(ConstraintState::is_complete)
+    /// Return whether the committed prefix is currently accepted by the grammar.
+    ///
+    /// An accepting prefix may still admit additional tokens.
+    pub fn is_accepting(&self) -> bool {
+        self.alternatives.iter().any(ConstraintState::is_accepting)
     }
 
-    /// Return whether generation has finished.
-    pub fn is_finished(&self) -> bool {
-        self.is_complete()
+    /// Return whether the committed prefix has been irrecoverably rejected.
+    pub fn is_rejected(&self) -> bool {
+        self.alternatives.is_empty()
     }
 
     /// Return the allowed-token mask as a packed `u32` bitset.
@@ -1126,7 +1119,7 @@ mod tests {
         assert_eq!(normal_state.mask(), dynamic_state.mask());
         normal_state.commit_token(1).unwrap();
         dynamic_state.commit_token(1).unwrap();
-        assert_eq!(normal_state.is_complete(), dynamic_state.is_complete());
+        assert_eq!(normal_state.is_accepting(), dynamic_state.is_accepting());
         assert_eq!(normal_state.mask(), dynamic_state.mask());
     }
 
@@ -1335,7 +1328,7 @@ mod tests {
         state.commit_token(2).unwrap();
         assert_ne!(state.mask()[0] & (1 << 3), 0);
         state.commit_token(3).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1353,7 +1346,7 @@ mod tests {
         let dynamic = compile_compressed_dynamic(&grammar, &vocab);
         assert!(!dynamic.inner.possible_matches_complete);
 
-        let mut static_state = constraint.start_with_rollback(4);
+        let mut static_state = constraint.start();
         let mut dynamic_state = dynamic.start();
         assert_eq!(static_state.mask(), dynamic_state.mask());
         assert_eq!(static_state.forced(), dynamic_state.forced());
@@ -1362,15 +1355,16 @@ mod tests {
             static_state.commit_token(token).unwrap();
             dynamic_state.commit_token(token).unwrap();
             assert_eq!(static_state.mask(), dynamic_state.mask());
-            assert_eq!(static_state.is_complete(), dynamic_state.is_complete());
+            assert_eq!(static_state.is_accepting(), dynamic_state.is_accepting());
         }
 
         let before_third = static_state.mask();
+        let checkpoint = static_state.clone();
         static_state.commit_token(0).unwrap();
         dynamic_state.commit_token(0).unwrap();
         let after_third = static_state.mask();
         assert_eq!(after_third, dynamic_state.mask());
-        static_state.rollback(1).unwrap();
+        static_state = checkpoint;
         assert_eq!(static_state.mask(), before_third);
         static_state.commit_token(0).unwrap();
         assert_eq!(static_state.mask(), after_third);
@@ -1384,7 +1378,7 @@ mod tests {
             loaded_state.commit_token(token).unwrap();
             original_state.commit_token(token).unwrap();
             assert_eq!(loaded_state.mask(), original_state.mask());
-            assert_eq!(loaded_state.is_complete(), original_state.is_complete());
+            assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
         }
     }
 

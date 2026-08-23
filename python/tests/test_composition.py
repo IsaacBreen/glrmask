@@ -38,8 +38,8 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
     assert actual.mask().tolist() == expected.mask().tolist()
     actual.commit_token(2)
     expected.commit_token(2)
-    assert actual.is_finished()
-    assert expected.is_finished()
+    assert actual.is_accepting()
+    assert expected.is_accepting()
 
 
 def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
@@ -83,8 +83,8 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     assert actual.mask().tolist()[1]
     actual.commit_token(1)
     expected.commit_token(1)
-    assert actual.is_finished()
-    assert expected.is_finished()
+    assert actual.is_accepting()
+    assert expected.is_accepting()
 
 
 def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
@@ -124,8 +124,8 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
             assert actual.mask().tolist() == expected.mask().tolist()
             actual.commit_token(token)
             expected.commit_token(token)
-        assert actual.is_finished()
-        assert expected.is_finished()
+        assert actual.is_accepting()
+        assert expected.is_accepting()
 
 
 def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
@@ -174,8 +174,8 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
             assert actual.mask().tolist() == expected.mask().tolist()
             actual.commit_token(token)
             expected.commit_token(token)
-        assert actual.is_finished()
-        assert expected.is_finished()
+        assert actual.is_accepting()
+        assert expected.is_accepting()
 
 
 def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> None:
@@ -226,8 +226,8 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
             assert actual.mask().tolist() == expected.mask().tolist()
             actual.commit_token(token)
             expected.commit_token(token)
-        assert actual.is_finished()
-        assert expected.is_finished()
+        assert actual.is_accepting()
+        assert expected.is_accepting()
 
 
 def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
@@ -275,8 +275,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
             assert actual.mask().tolist() == expected.mask().tolist()
             actual.commit_token(token)
             expected.commit_token(token)
-        assert actual.is_finished()
-        assert expected.is_finished()
+        assert actual.is_accepting()
+        assert expected.is_accepting()
 
 
 def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
@@ -310,7 +310,7 @@ def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
         assert mask[end_token]
         assert state.forced() == [end_token]
         state.commit_token(end_token)
-        assert state.is_finished()
+        assert state.is_accepting()
 
     loaded = glrmask.Constraint.load(composed.save(), vocab)
     loaded_state = loaded.start()

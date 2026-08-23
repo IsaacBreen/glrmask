@@ -27,10 +27,10 @@ fn recursive_duplicate_anyof_ref_closed_object_does_not_overflow() {
     }"##;
 
     let vocab = byte_vocab();
-    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"{}").unwrap();
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
 }
 
 #[test]
@@ -60,8 +60,8 @@ fn recursive_mixed_anyof_ref_closed_object_does_not_overflow() {
     }"##;
 
     let vocab = byte_vocab();
-    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"{}").unwrap();
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
 }

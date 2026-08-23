@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
 
 fn token_allowed(mask: &[u32], token_id: usize) -> bool {
     let word = token_id / 32;
@@ -10,7 +10,12 @@ fn main() {
     let grammar = r#"start ::= "a" start "b" | "a" "b""#;
     let vocab = Vocab::new(
         vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-    let constraint = Constraint::from_ebnf(grammar, &vocab).unwrap();
+    let constraint = Constraint::compile(
+        Grammar::ebnf(grammar),
+        &vocab,
+        &CompileOptions::default(),
+    )
+    .unwrap();
     let mut state = constraint.start();
 
     // Generate aabb. Before the first b, either another a can open a deeper
@@ -30,6 +35,6 @@ fn main() {
     assert!(token_allowed(&state.mask(), 1));
     state.commit_token(1).unwrap();
 
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
     println!("accepted: aabb");
 }

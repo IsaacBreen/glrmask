@@ -17,6 +17,9 @@ pub enum Error {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Constraint state error: {0}")]
+    State(String),
 }
 
 pub type GlrMaskError = Error;

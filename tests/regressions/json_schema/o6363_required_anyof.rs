@@ -66,7 +66,7 @@ fn artifact_schema() -> String {
 fn test_required_propagated_through_anyof_base_merge() {
     let vocab = build_small_vocab();
     let schema = artifact_schema();
-    let constraint = Constraint::from_json_schema(&schema, &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
     let mut state = constraint.start();
 
     // Valid: `{"image": "x"}` — image is present (required + first in order).
@@ -74,7 +74,7 @@ fn test_required_propagated_through_anyof_base_merge() {
     for &byte in valid.iter() {
         state.commit_bytes(&[byte]).unwrap();
     }
-    assert!(state.is_finished());
+    assert!(state.is_accepting());
 
     // After `{"image": "x", "`, kaniko should be allowed (variant 1
     // allows it after image in declaration order).

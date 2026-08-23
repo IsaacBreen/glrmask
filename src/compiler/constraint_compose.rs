@@ -435,7 +435,19 @@ fn build_parser_default_domain_plan(
 
 pub(crate) struct CompiledSubgrammarInput<'a> {
     pub(crate) placeholder_terminal: u32,
+    /// Additional parent terminals that call the same compiled child. The
+    /// child parser/tokenizer artifacts are incorporated once and shared by
+    /// every listed call site.
+    pub(crate) additional_placeholder_terminals: &'a [u32],
     pub(crate) constraint: &'a Constraint,
+}
+
+impl<'a> CompiledSubgrammarInput<'a> {
+    #[inline]
+    fn placeholder_terminals(&self) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(self.placeholder_terminal)
+            .chain(self.additional_placeholder_terminals.iter().copied())
+    }
 }
 
 pub(crate) struct ConstraintComposition {
@@ -2183,9 +2195,13 @@ fn compose_nonnullable_grammar_adjacency_summaries(
     components: &[&Constraint],
     terminal_offsets: &[u32],
     placeholder_terminals: &[u32],
+    placeholder_component_indices: &[usize],
 ) -> Result<(CompositionGrammarSummary, BTreeSet<(u32, u32)>), String> {
     if components.len() != terminal_offsets.len()
-        || placeholder_terminals.len() + 1 != components.len()
+        || placeholder_terminals.len() != placeholder_component_indices.len()
+        || placeholder_component_indices
+            .iter()
+            .any(|&component| component == 0 || component >= components.len())
     {
         return Err("component grammar-summary shape mismatch".into());
     }
@@ -2206,8 +2222,8 @@ fn compose_nonnullable_grammar_adjacency_summaries(
     let parent = &summaries[0];
     let placeholder_to_component = placeholder_terminals
         .iter()
-        .enumerate()
-        .map(|(child, &terminal)| (terminal, child + 1))
+        .copied()
+        .zip(placeholder_component_indices.iter().copied())
         .collect::<BTreeMap<_, _>>();
 
     let expand_first = |terminal: u32| -> Vec<u32> {
@@ -11385,6 +11401,7 @@ fn build_boundary_repair(
                 components,
                 &composed_table.terminal_offsets,
                 &composed_table.placeholder_terminals,
+                &composed_table.placeholder_component_indices,
             )?;
             // Downstream fast-path code needs only terminal-domain metadata.
             // FIRST/FOLLOW/rule analysis has been replaced exactly by the
@@ -11599,6 +11616,7 @@ fn build_boundary_repair(
             components,
             &composed_table.terminal_offsets,
             &composed_table.placeholder_terminals,
+            &composed_table.placeholder_component_indices,
         )?;
         let spliced_follows = &spliced_summary.allowed_follows;
         let reference = compute_ever_allowed_follows(&analyzed);
@@ -12674,7 +12692,7 @@ fn legacy_splice_has_only_byte_terminal_continuations(
     }
     let placeholders = children
         .iter()
-        .map(|child| child.placeholder_terminal)
+        .flat_map(CompiledSubgrammarInput::placeholder_terminals)
         .collect::<BTreeSet<_>>();
     let boundary_controlled_followers = placeholders
         .iter()
@@ -13124,6 +13142,68 @@ fn finalize_composed_constraint(
 /// lexers, parse tables, parser DWAs, and possible-match tables are transported
 /// and reused; only the restricted cross-component boundary repair is compiled
 /// from the merged artifacts.
+fn validate_compiled_subgrammar_placeholders(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    vocab: &Vocab,
+    component_end_token_ids: &BTreeSet<u32>,
+) -> Result<(), String> {
+    for (child_index, child) in children.iter().enumerate() {
+        for placeholder_terminal in child.placeholder_terminals() {
+            let has_byte_token_matches = parent
+                .possible_matches
+                .get(&placeholder_terminal)
+                .is_some_and(|weight| !weight.is_empty());
+            let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
+                special.terminal_id == placeholder_terminal
+                    && vocab.entries_map().contains_key(&special.token_id)
+            });
+            if has_byte_token_matches || has_exact_token_match {
+                return Err(format!(
+                    "subgrammar placeholder terminal {placeholder_terminal} for child {child_index} matches one or more model-vocabulary tokens in the compiled parent; placeholders must be non-vocabulary sentinels (for example an @token(...) id outside the supplied vocabulary)",
+                ));
+            }
+            for special in parent
+                .special_token_terminals
+                .iter()
+                .filter(|special| special.terminal_id == placeholder_terminal)
+            {
+                if component_end_token_ids.contains(&special.token_id) {
+                    return Err(format!(
+                        "subgrammar placeholder terminal {placeholder_terminal} for child {child_index} uses token ID {}, which is also configured as a grammar-level end token; every replaced placeholder must use a unique sentinel token ID",
+                        special.token_id,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_no_live_placeholder_specials(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    live_special_token_ids: &BTreeSet<u32>,
+) -> Result<(), String> {
+    for child in children {
+        for placeholder_terminal in child.placeholder_terminals() {
+            for special in parent
+                .special_token_terminals
+                .iter()
+                .filter(|special| special.terminal_id == placeholder_terminal)
+            {
+                if live_special_token_ids.contains(&special.token_id) {
+                    return Err(format!(
+                        "subgrammar placeholder terminal {placeholder_terminal} uses token ID {}, which is also used by a live special terminal after composition; every replaced placeholder must use a unique sentinel token ID",
+                        special.token_id,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn compose_constraints(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
@@ -13153,35 +13233,12 @@ pub(crate) fn compose_constraints(
             ));
         }
     }
-    for (child_index, child) in children.iter().enumerate() {
-        let has_byte_token_matches = parent
-            .possible_matches
-            .get(&child.placeholder_terminal)
-            .is_some_and(|weight| !weight.is_empty());
-        let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
-            special.terminal_id == child.placeholder_terminal
-                && vocab.entries_map().contains_key(&special.token_id)
-        });
-        if has_byte_token_matches || has_exact_token_match
-        {
-            return Err(format!(
-                "subgrammar placeholder terminal {} for child {child_index} matches one or more model-vocabulary tokens in the compiled parent; placeholders must be non-vocabulary sentinels (for example an @token(...) id outside the supplied vocabulary)",
-                child.placeholder_terminal,
-            ));
-        }
-        for special in parent
-            .special_token_terminals
-            .iter()
-            .filter(|special| special.terminal_id == child.placeholder_terminal)
-        {
-            if component_end_token_ids.contains(&special.token_id) {
-                return Err(format!(
-                    "subgrammar placeholder terminal {} for child {child_index} uses token ID {}, which is also configured as a grammar-level end token; every replaced placeholder must use a unique sentinel token ID",
-                    child.placeholder_terminal, special.token_id,
-                ));
-            }
-        }
-    }
+    validate_compiled_subgrammar_placeholders(
+        parent,
+        children,
+        vocab,
+        &component_end_token_ids,
+    )?;
     let global_ignores = component_ignores_are_globally_erasable(parent, children);
     if compose_profile_enabled() {
         eprintln!("[glrmask/profile][constraint_linker_inputs] global_ignores={} parent_controls={} child_controls={:?} eof_rewrites_clean={} all_children_nonnullable={} legacy_follow_safe={} child_count={}",
@@ -13197,6 +13254,7 @@ pub(crate) fn compose_constraints(
         .iter()
         .map(|child| SubgrammarTableInput {
             placeholder_terminal: child.placeholder_terminal,
+            additional_placeholder_terminals: child.additional_placeholder_terminals,
             table: &child.constraint.table,
             ignore_terminal: (!global_ignores)
                 .then_some(child.constraint.ignore_terminal)
@@ -13306,6 +13364,7 @@ pub(crate) fn compose_constraints(
             &component_constraints,
             &composed_table.terminal_offsets,
             &composed_table.placeholder_terminals,
+            &composed_table.placeholder_component_indices,
         )
         .ok()
         .map(|(summary, _)| summary)
@@ -13424,20 +13483,7 @@ pub(crate) fn compose_constraints(
         .intersection(&live_special_token_ids)
         .copied()
         .collect::<Vec<_>>();
-    for child in children {
-        for special in parent
-            .special_token_terminals
-            .iter()
-            .filter(|special| special.terminal_id == child.placeholder_terminal)
-        {
-            if live_special_token_ids.contains(&special.token_id) {
-                return Err(format!(
-                    "subgrammar placeholder terminal {} uses token ID {}, which is also used by a live special terminal after composition; every replaced placeholder must use a unique sentinel token ID",
-                    child.placeholder_terminal, special.token_id,
-                ));
-            }
-        }
-    }
+    validate_no_live_placeholder_specials(parent, children, &live_special_token_ids)?;
     let original_token_ids = vocab
         .entries_map()
         .keys()
@@ -13932,34 +13978,12 @@ pub(crate) fn compose_constraints_owned_parent(
             ));
         }
     }
-    for (child_index, child) in children.iter().enumerate() {
-        let has_byte_token_matches = parent
-            .possible_matches
-            .get(&child.placeholder_terminal)
-            .is_some_and(|weight| !weight.is_empty());
-        let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
-            special.terminal_id == child.placeholder_terminal
-                && vocab.entries_map().contains_key(&special.token_id)
-        });
-        if has_byte_token_matches || has_exact_token_match {
-            return Err(format!(
-                "subgrammar placeholder terminal {} for child {child_index} matches one or more model-vocabulary tokens in the compiled parent; placeholders must be non-vocabulary sentinels (for example an @token(...) id outside the supplied vocabulary)",
-                child.placeholder_terminal,
-            ));
-        }
-        for special in parent
-            .special_token_terminals
-            .iter()
-            .filter(|special| special.terminal_id == child.placeholder_terminal)
-        {
-            if component_end_token_ids.contains(&special.token_id) {
-                return Err(format!(
-                    "subgrammar placeholder terminal {} for child {child_index} uses token ID {}, which is also configured as a grammar-level end token; every replaced placeholder must use a unique sentinel token ID",
-                    child.placeholder_terminal, special.token_id,
-                ));
-            }
-        }
-    }
+    validate_compiled_subgrammar_placeholders(
+        &parent,
+        children,
+        vocab,
+        &component_end_token_ids,
+    )?;
 
     let global_ignores = component_ignores_are_globally_erasable(&parent, children);
     if !global_ignores
@@ -14009,6 +14033,7 @@ pub(crate) fn compose_constraints_owned_parent(
         .iter()
         .map(|child| SubgrammarTableInput {
             placeholder_terminal: child.placeholder_terminal,
+            additional_placeholder_terminals: child.additional_placeholder_terminals,
             table: &child.constraint.table,
             ignore_terminal: (!global_ignores)
                 .then_some(child.constraint.ignore_terminal)
@@ -14115,6 +14140,7 @@ pub(crate) fn compose_constraints_owned_parent(
             &component_constraints,
             &composed_table.terminal_offsets,
             &composed_table.placeholder_terminals,
+            &composed_table.placeholder_component_indices,
         )
         .ok()
         .map(|(summary, _)| summary)
@@ -14227,20 +14253,7 @@ pub(crate) fn compose_constraints_owned_parent(
         .intersection(&live_special_token_ids)
         .copied()
         .collect::<Vec<_>>();
-    for child in children {
-        for special in parent
-            .special_token_terminals
-            .iter()
-            .filter(|special| special.terminal_id == child.placeholder_terminal)
-        {
-            if live_special_token_ids.contains(&special.token_id) {
-                return Err(format!(
-                    "subgrammar placeholder terminal {} uses token ID {}, which is also used by a live special terminal after composition; every replaced placeholder must use a unique sentinel token ID",
-                    child.placeholder_terminal, special.token_id,
-                ));
-            }
-        }
-    }
+    validate_no_live_placeholder_specials(&parent, children, &live_special_token_ids)?;
     let specials_ms = specials_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_ids_started_at = Instant::now();
     let original_token_ids = merged_original_token_ids(vocab, &special_token_terminals);
@@ -15310,6 +15323,7 @@ mod tests {
                 }
                 inputs.push(CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: child,
                 });
             }
@@ -15334,6 +15348,7 @@ mod tests {
                 }
                 inputs.push(CompiledSubgrammarInput {
                     placeholder_terminal,
+                    additional_placeholder_terminals: &[],
                     constraint: child,
                 });
             }
@@ -15377,18 +15392,21 @@ mod tests {
         let children = [
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "LEFT"),
-                constraint: &child,
+                additional_placeholder_terminals: &[],
+constraint: &child,
             },
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "RIGHT"),
-                constraint: &loaded_child,
+                additional_placeholder_terminals: &[],
+constraint: &loaded_child,
             },
         ];
         let table_inputs = children
             .iter()
             .map(|child| SubgrammarTableInput {
                 placeholder_terminal: child.placeholder_terminal,
-                table: &child.constraint.table,
+                additional_placeholder_terminals: &[],
+table: &child.constraint.table,
                 ignore_terminal: child.constraint.ignore_terminal,
                 start_nullable: child.constraint.table.embedded_start_nullable(),
             })
@@ -15468,7 +15486,7 @@ mod tests {
         );
         let mut actual = runtime_composed.start();
         actual.commit_token(0).unwrap();
-        assert!(actual.is_finished());
+        assert!(actual.is_accepting());
 
     }
 
@@ -15507,18 +15525,21 @@ mod tests {
         let children = [
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "LEFT"),
-                constraint: &child,
+                additional_placeholder_terminals: &[],
+constraint: &child,
             },
             CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "RIGHT"),
-                constraint: &child,
+                additional_placeholder_terminals: &[],
+constraint: &child,
             },
         ];
         let table_inputs = children
             .iter()
             .map(|child| SubgrammarTableInput {
                 placeholder_terminal: child.placeholder_terminal,
-                table: &child.constraint.table,
+                additional_placeholder_terminals: &[],
+table: &child.constraint.table,
                 ignore_terminal: child.constraint.ignore_terminal,
                 start_nullable: child.constraint.table.embedded_start_nullable(),
             })
@@ -15623,7 +15644,7 @@ mod tests {
             for token in suffix {
                 cursor.commit_token(token).unwrap();
             }
-            assert!(cursor.is_finished());
+            assert!(cursor.is_accepting());
         }
     }
 
@@ -15709,7 +15730,7 @@ mod tests {
                 for &byte in bytes {
                     state.commit_token(byte as u32).unwrap();
                 }
-                assert!(state.is_finished(), "recomposed runtime-product child rejected {bytes:?}");
+                assert!(state.is_accepting(), "recomposed runtime-product child rejected {bytes:?}");
             }
         }
     }
@@ -16063,7 +16084,8 @@ mod tests {
             None,
             &[SubgrammarTableInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
-                table: &child.table,
+                additional_placeholder_terminals: &[],
+table: &child.table,
                 ignore_terminal: child.ignore_terminal,
                 start_nullable: child.table.embedded_start_nullable(),
             }],
@@ -16115,12 +16137,12 @@ mod tests {
     fn assert_accepts(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
         state.commit_bytes(bytes).unwrap();
-        assert!(state.is_finished(), "expected {:?} to finish", bytes);
+        assert!(state.is_accepting(), "expected {:?} to finish", bytes);
     }
 
     fn assert_rejects(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
-        let accepted = state.commit_bytes(bytes).is_ok() && state.is_finished();
+        let accepted = state.commit_bytes(bytes).is_ok() && state.is_accepting();
         assert!(!accepted, "expected {:?} to reject", bytes);
     }
 
@@ -16196,8 +16218,8 @@ mod tests {
                 );
                 if compare_completion {
                     assert_eq!(
-                        actual_state.is_finished(),
-                        expected_state.is_finished(),
+                        actual_state.is_accepting(),
+                        expected_state.is_accepting(),
                         "completion mismatch after reachable prefix {prefix:?}",
                     );
                 }
@@ -16621,7 +16643,8 @@ mod tests {
             Some(terminal(&parent, "PARENT_WS")),
             &[SubgrammarTableInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
-                table: &child.table,
+                additional_placeholder_terminals: &[],
+table: &child.table,
                 ignore_terminal: child.ignore_terminal,
                 start_nullable: child.table.embedded_start_nullable(),
             }],
@@ -16699,9 +16722,9 @@ mod tests {
             }
             assert_eq!(actual.mask(), expected.mask());
             assert_eq!(cached.mask(), expected.mask());
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert_eq!(cached.is_finished(), expected.is_finished());
-            assert!(actual.is_finished(), "sequence {sequence:?} should finish");
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert_eq!(cached.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting(), "sequence {sequence:?} should finish");
         }
     }
 
@@ -16880,9 +16903,9 @@ mod tests {
                 "loaded token {token}",
             );
             assert_eq!(reference.commit_token(token).is_ok(), expected, "reference token {token}");
-            assert_eq!(actual.is_complete(), expected, "token {token}");
-            assert_eq!(loaded_state.is_complete(), expected, "loaded token {token}");
-            assert_eq!(reference.is_complete(), expected, "reference token {token}");
+            assert_eq!(actual.is_accepting(), expected, "token {token}");
+            assert_eq!(loaded_state.is_accepting(), expected, "loaded token {token}");
+            assert_eq!(reference.is_accepting(), expected, "reference token {token}");
         }
     }
 
@@ -17004,9 +17027,9 @@ mod tests {
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete(), "composed incomplete for {sequence:?}");
-            assert!(restored.is_complete(), "loaded incomplete for {sequence:?}");
-            assert!(expected.is_complete(), "reference incomplete for {sequence:?}");
+            assert!(actual.is_accepting(), "composed incomplete for {sequence:?}");
+            assert!(restored.is_accepting(), "loaded incomplete for {sequence:?}");
+            assert!(expected.is_accepting(), "reference incomplete for {sequence:?}");
         }
 
         // Parent trivia must not become active while the child scope is still
@@ -17079,14 +17102,14 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete(), "outer incomplete for {sequence:?}");
-            assert!(expected.is_complete(), "outer reference incomplete for {sequence:?}");
+            assert!(actual.is_accepting(), "outer incomplete for {sequence:?}");
+            assert!(expected.is_accepting(), "outer reference incomplete for {sequence:?}");
         }
 
         let mut actual = outer.start();
         let mut expected = outer_monolithic.start();
         assert_eq!(actual.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
-        assert!(!expected.is_complete());
+        assert!(!expected.is_accepting());
     }
 
     #[test]
@@ -17188,8 +17211,8 @@ mod tests {
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         // Leading RIGHT trivia also begins only after return-from-LEFT followed
         // by enter-RIGHT, and must preserve that scope across the token.
@@ -17203,8 +17226,8 @@ mod tests {
         reference.commit_token(3).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         // A multi-byte token containing only RIGHT trivia must itself be a
         // boundary-begin path: return from LEFT, enter RIGHT, consume trivia,
@@ -17223,8 +17246,8 @@ mod tests {
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
     }
 
     #[test]
@@ -17277,8 +17300,8 @@ mod tests {
         reference.commit_token(1).unwrap();
         actual.commit_token(2).unwrap();
         reference.commit_token(2).unwrap();
-        assert!(actual.is_complete());
-        assert!(reference.is_complete());
+        assert!(actual.is_accepting());
+        assert!(reference.is_accepting());
 
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
@@ -17366,9 +17389,9 @@ mod tests {
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete());
-            assert!(restored.is_complete());
-            assert!(expected.is_complete());
+            assert!(actual.is_accepting());
+            assert!(restored.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -17440,9 +17463,9 @@ mod tests {
                 restored_actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_complete());
-            assert!(restored_actual.is_complete());
-            assert!(expected.is_complete());
+            assert!(actual.is_accepting());
+            assert!(restored_actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17613,15 +17636,18 @@ mod tests {
             &[
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "FIRST"),
-                    constraint: &first,
+                    additional_placeholder_terminals: &[],
+constraint: &first,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "SECOND"),
-                    constraint: &second,
+                    additional_placeholder_terminals: &[],
+constraint: &second,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "THIRD"),
-                    constraint: &third,
+                    additional_placeholder_terminals: &[],
+constraint: &third,
                 },
             ],
             &vocab,
@@ -17656,10 +17682,10 @@ mod tests {
 
         let mut composed_bytes = composed.start();
         composed_bytes.commit_bytes(b"[a|b|c]").unwrap();
-        assert!(composed_bytes.is_finished());
+        assert!(composed_bytes.is_accepting());
         let mut monolithic_bytes = monolithic.start();
         monolithic_bytes.commit_bytes(b"[a|b|c]").unwrap();
-        assert!(monolithic_bytes.is_finished());
+        assert!(monolithic_bytes.is_accepting());
 
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
@@ -17669,7 +17695,7 @@ mod tests {
         );
         let mut fused = composed.start();
         fused.commit_token(0).unwrap();
-        assert!(fused.is_finished());
+        assert!(fused.is_accepting());
     }
 
     #[test]
@@ -17731,8 +17757,8 @@ mod tests {
             assert_eq!(actual.forced(), vec![END_TOKEN]);
             actual.commit_token(END_TOKEN).unwrap();
             expected.commit_token(END_TOKEN).unwrap();
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let loaded = Constraint::load(&composed.save()).unwrap();
@@ -17741,7 +17767,7 @@ mod tests {
         loaded_state.commit_token(0).unwrap();
         assert_eq!(loaded_state.forced(), vec![END_TOKEN]);
         loaded_state.commit_token(END_TOKEN).unwrap();
-        assert!(loaded_state.is_finished());
+        assert!(loaded_state.is_accepting());
     }
 
     #[test]
@@ -17797,8 +17823,8 @@ mod tests {
             assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
             actual.commit_token(SPECIAL_TOKEN).unwrap();
             expected.commit_token(SPECIAL_TOKEN).unwrap();
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17848,8 +17874,8 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -17944,8 +17970,8 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let outer = Constraint::from_glrm_grammar(
@@ -18068,6 +18094,88 @@ mod tests {
             &parent,
             &[CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
+                additional_placeholder_terminals: &[],
+constraint: &child,
+            }],
+            &vocab,
+        )
+        .unwrap()
+        .constraint;
+
+        let valid = b"<ab>ab!";
+        let mut expected = monolithic.start();
+        let mut actual = composed.start();
+        for (offset, &byte) in valid.iter().enumerate() {
+            assert_eq!(
+                actual.mask(),
+                expected.mask(),
+                "mask mismatch before offset {offset}, byte {byte:?}",
+            );
+            actual.commit_bytes(&[byte]).unwrap();
+            expected.commit_bytes(&[byte]).unwrap();
+        }
+        assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
+
+        for bytes in [
+            b"<ab>ab!".as_slice(),
+            b"<a>ab!".as_slice(),
+            b"<ab>a!".as_slice(),
+            b"<ab>ab".as_slice(),
+            b"ab>ab!".as_slice(),
+            b"<ab><ab>!".as_slice(),
+        ] {
+            let mut expected = monolithic.start();
+            let expected_accepts = expected.commit_bytes(bytes).is_ok() && expected.is_accepting();
+            let mut actual = composed.start();
+            let actual_accepts = actual.commit_bytes(bytes).is_ok() && actual.is_accepting();
+            assert_eq!(actual_accepts, expected_accepts, "language mismatch for {bytes:?}");
+        }
+        assert_accepts(&composed, valid);
+        assert_rejects(&composed, b"<ab>a!");
+    }
+
+    #[test]
+    fn composed_constraint_reuses_one_child_across_distinct_placeholders() {
+        let vocab = byte_vocab();
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t LEFT ::= @token(998);
+                t RIGHT ::= @token(999);
+                nt document ::= "<" LEFT ">" RIGHT "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                g inner ::= {
+                    start child;
+                    nt child ::= "a" "b";
+                };
+                nt document ::= "<" inner ">" inner "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let left = terminal(&parent, "LEFT");
+        let right = terminal(&parent, "RIGHT");
+        let composed = compose_constraints(
+            &parent,
+            &[CompiledSubgrammarInput {
+                placeholder_terminal: left,
+                additional_placeholder_terminals: &[right],
                 constraint: &child,
             }],
             &vocab,
@@ -18088,23 +18196,8 @@ mod tests {
             expected.commit_bytes(&[byte]).unwrap();
         }
         assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
-
-        for bytes in [
-            b"<ab>ab!".as_slice(),
-            b"<a>ab!".as_slice(),
-            b"<ab>a!".as_slice(),
-            b"<ab>ab".as_slice(),
-            b"ab>ab!".as_slice(),
-            b"<ab><ab>!".as_slice(),
-        ] {
-            let mut expected = monolithic.start();
-            let expected_accepts = expected.commit_bytes(bytes).is_ok() && expected.is_finished();
-            let mut actual = composed.start();
-            let actual_accepts = actual.commit_bytes(bytes).is_ok() && actual.is_finished();
-            assert_eq!(actual_accepts, expected_accepts, "language mismatch for {bytes:?}");
-        }
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
         assert_accepts(&composed, valid);
         assert_rejects(&composed, b"<ab>a!");
     }
@@ -18154,7 +18247,8 @@ mod tests {
             &parent,
             &[CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
-                constraint: &child,
+                additional_placeholder_terminals: &[],
+constraint: &child,
             }],
             &vocab,
         )
@@ -18168,8 +18262,8 @@ mod tests {
             actual.commit_token(token).unwrap();
             expected.commit_token(token).unwrap();
         }
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
     }
 
     #[test]
@@ -18234,11 +18328,13 @@ mod tests {
             &[
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "LEFT"),
-                    constraint: &left,
+                    additional_placeholder_terminals: &[],
+constraint: &left,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "RIGHT"),
-                    constraint: &right,
+                    additional_placeholder_terminals: &[],
+constraint: &right,
                 },
             ],
             &vocab,
@@ -18257,8 +18353,8 @@ mod tests {
             actual_separate.commit_token(token).unwrap();
             expected_separate.commit_token(token).unwrap();
         }
-        assert!(actual_separate.is_finished());
-        assert!(expected_separate.is_finished());
+        assert!(actual_separate.is_accepting());
+        assert!(expected_separate.is_accepting());
 
         let mut expected = monolithic.start();
         let mut actual = composed.start();
@@ -18267,8 +18363,8 @@ mod tests {
             actual.commit_token(token).unwrap();
             expected.commit_token(token).unwrap();
         }
-        assert_eq!(actual.is_finished(), expected.is_finished());
-        assert!(actual.is_finished());
+        assert_eq!(actual.is_accepting(), expected.is_accepting());
+        assert!(actual.is_accepting());
     }
 
     #[test]
@@ -18327,8 +18423,8 @@ mod tests {
                     actual.commit_token(token).unwrap();
                     expected.commit_token(token).unwrap();
                 }
-                assert_eq!(actual.is_finished(), expected.is_finished());
-                assert!(actual.is_finished());
+                assert_eq!(actual.is_accepting(), expected.is_accepting());
+                assert!(actual.is_accepting());
             }
         }
     }
@@ -18434,9 +18530,9 @@ mod tests {
                 restored.commit_token(byte as u32).unwrap();
                 expected.commit_token(byte as u32).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(restored.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(restored.is_accepting());
+            assert!(expected.is_accepting());
         }
     }
 
@@ -18501,8 +18597,8 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert!(actual.is_finished());
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting());
         }
     }
 
@@ -18552,7 +18648,8 @@ mod tests {
             &outer_parent,
             &[CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&outer_parent, "MIDDLE"),
-                constraint: &middle,
+                additional_placeholder_terminals: &[],
+constraint: &middle,
             }],
             &vocab,
         )
@@ -18593,8 +18690,8 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert_eq!(actual.is_finished(), expected.is_finished());
-            assert!(actual.is_finished());
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting());
         }
     }
 
@@ -18681,14 +18778,14 @@ mod tests {
                 roundtripped.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            assert!(actual.is_finished());
-            assert!(roundtripped.is_finished());
-            assert!(expected.is_finished());
+            assert!(actual.is_accepting());
+            assert!(roundtripped.is_accepting());
+            assert!(expected.is_accepting());
         }
 
         let mut crossed = composed.start();
         crossed.commit_token(0).unwrap();
-        assert!(crossed.commit_token(3).is_err() || !crossed.is_finished());
+        assert!(crossed.commit_token(3).is_err() || !crossed.is_accepting());
     }
 
     fn sizeable_json_schema(prefix: &str, choices: usize) -> String {
@@ -18846,7 +18943,7 @@ mod tests {
                 for &token in sequence {
                     total += state.commit_token_timed_ns(token).unwrap();
                 }
-                assert!(state.is_complete());
+                assert!(state.is_accepting());
                 samples.push(total);
             }
             samples.sort_unstable();
@@ -20096,13 +20193,15 @@ mod tests {
             let placeholder = terminal(&core, "PROGRAMMATIC_TOOL_SUFFIX");
             let child = CompiledSubgrammarInput {
                 placeholder_terminal: placeholder,
-                constraint: &dispatch,
+                additional_placeholder_terminals: &[],
+constraint: &dispatch,
             };
             let children = [child];
             let global_ignores = component_ignores_are_globally_erasable(&core, &children);
             let table_inputs = [SubgrammarTableInput {
                 placeholder_terminal: placeholder,
-                table: &dispatch.table,
+                additional_placeholder_terminals: &[],
+table: &dispatch.table,
                 ignore_terminal: (!global_ignores).then_some(dispatch.ignore_terminal).flatten(),
                 start_nullable: dispatch.table.embedded_start_nullable(),
             }];

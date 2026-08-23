@@ -1,6 +1,6 @@
 # Test layout
 
-- `integration.rs`, `end_tokens.rs`, and `rollback.rs` cover the public API.
+- `integration.rs` and `end_tokens.rs` cover the public API.
 - `json_schema/` contains focused cross-cutting JSON Schema suites.
 - `regressions/` contains isolated reproductions grouped by subsystem. Corpus IDs remain in filenames where they are useful for traceability.
 - `fixtures/` contains only data used by a current test.

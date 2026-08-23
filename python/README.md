@@ -56,7 +56,7 @@ assert state.mask().tolist() == [False, True, False]
 state.commit_token(1)
 assert state.mask().tolist() == [False, False, True]
 state.commit_token(2)
-assert state.is_finished()
+assert state.is_accepting()
 ```
 
 `state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass `state.mask(size)` when the model's logits vector is larger than the highest token ID in the vocabulary.
@@ -144,13 +144,10 @@ The main state operations are:
 
 - `mask(size=None)`: return the allowed-token mask.
 - `commit_token(token_id)`: advance by one model token.
-- `commit_tokens(token_ids)`: advance by several model tokens.
 - `commit_bytes(data)`: advance by raw bytes.
 - `forced()`: return a forced token sequence when one can be determined.
-- `is_complete()` and `is_finished()`: report whether the grammar has completed.
-- `is_failed()`: report whether no valid parser state remains.
-
-Enable bounded token rollback with `constraint.start(max_rollback_tokens=N)`, then call `state.rollback(count)`. `state.validate_tokens(token_ids)` returns the longest valid prefix without modifying the state.
+- `is_accepting()`: report whether the current prefix may validly end here.
+- `is_rejected()`: report whether the current prefix is irrecoverably invalid.
 
 ## Cache compiled constraints
 
@@ -168,7 +165,7 @@ constraint = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
 state = constraint.start()
 ```
 
-`DynamicConstraint` and its state also support `save()`, `load()`, `mask()`, `commit_token()`, `commit_tokens()`, `commit_bytes()`, `forced()`, `is_complete()`, and `is_finished()`.
+`DynamicConstraint` uses the same state interface as `Constraint`, including `mask()`, `commit_token()`, `commit_bytes()`, `forced()`, `is_accepting()`, and `is_rejected()`.
 
 ## Grammar formats
 

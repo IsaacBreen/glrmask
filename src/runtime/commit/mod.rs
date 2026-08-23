@@ -1356,8 +1356,8 @@ fn assert_commit_fast_path_equivalence(
         let mut reference_semantic = constraint.start();
         reference_semantic.state = reference_state;
         assert_eq!(
-            actual_semantic.is_complete(),
-            reference_semantic.is_complete(),
+            actual_semantic.is_accepting(),
+            reference_semantic.is_accepting(),
             "commit fast-path completion mismatch for token_id {token_id} bytes {}\nactual={actual_canonical:?}\nreference={reference_canonical:?}",
             format_optional_token_bytes(token_bytes_for_id(constraint, token_id)),
         );
@@ -7521,6 +7521,11 @@ fn commit_bytes_impl_inner(
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn knows_token_id(&self, token_id: u32) -> bool {
+        token_bytes_for_id(self.constraint, token_id).is_some()
+            || self.constraint.has_special_token_id(token_id)
+    }
+
     /// Commit a sampled token, advancing the constraint state.
     ///
     /// `token_id` must either exist in the vocabulary the constraint was built
@@ -7533,19 +7538,24 @@ impl<'a> ConstraintState<'a> {
     ///
     /// Returns an error if `token_id` is neither present in the vocabulary nor
     /// declared by a special-token terminal.
-    /// Advance the state by one model token ID.
     pub fn commit_token(
+        &mut self,
+        token_id: u32,
+    ) -> crate::Result<()> {
+        self.commit_token_raw(token_id).map_err(crate::Error::State)
+    }
+
+    pub(crate) fn commit_token_raw(
         &mut self,
         token_id: u32,
     ) -> Result<(), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
-        if bytes.is_none() && !constraint.has_special_token_id(token_id) {
+        if !self.knows_token_id(token_id) {
             return Err(format!(
                 "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
             ));
         }
-        self.record_pre_commit_snapshot();
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
@@ -7567,6 +7577,11 @@ impl<'a> ConstraintState<'a> {
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
+        if !self.knows_token_id(token_id) {
+            return Err(format!(
+                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+            ));
+        }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = if assertion_flags & COMMIT_ASSERT_MASK_EQUIVALENCE != 0 {
             let mut mask = vec![0u32; constraint.mask_len()];
@@ -7587,13 +7602,6 @@ impl<'a> ConstraintState<'a> {
             result.is_ok(),
         );
         result
-    }
-
-    pub(crate) fn commit_tokens_dynamic(&mut self, tokens: &[u32]) -> Result<(), String> {
-        for &token in tokens {
-            self.commit_token_dynamic(token)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
@@ -7749,20 +7757,17 @@ impl<'a> ConstraintState<'a> {
     }
 
     /// Advance the state by raw bytes.
-    pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
+        self.commit_bytes_raw(bytes).map_err(crate::Error::State)
+    }
+
+    pub(crate) fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
         let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
         let result = clear_state_on_commit_error(&mut self.state, result);
         self.generation += 1;
         result
     }
 
-    /// Advance the state by a sequence of model token IDs.
-    pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {
-        for &token in tokens {
-            self.commit_token(token)?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -8308,12 +8313,12 @@ mod tests {
         );
         state.commit_token(0).unwrap();
         state.commit_token(2).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
 
         let loaded = Constraint::load(&constraint.save()).unwrap();
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(1).unwrap();
-        assert!(loaded_state.is_complete());
+        assert!(loaded_state.is_accepting());
     }
 
     #[test]
@@ -8336,11 +8341,11 @@ mod tests {
             state.state.has_duplicate_keys(),
             "the bounded runtime should retain the completed alternatives separately"
         );
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
 
         let mut normalized = state.clone();
         normalized.state.normalize_duplicate_keys();
-        assert!(normalized.is_complete());
+        assert!(normalized.is_accepting());
         assert_eq!(
             canonical_commit_state(&state.state),
             canonical_commit_state(&normalized.state),
@@ -8371,8 +8376,8 @@ mod tests {
 
         flat.commit_token(100).unwrap();
         normalized.commit_token(100).unwrap();
-        assert!(flat.is_complete());
-        assert!(normalized.is_complete());
+        assert!(flat.is_accepting());
+        assert!(normalized.is_accepting());
         assert_eq!(
             canonical_commit_state(&flat.state),
             canonical_commit_state(&normalized.state),
@@ -8661,8 +8666,10 @@ nt start ::= item item? item?;
         assert!(allowed(3), "continuing the current ID remains viable");
         assert!(!allowed(4), "the consumed ID cannot also satisfy the next ID");
         assert!(!allowed(5), "a prefix of %= cannot follow until a new ID is consumed");
-        assert!(state.validate_tokens(&[4]).is_empty());
-        assert!(state.validate_tokens(&[5]).is_empty());
+        let mut probe = state.clone();
+        assert!(probe.commit_token(4).is_err());
+        let mut probe = state.clone();
+        assert!(probe.commit_token(5).is_err());
     }
 
     #[test]
@@ -9186,13 +9193,13 @@ nt start ::= item item? item?;
                     canonical_commit_state(&general.state),
                 );
                 assert_eq!(
-                    fast.is_finished(),
-                    general.is_finished(),
+                    fast.is_accepting(),
+                    general.is_accepting(),
                     "epsilon completion mismatch after path {path:?}",
                 );
                 assert_eq!(
-                    profiled.is_finished(),
-                    general.is_finished(),
+                    profiled.is_accepting(),
+                    general.is_accepting(),
                     "epsilon profiled completion mismatch after path {path:?}",
                 );
                 if depth == 4 {
@@ -9278,5 +9285,3 @@ nt start ::= item item? item?;
         assert_eq!(profile.n_advances, 1, "profile={profile:?}");
     }
 }
-
-

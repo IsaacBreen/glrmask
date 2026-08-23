@@ -126,6 +126,36 @@ for _ in range(MAX_OUTPUT_TOKENS):
 print(llm.detokenize(generated).decode())
 ```
 
+## Rust quickstart
+
+Rust uses one shared grammar/options compilation surface for both static and dynamic constraints:
+
+```rust
+use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+
+let vocab = Vocab::new(vec![
+    (0, b"\"yes\"".to_vec()),
+    (1, b"\"no\"".to_vec()),
+]);
+let schema = r#"{"type":"string","enum":["yes","no"]}"#;
+let options = CompileOptions::default();
+let constraint = Constraint::compile(Grammar::json_schema(schema), &vocab, &options)?;
+let mut state = constraint.start();
+
+let mask = state.mask();
+state.commit_token(0)?;
+
+if state.is_accepting() {
+    // The current prefix may validly end here.
+}
+if state.is_rejected() {
+    // No valid continuation remains.
+}
+# Ok::<(), glrmask::Error>(())
+```
+
+Use `DynamicConstraint::compile(...)` with the same `Grammar` and `CompileOptions` when startup latency matters more than per-token mask latency. Once started, static and dynamic states expose the same decoding interface.
+
 ## Grammar formats
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
@@ -174,7 +204,7 @@ constraint = glrmask.Constraint.from_json_schema(
 )
 ```
 
-The state becomes complete only after one of those tokens is committed.
+The state becomes accepting only after one of those tokens is committed.
 
 ## Saving compiled constraints
 

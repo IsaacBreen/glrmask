@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
     compile_owned_with_table_construction,
+    compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
     emit_compile_profile_summary,
@@ -237,6 +238,30 @@ fn compile_from_named_grammar(
     Ok(constraint)
 }
 
+pub(crate) fn compile_glrm_with_protected_shift_terminals(
+    glrm: &str,
+    protected_terminal_names: &[&str],
+    vocab: &crate::Vocab,
+) -> crate::Result<Constraint> {
+    with_large_import_stack(glrm.len(), || {
+        let named = parse_glrm_to_named(glrm)?;
+        let factored = factor_named_grammar(named);
+        let grammar = ast::lower(&factored)?;
+        let protected = protected_terminal_names
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        crate::error::catch_internal_invariant(|| {
+            compile_owned_with_table_construction_and_protected_shift_terminal_names(
+                grammar,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                protected,
+            )
+        })
+    })
+}
+
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
     if vocab.is_empty() {
         return Ok(0);
@@ -442,12 +467,12 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 
 impl Constraint {
     /// Compile an EBNF grammar for `vocab`.
-    pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
     }
 
     /// Compile an EBNF grammar and declare model end-token IDs.
-    pub fn from_ebnf_with_end_tokens(
+    pub(crate) fn from_ebnf_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -466,12 +491,12 @@ impl Constraint {
     }
 
     /// Compile a Lark grammar for `vocab`.
-    pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_lark_with_end_tokens(lark, vocab, &[])
     }
 
     /// Compile a Lark grammar and declare model end-token IDs.
-    pub fn from_lark_with_end_tokens(
+    pub(crate) fn from_lark_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -490,12 +515,12 @@ impl Constraint {
     }
 
     /// Compile a JSON Schema for `vocab`.
-    pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_json_schema_with_end_tokens(schema, vocab, &[])
     }
 
     /// Compile a JSON Schema and declare model end-token IDs.
-    pub fn from_json_schema_with_end_tokens(
+    pub(crate) fn from_json_schema_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -516,12 +541,12 @@ impl Constraint {
     }
 
     /// Compile a grammar in GLRMask's native GLRM format.
-    pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
     /// Compile a GLRM grammar and declare model end-token IDs.
-    pub fn from_glrm_grammar_with_end_tokens(
+    pub(crate) fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -548,7 +573,7 @@ impl Constraint {
     /// automatically; callers never need to manufacture `@token(...)`
     /// sentinels. Missing, duplicate, and unknown bindings are rejected before
     /// compilation or linking.
-    pub fn from_glrm_grammar_with_subgrammars(
+    pub(crate) fn from_glrm_grammar_with_subgrammars(
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
@@ -557,7 +582,7 @@ impl Constraint {
     }
 
     /// Compile GLRM with typed external subgrammars and model end-token IDs.
-    pub fn from_glrm_grammar_with_subgrammars_and_end_tokens(
+    pub(crate) fn from_glrm_grammar_with_subgrammars_and_end_tokens(
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
@@ -638,6 +663,7 @@ impl Constraint {
                 composition_inputs.push(
                     crate::compiler::constraint_compose::CompiledSubgrammarInput {
                         placeholder_terminal,
+                        additional_placeholder_terminals: &[],
                         constraint: child,
                     },
                 );
@@ -655,7 +681,7 @@ impl Constraint {
 
 impl DynamicConstraint {
     #[doc(hidden)]
-    pub fn compile_ebnf_serialized_profiled_with_end_tokens(
+    pub(crate) fn compile_ebnf_serialized_profiled_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -673,7 +699,7 @@ impl DynamicConstraint {
     }
 
     #[doc(hidden)]
-    pub fn compile_lark_serialized_profiled_with_end_tokens(
+    pub(crate) fn compile_lark_serialized_profiled_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -691,7 +717,7 @@ impl DynamicConstraint {
     }
 
     #[doc(hidden)]
-    pub fn compile_json_schema_serialized_profiled_with_end_tokens(
+    pub(crate) fn compile_json_schema_serialized_profiled_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -709,7 +735,7 @@ impl DynamicConstraint {
     }
 
     #[doc(hidden)]
-    pub fn compile_glrm_serialized_profiled_with_end_tokens(
+    pub(crate) fn compile_glrm_serialized_profiled_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -729,7 +755,7 @@ impl DynamicConstraint {
     /// Compile EBNF directly to a serialized dynamic artifact without building
     /// runtime-only caches in the producing process.
     #[doc(hidden)]
-    pub fn compile_ebnf_serialized_with_end_tokens(
+    pub(crate) fn compile_ebnf_serialized_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -748,7 +774,7 @@ impl DynamicConstraint {
 
     /// Compile Lark directly to a serialized dynamic artifact.
     #[doc(hidden)]
-    pub fn compile_lark_serialized_with_end_tokens(
+    pub(crate) fn compile_lark_serialized_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -767,7 +793,7 @@ impl DynamicConstraint {
 
     /// Compile JSON Schema directly to a serialized dynamic artifact.
     #[doc(hidden)]
-    pub fn compile_json_schema_serialized_with_end_tokens(
+    pub(crate) fn compile_json_schema_serialized_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -786,7 +812,7 @@ impl DynamicConstraint {
 
     /// Compile GLRM directly to a serialized dynamic artifact.
     #[doc(hidden)]
-    pub fn compile_glrm_serialized_with_end_tokens(
+    pub(crate) fn compile_glrm_serialized_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -804,12 +830,12 @@ impl DynamicConstraint {
     }
 
     /// Compile an EBNF grammar with reduced compilation latency.
-    pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
     }
 
     /// Compile an EBNF grammar with reduced latency and model end-token IDs.
-    pub fn from_ebnf_with_end_tokens(
+    pub(crate) fn from_ebnf_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -827,12 +853,12 @@ impl DynamicConstraint {
     }
 
     /// Compile a Lark grammar with reduced compilation latency.
-    pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_lark_with_end_tokens(lark, vocab, &[])
     }
 
     /// Compile a Lark grammar with reduced latency and model end-token IDs.
-    pub fn from_lark_with_end_tokens(
+    pub(crate) fn from_lark_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -850,12 +876,12 @@ impl DynamicConstraint {
     }
 
     /// Compile a JSON Schema with reduced compilation latency.
-    pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_json_schema_with_end_tokens(schema, vocab, &[])
     }
 
     /// Compile a JSON Schema with reduced latency and model end-token IDs.
-    pub fn from_json_schema_with_end_tokens(
+    pub(crate) fn from_json_schema_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -873,12 +899,12 @@ impl DynamicConstraint {
     }
 
     /// Compile a GLRM grammar with reduced compilation latency.
-    pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+    pub(crate) fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
     /// Compile a GLRM grammar with reduced latency and model end-token IDs.
-    pub fn from_glrm_grammar_with_end_tokens(
+    pub(crate) fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
@@ -953,13 +979,13 @@ mod tests {
         assert!(!token_allowed(&state.mask(), 100));
         assert!(!token_allowed(&state.mask(), 101));
         state.commit_token(2).unwrap();
-        assert!(!state.is_complete());
+        assert!(!state.is_accepting());
         let mask = state.mask();
         assert!(token_allowed(&mask, 100));
         assert!(token_allowed(&mask, 101));
         assert_eq!(state.forced(), Vec::<u32>::new());
         state.commit_token(100).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -976,7 +1002,7 @@ mod tests {
         state.commit_token(2).unwrap();
         assert_eq!(state.forced(), vec![100]);
         state.commit_token(100).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -992,10 +1018,10 @@ mod tests {
         let mut state = constraint.start();
         assert_eq!(state.forced(), vec![100, 100]);
         state.commit_token(100).unwrap();
-        assert!(!state.is_complete());
+        assert!(!state.is_accepting());
         assert_eq!(state.forced(), vec![100]);
         state.commit_token(100).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1098,7 +1124,7 @@ mod tests {
         );
         let mut state = constraint.start();
         state.commit_bytes(b"  < a   b >  ").unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1134,7 +1160,7 @@ mod tests {
         assert!(constraint.ignore_terminal.is_some());
         let mut state = constraint.start();
         state.commit_bytes(b" < [ x ] > ").unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1165,7 +1191,7 @@ mod tests {
         );
         let mut state = constraint.start();
         state.commit_bytes(b" <\ta\t\tb\t> ").unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1191,7 +1217,7 @@ mod tests {
         assert!(constraint.ignore_terminal.is_none());
         let mut state = constraint.start();
         state.commit_bytes(b" <ab> ").unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1236,8 +1262,8 @@ mod tests {
                 actual.commit_token(token_id).unwrap();
                 expected.commit_token(token_id).unwrap();
             }
-            assert_eq!(actual.is_complete(), expected.is_complete());
-            assert!(actual.is_complete());
+            assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert!(actual.is_accepting());
         }
     }
 
@@ -1277,8 +1303,8 @@ mod tests {
             actual.commit_token(token_id).unwrap();
             expected.commit_token(token_id).unwrap();
         }
-        assert!(actual.is_complete());
-        assert!(expected.is_complete());
+        assert!(actual.is_accepting());
+        assert!(expected.is_accepting());
     }
 
     #[test]
@@ -1306,7 +1332,7 @@ mod tests {
 
         let mut state = composed.start();
         state.commit_token(5).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1356,8 +1382,8 @@ mod tests {
         let mut expected = inline.start();
         actual.commit_bytes(bytes).unwrap();
         expected.commit_bytes(bytes).unwrap();
-        assert!(actual.is_complete());
-        assert!(expected.is_complete());
+        assert!(actual.is_accepting());
+        assert!(expected.is_accepting());
     }
 
     #[test]
@@ -1421,7 +1447,7 @@ mod tests {
         state.commit_token(0).unwrap();
         state.commit_token(2).unwrap();
         state.commit_token(1).unwrap();
-        assert!(state.is_complete());
+        assert!(state.is_accepting());
     }
 
     #[test]
@@ -1468,7 +1494,7 @@ mod tests {
                 assert_ne!(mask[0] & (1 << 1), 0, "end token missing from cached mask");
             }
             state.commit_token(1).unwrap();
-            assert!(state.is_complete());
+            assert!(state.is_accepting());
         }
     }
 

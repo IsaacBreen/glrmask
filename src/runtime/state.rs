@@ -1,6 +1,5 @@
 use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
-use std::collections::VecDeque;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
@@ -402,12 +401,6 @@ impl CommitBuffers {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct StateSnapshot {
-    pub state: ParserStateMap,
-    pub generation: u64,
-}
-
 /// Mutable parser state for one generated sequence.
 ///
 /// Obtain a mask, sample a permitted token, and commit it to advance the state.
@@ -424,10 +417,6 @@ pub struct ConstraintState<'a> {
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Mutex<MaskScratch>,
-    /// Maximum number of token commits whose pre-commit states are retained.
-    pub(crate) max_rollback_tokens: usize,
-    /// Bounded pre-commit snapshots for token-level rollback.
-    pub(crate) history: VecDeque<StateSnapshot>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -439,8 +428,6 @@ impl<'a> Clone for ConstraintState<'a> {
             generation: self.generation,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(MaskScratch::for_constraint(self.constraint)),
-            max_rollback_tokens: self.max_rollback_tokens,
-            history: self.history.clone(),
         }
     }
 }
@@ -477,74 +464,15 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    pub(crate) fn clone_without_history(&self) -> Self {
-        Self {
-            constraint: self.constraint,
-            state: self.state.clone(),
-            buffers: self.buffers.clone(),
-            generation: self.generation,
-            mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(MaskScratch::for_constraint(self.constraint)),
-            max_rollback_tokens: 0,
-            history: VecDeque::new(),
-        }
-    }
-
-    pub(crate) fn record_pre_commit_snapshot(&mut self) {
-        if self.max_rollback_tokens == 0 {
-            return;
-        }
-        if self.history.len() == self.max_rollback_tokens {
-            self.history.pop_front();
-        }
-        self.history.push_back(StateSnapshot {
-            state: self.state.clone(),
-            generation: self.generation,
-        });
-    }
-
-    /// Roll back committed tokens retained by `start_with_rollback`.
-    pub fn rollback(&mut self, num_tokens: usize) -> Result<(), String> {
-        if num_tokens == 0 {
-            return Ok(());
-        }
-        if num_tokens > self.history.len() {
-            return Err(format!(
-                "rollback requested {num_tokens} tokens but only {} are available",
-                self.history.len()
-            ));
-        }
-        let target_index = self.history.len() - num_tokens;
-        let snapshot = self.history[target_index].clone();
-        self.history.truncate(target_index);
-        self.state = snapshot.state;
-        self.generation = snapshot.generation;
-        self.buffers.reset_all();
-        *self.mask_cache.lock().unwrap() = None;
-        *self.mask_scratch.lock().unwrap() = MaskScratch::for_constraint(self.constraint);
-        Ok(())
-    }
-
-    /// Return the longest valid prefix of `tokens` without modifying this state.
-    pub fn validate_tokens(&self, tokens: &[u32]) -> Vec<u32> {
-        let mut cursor = self.clone_without_history();
-        let mut accepted = Vec::with_capacity(tokens.len());
-        for &token in tokens {
-            if cursor.commit_token(token).is_err() || cursor.is_failed() {
-                break;
-            }
-            accepted.push(token);
-        }
-        accepted
-    }
-
-    /// Return whether no valid parser state remains.
-    pub fn is_failed(&self) -> bool {
+    /// Return whether the committed prefix has been irrecoverably rejected.
+    pub fn is_rejected(&self) -> bool {
         self.state.is_empty()
     }
 
-    /// Return whether the committed prefix completes the grammar.
-    pub fn is_complete(&self) -> bool {
+    /// Return whether the committed prefix is currently accepted by the grammar.
+    ///
+    /// An accepting prefix may still admit additional tokens.
+    pub fn is_accepting(&self) -> bool {
         let product_initial = self.constraint.tokenizer.initial_state();
         let commit_initial = self.constraint.runtime_commit_initial_state();
         self.state
@@ -568,13 +496,6 @@ impl<'a> ConstraintState<'a> {
                             }
                         })
             })
-    }
-
-    /// Return whether generation has finished.
-    ///
-    /// This is currently equivalent to [`ConstraintState::is_complete`].
-    pub fn is_finished(&self) -> bool {
-        self.is_complete()
     }
 
     pub(crate) fn parser_root_count(&self) -> usize {
@@ -626,7 +547,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn forced_impl(&self, dynamic: bool) -> Vec<u32> {
-        if self.is_complete() {
+        if self.is_accepting() {
             return Vec::new();
         }
 
@@ -669,7 +590,7 @@ impl<'a> ConstraintState<'a> {
                     .commit_token(token)
                     .expect("forced token should be in vocabulary");
             }
-            if cursor.state.is_empty() || cursor.is_complete() {
+            if cursor.state.is_empty() || cursor.is_accepting() {
                 break;
             }
         }

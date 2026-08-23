@@ -73,7 +73,7 @@ fn first_final_max_location(constraint: &Constraint, text: &str) -> Option<(usiz
 #[test]
 fn direct_glrm_ordered_suffix_fixed_n5_regression() {
     let vocab = byte_vocab();
-    let constraint = Constraint::from_glrm_grammar(FIXED_N5_ORDERED_SUFFIX_GLRM, &vocab).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(FIXED_N5_ORDERED_SUFFIX_GLRM), &vocab, &glrmask::CompileOptions::default()).unwrap();
     let (max_paths, max_stacks) = measure_max_counts(&constraint, FIXED_N5_INPUT);
 
     println!(

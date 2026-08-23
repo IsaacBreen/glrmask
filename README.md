@@ -178,7 +178,7 @@ constraint = glrmask.Constraint.from_json_schema(
 )
 ```
 
-The state becomes complete only after one of those tokens is committed.
+The state becomes accepting only after one of those tokens is committed.
 
 ## Saving compiled constraints
 

@@ -75,10 +75,8 @@ self_cell!(
 );
 
 impl OwnedState {
-    fn from_arc(arc: Arc<glrmask::Constraint>, max_rollback_tokens: usize) -> Self {
-        OwnedState::new(arc, |arc_ref| {
-            arc_ref.start_with_rollback(max_rollback_tokens)
-        })
+    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
+        OwnedState::new(arc, |arc_ref| arc_ref.start())
     }
 }
 
@@ -467,8 +465,8 @@ fn mask_profile_to_dict<'py>(
     dict.set_item("other_ns", profile.other_ns)?;
     Ok(dict)
 }
-fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
-    result.map_err(PyValueError::new_err)
+fn string_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
+    result.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 fn advance_trace_to_dict<'py>(
@@ -642,11 +640,13 @@ impl PyConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::Constraint::from_json_schema_with_end_tokens(
-                schema,
+            glrmask::Constraint::compile(
+                glrmask::Grammar::json_schema(schema),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -659,11 +659,13 @@ impl PyConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::Constraint::from_lark_with_end_tokens(
-                lark_source,
+            glrmask::Constraint::compile(
+                glrmask::Grammar::lark(lark_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -690,21 +692,25 @@ impl PyConstraint {
                 .iter()
                 .map(|(name, child)| (name.as_str(), child.as_ref()))
                 .collect::<Vec<_>>();
+            let options = glrmask::CompileOptions::default()
+                .end_tokens(end_token_ids.as_deref().unwrap_or(&[]))
+                .subgrammars(&borrowed_children);
             return Self::from_constraint_result(
-                glrmask::Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-                    glrm_source,
-                    &borrowed_children,
+                glrmask::Constraint::compile(
+                    glrmask::Grammar::glrm(glrm_source),
                     &vocab.inner,
-                    end_token_ids.as_deref().unwrap_or(&[]),
+                    &options,
                 ),
                 vocab,
             );
         }
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::Constraint::from_glrm_grammar_with_end_tokens(
-                glrm_source,
+            glrmask::Constraint::compile(
+                glrmask::Grammar::glrm(glrm_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -717,11 +723,13 @@ impl PyConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::Constraint::from_ebnf_with_end_tokens(
-                ebnf_source,
+            glrmask::Constraint::compile(
+                glrmask::Grammar::ebnf(ebnf_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -736,10 +744,9 @@ impl PyConstraint {
         Self::from_constraint_result(glrmask::Constraint::load(data), vocab)
     }
 
-    #[pyo3(signature = (max_rollback_tokens=0))]
-    fn start(&self, max_rollback_tokens: usize) -> PyConstraintState {
+    fn start(&self) -> PyConstraintState {
         PyConstraintState {
-            inner: OwnedState::from_arc(self.inner.clone(), max_rollback_tokens),
+            inner: OwnedState::from_arc(self.inner.clone()),
             max_token: self.max_token,
         }
     }
@@ -784,11 +791,13 @@ impl PyDynamicConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_json_schema_with_end_tokens(
-                schema,
+            glrmask::DynamicConstraint::compile(
+                glrmask::Grammar::json_schema(schema),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -801,11 +810,13 @@ impl PyDynamicConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_lark_with_end_tokens(
-                lark_source,
+            glrmask::DynamicConstraint::compile(
+                glrmask::Grammar::lark(lark_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -818,11 +829,13 @@ impl PyDynamicConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_glrm_grammar_with_end_tokens(
-                glrm_source,
+            glrmask::DynamicConstraint::compile(
+                glrmask::Grammar::glrm(glrm_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -835,11 +848,13 @@ impl PyDynamicConstraint {
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
     ) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default()
+            .end_tokens(end_token_ids.as_deref().unwrap_or(&[]));
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_ebnf_with_end_tokens(
-                ebnf_source,
+            glrmask::DynamicConstraint::compile(
+                glrmask::Grammar::ebnf(ebnf_source),
                 &vocab.inner,
-                end_token_ids.as_deref().unwrap_or(&[]),
+                &options,
             ),
             vocab,
         )
@@ -1007,11 +1022,6 @@ impl PyDynamicConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
-        self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
-    }
-
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         self.inner
@@ -1019,29 +1029,18 @@ impl PyDynamicConstraintState {
         Ok(())
     }
 
-    fn fill_mask_bounded(
-        &self,
-        mut bitmask: PyReadwriteArray1<i32>,
-        timeout_ms: u64,
-    ) -> PyResult<()> {
-        let buf = bitmask_u32_view(&mut bitmask)?;
-        self.inner.with_dependent(|_owner, state| {
-            string_result(state.fill_mask_bounded(buf, timeout_ms))
-        })
-    }
-
     fn forced(&self) -> Vec<u32> {
         self.inner.with_dependent(|_owner, state| state.forced())
     }
 
-    fn is_complete(&self) -> bool {
+    fn is_accepting(&self) -> bool {
         self.inner
-            .with_dependent(|_owner, state| state.is_complete())
+            .with_dependent(|_owner, state| state.is_accepting())
     }
 
-    fn is_finished(&self) -> bool {
+    fn is_rejected(&self) -> bool {
         self.inner
-            .with_dependent(|_owner, state| state.is_finished())
+            .with_dependent(|_owner, state| state.is_rejected())
     }
 
     #[pyo3(signature = (size=None))]
@@ -1102,40 +1101,21 @@ impl PyConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
-        self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
-    }
-
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
-    fn rollback(&mut self, num_tokens: usize) -> PyResult<()> {
-        self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.rollback(num_tokens)))
-    }
-
-    fn validate_tokens(&self, token_ids: Vec<u32>) -> Vec<u32> {
-        self.inner
-            .with_dependent(|_owner, state| state.validate_tokens(&token_ids))
-    }
-
-    fn is_failed(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_failed())
+    fn is_rejected(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
     fn forced(&self) -> Vec<u32> {
         self.inner.with_dependent(|_owner, state| state.forced())
     }
 
-    fn is_complete(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_complete())
-    }
-
-    fn is_finished(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_finished())
+    fn is_accepting(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_accepting())
     }
 
     #[cfg(feature = "allocation-tracking")]

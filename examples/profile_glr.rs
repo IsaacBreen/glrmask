@@ -37,7 +37,7 @@ fn main() {
         .unwrap_or(20);
 
     // Warm up
-    let c = Constraint::from_json_schema(&schema, &vocab).unwrap();
+    let c = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
     std::hint::black_box(&c);
 
     let import_only = std::env::var("GLR_IMPORT_ONLY").is_ok();
@@ -48,7 +48,7 @@ fn main() {
         }
         Constraint::clear_weight_interners();
         Constraint::clear_weight_op_caches();
-        let c = Constraint::from_json_schema(&schema, &vocab).unwrap();
+        let c = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
         std::hint::black_box(&c);
     }
 }

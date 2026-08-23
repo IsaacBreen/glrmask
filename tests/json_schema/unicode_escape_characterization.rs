@@ -56,7 +56,7 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 
 fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     let mask = state.mask();
@@ -65,7 +65,7 @@ fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) 
 
 fn assert_token_rejected_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     let mask = state.mask();

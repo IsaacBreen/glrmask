@@ -443,6 +443,7 @@ fn compose_named_parent_owned(
                 as u32;
             crate::compiler::constraint_compose::CompiledSubgrammarInput {
                 placeholder_terminal,
+                additional_placeholder_terminals: &[],
                 constraint: child,
             }
         })
@@ -650,6 +651,7 @@ fn profile_owned_parent_tokenizer(
                 .expect("benchmark placeholder terminal") as u32;
             crate::compiler::glr::table::SubgrammarTableInput {
                 placeholder_terminal,
+                additional_placeholder_terminals: &[],
                 table: &child.table,
                 ignore_terminal: child.ignore_terminal,
                 start_nullable: child.table.embedded_start_nullable(),
@@ -852,7 +854,7 @@ fn build_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedBuild {
 
 fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
     let mut state = constraint.start();
-    state.commit_bytes(bytes).is_ok() && state.is_finished()
+    state.commit_bytes(bytes).is_ok() && state.is_accepting()
 }
 
 fn token_allowed(mask: &[u32], token: u32) -> bool {
@@ -920,8 +922,8 @@ fn verify_sampled_reachable_masks(
                 "mask mismatch after sampled o21137 token path {path:?}",
             );
             assert_eq!(
-                decomposed_state.is_finished(),
-                monolithic_state.is_finished(),
+                decomposed_state.is_accepting(),
+                monolithic_state.is_accepting(),
                 "completion mismatch after sampled o21137 token path {path:?}",
             );
             checked_prefixes += 1;
