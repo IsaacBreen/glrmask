@@ -144,7 +144,7 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
+GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
 ### Reusing compiled subgrammars
 

@@ -85,15 +85,15 @@ impl Constraint {
         let end_token_ids = options.end_token_ids;
         match grammar {
             Grammar::Ebnf(source) => {
-                reject_non_glrm_subgrammars(options)?;
+                reject_non_glrm_options(options)?;
                 Self::from_ebnf_with_end_tokens(source, vocab, end_token_ids)
             }
             Grammar::Lark(source) => {
-                reject_non_glrm_subgrammars(options)?;
+                reject_non_glrm_options(options)?;
                 Self::from_lark_with_end_tokens(source, vocab, end_token_ids)
             }
             Grammar::JsonSchema(source) => {
-                reject_non_glrm_subgrammars(options)?;
+                reject_non_glrm_options(options)?;
                 Self::from_json_schema_with_end_tokens(source, vocab, end_token_ids)
             }
             Grammar::Glrm(source) if options.subgrammars.is_empty() => {
@@ -129,9 +129,16 @@ impl DynamicConstraint {
         }
         let end_token_ids = options.end_token_ids;
         match grammar {
-            Grammar::Ebnf(source) => Self::from_ebnf_with_end_tokens(source, vocab, end_token_ids),
-            Grammar::Lark(source) => Self::from_lark_with_end_tokens(source, vocab, end_token_ids),
+            Grammar::Ebnf(source) => {
+                reject_non_glrm_options(options)?;
+                Self::from_ebnf_with_end_tokens(source, vocab, end_token_ids)
+            }
+            Grammar::Lark(source) => {
+                reject_non_glrm_options(options)?;
+                Self::from_lark_with_end_tokens(source, vocab, end_token_ids)
+            }
             Grammar::JsonSchema(source) => {
+                reject_non_glrm_options(options)?;
                 Self::from_json_schema_with_end_tokens(source, vocab, end_token_ids)
             }
             Grammar::Glrm(source) => {
@@ -146,7 +153,7 @@ impl DynamicConstraint {
     }
 }
 
-fn reject_non_glrm_subgrammars(options: &CompileOptions<'_>) -> Result<()> {
+fn reject_non_glrm_options(options: &CompileOptions<'_>) -> Result<()> {
     if options.subgrammars.is_empty() && options.external_terminal_bindings.is_empty() {
         Ok(())
     } else {

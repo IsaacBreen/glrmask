@@ -84,6 +84,7 @@
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::regex::validate_regular_regex;
 use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::grammar::ast::{
@@ -274,6 +275,140 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
     Ok(out)
 }
 
+/// Canonically format a versioned GLRM v1 source document without lowering
+/// source-level declarations such as `extern t NAME;`.
+///
+/// This is intentionally a source-layer formatter: exact token IDs are not
+/// accepted or emitted, and externally bound terminal names survive unchanged.
+/// Unversioned legacy GLRM must first be migrated explicitly rather than being
+/// silently reinterpreted as v1.
+pub fn format_glrm_v1(input: &str) -> Result<String, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    if parser.version != GlrmVersion::V1 {
+        return Err(err(
+            "format_glrm_v1 requires a leading 'glrm 1;' header",
+        ));
+    }
+    let scope = parser.parse_root_scope()?;
+    validate_scope_for_v1_format(&scope, "grammar")?;
+
+    let mut out = String::from("glrm 1;\n");
+    dump_parsed_scope_v1(&scope, 0, &mut out)?;
+    Ok(out)
+}
+
+fn validate_scope_for_v1_format(
+    scope: &ParsedGlrmScope,
+    scope_label: &str,
+) -> Result<(), GlrMaskError> {
+    scope_symbol_kinds(scope, scope_label)?;
+    for subgrammar in &scope.subgrammars {
+        if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
+            validate_scope_for_v1_format(child, &format!("{scope_label}::{}", subgrammar.name))?;
+        }
+    }
+    Ok(())
+}
+
+fn scope_grammar_for_v1_format(scope: &ParsedGlrmScope) -> NamedGrammar {
+    let mut grammar = NamedGrammar {
+        rules: scope.rules.clone(),
+        start: scope.start.clone(),
+        ignore: scope.ignore.clone(),
+        lexer_partitions: scope.lexer_partitions.clone(),
+        lexer_literal_partitions: scope.lexer_literal_partitions.clone(),
+        default_lexer_partition: scope.default_lexer_partition.clone(),
+    };
+    if let Some(partition) = scope.all_literals_partition.as_deref() {
+        for literal in grammar.emitted_anonymous_literals() {
+            grammar
+                .lexer_literal_partitions
+                .entry(literal)
+                .or_insert_with(|| partition.to_string());
+        }
+    }
+    grammar
+}
+
+fn push_indented_line(out: &mut String, indent: usize, line: &str) {
+    out.extend(std::iter::repeat_n(' ', indent));
+    out.push_str(line);
+    out.push('\n');
+}
+
+fn push_indented_block(out: &mut String, indent: usize, block: &str) {
+    for line in block.lines() {
+        push_indented_line(out, indent, line);
+    }
+}
+
+fn dump_parsed_scope_v1(
+    scope: &ParsedGlrmScope,
+    indent: usize,
+    out: &mut String,
+) -> Result<(), GlrMaskError> {
+    push_indented_line(out, indent, &format!("start {};", scope.start));
+    if let Some(ignore) = &scope.ignore {
+        push_indented_line(out, indent, &format!("ignore {ignore};"));
+    }
+
+    let grammar = scope_grammar_for_v1_format(scope);
+    let lexer_groups = lexer_groups_for_dump(&grammar, DumpFlavor::V1);
+    if !lexer_groups.is_empty() {
+        push_indented_line(out, indent, "pragma glrmask {");
+        for (partition, members) in lexer_groups {
+            push_indented_line(
+                out,
+                indent + 2,
+                &format!("lexer group {partition} = {};", members.join(", ")),
+            );
+        }
+        push_indented_line(out, indent, "}");
+    }
+
+    for terminal in &scope.external_terminals {
+        push_indented_line(out, indent, &format!("extern t {};", terminal.name));
+    }
+
+    for subgrammar in &scope.subgrammars {
+        match &subgrammar.body {
+            ParsedSubgrammarBody::External => {
+                push_indented_line(out, indent, &format!("extern g {};", subgrammar.name));
+            }
+            ParsedSubgrammarBody::Inline(child) => {
+                push_indented_line(out, indent, &format!("g {} = {{", subgrammar.name));
+                dump_parsed_scope_v1(child, indent + 2, out)?;
+                push_indented_line(out, indent, "};");
+            }
+        }
+    }
+
+    for rule in &scope.rules {
+        let prefix = match (rule.is_terminal, rule.is_internal) {
+            (true, true) => "internal t",
+            (true, false) => "t",
+            (false, _) => "nt",
+        };
+        if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+            push_indented_line(out, indent, &format!("{prefix} {} = fa {{", rule.name));
+            push_indented_block(out, indent, &dump_expr_nfa_v1(expr_nfa));
+            push_indented_line(out, indent, "};");
+        } else {
+            push_indented_line(
+                out,
+                indent,
+                &format!(
+                    "{prefix} {} = {};",
+                    rule.name,
+                    dump_nt_expr_v1(&rule.expr, false)
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn dump_expr_nfa_v1(expr_nfa: &ExprNFA) -> String {
     let mut out = String::new();
     let starts = expr_nfa
@@ -425,6 +560,9 @@ fn dump_nt_expr_with_flavor(
 /// Dump a sequence (or a single non-choice item).
 fn dump_nt_seq(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
+        GrammarExpr::Sequence(items) if items.is_empty() && flavor == DumpFlavor::V1 => {
+            "eps".to_string()
+        }
         GrammarExpr::Sequence(items) => items
             .iter()
             .map(|expr| dump_nt_postfix(expr, flavor))
@@ -2108,6 +2246,13 @@ impl GlrmParser {
                     Some(min)
                 };
                 self.consume(&Tok::RBrace)?;
+                if let Some(max) = max
+                    && max < min
+                {
+                    return Err(err(&format!(
+                        "repetition upper bound {max} is smaller than lower bound {min}"
+                    )));
+                }
                 Some(Quantifier::Range(min, max))
             }
             _ => None,
@@ -2147,6 +2292,11 @@ impl GlrmParser {
                     min
                 };
                 self.consume(&Tok::RBrace)?;
+                if max < min {
+                    return Err(err(&format!(
+                        "repetition upper bound {max} is smaller than lower bound {min}"
+                    )));
+                }
                 Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, Some(max))))
             }
             _ => Ok(atom),
@@ -2162,6 +2312,10 @@ impl GlrmParser {
             Tok::RegexLit(pat) => {
                 if !allow_raw_regex {
                     return Err(err("raw regex literals are only allowed in terminal (`t`) rules"));
+                }
+                if self.version == GlrmVersion::V1 {
+                    validate_regular_regex(&pat)
+                        .map_err(|message| err(&format!("invalid GLRM v1 regex: {message}")))?;
                 }
                 self.advance();
                 Ok(GrammarExpr::RawRegex(pat))
@@ -4083,6 +4237,35 @@ nt start = '"' | "'" | "plain";
     }
 
     #[test]
+    fn glrm_v1_rejects_nonregular_and_malformed_regex_syntax() {
+        for pattern in [r"(a)\1", r"(?=a)a", r"a(?<=b)", r"\bword", r"a{3,2}", r"(abc", r"[abc"] {
+            let source = format!("glrm 1; start start; t RX = /{pattern}/; nt start = RX;");
+            assert!(from_glrm(&source).is_err(), "pattern unexpectedly accepted: {pattern}");
+        }
+        assert!(from_glrm(r#"glrm 1; start start; t RX = /(?:ab|a)+/; nt start = RX;"#).is_ok());
+    }
+
+    #[test]
+    fn glrm_v1_rejects_descending_repetition_bounds() {
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{3,2};"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt item = "a"; nt start = "," ~ ( item{3,2} );"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{2,3};"#).is_ok());
+    }
+
+    #[test]
+    fn legacy_implicit_epsilon_formats_as_explicit_v1_eps() {
+        for source in [
+            "start start; nt start ::= ;",
+            "start start; nt start ::= 'a' |;",
+        ] {
+            let grammar = from_glrm(source).unwrap();
+            let dumped = to_glrm_v1(&grammar).unwrap();
+            assert!(dumped.contains("eps"), "{dumped}");
+            from_glrm(&dumped).unwrap();
+        }
+    }
+
+    #[test]
     fn glrm_v1_rejects_numeric_token_syntax_and_implicit_epsilon() {
         let error = from_glrm("glrm 1; start start; nt start = @token(7);")
             .unwrap_err()
@@ -4153,6 +4336,35 @@ nt start = "a" END_TURN;
     }
 
     #[test]
+    fn glrm_v1_fa_edges_accept_multiline_compound_expressions() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start declaration;
+t IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/;
+nt expression = IDENTIFIER;
+nt declaration = fa {
+    start 0;
+    accept 3;
+    0 -> 1: "const" | "let" | "var";
+    1 -> 2: IDENTIFIER;
+    2 -> 3:
+        ("=" expression)?
+        ";";
+};
+"#,
+        )
+        .unwrap();
+        let declaration = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.name == "declaration")
+            .unwrap();
+        assert!(matches!(declaration.expr, GrammarExpr::ExprNFA(_)));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
     fn glrm_v1_fa_body_supports_named_states_and_terminal_fas() {
         let grammar = from_glrm(
             r#"
@@ -4178,6 +4390,78 @@ nt start = fa {
         let start = grammar.rules.iter().find(|rule| rule.name == "start").unwrap();
         assert!(matches!(start.expr, GrammarExpr::ExprNFA(_)));
         lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_preserves_external_terminal_names_and_bindings() {
+        let source = r#"
+glrm 1;
+start message;
+pragma glrmask {
+    lexer group words = WORD;
+}
+extern t END_TURN;
+g inner = {
+    start value;
+    extern t BEGIN_ASSISTANT;
+    nt value = BEGIN_ASSISTANT "x";
+};
+t WORD = /[a-z]+/;
+nt message = inner WORD END_TURN;
+"#;
+        let begin_ids = [41];
+        let end_ids = [42, 43];
+        let bindings = [
+            ("inner::BEGIN_ASSISTANT", begin_ids.as_slice()),
+            ("END_TURN", end_ids.as_slice()),
+        ];
+        let before = from_glrm_with_external_terminals(source, &bindings).unwrap();
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(formatted.starts_with("glrm 1;\n"), "{formatted}");
+        assert!(formatted.contains("extern t END_TURN;"), "{formatted}");
+        assert!(formatted.contains("extern t BEGIN_ASSISTANT;"), "{formatted}");
+        assert!(formatted.contains("g inner = {"), "{formatted}");
+        assert!(formatted.contains("pragma glrmask {"), "{formatted}");
+        assert!(!formatted.contains("@token"), "{formatted}");
+        assert!(!formatted.contains("41"), "{formatted}");
+        assert!(!formatted.contains("42"), "{formatted}");
+        assert!(!formatted.contains("43"), "{formatted}");
+
+        let after = from_glrm_with_external_terminals(&formatted, &bindings).unwrap();
+        assert_eq!(after.rules, before.rules);
+        assert_eq!(after.start, before.start);
+        assert_eq!(after.ignore, before.ignore);
+        assert_eq!(after.lexer_partitions, before.lexer_partitions);
+        assert_eq!(
+            after.lexer_literal_partitions,
+            before.lexer_literal_partitions
+        );
+        assert_eq!(after.default_lexer_partition, before.default_lexer_partition);
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_preserves_external_subgrammar_declarations() {
+        let source = r#"
+glrm 1;
+start document;
+extern g payload;
+nt document = "<" payload ">";
+"#;
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(formatted.contains("extern g payload;"), "{formatted}");
+        let before = from_glrm_with_external_subgrammars(source, 100, []).unwrap();
+        let after = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
+        assert_eq!(after.grammar.rules, before.grammar.rules);
+        assert_eq!(after.grammar.start, before.grammar.start);
+        assert_eq!(after.placeholders, before.placeholders);
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_requires_version_header() {
+        let error = format_glrm_v1("start start; nt start ::= 'x';")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("glrm 1;"), "{error}");
     }
 
     #[test]

@@ -54,6 +54,134 @@ fn escaped_class_set(escaped: u8) -> Option<U8Set> {
     }
 }
 
+
+pub fn validate_regular_regex(pattern: &str) -> Result<(), String> {
+    let input = pattern.as_bytes();
+    let mut i = 0usize;
+    let mut group_depth = 0usize;
+    let mut can_quantify = false;
+
+    fn is_hex(b: u8) -> bool { b.is_ascii_hexdigit() }
+    fn require_hex(input: &[u8], start: usize, count: usize, kind: &str) -> Result<usize, String> {
+        let end = start.checked_add(count).ok_or_else(|| format!("invalid {kind} escape"))?;
+        let bytes = input.get(start..end).ok_or_else(|| format!("incomplete {kind} escape"))?;
+        if !bytes.iter().all(|b| is_hex(*b)) {
+            return Err(format!("invalid {kind} escape"));
+        }
+        Ok(end)
+    }
+
+    while i < input.len() {
+        match input[i] {
+            b'\\' => {
+                let Some(&escaped) = input.get(i + 1) else {
+                    return Err("trailing backslash in regex".to_string());
+                };
+                if escaped.is_ascii_digit() {
+                    return Err("regex backreferences are not supported".to_string());
+                }
+                if escaped.is_ascii_alphabetic() {
+                    i = match escaped {
+                        b'd' | b'D' | b's' | b'S' | b'w' | b'W' | b'n' | b'r' | b't' => i + 2,
+                        b'x' => require_hex(input, i + 2, 2, "\\x")?,
+                        b'u' => require_hex(input, i + 2, 4, "\\u")?,
+                        b'U' => require_hex(input, i + 2, 8, "\\U")?,
+                        _ => return Err(format!("unsupported regex escape \\{}", escaped as char)),
+                    };
+                } else {
+                    i += 2;
+                }
+                can_quantify = true;
+            }
+            b'[' => {
+                i += 1;
+                let mut closed = false;
+                while i < input.len() {
+                    if input[i] == b'\\' {
+                        if i + 1 >= input.len() {
+                            return Err("trailing backslash in character class".to_string());
+                        }
+                        i += 2;
+                    } else if input[i] == b']' {
+                        i += 1;
+                        closed = true;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if !closed { return Err("unterminated character class".to_string()); }
+                can_quantify = true;
+            }
+            b'(' => {
+                group_depth += 1;
+                i += 1;
+                if input.get(i) == Some(&b'?') {
+                    match input.get(i + 1).copied() {
+                        Some(b':') => i += 2,
+                        Some(b'P') if input.get(i + 2) == Some(&b'<') => {
+                            let Some(rel) = input[i + 3..].iter().position(|&b| b == b'>') else {
+                                return Err("unterminated named regex group".to_string());
+                            };
+                            if rel == 0 { return Err("empty named regex group".to_string()); }
+                            i += 4 + rel;
+                        }
+                        Some(b'<') if !matches!(input.get(i + 2), Some(b'=') | Some(b'!')) => {
+                            let Some(rel) = input[i + 2..].iter().position(|&b| b == b'>') else {
+                                return Err("unterminated named regex group".to_string());
+                            };
+                            if rel == 0 { return Err("empty named regex group".to_string()); }
+                            i += 3 + rel;
+                        }
+                        _ => return Err("lookaround, conditionals, inline flags, and other special regex groups are not supported".to_string()),
+                    }
+                }
+                can_quantify = false;
+            }
+            b')' => {
+                if group_depth == 0 { return Err("unmatched ')' in regex".to_string()); }
+                group_depth -= 1;
+                i += 1;
+                can_quantify = true;
+            }
+            b'^' | b'$' => return Err("regex anchors are not supported; GLRM regexes already use full-match semantics".to_string()),
+            b'|' => { i += 1; can_quantify = false; }
+            b'*' | b'+' | b'?' => {
+                if !can_quantify { return Err("postfix regex quantifier has no preceding atom".to_string()); }
+                i += 1;
+                if input.get(i) == Some(&b'?') { i += 1; }
+                can_quantify = false;
+            }
+            b'{' => {
+                if !can_quantify { return Err("bounded regex repetition has no preceding atom".to_string()); }
+                i += 1;
+                let start_min = i;
+                while input.get(i).is_some_and(u8::is_ascii_digit) { i += 1; }
+                if i == start_min { return Err("bounded regex repetition requires a lower bound".to_string()); }
+                let min: usize = std::str::from_utf8(&input[start_min..i]).unwrap().parse().map_err(|_| "regex repetition bound is too large".to_string())?;
+                let mut max = Some(min);
+                if input.get(i) == Some(&b',') {
+                    i += 1;
+                    let start_max = i;
+                    while input.get(i).is_some_and(u8::is_ascii_digit) { i += 1; }
+                    max = if i == start_max { None } else { Some(std::str::from_utf8(&input[start_max..i]).unwrap().parse().map_err(|_| "regex repetition bound is too large".to_string())?) };
+                }
+                if input.get(i) != Some(&b'}') { return Err("unterminated or malformed bounded regex repetition".to_string()); }
+                if let Some(max) = max && max < min { return Err(format!("regex repetition upper bound {max} is smaller than lower bound {min}")); }
+                i += 1;
+                if input.get(i) == Some(&b'?') { i += 1; }
+                can_quantify = false;
+            }
+            b'}' => return Err("unmatched '}' in regex".to_string()),
+            _ => { i += 1; can_quantify = true; }
+        }
+    }
+    if group_depth != 0 { return Err("unterminated '(' group in regex".to_string()); }
+    let (_, consumed) = parse_alternation(input, 0, true);
+    if consumed != input.len() { return Err("regex contains unsupported or malformed syntax".to_string()); }
+    Ok(())
+}
+
 pub fn parse_regex(pattern: &str, utf8: bool) -> Expr {
     let bytes = pattern.as_bytes();
     let (expr, pos) = parse_alternation(bytes, 0, utf8);

@@ -170,7 +170,7 @@ state = constraint.start()
 
 ## Grammar formats
 
-GLRM is GLRMask's native grammar format. New grammars should start with `glrm 1;` and use `=` declarations:
+GLRM is GLRMask's native grammar format. New grammars should start with `glrm 1;` and use `=` declarations. Raw regexes use full-match semantics, and unsupported or non-regular regex constructs are rejected:
 
 ```glrm
 glrm 1;

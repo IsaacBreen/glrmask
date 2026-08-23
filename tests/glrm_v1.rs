@@ -299,3 +299,19 @@ nt start = WORD;
     right.commit_token(2).unwrap();
     assert_eq!(left.is_accepting(), right.is_accepting());
 }
+
+#[test]
+fn static_and_dynamic_reject_external_bindings_for_non_glrm_grammars() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let ids = [7];
+    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
+    let options = CompileOptions::default().external_terminal_bindings(&bindings);
+    for grammar in [
+        Grammar::ebnf(r#"start ::= "a""#),
+        Grammar::lark(r#"start: "a""#),
+        Grammar::json_schema(r#"{"type":"string"}"#),
+    ] {
+        assert!(Constraint::compile(grammar, &vocab, &options).is_err());
+        assert!(DynamicConstraint::compile(grammar, &vocab, &options).is_err());
+    }
+}
