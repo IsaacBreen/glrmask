@@ -34,6 +34,11 @@ const DEAD_CANCELLATION_FAST_PATH_MIN_STATES: usize = 65_536;
 /// and wins on the large parser-NWA tail. Smaller graphs benefit more from
 /// batching their few multi-edge contributions before unioning them.
 const DIRECT_ACYCLIC_FINALITY_MIN_STATES: usize = 65_536;
+/// Build finality predecessor/topology metadata concurrently with cancellation
+/// once the graph is large enough for the extra Rayon job and owned edge refs
+/// to amortize. Above the direct-finality threshold the existing parallel
+/// finality solvers remain preferable until they can consume the same plan.
+const PRECOMPUTED_FINALITY_MIN_STATES: usize = 8_192;
 
 #[derive(Clone, Default)]
 enum SmallQueryWeights {
@@ -266,6 +271,22 @@ fn intersect_or_clone_right_if_subset_cached(
 struct PredEdge<'a> {
     from: usize,
     weight: &'a Weight,
+}
+
+#[derive(Clone)]
+struct OwnedPredEdge {
+    from: usize,
+    weight: Weight,
+}
+
+/// Finality metadata that can be prepared while cancellation is still reading
+/// the original NWA.  `reverse_topo_order` is a reverse topological order of
+/// the *full* original graph, not merely the DEFAULT/negative/epsilon subgraph.
+/// Every cancellation epsilon shortcuts an existing path in that graph, so the
+/// same order remains valid after those derived edges are installed.
+struct AcyclicFinalityPlan {
+    preds: Vec<Vec<OwnedPredEdge>>,
+    reverse_topo_order: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -833,6 +854,162 @@ fn collect_non_empty_derived_epsilons(
     result
 }
 
+
+fn reverse_topological_source_layers(nwa: &NWA) -> Option<Vec<Vec<u32>>> {
+    let n = nwa.states().len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    let mut remaining_out = vec![0usize; n];
+    let mut predecessors = vec![Vec::<u32>::new(); n];
+    for (from, state) in nwa.states().iter().enumerate() {
+        let mut add_edge = |target: u32, weight: &Weight| {
+            if weight.is_empty() || target as usize >= n {
+                return;
+            }
+            remaining_out[from] += 1;
+            predecessors[target as usize].push(from as u32);
+        };
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                add_edge(*target, weight);
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            add_edge(*target, weight);
+        }
+    }
+    let mut current = remaining_out
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &degree)| (degree == 0).then_some(state as u32))
+        .collect::<Vec<_>>();
+    let mut layers = Vec::new();
+    let mut visited = 0usize;
+    while !current.is_empty() {
+        current.sort_unstable();
+        visited += current.len();
+        let mut next = Vec::new();
+        for &target in &current {
+            for &pred in &predecessors[target as usize] {
+                let degree = &mut remaining_out[pred as usize];
+                debug_assert!(*degree > 0);
+                *degree -= 1;
+                if *degree == 0 {
+                    next.push(pred);
+                }
+            }
+        }
+        layers.push(current);
+        current = next;
+    }
+    (visited == n).then_some(layers)
+}
+
+fn compute_cancellations_reverse_topological_parallel(
+    nwa: &NWA,
+    allow_grouped: bool,
+) -> Option<Vec<(u32, u32, Weight)>> {
+    if rayon::current_num_threads() <= 1 {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let layers = reverse_topological_source_layers(nwa)?;
+    let layer_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut completed: DerivedEpsilons =
+        vec![SmallTargetWeights::Empty; nwa.states().len()];
+    let solve_started = std::time::Instant::now();
+    let mut parallel_sources = 0usize;
+    let mut max_width = 0usize;
+    let contiguous_runs = layers.iter().map(|layer| {
+        if layer.is_empty() {
+            return 0usize;
+        }
+        let mut sorted = layer.clone();
+        sorted.sort_unstable();
+        1 + sorted.windows(2).filter(|pair| pair[1] != pair[0] + 1).count()
+    }).sum::<usize>();
+    let max_runs_per_layer = layers.iter().map(|layer| {
+        if layer.is_empty() {
+            return 0usize;
+        }
+        let mut sorted = layer.clone();
+        sorted.sort_unstable();
+        1 + sorted.windows(2).filter(|pair| pair[1] != pair[0] + 1).count()
+    }).max().unwrap_or(0);
+    for layer in &layers {
+        max_width = max_width.max(layer.len());
+        parallel_sources += layer.len();
+        let foreign = &completed;
+        // States in one reverse-topological layer cannot reach one another:
+        // every live outgoing edge points into a layer already completed.  It
+        // is therefore exact to solve arbitrary groups of same-layer sources
+        // against the same immutable `foreign` relation.  Coarsen to at most
+        // one workspace per Rayon worker so the O(|states|) query/derived
+        // vectors are amortized across hundreds of sources instead of being
+        // allocated once per source.
+        let workers = rayon::current_num_threads().max(1).min(layer.len().max(1));
+        let chunk_size = layer.len().div_ceil(workers).max(1);
+        let grouped_requested = allow_grouped
+            && std::env::var("GLRMASK_ENABLE_GROUPED_CANCELLATION")
+                .map(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(false);
+        let rows = layer
+            .par_chunks(chunk_size)
+            .map(|sources| {
+                if grouped_requested {
+                    // The grouped solver still takes a contiguous range and
+                    // cannot represent arbitrary layer chunks exactly.  Keep
+                    // grouped mode on the established source-local path until
+                    // it has a source-slice workspace implementation.
+                    sources
+                        .iter()
+                        .flat_map(|&source| {
+                            compute_cancellations_range_grouped_inner(
+                                nwa,
+                                source..source + 1,
+                                Some(foreign),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    compute_cancellations_sources_serial_inner(
+                        nwa,
+                        sources.iter().copied(),
+                        Some(foreign),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        for row in rows {
+            for (from, to, weight) in row {
+                completed[from as usize].merge(to, weight);
+            }
+        }
+    }
+    let solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
+    let result = collect_non_empty_derived_epsilons(completed);
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][parallel_reverse_topo_cancellation] states={} layers={} max_width={} sources={} contiguous_runs={} max_runs_per_layer={} derived_edges={} layer_ms={layer_ms:.3} solve_ms={solve_ms:.3} total_ms={:.3}",
+            nwa.states().len(),
+            layers.len(),
+            max_width,
+            parallel_sources,
+            contiguous_runs,
+            max_runs_per_layer,
+            result.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(result)
+}
+
 pub fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
@@ -861,11 +1038,14 @@ pub fn compute_cancellations_range(
     }
 }
 
-fn compute_cancellations_range_serial_inner(
+fn compute_cancellations_sources_serial_inner<I>(
     nwa: &NWA,
-    range: std::ops::Range<u32>,
+    sources: I,
     foreign_derived: Option<&DerivedEpsilons>,
-) -> Vec<(u32, u32, Weight)> {
+) -> Vec<(u32, u32, Weight)>
+where
+    I: IntoIterator<Item = u32>,
+{
     let state_count = nwa.states().len() as u32;
     if state_count == 0 {
         return Vec::new();
@@ -879,7 +1059,7 @@ fn compute_cancellations_range_serial_inner(
     let use_dead_task_fast_path =
         state_count as usize >= DEAD_CANCELLATION_FAST_PATH_MIN_STATES;
 
-    for source_state in range {
+    for source_state in sources {
         if source_state >= state_count {
             continue;
         }
@@ -1006,6 +1186,14 @@ fn compute_cancellations_range_serial_inner(
     collect_non_empty_derived_epsilons(derived_epsilons)
 }
 
+fn compute_cancellations_range_serial_inner(
+    nwa: &NWA,
+    range: std::ops::Range<u32>,
+    foreign_derived: Option<&DerivedEpsilons>,
+) -> Vec<(u32, u32, Weight)> {
+    compute_cancellations_sources_serial_inner(nwa, range, foreign_derived)
+}
+
 pub fn apply_cancellations_range(
     nwa: &mut NWA,
     range: std::ops::Range<u32>,
@@ -1018,6 +1206,122 @@ pub fn apply_cancellations_range(
 
 fn is_live_finality_edge(target_state: u32, weight: &Weight, state_count: usize) -> bool {
     (target_state as usize) < state_count && !weight.is_empty()
+}
+
+fn prepare_acyclic_finality_plan(nwa: &NWA) -> Option<AcyclicFinalityPlan> {
+    let state_count = nwa.states().len();
+    if state_count == 0 {
+        return Some(AcyclicFinalityPlan {
+            preds: Vec::new(),
+            reverse_topo_order: Vec::new(),
+        });
+    }
+
+    let mut preds = vec![Vec::<OwnedPredEdge>::new(); state_count];
+    let mut indegree = vec![0usize; state_count];
+
+    for (from_state, state) in nwa.states().iter().enumerate() {
+        for (target_state, weight) in &state.epsilons {
+            if !is_live_finality_edge(*target_state, weight, state_count) {
+                continue;
+            }
+            indegree[*target_state as usize] += 1;
+            preds[*target_state as usize].push(OwnedPredEdge {
+                from: from_state,
+                weight: weight.clone(),
+            });
+        }
+        for (&label, targets) in &state.transitions {
+            for (target_state, weight) in targets {
+                if !is_live_finality_edge(*target_state, weight, state_count) {
+                    continue;
+                }
+                indegree[*target_state as usize] += 1;
+                if label == DEFAULT_LABEL || is_negative_label(label) {
+                    preds[*target_state as usize].push(OwnedPredEdge {
+                        from: from_state,
+                        weight: weight.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+    let mut topo_order = Vec::with_capacity(state_count);
+    while let Some(state_id) = queue.pop_front() {
+        topo_order.push(state_id);
+        let state = &nwa.states()[state_id];
+        for (target_state, weight) in &state.epsilons {
+            if !is_live_finality_edge(*target_state, weight, state_count) {
+                continue;
+            }
+            let degree = &mut indegree[*target_state as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(*target_state as usize);
+            }
+        }
+        for targets in state.transitions.values() {
+            for (target_state, weight) in targets {
+                if !is_live_finality_edge(*target_state, weight, state_count) {
+                    continue;
+                }
+                let degree = &mut indegree[*target_state as usize];
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(*target_state as usize);
+                }
+            }
+        }
+    }
+    if topo_order.len() != state_count {
+        return None;
+    }
+    topo_order.reverse();
+    Some(AcyclicFinalityPlan {
+        preds,
+        reverse_topo_order: topo_order,
+    })
+}
+
+fn apply_finality_fixpoint_precomputed_acyclic(
+    nwa: &mut NWA,
+    plan: &AcyclicFinalityPlan,
+) {
+    debug_assert_eq!(nwa.states().len(), plan.preds.len());
+    let mut reachable_final_weights = collect_initial_final_weights(nwa);
+    let mut pending_by_state: Vec<SmallVec<[GuardedFinalWeight; 4]>> =
+        (0..plan.preds.len()).map(|_| SmallVec::new()).collect();
+    for (state_id, final_weight) in reachable_final_weights.iter_mut().enumerate() {
+        if let Some(final_weight) = final_weight.take() {
+            pending_by_state[state_id].push(final_weight);
+        }
+    }
+
+    let mut weight_ops = ScopedWeightOpCache::default();
+    for &state_id in &plan.reverse_topo_order {
+        let Some(reachable_final) =
+            union_guarded_pending(std::mem::take(&mut pending_by_state[state_id]), &mut weight_ops)
+        else {
+            continue;
+        };
+        for edge in &plan.preds[state_id] {
+            let Some(propagated) =
+                reachable_final.intersection_with_edge_cached(&edge.weight, &mut weight_ops)
+            else {
+                continue;
+            };
+            pending_by_state[edge.from].push(propagated);
+        }
+        reachable_final_weights[state_id] = Some(reachable_final);
+    }
+    write_final_weights(nwa, reachable_final_weights);
 }
 
 fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
@@ -1884,6 +2188,29 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
     }
 }
 
+fn remove_negative_transitions_and_classify_terminal_states(nwa: &mut NWA) -> Vec<bool> {
+    let process = |state: &mut NWAState| {
+        state
+            .transitions
+            .retain(|label, _| !is_negative_label(*label));
+        is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL)
+    };
+    if rayon::current_num_threads() > 1 && nwa.states().len() >= 4_096 {
+        nwa.states_mut().par_iter_mut().map(process).collect()
+    } else {
+        nwa.states_mut().iter_mut().map(process).collect()
+    }
+}
+
+fn remove_redundant_default_transitions_with_initial(
+    nwa: &mut NWA,
+    mut terminal_states: Vec<bool>,
+) {
+    debug_assert_eq!(terminal_states.len(), nwa.states().len());
+    grow_terminal_state_set(nwa, &mut terminal_states);
+    prune_terminal_default_targets(nwa, &terminal_states);
+}
+
 pub fn remove_redundant_default_transitions(nwa: &mut NWA) {
     let classify = |state: &NWAState| {
         is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL)
@@ -1900,29 +2227,93 @@ pub fn remove_redundant_default_transitions(nwa: &mut NWA) {
     prune_terminal_default_targets(nwa, &terminal_states);
 }
 
-pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: bool) {
+pub fn resolve_negative_codes_in_nwa(
+    nwa: &mut NWA,
+    allow_grouped_cancellation: bool,
+) -> Option<Vec<u32>> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let precompute_finality = rayon::current_num_threads() > 1
+        && nwa.states().len() >= PRECOMPUTED_FINALITY_MIN_STATES
+        // Larger graphs may select the deduplicated parallel finality solver;
+        // leave those on the established path until the owned-plan variant has
+        // an equally exact parallel implementation.
+        && nwa.states().len() < DIRECT_ACYCLIC_FINALITY_MIN_STATES
+        && std::env::var_os("GLRMASK_DISABLE_PRECOMPUTED_FINALITY").is_none();
+
     let cancellation_started_at = profile_enabled.then(std::time::Instant::now);
-    if !nwa.states().is_empty() {
-        apply_cancellations_range(
-            nwa,
-            0..nwa.states().len() as u32,
-            allow_grouped_cancellation,
-        );
+    let state_count = nwa.states().len() as u32;
+    let use_parallel_reverse_topo =
+        std::env::var_os("GLRMASK_EXPERIMENT_PARALLEL_REVERSE_TOPO_CANCELLATION").is_some()
+            && rayon::current_num_threads() > 1
+            && state_count >= 4_096;
+    let compute_cancellations = || {
+        if use_parallel_reverse_topo {
+            compute_cancellations_reverse_topological_parallel(nwa, allow_grouped_cancellation)
+                .unwrap_or_else(|| {
+                    compute_cancellations_range(nwa, 0..state_count, allow_grouped_cancellation)
+                })
+        } else if state_count == 0 {
+            Vec::new()
+        } else {
+            compute_cancellations_range(nwa, 0..state_count, allow_grouped_cancellation)
+        }
+    };
+    let precompute_finality = precompute_finality || use_parallel_reverse_topo;
+    let (cancellations, mut finality_plan) = if precompute_finality {
+        rayon::join(compute_cancellations, || prepare_acyclic_finality_plan(nwa))
+    } else {
+        (compute_cancellations(), None)
+    };
+    for (from, to, weight) in cancellations {
+        if let Some(plan) = finality_plan.as_mut()
+            && (to as usize) < plan.preds.len()
+            && !weight.is_empty()
+        {
+            plan.preds[to as usize].push(OwnedPredEdge {
+                from: from as usize,
+                weight: weight.clone(),
+            });
+        }
+        nwa.add_epsilon(from, to, weight);
     }
     let cancellation_ms = cancellation_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+
     let finality_started_at = profile_enabled.then(std::time::Instant::now);
-    apply_finality_fixpoint(nwa);
+    let used_precomputed_finality = finality_plan.is_some();
+    if let Some(plan) = finality_plan.as_ref() {
+        apply_finality_fixpoint_precomputed_acyclic(nwa, plan);
+    } else {
+        apply_finality_fixpoint(nwa);
+    }
+    let reusable_reverse_topo_order = finality_plan.as_ref().map(|plan| {
+        plan.reverse_topo_order
+            .iter()
+            .map(|&state| state as u32)
+            .collect::<Vec<_>>()
+    });
     let finality_ms = finality_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let remove_negative_started_at = profile_enabled.then(std::time::Instant::now);
-    remove_negative_transitions(nwa);
+    let fused_cleanup = std::env::var_os(
+        "GLRMASK_EXPERIMENT_FUSED_NEGATIVE_DEFAULT_CLEANUP",
+    )
+    .is_some();
+    let initial_terminal_states = if fused_cleanup {
+        Some(remove_negative_transitions_and_classify_terminal_states(nwa))
+    } else {
+        remove_negative_transitions(nwa);
+        None
+    };
     let remove_negative_ms = remove_negative_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let prune_defaults_started_at = profile_enabled.then(std::time::Instant::now);
-    remove_redundant_default_transitions(nwa);
+    if let Some(initial_terminal_states) = initial_terminal_states {
+        remove_redundant_default_transitions_with_initial(nwa, initial_terminal_states);
+    } else {
+        remove_redundant_default_transitions(nwa);
+    }
     if let (Some(cancellation_ms), Some(finality_ms), Some(remove_negative_ms), Some(prune_defaults_started_at)) = (
         cancellation_ms,
         finality_ms,
@@ -1930,16 +2321,17 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: 
         prune_defaults_started_at,
     ) {
         eprintln!(
-            "[glrmask/profile][resolve_negatives] states={} cancellation_ms={:.3} finality_ms={:.3} remove_negative_ms={:.3} prune_defaults_ms={:.3}",
+            "[glrmask/profile][resolve_negatives] states={} cancellation_ms={:.3} finality_ms={:.3} remove_negative_ms={:.3} prune_defaults_ms={:.3} precomputed_finality={}",
             nwa.states().len(),
             cancellation_ms,
             finality_ms,
             remove_negative_ms,
             prune_defaults_started_at.elapsed().as_secs_f64() * 1000.0,
+            used_precomputed_finality,
         );
     }
+    reusable_reverse_topo_order
 }
-
 
 #[cfg(test)]
 mod terminal_default_tests {
@@ -2055,6 +2447,130 @@ mod terminal_default_tests {
                 None,
             ));
             assert_eq!(grouped, serial, "cancellation mismatch for seed {seed}");
+        }
+    }
+
+
+    fn generated_acyclic_finality_nwa(seed: u32) -> NWA {
+        use crate::compiler::glr::labels::encode_negative_label;
+
+        let state_count = 12 + (seed % 7);
+        let mut nwa = NWA::new(1, 31);
+        for _ in 0..state_count {
+            nwa.add_state();
+        }
+        let weights = [
+            weight(0..=7),
+            weight(4..=15),
+            weight(8..=23),
+            weight(16..=31),
+            weight(0..=31),
+        ];
+        for state in 0..state_count {
+            if state + 1 == state_count {
+                nwa.set_final_weight(
+                    state,
+                    weights[((state + seed) as usize) % weights.len()].clone(),
+                );
+                continue;
+            }
+            if (state + seed) % 3 == 0 {
+                nwa.set_final_weight(
+                    state,
+                    weights[((state + seed + 1) as usize) % weights.len()].clone(),
+                );
+            }
+            let remaining = state_count - state - 1;
+            let target = state + 1 + ((state * 5 + seed) % remaining);
+            let label = ((state + seed) % 3) as i32;
+            nwa.add_transition(
+                state,
+                encode_negative_label(label as u32),
+                target,
+                weights[((state + seed) as usize) % weights.len()].clone(),
+            );
+            let positive_target = state + 1 + ((state * 7 + seed + 1) % remaining);
+            nwa.add_transition(
+                state,
+                label,
+                positive_target,
+                weights[((state + seed + 2) as usize) % weights.len()].clone(),
+            );
+            if (state + seed) % 2 == 0 {
+                let default_target = state + 1 + ((state * 3 + seed + 2) % remaining);
+                nwa.add_transition(
+                    state,
+                    DEFAULT_LABEL,
+                    default_target,
+                    weights[((state + seed + 3) as usize) % weights.len()].clone(),
+                );
+            }
+            if (state + seed) % 4 != 0 {
+                let epsilon_target = state + 1 + ((state * 11 + seed + 3) % remaining);
+                nwa.add_epsilon(
+                    state,
+                    epsilon_target,
+                    weights[((state + seed + 4) as usize) % weights.len()].clone(),
+                );
+            }
+        }
+        nwa
+    }
+
+    #[test]
+    fn reverse_topological_parallel_cancellation_matches_serial_on_generated_dags() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("test Rayon pool");
+        pool.install(|| {
+            for seed in 0..64 {
+                let nwa = generated_acyclic_finality_nwa(seed);
+                let serial = normalize_cancellations(compute_cancellations_range_serial_inner(
+                    &nwa,
+                    0..nwa.num_states(),
+                    None,
+                ));
+                let parallel = normalize_cancellations(
+                    compute_cancellations_reverse_topological_parallel(&nwa, false)
+                        .expect("generated graph must admit reverse-topological layers"),
+                );
+                assert_eq!(parallel, serial, "cancellation mismatch for seed {seed}");
+            }
+        });
+    }
+
+    #[test]
+    fn precomputed_finality_plan_matches_post_cancellation_scan_on_generated_dags() {
+        for seed in 0..64 {
+            let input = generated_acyclic_finality_nwa(seed);
+            assert!(input.is_acyclic(), "generated graph must be acyclic");
+
+            let mut expected = input.clone();
+            let expected_states = expected.num_states();
+            apply_cancellations_range(&mut expected, 0..expected_states, false);
+            apply_finality_fixpoint(&mut expected);
+            remove_negative_transitions(&mut expected);
+            remove_redundant_default_transitions(&mut expected);
+
+            let mut actual = input.clone();
+            let mut plan = prepare_acyclic_finality_plan(&actual)
+                .expect("generated graph must admit an acyclic finality plan");
+            let cancellations =
+                compute_cancellations_range(&actual, 0..actual.num_states(), false);
+            for (from, to, weight) in cancellations {
+                plan.preds[to as usize].push(OwnedPredEdge {
+                    from: from as usize,
+                    weight: weight.clone(),
+                });
+                actual.add_epsilon(from, to, weight);
+            }
+            apply_finality_fixpoint_precomputed_acyclic(&mut actual, &plan);
+            remove_negative_transitions(&mut actual);
+            remove_redundant_default_transitions(&mut actual);
+
+            assert_eq!(actual.start_states(), expected.start_states(), "seed {seed}");
+            assert_eq!(actual.states(), expected.states(), "seed {seed}");
         }
     }
 

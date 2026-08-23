@@ -688,7 +688,7 @@ fn parser_may_advance_on_any(
         )
 }
 
-fn advance_parser_stacks_if_possible(
+pub(crate) fn advance_parser_stacks_if_possible(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: u32,

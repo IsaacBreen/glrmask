@@ -99,6 +99,32 @@ constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 
 Each constructor accepts an optional `end_token_ids=[...]` argument.
 
+For schema-aware programmatic JavaScript tool calling, build a reusable compiler
+and then compile/link each tool schema:
+
+```python
+ptc = glrmask.ProgrammaticJsCompiler(vocab)
+lookup = ptc.compile_schema(lookup_schema, vocab)
+update = ptc.compile_schema(update_schema, vocab)
+constraint = ptc.compose_tools({"lookup": lookup, "update": update}, vocab)
+```
+
+The arguments object itself remains schema-controlled. Nested opaque runtime
+values such as `customer.id` are allowed, and conditional result arms are
+recursively checked against the same schema. Thus an enum accepts
+`ready ? "open" : "closed"` but not `ready ? "open" : "bogus"`. The `tools`
+namespace is reserved so an unconstrained nested `tools.*` call cannot bypass
+the dispatcher.
+
+The shared build phases are also exposed independently:
+
+```python
+parent = glrmask.ProgrammaticJsCompiler.compile_parent(vocab)
+dynamic = glrmask.ProgrammaticJsCompiler.compile_dynamic_value(vocab)
+condition = glrmask.ProgrammaticJsCompiler.compile_condition(vocab)
+ptc = glrmask.ProgrammaticJsCompiler.from_components(parent, dynamic, condition)
+```
+
 Already-compiled constraints can be composed without recompiling their full
 grammars. Declare typed external subgrammars in GLRM and bind them by name. The
 compiler allocates hidden non-vocabulary sentinels automatically:
