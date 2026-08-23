@@ -1,5 +1,5 @@
 use glrmask::{
-    CompileOptions, Constraint, DynamicConstraint, ExternalTerminalBinding, Grammar, Vocab,
+    CompileOptions, ConstraintSpec, DynamicConstraint, Grammar, StaticConstraint, Vocab,
 };
 
 fn allowed(mask: &[u32], token_id: u32) -> bool {
@@ -12,23 +12,26 @@ fn allowed(mask: &[u32], token_id: u32) -> bool {
 const EXACT_GRAMMAR: &str = r#"
 glrm 1;
 start start;
-extern t SPECIAL;
+extern token SPECIAL;
 nt start = "a" SPECIAL "b";
 "#;
 
 #[test]
-fn named_external_terminal_is_an_exact_token_not_a_byte_language() {
+fn named_external_token_is_exact_not_a_byte_language() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (7, b"SPECIAL".to_vec())]);
-    let ids = [7];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
-    let constraint = Constraint::compile(Grammar::glrm(EXACT_GRAMMAR), &vocab, &options).unwrap();
+    let spec = ConstraintSpec::builder(Grammar::glrm(EXACT_GRAMMAR), &vocab)
+        .unwrap()
+        .bind_token("SPECIAL", [7])
+        .unwrap()
+        .build()
+        .unwrap();
+    let constraint = spec.compile_static(&CompileOptions::default()).unwrap();
 
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 0));
     state.commit_token(0).unwrap();
-    assert_eq!(allowed(&state.mask(), 7), true);
-    assert_eq!(allowed(&state.mask(), 1), false);
+    assert!(allowed(&state.mask(), 7));
+    assert!(!allowed(&state.mask(), 1));
 
     let mut by_bytes = state.clone();
     assert!(by_bytes.commit_bytes(b"SPECIAL").is_err());
@@ -37,21 +40,22 @@ fn named_external_terminal_is_an_exact_token_not_a_byte_language() {
     assert!(allowed(&state.mask(), 1));
     state.commit_token(1).unwrap();
     assert!(state.is_accepting());
-    assert!(!state.is_rejected());
 }
 
 #[test]
-fn external_terminal_ids_can_be_outside_the_byte_vocab_and_multiple_ids_are_interchangeable() {
+fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
     let vocab = Vocab::new(Vec::new());
-    let ids = [100, 101];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
-    let source = "glrm 1; start start; extern t SPECIAL; nt start = SPECIAL;";
+    let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
+    let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("SPECIAL", [100, 101])
+        .unwrap()
+        .build()
+        .unwrap();
+    let static_constraint = spec.compile_static(&CompileOptions::default()).unwrap();
+    let dynamic_constraint = spec.compile_dynamic(&CompileOptions::default()).unwrap();
 
-    let static_constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    let dynamic_constraint = DynamicConstraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-
-    for token in ids {
+    for token in [100, 101] {
         let mut static_state = static_constraint.start();
         let mut dynamic_state = dynamic_constraint.start();
         assert!(allowed(&static_state.mask(), 100));
@@ -65,133 +69,331 @@ fn external_terminal_ids_can_be_outside_the_byte_vocab_and_multiple_ids_are_inte
 }
 
 #[test]
-fn externally_bound_id_keeps_ordinary_byte_semantics_on_other_parse_paths() {
-    let vocab = Vocab::new(vec![
-        (0, b"x".to_vec()),
-        (1, b"z".to_vec()),
-        (7, b"a".to_vec()),
-    ]);
-    let ids = [7];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
+fn external_token_validation_is_early_and_complete() {
+    let vocab = Vocab::new(vec![(7, Vec::new())]);
     let source = r#"
 glrm 1;
 start start;
-extern t SPECIAL;
+extern token CONTROL;
+extern grammar payload;
+nt start = CONTROL payload;
+"#;
+
+    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("CONTROL", [])
+        .is_err());
+    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("payload", [7])
+        .is_err());
+    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("CONTROL", [7])
+        .unwrap()
+        .build()
+        .is_err());
+}
+
+#[test]
+fn commit_token_keeps_exact_and_decoded_byte_interpretations() {
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"z".to_vec()), (7, b"a".to_vec())]);
+    let source = r#"
+glrm 1;
+start start;
+extern token SPECIAL;
 nt start = "a" SPECIAL | "x" "a" "z";
 "#;
-    let constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
+    let constraint = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("SPECIAL", [7])
+        .unwrap()
+        .build()
+        .unwrap()
+        .compile_static(&CompileOptions::default())
+        .unwrap();
 
-    // Token 7 has bytes "a", so it follows the ordinary byte path here.
     let mut byte_path = constraint.start();
     byte_path.commit_token(0).unwrap();
-    assert!(allowed(&byte_path.mask(), 7));
     byte_path.commit_token(7).unwrap();
-    assert!(allowed(&byte_path.mask(), 1));
     byte_path.commit_token(1).unwrap();
     assert!(byte_path.is_accepting());
 
-    // At the root the same token's byte realization starts the first branch;
-    // the next occurrence is admitted as the exact SPECIAL terminal.
     let mut mixed_path = constraint.start();
     mixed_path.commit_token(7).unwrap();
-    assert!(allowed(&mixed_path.mask(), 7));
     mixed_path.commit_token(7).unwrap();
     assert!(mixed_path.is_accepting());
 }
 
 #[test]
-fn end_tokens_remain_separate_from_named_external_terminals() {
-    let vocab = Vocab::new(Vec::new());
-    let special_ids = [100];
-    let end_ids = [64];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &special_ids)];
-    let options = CompileOptions::default()
-        .external_terminal_bindings(&bindings)
-        .end_token_ids(&end_ids);
-    let source = "glrm 1; start start; extern t SPECIAL; nt start = SPECIAL;";
+fn exact_tokens_survive_static_and_dynamic_serialization() {
+    let vocab = Vocab::new(vec![(100, Vec::new())]);
+    let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
+    let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("SPECIAL", [100])
+        .unwrap()
+        .build()
+        .unwrap();
 
-    for mut state in [
-        Constraint::compile(Grammar::glrm(source), &vocab, &options)
-            .unwrap()
-            .start(),
+    let compiled = spec.compile_static(&CompileOptions::default()).unwrap();
+    let loaded = StaticConstraint::load(&compiled.save()).unwrap();
+    let mut state = loaded.start();
+    state.commit_token(100).unwrap();
+    assert!(state.is_accepting());
+
+    let compiled = spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let loaded = DynamicConstraint::load(&compiled.save()).unwrap();
+    let mut state = loaded.start();
+    state.commit_token(100).unwrap();
+    assert!(state.is_accepting());
+}
+
+#[test]
+fn compiled_children_are_authoritative_and_compose_both_directions() {
+    let vocab = Vocab::new(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]);
+    let child_source = "glrm 1; start start; extern token VALUE; nt start = VALUE;";
+    let child_spec = ConstraintSpec::builder(Grammar::glrm(child_source), &vocab)
+        .unwrap()
+        .bind_token("VALUE", [55, 56])
+        .unwrap()
+        .build()
+        .unwrap();
+    let static_child = child_spec.compile_static(&CompileOptions::default()).unwrap();
+    let dynamic_child = child_spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let loaded_dynamic_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
+    let parent_source = r#"
+glrm 1;
+start document;
+extern token MARK;
+extern grammar payload;
+nt document = MARK payload;
+"#;
+
+    for (static_parent, dynamic_parent) in [
+        {
+            let spec = ConstraintSpec::builder(Grammar::glrm(parent_source), &vocab)
+                .unwrap()
+                .bind_token("MARK", [0])
+                .unwrap()
+                .bind_grammar("payload", &static_child)
+                .unwrap()
+                .build()
+                .unwrap();
+            (
+                spec.compile_static(&CompileOptions::default()).unwrap(),
+                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+            )
+        },
+        {
+            let spec = ConstraintSpec::builder(Grammar::glrm(parent_source), &vocab)
+                .unwrap()
+                .bind_token("MARK", [0])
+                .unwrap()
+                .bind_grammar("payload", &dynamic_child)
+                .unwrap()
+                .build()
+                .unwrap();
+            (
+                spec.compile_static(&CompileOptions::default()).unwrap(),
+                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+            )
+        },
+        {
+            let spec = ConstraintSpec::builder(Grammar::glrm(parent_source), &vocab)
+                .unwrap()
+                .bind_token("MARK", [0])
+                .unwrap()
+                .bind_grammar("payload", &loaded_dynamic_child)
+                .unwrap()
+                .build()
+                .unwrap();
+            (
+                spec.compile_static(&CompileOptions::default()).unwrap(),
+                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+            )
+        },
     ] {
-        assert!(allowed(&state.mask(), 100));
-        assert!(!allowed(&state.mask(), 64));
-        state.commit_token(100).unwrap();
-        assert!(!state.is_accepting());
-        assert!(allowed(&state.mask(), 64));
-        state.commit_token(64).unwrap();
-        assert!(state.is_accepting());
+        for token in [55, 56] {
+            let mut static_state = static_parent.start();
+            let mut dynamic_state = dynamic_parent.start();
+            static_state.commit_token(0).unwrap();
+            dynamic_state.commit_token(0).unwrap();
+            static_state.commit_token(token).unwrap();
+            dynamic_state.commit_token(token).unwrap();
+            assert!(static_state.is_accepting());
+            assert!(dynamic_state.is_accepting());
+        }
     }
-
-    let dynamic = DynamicConstraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    let mut state = dynamic.start();
-    state.commit_token(100).unwrap();
-    assert!(!state.is_accepting());
-    assert!(allowed(&state.mask(), 64));
-    state.commit_token(64).unwrap();
-    assert!(state.is_accepting());
 }
 
 #[test]
-fn named_external_terminals_survive_static_and_dynamic_serialization() {
-    let vocab = Vocab::new(Vec::new());
-    let ids = [100];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
-    let source = "glrm 1; start start; extern t SPECIAL; nt start = SPECIAL;";
-
-    let static_constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    let loaded = Constraint::load(&static_constraint.save()).unwrap();
-    let mut state = loaded.start();
-    state.commit_token(100).unwrap();
-    assert!(state.is_accepting());
-
-    let dynamic = DynamicConstraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
-    let mut state = loaded.start();
-    state.commit_token(100).unwrap();
-    assert!(state.is_accepting());
-}
-
-#[test]
-fn named_external_terminals_compose_with_external_subgrammars_without_sentinel_collisions() {
-    let vocab = Vocab::new(Vec::new());
-    let child = Constraint::compile(
-        Grammar::glrm("start start; nt start ::= @token(55);"),
+fn loaded_direct_regular_dynamic_child_remains_composable() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+    let dynamic_child = DynamicConstraint::compile(
+        Grammar::lark("start: /a+/"),
         &vocab,
         &CompileOptions::default(),
     )
     .unwrap();
+    let loaded_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
+    let parent_source = "glrm 1; start start; extern grammar payload; nt start = payload;";
+    let spec = ConstraintSpec::builder(Grammar::glrm(parent_source), &vocab)
+        .unwrap()
+        .bind_grammar("payload", &loaded_child)
+        .unwrap()
+        .build()
+        .unwrap();
+    let static_parent = spec.compile_static(&CompileOptions::default()).unwrap();
+    let dynamic_parent = spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    for token in [0, 1] {
+        let mut static_state = static_parent.start();
+        let mut dynamic_state = dynamic_parent.start();
+        static_state.commit_token(token).unwrap();
+        dynamic_state.commit_token(token).unwrap();
+        assert!(static_state.is_accepting());
+        assert!(dynamic_state.is_accepting());
+    }
+}
 
-    // ID 0 is exactly where an empty-vocab linker allocator would otherwise
-    // begin. The compiler must reserve it for MARK and choose another hidden ID.
-    let mark_ids = [0];
-    let bindings = [ExternalTerminalBinding::new("MARK", &mark_ids)];
-    let children = [("payload", &child)];
-    let options = CompileOptions::default()
-        .external_terminal_bindings(&bindings)
-        .subgrammars(&children);
-    let source = r#"
-glrm 1;
-start document;
-extern t MARK;
-extern g payload;
-nt document = MARK payload;
-"#;
+#[test]
+fn grammar_can_bind_source_subgrammar_before_target_selection() {
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+    let parent = Grammar::glrm(
+        "glrm 1; start start; extern grammar payload; nt start = payload;",
+    )
+    .bind_grammar("payload", Grammar::ebnf(r#"start ::= "x" | "y""#))
+    .unwrap();
 
-    let constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
+    let static_constraint =
+        StaticConstraint::compile(parent.clone(), &vocab, &CompileOptions::default()).unwrap();
+    let dynamic_constraint =
+        DynamicConstraint::compile(parent, &vocab, &CompileOptions::default()).unwrap();
+
+    for token in [0, 1] {
+        let mut static_state = static_constraint.start();
+        let mut dynamic_state = dynamic_constraint.start();
+        static_state.commit_token(token).unwrap();
+        dynamic_state.commit_token(token).unwrap();
+        assert!(static_state.is_accepting());
+        assert!(dynamic_state.is_accepting());
+    }
+}
+
+#[test]
+fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings() {
+    let vocab = Vocab::new(vec![(7, Vec::new()), (8, b"z".to_vec())]);
+    let leaf = Grammar::ebnf(r#"start ::= "z""#);
+    let child = Grammar::glrm(
+        "glrm 1; start start; extern grammar leaf; nt start = leaf;",
+    )
+    .bind_grammar("leaf", leaf)
+    .unwrap();
+    let parent = Grammar::glrm(
+        "glrm 1; start start; extern token MARK; extern grammar child; nt start = MARK child;",
+    )
+    .bind_grammar("child", child)
+    .unwrap();
+
+    let spec = ConstraintSpec::builder(parent, &vocab)
+        .unwrap()
+        .bind_token("MARK", [7])
+        .unwrap()
+        .build()
+        .unwrap();
+    let constraint = spec.compile_static(&CompileOptions::default()).unwrap();
     let mut state = constraint.start();
-    assert!(allowed(&state.mask(), 0));
-    state.commit_token(0).unwrap();
-    assert!(allowed(&state.mask(), 55));
-    state.commit_token(55).unwrap();
+    state.commit_token(7).unwrap();
+    state.commit_token(8).unwrap();
     assert!(state.is_accepting());
 }
 
 #[test]
-fn v1_terminal_fa_compiles_directly_and_masks_tokens() {
+fn grammar_source_binding_accepts_shorter_lived_child_source() {
+    let child_source = String::from(r#"start ::= "x""#);
+    let _grammar = Grammar::glrm(
+        "glrm 1; start start; extern grammar payload; nt start = payload;",
+    )
+    .bind_grammar("payload", Grammar::ebnf(&child_source))
+    .unwrap();
+}
+
+#[test]
+fn grammar_source_bindings_validate_parent_declarations() {
+    let wrong_kind = Grammar::glrm(
+        "glrm 1; start start; extern token X; nt start = X;",
+    )
+    .bind_grammar("X", Grammar::ebnf(r#"start ::= "x""#))
+    .unwrap_err()
+    .to_string();
+    assert!(wrong_kind.contains("kind token, not grammar"), "{wrong_kind}");
+
+    let unknown = Grammar::glrm("glrm 1; start start; nt start = \"x\";")
+        .bind_grammar("missing", Grammar::ebnf(r#"start ::= "x""#))
+        .unwrap_err()
+        .to_string();
+    assert!(unknown.contains("no external grammar"), "{unknown}");
+}
+
+#[test]
+fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
+    let vocab = Vocab::new(vec![(0, b"x".to_vec())]);
+    let parent = "glrm 1; start start; extern grammar child; nt start = child;";
+    let source_child = Grammar::ebnf(r#"start ::= "x""#);
+    let source_bound = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+        .unwrap()
+        .bind_grammar("child", source_child.clone())
+        .unwrap()
+        .build()
+        .unwrap()
+        .compile_static(&CompileOptions::default())
+        .unwrap();
+    let mut state = source_bound.start();
+    state.commit_token(0).unwrap();
+    assert!(state.is_accepting());
+
+    let child_spec = ConstraintSpec::builder(source_child, &vocab)
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+        .unwrap()
+        .bind_grammar("child", child_spec)
+        .unwrap()
+        .build()
+        .is_ok());
+
+    let unresolved_child = Grammar::glrm(
+        "glrm 1; start start; extern token TOKEN; nt start = TOKEN;",
+    );
+    let spec = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+        .unwrap()
+        .bind_grammar("child", unresolved_child)
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(spec.compile_static(&CompileOptions::default()).is_err());
+}
+
+#[test]
+fn incompatible_compiled_child_target_is_rejected_at_bind_time() {
+    let child_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+    let parent_vocab = Vocab::new(vec![(0, b"b".to_vec())]);
+    let child = StaticConstraint::compile(
+        Grammar::ebnf(r#"start ::= "a""#),
+        &child_vocab,
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let parent = "glrm 1; start start; extern grammar child; nt start = child;";
+    assert!(ConstraintSpec::builder(Grammar::glrm(parent), &parent_vocab)
+        .unwrap()
+        .bind_grammar("child", &child)
+        .is_err());
+}
+
+#[test]
+fn v1_terminal_fa_compiles_and_masks_tokens() {
     let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec())]);
     let source = r#"
 glrm 1;
@@ -204,7 +406,7 @@ t WORD = fa {
 };
 nt start = WORD;
 "#;
-    let constraint = Constraint::compile(
+    let constraint = StaticConstraint::compile(
         Grammar::glrm(source),
         &vocab,
         &CompileOptions::default(),
@@ -218,100 +420,72 @@ nt start = WORD;
 }
 
 #[test]
-fn nested_external_terminal_bindings_use_qualified_names() {
-    let vocab = Vocab::new(Vec::new());
-    let ids = [123];
-    let bindings = [ExternalTerminalBinding::new("inner::END", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
+fn nested_external_tokens_use_qualified_names() {
+    let vocab = Vocab::new(vec![(123, Vec::new())]);
     let source = r#"
 glrm 1;
 start document;
 g inner = {
     start value;
-    extern t END;
+    extern token END;
     nt value = END;
 };
 nt document = inner;
 "#;
-    let constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
+    let constraint = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("inner::END", [123])
+        .unwrap()
+        .build()
+        .unwrap()
+        .compile_static(&CompileOptions::default())
+        .unwrap();
     let mut state = constraint.start();
-    assert!(allowed(&state.mask(), 123));
     state.commit_token(123).unwrap();
     assert!(state.is_accepting());
 }
 
 #[test]
-fn external_terminal_can_label_nonterminal_fa_edges() {
-    let vocab = Vocab::new(Vec::new());
-    let ids = [77];
-    let bindings = [ExternalTerminalBinding::new("END", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
+fn external_token_can_label_nonterminal_fa_edges() {
+    let vocab = Vocab::new(vec![(77, Vec::new())]);
     let source = r#"
 glrm 1;
 start start;
-extern t END;
+extern token END;
 nt start = fa {
     start begin;
     accept done;
     begin -> done: END;
 };
 "#;
-    let constraint = Constraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    let dynamic = DynamicConstraint::compile(Grammar::glrm(source), &vocab, &options).unwrap();
-    assert!(allowed(&constraint.start().mask(), 77));
-    assert!(allowed(&dynamic.start().mask(), 77));
+    let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap()
+        .bind_token("END", [77])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(allowed(&spec.compile_static(&CompileOptions::default()).unwrap().start().mask(), 77));
+    assert!(allowed(&spec.compile_dynamic(&CompileOptions::default()).unwrap().start().mask(), 77));
 }
 
 #[test]
-fn glrmask_lexer_pragma_does_not_change_token_language() {
-    let vocab = Vocab::new(vec![
-        (0, b"abc".to_vec()),
-        (1, b"a".to_vec()),
-        (2, b"bc".to_vec()),
-        (3, b"123".to_vec()),
-    ]);
-    let plain = r#"
-glrm 1;
-start start;
-t WORD = /[a-z]+/;
-nt start = WORD;
-"#;
+fn lexer_pragma_does_not_change_token_language() {
+    let vocab = Vocab::new(vec![(0, b"abc".to_vec()), (1, b"a".to_vec()), (2, b"bc".to_vec())]);
+    let plain = "glrm 1; start start; t WORD = /[a-z]+/; nt start = WORD;";
     let hinted = r#"
 glrm 1;
 start start;
-pragma glrmask {
-    lexer group words = WORD;
-}
+pragma glrmask { lexer group words = WORD; }
 t WORD = /[a-z]+/;
 nt start = WORD;
 "#;
     let options = CompileOptions::default();
-    let plain = Constraint::compile(Grammar::glrm(plain), &vocab, &options).unwrap();
-    let hinted = Constraint::compile(Grammar::glrm(hinted), &vocab, &options).unwrap();
-
+    let plain = StaticConstraint::compile(Grammar::glrm(plain), &vocab, &options).unwrap();
+    let hinted = StaticConstraint::compile(Grammar::glrm(hinted), &vocab, &options).unwrap();
     let mut left = plain.start();
     let mut right = hinted.start();
     assert_eq!(left.mask(), right.mask());
     left.commit_token(1).unwrap();
     right.commit_token(1).unwrap();
     assert_eq!(left.mask(), right.mask());
-    left.commit_token(2).unwrap();
-    right.commit_token(2).unwrap();
-    assert_eq!(left.is_accepting(), right.is_accepting());
-}
-
-#[test]
-fn static_and_dynamic_reject_external_bindings_for_non_glrm_grammars() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
-    let ids = [7];
-    let bindings = [ExternalTerminalBinding::new("SPECIAL", &ids)];
-    let options = CompileOptions::default().external_terminal_bindings(&bindings);
-    for grammar in [
-        Grammar::ebnf(r#"start ::= "a""#),
-        Grammar::lark(r#"start: "a""#),
-        Grammar::json_schema(r#"{"type":"string"}"#),
-    ] {
-        assert!(Constraint::compile(grammar, &vocab, &options).is_err());
-        assert!(DynamicConstraint::compile(grammar, &vocab, &options).is_err());
-    }
 }

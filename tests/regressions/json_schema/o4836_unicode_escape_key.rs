@@ -1,6 +1,6 @@
 use std::{env, ffi::OsString};
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 
 struct EnvVarGuard {
@@ -16,7 +16,7 @@ impl EnvVarGuard {
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
-            glrmask::Constraint::set_test_compat_mode(enabled);
+            glrmask::StaticConstraint::set_test_compat_mode(enabled);
         }
         Self { key, original }
     }
@@ -34,7 +34,7 @@ impl Drop for EnvVarGuard {
         }
         if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let original_enabled = self.original.as_ref().is_some_and(|value| value != "0" && !value.is_empty());
-            glrmask::Constraint::set_test_compat_mode(original_enabled);
+            glrmask::StaticConstraint::set_test_compat_mode(original_enabled);
         }
     }
 }

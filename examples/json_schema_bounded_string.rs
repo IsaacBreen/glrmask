@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Instant;
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();

@@ -1,7 +1,7 @@
 mod ti_mre_tests {
     use std::{env, ffi::OsString, sync::Mutex};
 
-    use crate::{Constraint, Vocab};
+    use crate::{StaticConstraint as Constraint, Vocab};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -238,7 +238,7 @@ nt S ::= FROM V | SPACE V SPACE CLASS;
 
 
 mod synthetic_state_facade_tests {
-    use crate::{Constraint, DynamicConstraint, Vocab};
+    use crate::{DynamicConstraint, StaticConstraint as Constraint, Vocab};
 
     struct LlGuidanceCompatGuard;
 

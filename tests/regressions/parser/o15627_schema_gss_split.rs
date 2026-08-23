@@ -1,4 +1,4 @@
-use glrmask::{Constraint, ConstraintState, Vocab};
+use glrmask::{StaticConstraint as Constraint, ConstraintState, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 // The second root key is load-bearing. It is globally subtracted from the shared

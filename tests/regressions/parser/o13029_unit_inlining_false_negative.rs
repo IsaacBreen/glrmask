@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 const DISPUTED_TOKEN_ID: u32 = 3605;

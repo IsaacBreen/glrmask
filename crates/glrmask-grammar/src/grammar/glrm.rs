@@ -13,7 +13,7 @@
 //!
 //! internal t DIGIT = /[0-9]/;
 //! t NUMBER = /-?(0|[1-9][0-9]*)/;
-//! extern t END_TURN;
+//! extern token END_TURN;
 //! nt value = NUMBER | "null" | END_TURN;
 //! ```
 //!
@@ -22,7 +22,7 @@
 //! and double quoted literals have the same byte-string semantics; the v1
 //! formatter chooses the delimiter requiring fewer escapes and prefers double
 //! quotes on a tie. Exact
-//! model-token IDs do not appear in v1 source: `extern t NAME;` declares a
+//! model-token IDs do not appear in v1 source: `extern token NAME;` declares a
 //! parser-visible exact-token terminal whose ID or IDs are supplied by the host.
 //! External terminals may appear in nonterminal expressions and nonterminal FA
 //! edges, but not in byte-level terminal expressions.
@@ -49,7 +49,7 @@
 //! }
 //! ```
 //!
-//! Inline subgrammars use `g name = { ... };`; `extern g name;` declares a
+//! Inline subgrammars use `g name = { ... };`; `extern grammar name;` declares a
 //! compiled subgrammar supplied by the host. Scope and ignore semantics remain
 //! local to each grammar.
 //!
@@ -214,7 +214,7 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
 
 /// Serialize a grammar using the versioned GLRM v1 surface syntax.
 ///
-/// Bound exact-token terminals cannot be reconstructed as named `extern t`
+/// Bound exact-token terminals cannot be reconstructed as named `extern token`
 /// declarations from a lowered [`NamedGrammar`], so grammars containing raw
 /// [`GrammarExpr::SpecialToken`] nodes are rejected instead of leaking the
 /// legacy numeric `@token(id)` syntax into v1 output.
@@ -276,7 +276,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
 }
 
 /// Canonically format a versioned GLRM v1 source document without lowering
-/// source-level declarations such as `extern t NAME;`.
+/// source-level declarations such as `extern token NAME;`.
 ///
 /// This is intentionally a source-layer formatter: exact token IDs are not
 /// accepted or emitted, and externally bound terminal names survive unchanged.
@@ -368,13 +368,13 @@ fn dump_parsed_scope_v1(
     }
 
     for terminal in &scope.external_terminals {
-        push_indented_line(out, indent, &format!("extern t {};", terminal.name));
+        push_indented_line(out, indent, &format!("extern token {};", terminal.name));
     }
 
     for subgrammar in &scope.subgrammars {
         match &subgrammar.body {
             ParsedSubgrammarBody::External => {
-                push_indented_line(out, indent, &format!("extern g {};", subgrammar.name));
+                push_indented_line(out, indent, &format!("extern grammar {};", subgrammar.name));
             }
             ParsedSubgrammarBody::Inline(child) => {
                 push_indented_line(out, indent, &format!("g {} = {{", subgrammar.name));
@@ -744,7 +744,7 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
 }
 
-/// Parse GLRM v1 and bind every `extern t NAME;` declaration to one or more
+/// Parse GLRM v1 and bind every `extern token NAME;` declaration to one or more
 /// exact model token IDs. These terminals are parser-visible and have no byte
 /// language; token IDs need not occur in the byte vocabulary.
 pub fn from_glrm_with_external_terminals(
@@ -779,7 +779,30 @@ pub struct GlrmWithExternalSubgrammars {
     pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
-/// Parse GLRM containing `extern g name;` declarations.
+/// The target-independent external declarations in a GLRM source descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlrmExternalDeclarations {
+    pub token_names: Vec<String>,
+    pub grammar_names: Vec<String>,
+}
+
+/// Parse and validate GLRM declarations without binding or lowering them.
+///
+/// Names nested inside inline grammar scopes are qualified with `::`.
+pub fn external_declarations(
+    input: &str,
+) -> Result<GlrmExternalDeclarations, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let scope = parser.parse_root_scope()?;
+    validate_scope_for_v1_format(&scope, "grammar")?;
+    Ok(GlrmExternalDeclarations {
+        token_names: collect_external_terminal_names(&scope),
+        grammar_names: collect_external_subgrammar_names(&scope),
+    })
+}
+
+/// Parse GLRM containing `extern grammar name;` declarations.
 ///
 /// `first_placeholder_token_id` must lie outside the model vocabulary.
 /// `reserved_token_ids` contains end-token and other caller-reserved IDs.
@@ -1592,9 +1615,9 @@ impl GlrmParser {
                     "extern" => {
                         self.advance();
                         match self.advance().clone() {
-                            Tok::Ident(ref kind) if kind == "t" => {
+                            Tok::Ident(ref kind) if kind == "token" => {
                                 if self.version != GlrmVersion::V1 {
-                                    return Err(err("extern t declarations require a leading 'glrm 1;' header"));
+                                    return Err(err("extern token declarations require a leading 'glrm 1;' header"));
                                 }
                                 let name = self.expect_ident()?;
                                 self.consume(&Tok::Semi)?;
@@ -1604,10 +1627,10 @@ impl GlrmParser {
                                 });
                                 continue;
                             }
-                            Tok::Ident(ref kind) if kind == "g" || kind == "subgrammar" => {}
+                            Tok::Ident(ref kind) if kind == "grammar" => {}
                             other => {
                                 return Err(err(&format!(
-                                    "expected 'g' after 'extern', got {:?}",
+                                    "expected 'token' or 'grammar' after 'extern', got {:?}",
                                     other,
                                 )));
                             }
@@ -2332,7 +2355,7 @@ impl GlrmParser {
             }
             Tok::At => {
                 if self.version == GlrmVersion::V1 {
-                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern t NAME;' and bind it by name"));
+                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern token NAME;' and bind it by name"));
                 }
                 self.advance();
                 match self.advance().clone() {
@@ -4111,7 +4134,7 @@ nt document ::= A inner;
         let error = from_glrm(
             r#"
 start document;
-extern g payload;
+extern grammar payload;
 nt document ::= "<" payload ">";
 "#,
         )
@@ -4125,10 +4148,10 @@ nt document ::= "<" payload ">";
         let parsed = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern g payload;
+extern grammar payload;
 g wrapper ::= {
     start value;
-    extern g leaf;
+    extern grammar leaf;
     nt value ::= "[" leaf "]";
 };
 t END ::= @token(52);
@@ -4173,8 +4196,8 @@ nt document ::= "<" payload wrapper ">" END?;
         let error = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern g left;
-extern g right;
+extern grammar left;
+extern grammar right;
 nt document ::= left right;
 "#,
             u32::MAX,
@@ -4285,7 +4308,7 @@ nt start = '"' | "'" | "plain";
             r#"
 glrm 1;
 start start;
-extern t END_TURN;
+extern token END_TURN;
 nt start = "a" END_TURN;
 "#,
             &[("END_TURN", &ids)],
@@ -4304,7 +4327,7 @@ nt start = "a" END_TURN;
 
     #[test]
     fn glrm_v1_external_terminal_binding_errors_are_explicit() {
-        let source = "glrm 1; start start; extern t X; nt start = X;";
+        let source = "glrm 1; start start; extern token X; nt start = X;";
         let missing = from_glrm(source).unwrap_err().to_string();
         assert!(missing.contains("no exact-token binding"), "{missing}");
         let empty = from_glrm_with_external_terminals(source, &[("X", &[])])
@@ -4327,7 +4350,7 @@ nt start = "a" END_TURN;
     fn glrm_v1_external_terminal_is_not_visible_inside_terminal_bodies() {
         let ids = [100];
         let error = from_glrm_with_external_terminals(
-            "glrm 1; start start; extern t X; t BAD = X; nt start = BAD;",
+            "glrm 1; start start; extern token X; t BAD = X; nt start = BAD;",
             &[("X", &ids)],
         )
         .unwrap_err()
@@ -4400,10 +4423,10 @@ start message;
 pragma glrmask {
     lexer group words = WORD;
 }
-extern t END_TURN;
+extern token END_TURN;
 g inner = {
     start value;
-    extern t BEGIN_ASSISTANT;
+    extern token BEGIN_ASSISTANT;
     nt value = BEGIN_ASSISTANT "x";
 };
 t WORD = /[a-z]+/;
@@ -4418,8 +4441,8 @@ nt message = inner WORD END_TURN;
         let before = from_glrm_with_external_terminals(source, &bindings).unwrap();
         let formatted = format_glrm_v1(source).unwrap();
         assert!(formatted.starts_with("glrm 1;\n"), "{formatted}");
-        assert!(formatted.contains("extern t END_TURN;"), "{formatted}");
-        assert!(formatted.contains("extern t BEGIN_ASSISTANT;"), "{formatted}");
+        assert!(formatted.contains("extern token END_TURN;"), "{formatted}");
+        assert!(formatted.contains("extern token BEGIN_ASSISTANT;"), "{formatted}");
         assert!(formatted.contains("g inner = {"), "{formatted}");
         assert!(formatted.contains("pragma glrmask {"), "{formatted}");
         assert!(!formatted.contains("@token"), "{formatted}");
@@ -4444,11 +4467,11 @@ nt message = inner WORD END_TURN;
         let source = r#"
 glrm 1;
 start document;
-extern g payload;
+extern grammar payload;
 nt document = "<" payload ">";
 "#;
         let formatted = format_glrm_v1(source).unwrap();
-        assert!(formatted.contains("extern g payload;"), "{formatted}");
+        assert!(formatted.contains("extern grammar payload;"), "{formatted}");
         let before = from_glrm_with_external_subgrammars(source, 100, []).unwrap();
         let after = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
         assert_eq!(after.grammar.rules, before.grammar.rules);

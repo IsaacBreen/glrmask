@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 use serde_json::json;
 

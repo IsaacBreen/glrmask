@@ -1,4 +1,4 @@
-use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+use glrmask::{CompileOptions, StaticConstraint as Constraint, Grammar, Vocab};
 
 fn token_allowed(mask: &[u32], token_id: usize) -> bool {
     let word = token_id / 32;

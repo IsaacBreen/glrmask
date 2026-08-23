@@ -1,7 +1,7 @@
 //! Minimal TI-off reproducer for byte-restricted L2P state equivalence.
 //!
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 fn contains(mask: &[u32], token: u32) -> bool {
     let word = token as usize / 32;

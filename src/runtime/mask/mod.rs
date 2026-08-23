@@ -816,7 +816,7 @@ mod tests {
     use crate::automata::lexer::Lexer;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::{Constraint, Vocab};
+    use crate::{StaticConstraint as Constraint, Vocab};
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
@@ -5254,7 +5254,7 @@ impl<'a> ConstraintState<'a> {
 
     /// Fill `buf` with the allowed-token mask.
     ///
-    /// `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
+    /// `buf` must contain at least [`crate::StaticConstraint::mask_len`] words. Any extra
     /// words are cleared.
 
     fn static_mask_for_reset_branch(&self, gss: &ParserGSS, buf: &mut [u32]) {

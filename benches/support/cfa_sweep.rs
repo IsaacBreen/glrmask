@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
 
 use criterion::{black_box, BenchmarkId, Criterion};
-use glrmask::{Constraint, Vocab};
+use glrmask::{CompileOptions, Grammar, StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 
 pub struct BenchCase {
@@ -86,8 +86,12 @@ pub fn clear_compile_caches() {
 
 pub fn build_schema(case: &BenchCase, vocab: &Vocab) {
     clear_compile_caches();
-    let constraint = Constraint::from_json_schema(black_box(case.schema), black_box(vocab))
-        .unwrap_or_else(|err| panic!("{} schema should compile: {err}", case.cfa_name));
+    let constraint = Constraint::compile(
+        Grammar::json_schema(black_box(case.schema)),
+        black_box(vocab),
+        &CompileOptions::default(),
+    )
+    .unwrap_or_else(|err| panic!("{} schema should compile: {err}", case.cfa_name));
     black_box(constraint);
 }
 

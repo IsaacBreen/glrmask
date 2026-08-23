@@ -37,15 +37,11 @@ fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
 
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
-    bindings: &[crate::ExternalTerminalBinding<'_>],
+    bindings: &[(&str, &[u32])],
 ) -> crate::Result<ast::NamedGrammar> {
-    let bindings = bindings
-        .iter()
-        .map(|binding| (binding.name(), binding.token_ids()))
-        .collect::<Vec<_>>();
     Ok(crate::grammar::glrm::from_glrm_with_external_terminals(
         source,
-        &bindings,
+        bindings,
     )?)
 }
 
@@ -788,7 +784,7 @@ impl Constraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[crate::ExternalTerminalBinding<'_>],
+        bindings: &[(&str, &[u32])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -803,7 +799,7 @@ impl Constraint {
         })
     }
 
-    /// Compile GLRM containing typed `extern g name;` declarations and bind
+    /// Compile GLRM containing typed `extern grammar name;` declarations and bind
     /// each declaration to an already-compiled child constraint.
     ///
     /// Binding names are the source names of top-level externals. Externals
@@ -840,15 +836,11 @@ impl Constraint {
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
-        terminal_bindings: &[crate::ExternalTerminalBinding<'_>],
+        terminal_bindings: &[(&str, &[u32])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let terminal_bindings = terminal_bindings
-                .iter()
-                .map(|binding| (binding.name(), binding.token_ids()))
-                .collect::<Vec<_>>();
             let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
@@ -862,7 +854,7 @@ impl Constraint {
                                 .map(|special| special.token_id)
                         }),
                 ),
-                &terminal_bindings,
+                terminal_bindings,
             )?;
 
             let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
@@ -1175,7 +1167,7 @@ impl DynamicConstraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[crate::ExternalTerminalBinding<'_>],
+        bindings: &[(&str, &[u32])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -1186,6 +1178,107 @@ impl DynamicConstraint {
                 GlrTableConstruction::ExperimentalCoreMerged,
                 end_token_ids,
             )
+        })
+    }
+
+    pub(crate) fn from_glrm_grammar_with_subgrammars_and_bindings(
+        glrm: &str,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+        terminal_bindings: &[(&str, &[u32])],
+    ) -> crate::Result<Self> {
+        with_large_import_stack(glrm.len(), || {
+            let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
+            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+                glrm,
+                first_placeholder_token_id,
+                children.iter().flat_map(|(_, child)| {
+                    child
+                        .special_token_terminals
+                        .iter()
+                        .map(|special| special.token_id)
+                }),
+                terminal_bindings,
+            )?;
+
+            let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
+            for &(binding_name, child) in children {
+                if children_by_name.insert(binding_name, child).is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "external subgrammar binding {binding_name:?} was supplied more than once",
+                    )));
+                }
+            }
+
+            let mut external_bindings = Vec::with_capacity(parsed.placeholders.len());
+            for placeholder in &parsed.placeholders {
+                let child = children_by_name
+                    .remove(placeholder.binding_name.as_str())
+                    .ok_or_else(|| {
+                        crate::GlrMaskError::Compilation(format!(
+                            "GLRM declares external subgrammar {:?}, but no compiled child was supplied",
+                            placeholder.binding_name,
+                        ))
+                    })?;
+                external_bindings.push((
+                    placeholder.token_id,
+                    placeholder.binding_name.as_str(),
+                    child,
+                ));
+            }
+            if let Some((&unknown, _)) = children_by_name.first_key_value() {
+                return Err(crate::GlrMaskError::Compilation(format!(
+                    "compiled child was supplied for unknown external subgrammar {unknown:?}",
+                )));
+            }
+
+            let parents = compile_dynamic_from_named(
+                parsed.grammar,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                &[],
+            )?
+            .composition_constraints(vocab)?;
+            let mut composed = Vec::with_capacity(parents.len());
+            for parent in parents {
+                let mut composition_inputs = Vec::new();
+                for &(placeholder_token_id, binding_name, child) in &external_bindings {
+                    let mut matching_terminals = parent
+                        .special_token_terminals
+                        .iter()
+                        .filter(|special| special.token_id == placeholder_token_id)
+                        .map(|special| special.terminal_id);
+                    let Some(placeholder_terminal) = matching_terminals.next() else {
+                        continue;
+                    };
+                    if matching_terminals.next().is_some() {
+                        return Err(crate::GlrMaskError::Compilation(format!(
+                            "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
+                        )));
+                    }
+                    composition_inputs.push(
+                        crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                            placeholder_terminal,
+                            additional_placeholder_terminals: &[],
+                            constraint: child,
+                        },
+                    );
+                }
+                if composition_inputs.is_empty() {
+                    composed.push(parent);
+                } else {
+                    composed.push(
+                        crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                            parent,
+                            &composition_inputs,
+                            vocab,
+                        )
+                        .map_err(crate::GlrMaskError::Compilation)?
+                        .constraint,
+                    );
+                }
+            }
+            Ok(DynamicConstraint::from_constraints(composed))
         })
     }
 }
@@ -1593,7 +1686,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern g payload;
+                extern grammar payload;
                 nt document ::= "X" payload "!";
             "#,
             &[("payload", &child)],
@@ -1637,8 +1730,8 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern g left;
-                extern g right;
+                extern grammar left;
+                extern grammar right;
                 nt document ::= "X" left right "!";
             "#,
             &[("left", &child), ("right", &child)],
@@ -1679,7 +1772,7 @@ mod tests {
                 start document;
                 g wrapper ::= {
                     start value;
-                    extern g leaf;
+                    extern grammar leaf;
                     nt value ::= "[" leaf "]";
                 };
                 nt document ::= "<" wrapper ">";
@@ -1712,7 +1805,7 @@ mod tests {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                extern g child;
+                extern grammar child;
                 nt document ::= "<" child ">";
             "#,
             &[("child", &child)],
@@ -1753,7 +1846,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let source = "start document; extern g child; nt document ::= child;";
+        let source = "start document; extern grammar child; nt document ::= child;";
 
         let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
             .unwrap_err()
@@ -1794,7 +1887,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern g child;
+                extern grammar child;
                 nt document ::= child "!";
             "#,
             &[("child", &child)],
@@ -1833,7 +1926,7 @@ mod tests {
         )
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-            "start document; extern g child; nt document ::= child;",
+            "start document; extern grammar child; nt document ::= child;",
             &[("child", &child)],
             &vocab,
             &[1],

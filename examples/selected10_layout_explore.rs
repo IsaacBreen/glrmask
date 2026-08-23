@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+use glrmask::{CompileOptions, StaticConstraint as Constraint, Grammar, Vocab};
 use glrmask::__private::{ConstraintExt, ConstraintStateExt};
 use serde_json::Value;
 

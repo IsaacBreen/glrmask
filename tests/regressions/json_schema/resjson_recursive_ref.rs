@@ -1,5 +1,5 @@
 //! Reproduce segfault from JsonSchemaStore---resjson schema (recursive $ref).
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 fn make_vocab(entries: &[&str]) -> Vocab {
     let entries: Vec<(u32, Vec<u8>)> = entries

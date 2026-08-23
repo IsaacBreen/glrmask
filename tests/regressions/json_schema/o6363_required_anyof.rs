@@ -5,7 +5,7 @@
 /// This dropped the `required` constraint entirely, allowing property-only
 /// variants (e.g. `kaniko` without `image`) that should have been rejected.
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 fn build_small_vocab() -> Vocab {
     let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();

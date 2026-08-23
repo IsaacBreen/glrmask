@@ -3,18 +3,18 @@
 //! Extremely fast grammar-constrained decoding for LLMs.
 //!
 //! GLRMask compiles a [`Grammar`] together with a model vocabulary into a reusable
-//! [`Constraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
+//! [`StaticConstraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
 //! obtain the next-token mask, sample a token, then commit that token to advance
 //! the parser state.
 //!
 //! [`DynamicConstraint`] exposes the same decoding model with much lower
 //! compilation latency and higher mask-generation latency. It is intended for
-//! cache misses while a reusable [`Constraint`] is compiled separately.
+//! cache misses while a reusable [`StaticConstraint`] is compiled separately.
 //!
 //! # Quickstart
 //!
 //! ```
-//! use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+//! use glrmask::{CompileOptions, Grammar, StaticConstraint, Vocab};
 //!
 //! let vocab = Vocab::new(vec![
 //!     (0, b"hello".to_vec()),
@@ -22,7 +22,7 @@
 //!     (2, b"world".to_vec()),
 //! ]);
 //! let grammar = Grammar::ebnf(r#"start ::= "hello" " " "world""#);
-//! let constraint = Constraint::compile(grammar, &vocab, &CompileOptions::default()).unwrap();
+//! let constraint = StaticConstraint::compile(grammar, &vocab, &CompileOptions::default()).unwrap();
 //!
 //! let mut state = constraint.start();
 //! assert_ne!(state.mask()[0] & (1 << 0), 0);
@@ -40,26 +40,28 @@
 //!
 //! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. New GLRM grammars use
 //! the versioned `glrm 1;` syntax; unversioned GLRM remains the legacy
-//! compatibility format. [`CompileOptions`] carries optional end-token IDs,
-//! named GLRM external-terminal bindings, and compiled GLRM subgrammar bindings.
-//! Use the same [`Constraint::compile`] / [`DynamicConstraint::compile`] shape
-//! for both execution modes.
+//! compatibility format. Use [`ConstraintSpec::builder`] for target-bound GLRM
+//! extern bindings, then compile the same immutable spec as either a
+//! [`StaticConstraint`] or [`DynamicConstraint`].
 //!
 //! # Persistence
 //!
-//! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
+//! Use [`StaticConstraint::save`] and [`StaticConstraint::load`] to cache compiled
 //! constraints across requests or process restarts.
 //!
 //! # GLRM external bindings
 //!
-//! GLRM v1 can declare exact model-token terminals with `extern t NAME;`. Bind
-//! those names through [`CompileOptions::external_terminal_bindings`] using
-//! [`ExternalTerminalBinding`]. Token IDs stay outside the grammar source.
+//! GLRM v1 can declare exact model-token terminals with `extern token NAME;`.
+//! Bind those names through [`ConstraintSpecBuilder::bind_token`]. Token IDs
+//! stay outside the grammar source.
 //!
-//! GLRM can also declare typed external subgrammars with `extern g name;`. Bind
-//! already-compiled children through [`CompileOptions::subgrammars`]. The compiler
-//! allocates hidden call placeholders automatically and links the components
-//! exactly, including model tokens that cross grammar boundaries.
+//! GLRM can also declare typed external subgrammars with `extern grammar name;`.
+//! A source [`Grammar`] can bind another source grammar directly with
+//! [`Grammar::bind_grammar`] before a target vocabulary is chosen. Target-bound
+//! source/spec/compiled realizations can instead be supplied through
+//! [`ConstraintSpecBuilder::bind_grammar`]. The compiler allocates hidden call
+//! placeholders automatically and links the components exactly, including model
+//! tokens that cross grammar boundaries.
 //!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.
@@ -83,10 +85,14 @@ pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use programmatic_js::ProgrammaticJsCompiler;
-pub use runtime::{Constraint, ConstraintState};
+pub use runtime::{Constraint as StaticConstraint, ConstraintState};
+#[doc(hidden)]
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
-pub use public_api::{CompileOptions, ExternalTerminalBinding, Grammar};
+pub use public_api::{
+    CompileOptions, Constraint, ConstraintSpec, ConstraintSpecBuilder, Grammar,
+    IntoGrammarBinding,
+};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -133,7 +139,10 @@ pub(crate) use error::GlrMaskError;
 
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
-pub(crate) fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {
+pub(crate) fn compile_grammar_def_json(
+    grammar_def_json: &str,
+    vocab: &Vocab,
+) -> Result<StaticConstraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
     error::catch_internal_invariant(|| {
@@ -191,7 +200,7 @@ pub mod __private {
         PerAdvanceEntry,
     };
 
-    use crate::{Constraint, ConstraintState, DynamicConstraint, Vocab};
+    use crate::{ConstraintState, DynamicConstraint, StaticConstraint, Vocab};
 
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -224,12 +233,12 @@ pub mod __private {
         /// removed.  Production callers should express subgrammars in GLRM.
         fn compose_compiled_subgrammars(
             self,
-            children: &[(&str, &Constraint)],
+            children: &[(&str, &StaticConstraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
         fn compose_compiled_subgrammars_shared(
             self,
-            children: &[(&str, std::sync::Arc<Constraint>)],
+            children: &[(&str, std::sync::Arc<StaticConstraint>)],
             vocab: &Vocab,
         ) -> Result<Self>;
     }
@@ -279,7 +288,7 @@ pub mod __private {
         fn max_original_token_id(&self) -> Option<u32>;
     }
 
-    impl ConstraintExt for Constraint {
+    impl ConstraintExt for StaticConstraint {
         fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Self> {
             crate::compile_grammar_def_json(grammar_def_json, vocab)
         }
@@ -298,7 +307,7 @@ pub mod __private {
 
         fn compose_compiled_subgrammars(
             self,
-            children: &[(&str, &Constraint)],
+            children: &[(&str, &StaticConstraint)],
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
@@ -336,7 +345,7 @@ pub mod __private {
 
         fn compose_compiled_subgrammars_shared(
             self,
-            children: &[(&str, std::sync::Arc<Constraint>)],
+            children: &[(&str, std::sync::Arc<StaticConstraint>)],
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
@@ -416,35 +425,35 @@ pub mod __private {
 
 
         fn num_parser_states(&self) -> u32 {
-            Constraint::num_parser_states(self)
+            StaticConstraint::num_parser_states(self)
         }
 
         fn num_tokenizer_states(&self) -> usize {
-            Constraint::num_tokenizer_states(self)
+            StaticConstraint::num_tokenizer_states(self)
         }
 
         fn compute_forced_minimized_tokenizer_state_count(&self) -> usize {
-            Constraint::compute_forced_minimized_tokenizer_state_count(self)
+            StaticConstraint::compute_forced_minimized_tokenizer_state_count(self)
         }
 
         fn max_original_token_id(&self) -> Option<u32> {
-            Constraint::max_original_token_id(self)
+            StaticConstraint::max_original_token_id(self)
         }
 
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
-            Constraint::table_ambiguous_actions(self)
+            StaticConstraint::table_ambiguous_actions(self)
         }
 
         fn table_has_ambiguity(&self) -> bool {
-            Constraint::table_has_ambiguity(self)
+            StaticConstraint::table_has_ambiguity(self)
         }
 
         fn terminal_display_names(&self) -> &[String] {
-            Constraint::terminal_display_names(self)
+            StaticConstraint::terminal_display_names(self)
         }
 
         fn terminal_display_name(&self, terminal_id: u32) -> Option<&str> {
-            Constraint::terminal_display_name(self, terminal_id)
+            StaticConstraint::terminal_display_name(self, terminal_id)
         }
     }
 

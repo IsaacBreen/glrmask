@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
@@ -43,7 +43,7 @@ fn main() {
     let import_only = std::env::var("GLR_IMPORT_ONLY").is_ok();
     for _ in 0..iters {
         if import_only {
-            glrmask::Constraint::profile_json_schema_import(&schema).unwrap();
+            glrmask::StaticConstraint::profile_json_schema_import(&schema).unwrap();
             continue;
         }
         Constraint::clear_weight_interners();

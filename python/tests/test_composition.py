@@ -15,7 +15,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -56,7 +56,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -102,7 +102,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -142,7 +142,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
     middle = glrmask.Constraint.from_glrm_grammar(
         '''
         start middle;
-        extern g leaf;
+        extern grammar leaf;
         nt middle ::= leaf?;
         ''',
         vocab,
@@ -152,7 +152,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g middle;
+        extern grammar middle;
         nt document ::= "X" middle "!";
         ''',
         vocab,
@@ -203,7 +203,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         start document;
         ignore WS;
         t WS ::= " "+;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -252,8 +252,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g left;
-        extern g right;
+        extern grammar left;
+        extern grammar right;
         nt document ::= "<" left ">,<" right ">";
         ''',
         vocab,
@@ -294,7 +294,7 @@ def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,

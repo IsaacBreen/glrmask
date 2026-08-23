@@ -136,7 +136,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
     '''
     glrm 1;
     start document;
-    extern g payload;
+    extern grammar payload;
     nt document = "{" payload "}";
     ''',
     vocab,
@@ -211,7 +211,7 @@ Exact model-token terminals are named in GLRM v1 and bound outside the grammar:
 grammar = '''
 glrm 1;
 start message;
-extern t END_TURN;
+extern token END_TURN;
 nt message = "hello" END_TURN;
 '''
 constraint = glrmask.Constraint.from_glrm_grammar(

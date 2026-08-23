@@ -8,7 +8,7 @@
 //! Before the fix (finalizers only) this over-accepted `word=[B]` for token
 //! `"a"`. See obsidian/.../MINIMAL-mre-at-bt-single-token.md.
 
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 #[test]
 fn shared_suffix_terminals_are_not_interchangeable_under_prefix_byte_partition() {

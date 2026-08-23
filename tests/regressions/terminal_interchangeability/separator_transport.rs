@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 #[test]
 fn ti_separator_transport_matches_ti_off_reference() {

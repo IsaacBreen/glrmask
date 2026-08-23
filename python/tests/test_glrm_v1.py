@@ -10,7 +10,7 @@ def _grammar():
     return '''
     glrm 1;
     start start;
-    extern t END;
+    extern token END;
     nt start = "a" END;
     '''
 

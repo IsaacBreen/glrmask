@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 
 #[test]
 fn unicode_class_pattern_preserves_ascii_and_non_ascii_entries() {

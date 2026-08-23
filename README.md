@@ -4,7 +4,7 @@
 
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
-> **Preliminary:** these timings are not yet accurate and should not be relied on.
+> **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/2f8b1505d0cba2467a458eb8b45c4879710468dd/docs/assets/benchmark-tbm-tail-2026-08-21.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
@@ -30,7 +30,7 @@ cargo add glrmask
 
 ## Usage
 
-GLRMask compiles a grammar and vocabulary into a `Constraint`. The resulting `Constraint` can be serialized and cached for reuse across requests.
+GLRMask compiles a grammar and vocabulary into a `StaticConstraint`. The resulting `StaticConstraint` can be serialized and cached for reuse across requests.
 
 At runtime, call `constraint.start()` to initialize a `ConstraintState`. In the decoding loop, run `state.mask()` in parallel with the model’s forward pass so the mask is ready in time for sampling. Then apply the mask to the logits, sample a token, and call `state.commit_token(token_id)` to advance the state.
 
@@ -47,7 +47,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-For constraints that will not be reused enough to justify static compilation, `DynamicConstraint` leaves more work in the token loop and avoids the full static build. The corresponding `Constraint` can be compiled separately and cached for later requests.
+For constraints that will not be reused enough to justify static compilation, `DynamicConstraint` leaves more work in the token loop and avoids the full static build. The corresponding `StaticConstraint` can be compiled separately and cached for later requests.
 
 ## Python quickstart
 
@@ -130,6 +130,84 @@ for _ in range(MAX_OUTPUT_TOKENS):
 print(llm.detokenize(generated).decode())
 ```
 
+## Rust quickstart
+
+Rust uses one shared grammar/options compilation surface for both static and dynamic constraints. `Constraint` is the trait common to both compiled artifact types; `StaticConstraint` is the default concrete artifact:
+
+```rust
+use glrmask::{CompileOptions, Grammar, StaticConstraint, Vocab};
+
+let vocab = Vocab::new(vec![
+    (0, b"\"yes\"".to_vec()),
+    (1, b"\"no\"".to_vec()),
+]);
+let schema = r#"{"type":"string","enum":["yes","no"]}"#;
+let options = CompileOptions::default();
+let constraint = StaticConstraint::compile(Grammar::json_schema(schema), &vocab, &options)?;
+let mut state = constraint.start();
+
+let mask = state.mask();
+state.commit_token(0)?;
+
+if state.is_accepting() {
+    // The current prefix may validly end here.
+}
+if state.is_rejected() {
+    // No valid continuation remains.
+}
+# Ok::<(), glrmask::Error>(())
+```
+
+Use `DynamicConstraint::compile(...)` with the same `Grammar` and `CompileOptions` when startup latency matters more than per-token mask latency. Once started, static and dynamic states expose the same decoding interface.
+
+When an external subgrammar is still just source, it can be attached before choosing a vocabulary:
+
+```rust
+let grammar = Grammar::glrm(
+    "glrm 1; start start; extern grammar payload; nt start = payload;",
+)
+.bind_grammar("payload", Grammar::json_schema(r#"{\"type\":\"null\"}"#))?;
+
+let constraint = StaticConstraint::compile(grammar, &vocab, &options)?;
+# Ok::<(), glrmask::Error>(())
+```
+
+`Grammar::bind_grammar(...)` is deliberately target-neutral. Exact token IDs and compiled child constraints are bound through `ConstraintSpec` instead.
+
+For GLRM extern declarations that need target-specific bindings, build a target-bound `ConstraintSpec`. The completed immutable spec can be reused to compile either artifact type, and the same `bind_grammar(...)` method accepts source, another spec, a `StaticConstraint`, or a `DynamicConstraint`:
+
+```rust
+use glrmask::{CompileOptions, ConstraintSpec, Grammar, StaticConstraint, Vocab};
+
+let vocab = Vocab::new(vec![
+    (0, b"{".to_vec()),
+    (1, b"}".to_vec()),
+    (2, b"null".to_vec()),
+]);
+let options = CompileOptions::default();
+let child = StaticConstraint::compile(
+    Grammar::json_schema(r#"{"type":"null"}"#),
+    &vocab,
+    &options,
+)?;
+let source = r#"
+glrm 1;
+start document;
+extern token CONTROL;
+extern grammar payload;
+nt document = CONTROL "{" payload "}";
+"#;
+let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)?
+    .bind_token("CONTROL", [32001])?
+    .bind_grammar("payload", &child)?
+    .build()?;
+
+let static_constraint = spec.compile_static(&options)?;
+let dynamic_constraint = spec.compile_dynamic(&options)?;
+let mut state = static_constraint.start();
+# Ok::<(), glrmask::Error>(())
+```
+
 ## Grammar formats
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
@@ -146,35 +224,9 @@ nt value = NUMBER | "null";
 
 GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
-### Programmatic JavaScript tool calling
-
-`ProgrammaticJsCompiler` compiles a reusable JavaScript parent plus shared
-expression grammars, then compiles each tool's JSON Schema and links the named
-tools into `tools.<name>(...)` call sites:
-
-```python
-ptc = glrmask.ProgrammaticJsCompiler(vocab)
-lookup = ptc.compile_schema(lookup_schema, vocab)
-update = ptc.compile_schema(update_schema, vocab)
-constraint = ptc.compose_tools({"lookup": lookup, "update": update}, vocab)
-```
-
-The top-level arguments value remains schema-shaped. Explicit literals are
-validated normally, while nested opaque runtime values such as `customer.id`
-may satisfy a value position because their runtime value is unknowable during
-generation. Conditional values are schema-aware on both result arms, so an enum
-can accept `ready ? "open" : "closed"` but rejects a branch containing an
-invalid literal. Arbitrary arithmetic/string construction is not treated as an
-opaque escape. The `tools` namespace is reserved: nested `tools.*` calls inside
-a tool argument expression are rejected rather than bypassing schema dispatch.
-
-For build accounting or persistent caches, the shared components can be built
-separately with `compile_parent`, `compile_dynamic_value`, and
-`compile_condition`, then assembled with `from_components`.
-
 ### Reusing compiled subgrammars
 
-Declare an external grammar with `extern g name;`, then bind an independently compiled constraint by name. Hidden call terminals and cross-boundary token paths are handled automatically:
+Declare an external grammar with `extern grammar name;`, then bind an independently compiled constraint by name. Hidden call terminals and cross-boundary token paths are handled automatically:
 
 ```python
 payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
@@ -183,7 +235,7 @@ document = glrmask.Constraint.from_glrm_grammar(
     '''
     glrm 1;
     start document;
-    extern g payload;
+    extern grammar payload;
     nt document = "{" payload "}";
     ''',
     vocab,
@@ -191,7 +243,7 @@ document = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Inline `g name = { ... };` and externally bound `extern g name;` have the same language semantics, including scope-local ignores and model tokens that cross parent/child boundaries.
+Inline `g name = { ... };` and externally bound `extern grammar name;` have the same language semantics, including scope-local ignores and model tokens that cross parent/child boundaries.
 
 ## Special tokens
 
@@ -201,7 +253,7 @@ GLRM v1 declares exact model-token terminals by name and binds their token IDs o
 grammar = '''
 glrm 1;
 start message;
-extern t END_TURN;
+extern token END_TURN;
 nt message = "hello" END_TURN;
 '''
 
@@ -212,7 +264,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-A binding may also be a list of interchangeable exact token IDs. `extern t` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Legacy unversioned GLRM, Lark, and EBNF continue to support numeric `@token(<id>)` syntax.
+A binding may also be a list of interchangeable exact token IDs. `extern token` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Legacy unversioned GLRM, Lark, and EBNF continue to support numeric `@token(<id>)` syntax.
 
 Use `end_token_ids` to require one of the specified model tokens after the grammar completes:
 
@@ -228,14 +280,14 @@ The state becomes accepting only after one of those tokens is committed.
 
 ## Saving compiled constraints
 
-A compiled `Constraint` can be serialized and loaded again:
+A compiled `StaticConstraint` can be serialized and loaded again:
 
 ```python
 blob = constraint.save()
 constraint = glrmask.Constraint.load(blob, vocab)
 ```
 
-Load an artifact only with the exact vocabulary it was compiled against. `Constraint.load()` currently does not verify the supplied vocabulary. Composed constraints are saved as one artifact, including their child constraints.
+Load an artifact only with the exact vocabulary it was compiled against. `StaticConstraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
 
 `DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify static compilation.
 

@@ -68,14 +68,14 @@ type DynamicConstraintState<'a> = glrmask::DynamicConstraintState<'a>;
 
 self_cell!(
     struct OwnedState {
-        owner: Arc<glrmask::Constraint>,
+        owner: Arc<glrmask::StaticConstraint>,
         #[not_covariant]
         dependent: ConstraintState,
     }
 );
 
 impl OwnedState {
-    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
+    fn from_arc(arc: Arc<glrmask::StaticConstraint>) -> Self {
         OwnedState::new(arc, |arc_ref| arc_ref.start())
     }
 }
@@ -764,13 +764,13 @@ impl PyProgrammaticJsCompiler {
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyConstraint {
-    inner: Arc<glrmask::Constraint>,
+    inner: Arc<glrmask::StaticConstraint>,
     max_token: u32,
 }
 
 impl PyConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
-        constraint: Result<glrmask::Constraint, E>,
+        constraint: Result<glrmask::StaticConstraint, E>,
         _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
@@ -803,16 +803,11 @@ impl PyConstraint {
 #[pymethods]
 impl PyConstraint {
     #[staticmethod]
-    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
-    fn from_json_schema(
-        schema: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (schema, vocab))]
+    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::Constraint::compile(
+            glrmask::StaticConstraint::compile(
                 glrmask::Grammar::json_schema(schema),
                 &vocab.inner,
                 &options,
@@ -822,16 +817,11 @@ impl PyConstraint {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
-    fn from_lark(
-        lark_source: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (lark_source, vocab))]
+    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::Constraint::compile(
+            glrmask::StaticConstraint::compile(
                 glrmask::Grammar::lark(lark_source),
                 &vocab.inner,
                 &options,
@@ -841,69 +831,47 @@ impl PyConstraint {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None, subgrammars=None, bindings=None))]
+    #[pyo3(signature = (glrm_source, vocab, subgrammars=None, bindings=None))]
     fn from_glrm_grammar(
         py: Python<'_>,
         glrm_source: &str,
         vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
         subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
         bindings: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let owned_bindings = external_terminal_bindings_from_dict(bindings)?;
-        let bindings = owned_bindings
-            .iter()
-            .map(|(name, token_ids)| glrmask::ExternalTerminalBinding::new(name, token_ids))
-            .collect::<Vec<_>>();
-        if let Some(subgrammars) = subgrammars {
-            let owned_children = subgrammars
-                .into_iter()
-                .map(|(name, child)| {
-                    let child = child.borrow(py);
-                    (name, Arc::clone(&child.inner))
-                })
-                .collect::<Vec<_>>();
-            let borrowed_children = owned_children
-                .iter()
-                .map(|(name, child)| (name.as_str(), child.as_ref()))
-                .collect::<Vec<_>>();
-            let options = glrmask::CompileOptions::default()
-                .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]))
-                .subgrammars(&borrowed_children)
-                .external_terminal_bindings(&bindings);
-            return Self::from_constraint_result(
-                glrmask::Constraint::compile(
-                    glrmask::Grammar::glrm(glrm_source),
-                    &vocab.inner,
-                    &options,
-                ),
-                vocab,
-            );
+        let mut builder = glrmask::ConstraintSpec::builder(
+            glrmask::Grammar::glrm(glrm_source),
+            &vocab.inner,
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        for (name, token_ids) in external_terminal_bindings_from_dict(bindings)? {
+            builder = builder
+                .bind_token(name, token_ids)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
         }
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]))
-            .external_terminal_bindings(&bindings);
+        if let Some(subgrammars) = subgrammars {
+            for (name, child) in subgrammars {
+                let child = child.borrow(py);
+                builder = builder
+                    .bind_grammar(name, Arc::clone(&child.inner))
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            }
+        }
+        let spec = builder
+            .build()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::glrm(glrm_source),
-                &vocab.inner,
-                &options,
-            ),
+            spec.compile_static(&glrmask::CompileOptions::default()),
             vocab,
         )
     }
 
     #[staticmethod]
-    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
-    fn from_ebnf(
-        ebnf_source: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (ebnf_source, vocab))]
+    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::Constraint::compile(
+            glrmask::StaticConstraint::compile(
                 glrmask::Grammar::ebnf(ebnf_source),
                 &vocab.inner,
                 &options,
@@ -949,7 +917,7 @@ impl PyConstraint {
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let mut constraint = constraint_result(glrmask::Constraint::load(data))?;
+        let mut constraint = constraint_result(glrmask::StaticConstraint::load(data))?;
         constraint
             .bind_vocab_exact(&vocab.inner)
             .map_err(PyValueError::new_err)?;
@@ -997,14 +965,9 @@ impl PyDynamicConstraint {
 #[pymethods]
 impl PyDynamicConstraint {
     #[staticmethod]
-    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
-    fn from_json_schema(
-        schema: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (schema, vocab))]
+    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::json_schema(schema),
@@ -1016,14 +979,9 @@ impl PyDynamicConstraint {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
-    fn from_lark(
-        lark_source: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (lark_source, vocab))]
+    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::lark(lark_source),
@@ -1035,40 +993,45 @@ impl PyDynamicConstraint {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None, bindings=None))]
+    #[pyo3(signature = (glrm_source, vocab, subgrammars=None, bindings=None))]
     fn from_glrm_grammar(
+        py: Python<'_>,
         glrm_source: &str,
         vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
+        subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
         bindings: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let owned_bindings = external_terminal_bindings_from_dict(bindings)?;
-        let bindings = owned_bindings
-            .iter()
-            .map(|(name, token_ids)| glrmask::ExternalTerminalBinding::new(name, token_ids))
-            .collect::<Vec<_>>();
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]))
-            .external_terminal_bindings(&bindings);
+        let mut builder = glrmask::ConstraintSpec::builder(
+            glrmask::Grammar::glrm(glrm_source),
+            &vocab.inner,
+        )
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        for (name, token_ids) in external_terminal_bindings_from_dict(bindings)? {
+            builder = builder
+                .bind_token(name, token_ids)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        if let Some(subgrammars) = subgrammars {
+            for (name, child) in subgrammars {
+                let child = child.borrow(py);
+                builder = builder
+                    .bind_grammar(name, Arc::clone(&child.inner))
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            }
+        }
+        let spec = builder
+            .build()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::compile(
-                glrmask::Grammar::glrm(glrm_source),
-                &vocab.inner,
-                &options,
-            ),
+            spec.compile_dynamic(&glrmask::CompileOptions::default()),
             vocab,
         )
     }
 
     #[staticmethod]
-    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
-    fn from_ebnf(
-        ebnf_source: &str,
-        vocab: &PyVocab,
-        end_token_ids: Option<Vec<u32>>,
-    ) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default()
-            .end_token_ids(end_token_ids.as_deref().unwrap_or(&[]));
+    #[pyo3(signature = (ebnf_source, vocab))]
+    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::ebnf(ebnf_source),
@@ -1828,7 +1791,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // touches only a zero-length NumPy array and does not build or execute a
     // constraint.
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
-    glrmask::Constraint::warm_ti_pool();
+    glrmask::StaticConstraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyProgrammaticJsCompiler>()?;
     m.add_class::<PyConstraint>()?;
@@ -1882,18 +1845,18 @@ fn collect_allocator(force: bool) {
 
 #[pyfunction]
 fn clear_stale_weights() {
-    glrmask::Constraint::clear_stale_weights();
+    glrmask::StaticConstraint::clear_stale_weights();
 }
 
 #[pyfunction]
 fn clear_weight_op_caches() {
-    glrmask::Constraint::clear_weight_op_caches();
+    glrmask::StaticConstraint::clear_weight_op_caches();
 }
 
 #[pyfunction]
 fn clear_weight_caches() {
-    glrmask::Constraint::clear_weight_op_caches();
-    glrmask::Constraint::clear_stale_weights();
+    glrmask::StaticConstraint::clear_weight_op_caches();
+    glrmask::StaticConstraint::clear_stale_weights();
 }
 
 #[pyfunction]
@@ -1922,7 +1885,7 @@ fn prepare_vocab_for_compile(vocab: &PyVocab) {
 
 #[pyfunction]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-    let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
+    let constraint = glrmask::StaticConstraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
     let max_token = constraint.max_original_token_id().unwrap_or(0);
     Ok(PyConstraint {
@@ -1933,6 +1896,6 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
 
 #[pyfunction]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
-    glrmask::Constraint::dump_json_schema_grammar_glrm(schema_json)
+    glrmask::StaticConstraint::dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }

@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{StaticConstraint as Constraint, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 fn token_allowed(mask: &[u32], token_id: u32) -> bool {

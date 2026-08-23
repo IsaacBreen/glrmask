@@ -4744,6 +4744,7 @@ fn compile_dynamic_owned_impl(
             .inner
             .table
             .set_embedded_start_nullable(start_nullable);
+        constraint.set_composition_grammar(prepared_grammar);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
