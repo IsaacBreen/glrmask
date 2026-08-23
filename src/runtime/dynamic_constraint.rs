@@ -17,8 +17,10 @@ const PREVIOUS_DYNAMIC_CONSTRAINT_VERSION: u16 = 12;
 const DYNAMIC_CONSTRAINT_VERSION: u16 = 13;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
-const PREVIOUS_DYNAMIC_TRANSFER_VERSION: u16 = 2;
-const DYNAMIC_TRANSFER_VERSION: u16 = 3;
+const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
+const DYNAMIC_TRANSFER_VERSION_V2: u16 = 2;
+const DYNAMIC_TRANSFER_VERSION_V3: u16 = 3;
+const DYNAMIC_TRANSFER_VERSION: u16 = 4;
 
 mod compressed_terminal_exprs_serde {
     use super::Expr;
@@ -51,6 +53,28 @@ mod compressed_terminal_exprs_serde {
         let raw = zstd::stream::decode_all(compressed.as_slice()).map_err(D::Error::custom)?;
         let exprs = bincode::deserialize(&raw).map_err(D::Error::custom)?;
         Ok(Some(exprs))
+    }
+}
+
+#[derive(Debug)]
+struct CompactTransferTokenizer(Tokenizer);
+
+impl serde::Serialize for CompactTransferTokenizer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        crate::automata::lexer::tokenizer::compact_artifact_serde::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CompactTransferTokenizer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        crate::automata::lexer::tokenizer::compact_artifact_serde::deserialize(deserializer)
+            .map(Self)
     }
 }
 
@@ -195,6 +219,9 @@ struct DynamicConstraintTransferAlternativeV1 {
     ignore_expr: Option<Expr>,
     #[serde(default, with = "compressed_terminal_exprs_serde")]
     terminal_exprs: Option<Vec<Expr>>,
+    mask_tokenizer: Option<CompactTransferTokenizer>,
+    full_to_mask_state: Vec<u32>,
+
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -203,7 +230,7 @@ struct DynamicConstraintTransferPayloadV1 {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct LegacyDynamicConstraintTransferAlternativeV1 {
+struct LegacyDynamicConstraintTransferAlternativeV3 {
     table: GLRTable,
     terminal_display_names: Vec<String>,
     #[serde(with = "crate::automata::lexer::tokenizer::compact_artifact_serde")]
@@ -211,11 +238,15 @@ struct LegacyDynamicConstraintTransferAlternativeV1 {
     ignore_terminal: Option<TerminalID>,
     direct_regular_automaton: Option<DirectRegularAutomaton>,
     special_token_terminals: Vec<SpecialTokenTerminal>,
+    #[serde(default)]
+    ignore_expr: Option<Expr>,
+    mask_tokenizer: Option<CompactTransferTokenizer>,
+    full_to_mask_state: Vec<u32>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct LegacyDynamicConstraintTransferPayloadV1 {
-    alternatives: Vec<LegacyDynamicConstraintTransferAlternativeV1>,
+struct LegacyDynamicConstraintTransferPayloadV3 {
+    alternatives: Vec<LegacyDynamicConstraintTransferAlternativeV3>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -234,6 +265,22 @@ struct LegacyDynamicConstraintTransferAlternativeV2 {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct LegacyDynamicConstraintTransferPayloadV2 {
     alternatives: Vec<LegacyDynamicConstraintTransferAlternativeV2>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LegacyDynamicConstraintTransferAlternativeV1 {
+    table: GLRTable,
+    terminal_display_names: Vec<String>,
+    #[serde(with = "crate::automata::lexer::tokenizer::compact_artifact_serde")]
+    tokenizer: Tokenizer,
+    ignore_terminal: Option<TerminalID>,
+    direct_regular_automaton: Option<DirectRegularAutomaton>,
+    special_token_terminals: Vec<SpecialTokenTerminal>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LegacyDynamicConstraintTransferPayloadV1 {
+    alternatives: Vec<LegacyDynamicConstraintTransferAlternativeV1>,
 }
 
 /// A constraint optimized for low compilation latency.
@@ -470,9 +517,11 @@ impl DynamicConstraint {
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
+            packed_parser_dwa: None,
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),
             direct_regular_l1_complete_by_terminal: BTreeMap::new(),
+            packed_non_dwa_weights: None,
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -489,11 +538,12 @@ impl DynamicConstraint {
             possible_matches_complete: false,
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
+            deferred_internal_tsid_to_states: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
-        terminal_live_states: Vec::new(),
+            terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),
             runtime_source_state_offset: None,
@@ -504,19 +554,23 @@ impl DynamicConstraint {
             template_dfas_by_terminal: Vec::new(),
             fast_template_dfas_by_terminal: Vec::new(),
             original_token_to_internal: Vec::new(),
+            packed_original_token_to_internal: None,
+            deferred_original_token_to_internal: std::sync::OnceLock::new(),
             internal_token_to_tokens: Vec::new(),
+            deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
             token_bytes: payload.token_bytes,
+            packed_token_bytes: None,
             internal_token_bytes: BTreeMap::new(),
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
             word_group_buf_masks: Vec::new(),
-            pair_word_group_buf_masks: Vec::new(),
-            quad_word_group_buf_masks: Vec::new(),
-            super_word_group_buf_masks: Vec::new(),
-            mega_word_group_buf_masks: Vec::new(),
-            giga_word_group_buf_masks: Vec::new(),
+            pair_word_group_buf_masks: Default::default(),
+            quad_word_group_buf_masks: Default::default(),
+            super_word_group_buf_masks: Default::default(),
+            mega_word_group_buf_masks: Default::default(),
+            giga_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),
-            word_group_prefix_buf_masks: Vec::new(),
+            word_group_prefix_buf_masks: Default::default(),
             word_group_sparse_prefix_entries: Vec::new(),
             quad_group_sparse_masks: Vec::new(),
             quad_group_dense_masks: Vec::new(),
@@ -527,19 +581,21 @@ impl DynamicConstraint {
             all_tokens_buf_mask: Box::new([]),
             internal_token_dense_words: 0,
             weight_token_dense_masks: Default::default(),
+            packed_dwa_token_dense_masks: Default::default(),
             weight_token_buf_masks: Default::default(),
             weight_token_sparse_buf_masks: Default::default(),
             direct_sparse_weight_token_sets: Default::default(),
             seed_terminal_dense: Default::default(),
             seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: Arc::from(Vec::<u64>::new().into_boxed_slice()),
-            dwa_fast_transitions: Vec::new(),
+            dwa_fast_transitions: Default::default(),
             parser_runtime_caches_prebuilt: false,
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),
             tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             internal_token_buf_flat: Box::new([]),
+            backed_internal_token_buf_flat: None,
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
             heavy_token_indices: Vec::new(),
@@ -550,6 +606,12 @@ impl DynamicConstraint {
             final_mask_mapping: Default::default(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr: payload.ignore_expr,
+            serialized_artifact_cache: None,
+            deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
+            deferred_composition_metadata_blob: None,
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
         };
         inner
     }
@@ -731,6 +793,10 @@ impl DynamicConstraint {
         constraint: Constraint,
     ) -> DynamicConstraintTransferAlternativeV1 {
         let terminal_exprs = constraint.tokenizer.terminal_exprs().map(ToOwned::to_owned);
+        let mask_quotient = constraint
+            .dynamic_mask_vocab
+            .mask_tokenizer_quotient_for_transfer();
+
         DynamicConstraintTransferAlternativeV1 {
             table: constraint.table,
             terminal_display_names: constraint.terminal_display_names,
@@ -740,6 +806,11 @@ impl DynamicConstraint {
             special_token_terminals: constraint.special_token_terminals,
             ignore_expr: constraint.ignore_expr,
             terminal_exprs,
+            mask_tokenizer: mask_quotient
+                .as_ref()
+                .map(|(tokenizer, _)| CompactTransferTokenizer(tokenizer.clone())),
+            full_to_mask_state: mask_quotient.map_or_else(Vec::new, |(_, mapping)| mapping),
+
         }
     }
 
@@ -933,7 +1004,11 @@ impl DynamicConstraint {
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
         if !matches!(
             version,
-            1 | PREVIOUS_DYNAMIC_TRANSFER_VERSION | DYNAMIC_TRANSFER_VERSION
+            DYNAMIC_TRANSFER_VERSION_V1
+                | DYNAMIC_TRANSFER_VERSION_V2
+                | DYNAMIC_TRANSFER_VERSION_V3
+                | DYNAMIC_TRANSFER_VERSION
+
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
                 "unsupported dynamic transfer artifact version {version}",
@@ -959,16 +1034,14 @@ impl DynamicConstraint {
                 &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
             )
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?,
-            PREVIOUS_DYNAMIC_TRANSFER_VERSION => {
-                let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV2>(
+            DYNAMIC_TRANSFER_VERSION_V3 => {
+                let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV3>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 DynamicConstraintTransferPayloadV1 {
-                    alternatives: legacy
-                        .alternatives
-                        .into_iter()
-                        .map(|alternative| DynamicConstraintTransferAlternativeV1 {
+                    alternatives: legacy.alternatives.into_iter().map(|alternative| {
+                        DynamicConstraintTransferAlternativeV1 {
                             table: alternative.table,
                             terminal_display_names: alternative.terminal_display_names,
                             tokenizer: alternative.tokenizer,
@@ -977,20 +1050,42 @@ impl DynamicConstraint {
                             special_token_terminals: alternative.special_token_terminals,
                             ignore_expr: alternative.ignore_expr,
                             terminal_exprs: None,
-                        })
-                        .collect(),
+                            mask_tokenizer: alternative.mask_tokenizer,
+                            full_to_mask_state: alternative.full_to_mask_state,
+                        }
+                    }).collect(),
                 }
             }
-            1 => {
+            DYNAMIC_TRANSFER_VERSION_V2 => {
+                let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV2>(
+                    &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
+                )
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                DynamicConstraintTransferPayloadV1 {
+                    alternatives: legacy.alternatives.into_iter().map(|alternative| {
+                        DynamicConstraintTransferAlternativeV1 {
+                            table: alternative.table,
+                            terminal_display_names: alternative.terminal_display_names,
+                            tokenizer: alternative.tokenizer,
+                            ignore_terminal: alternative.ignore_terminal,
+                            direct_regular_automaton: alternative.direct_regular_automaton,
+                            special_token_terminals: alternative.special_token_terminals,
+                            ignore_expr: alternative.ignore_expr,
+                            terminal_exprs: None,
+                            mask_tokenizer: None,
+                            full_to_mask_state: Vec::new(),
+                        }
+                    }).collect(),
+                }
+            }
+            DYNAMIC_TRANSFER_VERSION_V1 => {
                 let legacy = bincode::deserialize::<LegacyDynamicConstraintTransferPayloadV1>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 DynamicConstraintTransferPayloadV1 {
-                    alternatives: legacy
-                        .alternatives
-                        .into_iter()
-                        .map(|alternative| DynamicConstraintTransferAlternativeV1 {
+                    alternatives: legacy.alternatives.into_iter().map(|alternative| {
+                        DynamicConstraintTransferAlternativeV1 {
                             table: alternative.table,
                             terminal_display_names: alternative.terminal_display_names,
                             tokenizer: alternative.tokenizer,
@@ -999,19 +1094,21 @@ impl DynamicConstraint {
                             special_token_terminals: alternative.special_token_terminals,
                             ignore_expr: None,
                             terminal_exprs: None,
-                        })
-                        .collect(),
+                            mask_tokenizer: None,
+                            full_to_mask_state: Vec::new(),
+                        }
+                    }).collect(),
                 }
             }
             _ => unreachable!("transfer version was validated above"),
         };
         let token_bytes = vocab.entries_arc();
-        Self::from_payload_v3_with_vocab(
-            DynamicConstraintPayloadV3 {
-                alternatives: payload
-                    .alternatives
-                    .into_iter()
-                    .map(|alternative| DynamicConstraintPayloadV2 {
+        let mut alternatives = payload
+            .alternatives
+            .into_iter()
+            .map(|alternative| {
+                let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
+                    DynamicConstraintPayloadV2 {
                         v1: DynamicConstraintPayloadV1 {
                             table: alternative.table,
                             terminal_display_names: alternative.terminal_display_names,
@@ -1023,11 +1120,31 @@ impl DynamicConstraint {
                             terminal_exprs: alternative.terminal_exprs,
                         },
                         special_token_terminals: alternative.special_token_terminals,
-                    })
-                    .collect(),
-            },
-            vocab,
-        )
+                    },
+                    crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(
+                        vocab,
+                    ),
+                );
+                if let Some(mask_tokenizer) = alternative.mask_tokenizer {
+                    inner.dynamic_mask_vocab.set_mask_tokenizer_quotient(
+                        mask_tokenizer.0,
+                        alternative.full_to_mask_state,
+                    );
+                }
+                inner.rebuild_dynamic_runtime_caches();
+                Self {
+                    inner,
+                    alternatives: Vec::new(),
+                    composition_grammars: vec![None],
+                }
+            })
+            .collect::<Vec<_>>();
+        if alternatives.is_empty() {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic union transfer artifact has no alternatives".to_owned(),
+            ));
+        }
+        Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
     }
 
     /// Load an artifact produced by [`DynamicConstraint::save`].
@@ -1504,6 +1621,43 @@ mod tests {
         assert_eq!(loaded.start().mask(), original_mask);
     }
 
+
+    #[test]
+    fn dynamic_transfer_loads_v3_mask_quotient_payload_without_terminal_exprs() {
+        let vocab = vocab();
+        crate::compiler::constraint_possible_matches::prepare_vocab_for_dynamic_mask(&vocab);
+        let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
+        let original_mask = original.start().mask();
+        let mask_quotient = original
+            .inner
+            .dynamic_mask_vocab
+            .mask_tokenizer_quotient_for_transfer();
+        let legacy = LegacyDynamicConstraintTransferPayloadV3 {
+            alternatives: vec![LegacyDynamicConstraintTransferAlternativeV3 {
+                table: original.inner.table.clone(),
+                terminal_display_names: original.inner.terminal_display_names.clone(),
+                tokenizer: original.inner.tokenizer.clone(),
+                ignore_terminal: original.inner.ignore_terminal,
+                direct_regular_automaton: original.inner.direct_regular_automaton.clone(),
+                special_token_terminals: original.inner.special_token_terminals.clone(),
+                ignore_expr: original.inner.ignore_expr.clone(),
+                mask_tokenizer: mask_quotient
+                    .as_ref()
+                    .map(|(tokenizer, _)| CompactTransferTokenizer(tokenizer.clone())),
+                full_to_mask_state: mask_quotient.map_or_else(Vec::new, |(_, mapping)| mapping),
+            }],
+        };
+        let payload = bincode::serialize(&legacy).unwrap();
+        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&DYNAMIC_TRANSFER_MAGIC);
+        bytes.extend_from_slice(&DYNAMIC_TRANSFER_VERSION_V3.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        let loaded = DynamicConstraint::load_with_vocab(&bytes, &vocab).unwrap();
+        assert!(loaded.inner.tokenizer.terminal_exprs().is_none());
+        assert_eq!(loaded.start().mask(), original_mask);
+    }
 
     #[test]
     fn precompiled_dynamic_artifacts_require_rebuild() {

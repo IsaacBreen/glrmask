@@ -27,6 +27,38 @@ impl BitSet {
         }
     }
 
+    /// Construct directly from sparse set-bit indices. Static tokenizer
+    /// artifacts already store finalizer/future metadata in this form; folding
+    /// the common <=64-bit case into one inline word avoids thousands of
+    /// `new(64)` + `set()` calls during load.
+    pub(crate) fn from_sparse_u32(len: usize, indices: &[u32]) -> Self {
+        if len <= 64 {
+            let mut word = 0u64;
+            for &index in indices {
+                debug_assert!((index as usize) < len);
+                if (index as usize) < len {
+                    word |= 1u64 << index;
+                }
+            }
+            let mut words = SmallVec::new();
+            if len != 0 {
+                words.push(word);
+            }
+            return Self { words, len };
+        }
+
+        let mut result = Self::new(len);
+        for &index in indices {
+            debug_assert!((index as usize) < len);
+            if (index as usize) < len {
+                let word_index = index as usize / 64;
+                let bit_index = index % 64;
+                result.words[word_index] |= 1u64 << bit_index;
+            }
+        }
+        result
+    }
+
     pub fn empty(len: usize) -> Self {
         Self::new(len)
     }

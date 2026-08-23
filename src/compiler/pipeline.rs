@@ -1,4 +1,4 @@
-﻿use crate::automata::lexer::Lexer;
+use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1860,6 +1860,12 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
+    if constraint.packed_token_bytes.is_none() {
+        constraint.packed_token_bytes = Some(std::sync::Arc::new(
+            crate::runtime::PackedTokenBytes::from_runtime_entries(&constraint.token_bytes)
+            .expect("compiler-produced token bytes should form a valid indexed runtime vocabulary"),
+        ));
+    }
     constraint.rebuild_runtime_caches();
     constraint
 }
@@ -3155,12 +3161,26 @@ fn launch_classify_dag_if_ready<'scope>(
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_ms = elapsed_ms(compile_started_at.clone());
         let classify_started_at = Instant::now();
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+            eprintln!(
+                "[glrmask/profile][compile_dag_classify_start] tokenizer_states={} terminals={} disallowed={}",
+                tokenizer.tokenizer.num_states(),
+                analysis.analyzed_grammar.num_terminals,
+                token_path_disallowed_follows.len(),
+            );
+        }
         prewarm_shared_classify_cache(
             &tokenizer.tokenizer,
             analysis.analyzed_grammar.num_terminals,
             &shared_classify_cache,
         );
         let classify_ms = elapsed_ms(classify_started_at);
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+            eprintln!(
+                "[glrmask/profile][compile_dag_classify_end] ms={:.3}",
+                classify_ms,
+            );
+        }
         let classify_finished_ms = elapsed_ms(compile_started_at.clone());
 
         terminal_state
@@ -3550,12 +3570,24 @@ fn compile_prepared_with_profile_and_table_construction(
                 scope.spawn(move |scope| {
                     let flat_global_started_ms = elapsed_ms(compile_started_for_terminal.clone());
                     let flat_trans_started_at = Instant::now();
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_flat_start] tokenizer_states={}",
+                            flat_global_tokenizer.num_states(),
+                        );
+                    }
                     let flat_trans: Arc<[u32]> = Arc::from(
                         crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(
                             &flat_global_tokenizer,
                         ),
                     );
                     let flat_trans_ms = elapsed_ms(flat_trans_started_at);
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_flat_end] ms={:.3}",
+                            flat_trans_ms,
+                        );
+                    }
                     let shared_transition_cache = Arc::new(std::sync::OnceLock::new());
 
                     if eager_possible_matches {
@@ -3600,6 +3632,9 @@ fn compile_prepared_with_profile_and_table_construction(
                     }
 
                     let global_max_length_started_at = Instant::now();
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!("[glrmask/profile][compile_dag_global_max_start]");
+                    }
                     let global_max_length_state_map =
                         crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map_with_initial(
                             &flat_global_tokenizer,
@@ -3608,6 +3643,12 @@ fn compile_prepared_with_profile_and_table_construction(
                             flat_global_initial_state_map.as_ref(),
                         );
                     let global_max_length_ms = elapsed_ms(global_max_length_started_at);
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_global_max_end] ms={:.3}",
+                            global_max_length_ms,
+                        );
+                    }
                     let flat_global_finished_ms = elapsed_ms(compile_started_for_terminal.clone());
                     terminal_state_ref
                         .lock()
@@ -4382,7 +4423,22 @@ fn compile_prepared_with_profile_and_table_construction(
                 direct_l1_complete_by_terminal,
             },
         ) = parser_dwa.into_artifact();
-
+        let parser_dwa = parser_dwa.share_exact_transition_rows_owned();
+        // Large parser DWAs are much cheaper to serialize and load from the
+        // immutable packed runtime representation. Small/medium schema DWAs are
+        // deliberately left materialized: their first save/load is already only
+        // a few milliseconds, so even small amounts of extra finalization work
+        // would be a bad trade. The gap between the two populations is large in
+        // practice (hundreds of states versus tens of thousands).
+        // Keep the compact runtime representation for the upper ordinary-
+        // schema tail as well as giant parser DWAs. The p99-ish population is
+        // already expensive enough to repack on first save, while the p50/p90
+        // population remains below this cutoff and pays no extra finalization.
+        // This boundary is deliberately well above their observed ~136/~275
+        // states but below the ~454-state p99 representative.
+        const PACKED_RUNTIME_DWA_STATE_THRESHOLD: usize = 384;
+        let build_packed_parser_dwa =
+            parser_dwa.states().len() >= PACKED_RUNTIME_DWA_STATE_THRESHOLD;
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
             vocab,
@@ -4445,16 +4501,21 @@ fn compile_prepared_with_profile_and_table_construction(
         )
         .is_none()
         .then(|| composition_grammar_summary_from_analysis(&analyzed_grammar));
-        let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
+        let mut tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
+        if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
+            crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
+        }
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
+            packed_parser_dwa: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
+            packed_non_dwa_weights: None,
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -4471,11 +4532,12 @@ fn compile_prepared_with_profile_and_table_construction(
             possible_matches_complete,
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
+            deferred_internal_tsid_to_states: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal,
             composition_parser_characterizations_by_terminal,
             composition_grammar_summary,
-        terminal_live_states: Vec::new(),
+            terminal_live_states: Vec::new(),
             // Unless optional runtime full-adaptive product states were selected,
             // `runtime_tokenizer_state_map` is a ManyToOne partition: every raw
             // runtime tokenizer state has exactly one internal TSID. Runtime
@@ -4494,21 +4556,25 @@ fn compile_prepared_with_profile_and_table_construction(
             runtime_product_exact_source_states,
             runtime_product_state_by_source_subset: Default::default(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
+            packed_original_token_to_internal: None,
+            deferred_original_token_to_internal: std::sync::OnceLock::new(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
+            deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
             template_dfas_by_terminal,
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
+            packed_token_bytes: None,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
             word_group_buf_masks: Vec::new(),
-            pair_word_group_buf_masks: Vec::new(),
-            quad_word_group_buf_masks: Vec::new(),
-            super_word_group_buf_masks: Vec::new(),
-            mega_word_group_buf_masks: Vec::new(),
-            giga_word_group_buf_masks: Vec::new(),
+            pair_word_group_buf_masks: Default::default(),
+            quad_word_group_buf_masks: Default::default(),
+            super_word_group_buf_masks: Default::default(),
+            mega_word_group_buf_masks: Default::default(),
+            giga_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),
-            word_group_prefix_buf_masks: Vec::new(),
+            word_group_prefix_buf_masks: Default::default(),
             word_group_sparse_prefix_entries: Vec::new(),
             quad_group_sparse_masks: Vec::new(),
             quad_group_dense_masks: Vec::new(),
@@ -4519,13 +4585,14 @@ fn compile_prepared_with_profile_and_table_construction(
             all_tokens_buf_mask: Box::new([]),
             internal_token_dense_words: 0,
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
+            packed_dwa_token_dense_masks: Default::default(),
             weight_token_buf_masks: rustc_hash::FxHashMap::default(),
             weight_token_sparse_buf_masks: rustc_hash::FxHashMap::default(),
             direct_sparse_weight_token_sets: rustc_hash::FxHashSet::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-            dwa_fast_transitions: Vec::new(),
+            dwa_fast_transitions: Default::default(),
             parser_runtime_caches_prebuilt: false,
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),
@@ -4533,6 +4600,7 @@ fn compile_prepared_with_profile_and_table_construction(
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),
+            backed_internal_token_buf_flat: None,
             internal_token_buf_offsets: Box::new([]),
             total_internal_buf_cost: 0,
             heavy_total_cost: 0,
@@ -4542,13 +4610,46 @@ fn compile_prepared_with_profile_and_table_construction(
             final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
+            serialized_artifact_cache: None,
+            deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
+            deferred_composition_metadata_blob: None,
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
         };
+        if build_packed_parser_dwa {
+            let packed_started_at = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
+                .is_some()
+                .then(Instant::now);
+            let packed = crate::automata::weighted::dwa::PackedRuntimeDwa::from_dwa(
+                &constraint.parser_dwa,
+            )
+            .expect("direct packed-runtime DWA construction should succeed");
+            if let Some(started_at) = packed_started_at {
+                eprintln!(
+                    "[glrmask/profile][packed_runtime_dwa_build] states={} ms={:.3}",
+                    constraint.parser_dwa.states().len(),
+                    elapsed_ms(started_at),
+                );
+            }
+            // Keep the packed runtime DWA because masking/loading use it
+            // directly, but do not pre-encode the serialization wire here.
+            // Fresh-save timings must include serialization work rather than
+            // shifting it into compile finalization.
+            constraint.packed_parser_dwa = Some(std::sync::Arc::new(packed));
+        }
         if let Some(caches) = prebuilt_token_mask_caches
             && caches.matches_constraint(&constraint)
         {
             caches.install(&mut constraint);
         }
-        let constraint = finalize_constraint(constraint);
+        let mut constraint = finalize_constraint(constraint);
+        crate::runtime::compact_large_non_dwa_weight_runtime(&mut constraint);
+        // Keep compiler-produced packed runtime storage in its owned form.
+        // Converting it to a backed artifact representation here would perform
+        // serialization work during compilation and make first-save benchmarks
+        // dishonest. Loaded constraints use a zero-copy backed view of the same
+        // logical packed pools; only save() is allowed to create wire bytes.
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
 
@@ -4631,6 +4732,78 @@ fn compile_dynamic_owned_impl(
     };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_some() {
+            let quotient_started_at = Instant::now();
+            let plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
+            let planned_ms = elapsed_ms(quotient_started_at);
+            let pair_started_at = Instant::now();
+            let pair = plan.as_ref().and_then(|plan| {
+                prepare_structural_tokenizer_pair(
+                    &prepared_grammar,
+                    plan,
+                    vocab,
+                    Some(false),
+                    true,
+                )
+            });
+            let pair_ms = elapsed_ms(pair_started_at);
+            if let Some((synthesized, full, certified)) = pair {
+                eprintln!(
+                    "[glrmask/profile][dynamic_mask_quotient_probe] selected=true full_states={} quotient_states={} map_states={} plan_ms={:.3} pair_ms={:.3} total_ms={:.3}",
+                    full.num_states(),
+                    synthesized.num_states(),
+                    certified.full_to_synthesized.len(),
+                    planned_ms,
+                    pair_ms,
+                    elapsed_ms(quotient_started_at),
+                );
+                let requested_states = std::env::var(
+                    "GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT_STATES",
+                )
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter_map(|state| state.trim().parse::<u32>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+                let mut requested_quotients = std::collections::BTreeSet::new();
+                for &full_state in &requested_states {
+                    let Some(&quotient_state) =
+                        certified.full_to_synthesized.get(full_state as usize)
+                    else {
+                        continue;
+                    };
+                    requested_quotients.insert(quotient_state);
+                    eprintln!(
+                        "[glrmask/profile][dynamic_mask_quotient_state] full={} quotient={} transitions={} matched={} futures={} loop_bytes={}",
+                        full_state,
+                        quotient_state,
+                        synthesized.transitions_from(quotient_state).count(),
+                        synthesized.matched_terminals_iter(quotient_state).count(),
+                        synthesized.possible_future_terminals_iter(quotient_state).count(),
+                        synthesized.self_loop_bytes(quotient_state).len(),
+                    );
+                }
+                if !requested_states.is_empty() {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_mask_quotient_requested] full_states={} unique_quotient_states={} quotient_states={:?}",
+                        requested_states.len(),
+                        requested_quotients.len(),
+                        requested_quotients,
+                    );
+                }
+            } else {
+                eprintln!(
+                    "[glrmask/profile][dynamic_mask_quotient_probe] selected=false planned={} plan_ms={:.3} pair_ms={:.3} total_ms={:.3}",
+                    plan.is_some(),
+                    planned_ms,
+                    pair_ms,
+                    elapsed_ms(quotient_started_at),
+                );
+            }
+        }
         let analysis_started_at = profile.then(Instant::now);
         // Move a complete direct automaton out of the grammar instead of
         // cloning its 20k-state graph into AnalyzedGrammar and cloning it again
@@ -4654,11 +4827,38 @@ fn compile_dynamic_owned_impl(
             .map(|automaton| automaton.states.len());
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let ((tokenizer, tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
+        let (((tokenizer, mask_tokenizer_quotient), tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
             || {
                 let started_at = Instant::now();
-                let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
-                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
+                    .is_some();
+                let quotient_pair = quotient_enabled
+                    .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
+                    .flatten()
+                    .and_then(|plan| {
+                        prepare_structural_tokenizer_pair(
+                            &prepared_grammar,
+                            &plan,
+                            vocab,
+                            Some(false),
+                            true,
+                        )
+                    });
+                let (mut tokenizer, mask_tokenizer_quotient) = if let Some((
+                    synthesized,
+                    full,
+                    certified,
+                )) = quotient_pair
+                {
+                    (
+                        full.finish(),
+                        Some((synthesized, certified.full_to_synthesized)),
+                    )
+                } else {
+                    let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
+                    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                    (tokenizer, None)
+                };
                 if tokenizer.has_epsilon_transitions() {
                     let source_states = tokenizer.num_states();
                     let source_transitions = tokenizer.transition_count();
@@ -4694,7 +4894,7 @@ fn compile_dynamic_owned_impl(
                         );
                     }
                 }
-                (tokenizer, elapsed_ms(started_at))
+                ((tokenizer, mask_tokenizer_quotient), elapsed_ms(started_at))
             },
             || rayon::join(
                 || {
@@ -4725,12 +4925,10 @@ fn compile_dynamic_owned_impl(
         );
 
         let finalize_started_at = profile.then(Instant::now);
-        let build_constraint = if finalize_runtime {
-            DynamicConstraint::from_parts_with_dynamic_vocab
-        } else {
-            DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized
-        };
-        let mut constraint = build_constraint(
+        // Build unfinalized so a mask-only finite-token quotient can be
+        // attached before dynamic runtime caches/projections are constructed.
+        // The exact full tokenizer above remains authoritative for commit.
+        let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             table,
             terminal_display_names,
             tokenizer,
@@ -4740,6 +4938,15 @@ fn compile_dynamic_owned_impl(
             vocab,
             dynamic_mask_vocab,
         );
+        if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .set_mask_tokenizer_quotient(mask_tokenizer, full_to_mask_state);
+        }
+        if finalize_runtime {
+            constraint.inner.rebuild_dynamic_runtime_caches();
+        }
         constraint
             .inner
             .table

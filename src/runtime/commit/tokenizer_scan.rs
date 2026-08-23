@@ -71,7 +71,11 @@ pub(crate) fn execute_tokenizer_reusable(
             return true;
         }
         for &state in &scratch.states {
-            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
+            // Do not use `matched_terminals_slice` here. On compiler-created
+            // tokenizers its first call materializes finalizer lists for every
+            // lexer state; source-specialized schemas can have >1M states, so
+            // that otherwise puts tens of milliseconds on the first commit.
+            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
                 if scratch.matches.len() == scratch.matches.capacity() {
                     return false;
                 }
@@ -132,7 +136,7 @@ pub(crate) fn execute_tokenizer_reusable(
 
         let width = index + 1;
         for &state in &scratch.states {
-            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
+            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
                 let prior_width = scratch
                     .matches
                     .iter()
@@ -246,7 +250,7 @@ pub(crate) fn execute_tokenizer_reusable_from_states(
         std::mem::swap(&mut scratch.states, &mut scratch.next_states);
         let width = index + 1;
         for &state in &scratch.states {
-            for terminal in constraint.tokenizer.matched_terminals_slice(state).iter().copied() {
+            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
                 let prior_width = scratch
                     .matches
                     .iter()
@@ -317,7 +321,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 
         tokenizer_state = next_state;
         let width = index + 1;
-        for terminal in constraint.tokenizer.matched_terminals_slice(tokenizer_state).iter().copied() {
+        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
             if let Some(existing) = result
                 .matches
                 .iter_mut()

@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
-use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
@@ -18,6 +18,7 @@ use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 
 use super::mask_mapping::FinalMaskMapping;
 
@@ -40,6 +41,15 @@ pub(crate) struct CompositionGrammarSummary {
     pub(crate) root_first: BitSet,
     pub(crate) root_last: BitSet,
     pub(crate) root_nullable: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PackedNonDwaWeights {
+    pub(crate) pool: Arc<crate::ds::weight::PackedRuntimeWeightPool>,
+    pub(crate) parser_top_accept: BTreeMap<i32, u32>,
+    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<u32>>,
+    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, u32>,
+    pub(crate) possible_matches: BTreeMap<TerminalID, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +133,350 @@ pub(crate) fn empty_dense_words() -> DenseWords {
 }
 
 pub(crate) type InternalTokenBufMasks = Vec<(u16, u32)>;
+/// Runtime-native fixed-width form of one sparse output-mask entry. The two-byte
+/// pad makes the layout exactly eight bytes while keeping the hot fields at
+/// their natural offsets; current artifacts can therefore bulk-copy the slab
+/// without making commit pay bit shifts on every sparse replay.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PackedInternalTokenBufMask {
+    pub(crate) word_idx: u16,
+    pub(crate) _pad: u16,
+    pub(crate) mask: u32,
+}
+const _: () = assert!(std::mem::size_of::<PackedInternalTokenBufMask>() == 8);
+
+#[derive(Debug, Clone)]
+pub(crate) struct BackedInternalTokenBufMasks {
+    backing: Arc<Vec<u8>>,
+    entries_start: usize,
+    len: usize,
+    aligned_base_addr: Option<usize>,
+}
+
+impl BackedInternalTokenBufMasks {
+    pub(crate) fn new(
+        backing: Arc<Vec<u8>>,
+        entries_start: usize,
+        len: usize,
+    ) -> Result<Self, String> {
+        let bytes = len
+            .checked_mul(std::mem::size_of::<PackedInternalTokenBufMask>())
+            .ok_or_else(|| "backed internal-token buffer-mask length overflow".to_owned())?;
+        let end = entries_start
+            .checked_add(bytes)
+            .ok_or_else(|| "backed internal-token buffer-mask range overflow".to_owned())?;
+        if end > backing.len() {
+            return Err("backed internal-token buffer-mask range is outside artifact".to_owned());
+        }
+        let ptr = unsafe { backing.as_ptr().add(entries_start) };
+        let aligned_base_addr = (cfg!(target_endian = "little")
+            && ptr.align_offset(std::mem::align_of::<PackedInternalTokenBufMask>()) == 0)
+            .then_some(ptr as usize);
+        Ok(Self {
+            backing,
+            entries_start,
+            len,
+            aligned_base_addr,
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn append_wire_bytes(&self, out: &mut Vec<u8>) {
+        let byte_len = self.len * std::mem::size_of::<PackedInternalTokenBufMask>();
+        out.extend_from_slice(&self.backing[self.entries_start..self.entries_start + byte_len]);
+    }
+
+    #[inline(always)]
+    pub(crate) fn slice(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<&[PackedInternalTokenBufMask]> {
+        if start > end || end > self.len {
+            return None;
+        }
+        let base = self.aligned_base_addr? as *const PackedInternalTokenBufMask;
+        // SAFETY: `new` validated the complete backing range and natural
+        // alignment, and the retained Arc keeps the allocation alive.
+        Some(unsafe { std::slice::from_raw_parts(base.add(start), end - start) })
+    }
+
+    #[inline(always)]
+    pub(crate) fn for_each_range(
+        &self,
+        start: usize,
+        end: usize,
+        mut visit: impl FnMut(u16, u32),
+    ) {
+        debug_assert!(start <= end && end <= self.len);
+        if start > end || end > self.len {
+            return;
+        }
+        if let Some(entries) = self.slice(start, end) {
+            for &entry in entries {
+                visit(entry.word_idx, entry.mask);
+            }
+            return;
+        }
+        let entry_bytes = std::mem::size_of::<PackedInternalTokenBufMask>();
+        let base = unsafe { self.backing.as_ptr().add(self.entries_start + start * entry_bytes) };
+        for index in 0..(end - start) {
+            let entry = unsafe {
+                std::ptr::read_unaligned(
+                    base.add(index * entry_bytes)
+                        .cast::<PackedInternalTokenBufMask>(),
+                )
+            };
+            if cfg!(target_endian = "little") {
+                visit(entry.word_idx, entry.mask);
+            } else {
+                visit(u16::from_le(entry.word_idx), u32::from_le(entry.mask));
+            }
+        }
+    }
+}
+
+/// Contiguous dense-mask matrix used by the word-group prefix cache. The old
+/// `Vec<Box<[u32]>>` representation allocated one heap object per row; this
+/// keeps the same row-slice API while requiring one aligned allocation.
+const DENSE_BUF_MASK_ROWS_FLAT_MIN_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum DenseBufMaskRowsStorage {
+    Rows(Vec<Box<[u32]>>),
+    Flat(Box<[u32]>),
+    #[serde(skip)]
+    Backed {
+        backing: Arc<Vec<u8>>,
+        /// Address of the first u32 in `backing`. `from_backed` validates the
+        /// complete range and alignment once, so hot row lookup does not need
+        /// to redo checked byte-offset arithmetic for every prefix row.
+        base_addr: usize,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DenseBufMaskRows {
+    storage: DenseBufMaskRowsStorage,
+    rows: usize,
+    row_len: usize,
+}
+
+impl Default for DenseBufMaskRows {
+    fn default() -> Self {
+        Self {
+            storage: DenseBufMaskRowsStorage::Rows(Vec::new()),
+            rows: 0,
+            row_len: 0,
+        }
+    }
+}
+
+impl DenseBufMaskRows {
+    #[inline]
+    pub(crate) fn prefer_flat(rows: usize, row_len: usize) -> bool {
+        rows.checked_mul(row_len)
+            .and_then(|values| values.checked_mul(std::mem::size_of::<u32>()))
+            .is_some_and(|bytes| bytes >= DENSE_BUF_MASK_ROWS_FLAT_MIN_BYTES)
+    }
+
+    pub(crate) fn from_flat(
+        flat: Box<[u32]>,
+        rows: usize,
+        row_len: usize,
+    ) -> Result<Self, String> {
+        let expected = rows
+            .checked_mul(row_len)
+            .ok_or_else(|| "dense mask row dimensions overflow".to_owned())?;
+        if flat.len() != expected {
+            return Err("dense mask flat length does not match row dimensions".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Flat(flat),
+            rows,
+            row_len,
+        })
+    }
+
+    /// Retain a current-format little-endian dense matrix directly in the
+    /// artifact allocation. The byte range must be naturally aligned because
+    /// callers consume rows as ordinary `&[u32]` slices on the hot path.
+    pub(crate) fn from_backed(
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        rows: usize,
+        row_len: usize,
+    ) -> Result<Self, String> {
+        if !cfg!(target_endian = "little") {
+            return Err("backed dense mask rows require little-endian host".to_owned());
+        }
+        let values = rows
+            .checked_mul(row_len)
+            .ok_or_else(|| "backed dense mask dimensions overflow".to_owned())?;
+        let bytes = values
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| "backed dense mask byte length overflow".to_owned())?;
+        let end = start
+            .checked_add(bytes)
+            .ok_or_else(|| "backed dense mask range overflow".to_owned())?;
+        if end > backing.len() {
+            return Err("backed dense mask range is outside artifact".to_owned());
+        }
+        let ptr = unsafe { backing.as_ptr().add(start) };
+        if ptr.align_offset(std::mem::align_of::<u32>()) != 0 {
+            return Err("backed dense mask range is not u32-aligned".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Backed {
+                backing,
+                base_addr: ptr as usize,
+            },
+            rows,
+            row_len,
+        })
+    }
+
+    pub(crate) fn from_rows(rows: Vec<Box<[u32]>>) -> Result<Self, String> {
+        let row_count = rows.len();
+        let row_len = rows.first().map_or(0, |row| row.len());
+        if rows.iter().any(|row| row.len() != row_len) {
+            return Err("dense mask rows have inconsistent lengths".to_owned());
+        }
+        Ok(Self {
+            storage: DenseBufMaskRowsStorage::Rows(rows),
+            rows: row_count,
+            row_len,
+        })
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    #[inline]
+    pub(crate) fn row_len(&self) -> usize {
+        self.row_len
+    }
+
+    /// Return the complete dense matrix as one contiguous runtime slice when
+    /// storage is already flat/backed. This is the same memory consumed by hot
+    /// row lookups; serialization can therefore copy it without rebuilding
+    /// row objects.
+    #[inline]
+    pub(crate) fn as_contiguous(&self) -> Option<&[u32]> {
+        match &self.storage {
+            DenseBufMaskRowsStorage::Rows(_) => None,
+            DenseBufMaskRowsStorage::Flat(flat) => Some(flat),
+            DenseBufMaskRowsStorage::Backed {
+                backing: _,
+                base_addr,
+            } => {
+                let values = self.rows.checked_mul(self.row_len)?;
+                let ptr = *base_addr as *const u32;
+                // SAFETY: `from_backed` validated the complete byte range and
+                // alignment, and the retained Arc keeps the allocation alive.
+                Some(unsafe { std::slice::from_raw_parts(ptr, values) })
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, row: usize) -> Option<&[u32]> {
+        if row >= self.rows {
+            return None;
+        }
+        match &self.storage {
+            DenseBufMaskRowsStorage::Rows(rows) => rows.get(row).map(Box::as_ref),
+            DenseBufMaskRowsStorage::Flat(flat) => {
+                let start = row * self.row_len;
+                flat.get(start..start + self.row_len)
+            }
+            DenseBufMaskRowsStorage::Backed {
+                backing: _,
+                base_addr,
+            } => {
+                // `row < self.rows` and `from_backed` validated the complete
+                // rows*row_len slab, so this multiplication and pointer offset
+                // are within the retained allocation.
+                let value_start = row * self.row_len;
+                let ptr = unsafe { (*base_addr as *const u32).add(value_start) };
+                // SAFETY: `from_backed` validated the full range and alignment;
+                // row boundaries advance by a multiple of four bytes.
+                Some(unsafe { std::slice::from_raw_parts(ptr, self.row_len) })
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn last(&self) -> Option<&[u32]> {
+        self.rows.checked_sub(1).and_then(|row| self.get(row))
+    }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> DenseBufMaskRowsIter<'_> {
+        DenseBufMaskRowsIter {
+            rows: self,
+            next: 0,
+        }
+    }
+}
+
+impl std::ops::Index<usize> for DenseBufMaskRows {
+    type Output = [u32];
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("dense mask row index out of bounds")
+    }
+}
+
+pub(crate) struct DenseBufMaskRowsIter<'a> {
+    rows: &'a DenseBufMaskRows,
+    next: usize,
+}
+
+impl<'a> Iterator for DenseBufMaskRowsIter<'a> {
+    type Item = &'a [u32];
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.get(self.next)?;
+        self.next += 1;
+        Some(row)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.rows.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for DenseBufMaskRowsIter<'_> {}
+
+impl<'a> IntoIterator for &'a DenseBufMaskRows {
+    type Item = &'a [u32];
+    type IntoIter = DenseBufMaskRowsIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
+pub(crate) type PackedDwaDenseWeightMaskCache = FxHashMap<u32, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
@@ -134,6 +487,7 @@ const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
 pub(crate) enum FastDwaTransitionRow {
     Inline(SmallVec<[(i32, (u32, Weight)); 4]>),
     Hash(FxHashMap<i32, (u32, Weight)>),
+    Packed(DwaTransitionMap),
 }
 
 impl FastDwaTransitionRow {
@@ -148,26 +502,100 @@ impl FastDwaTransitionRow {
         }
     }
 
+    pub(crate) fn from_exact_entries(
+        len: usize,
+        entries: impl IntoIterator<Item = (i32, (u32, Weight))>,
+    ) -> Self {
+        if len <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries.into_iter().collect())
+        } else {
+            let mut map = FxHashMap::default();
+            map.reserve(len);
+            map.extend(entries);
+            Self::Hash(map)
+        }
+    }
+
+    pub(crate) fn from_packed(row: DwaTransitionMap) -> Self {
+        debug_assert!(row.is_packed());
+        Self::Packed(row)
+    }
+
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             Self::Inline(entries) => entries.is_empty(),
             Self::Hash(entries) => entries.is_empty(),
+            Self::Packed(row) => row.is_empty(),
         }
     }
 
     #[inline]
-    pub(crate) fn get(&self, label: &i32) -> Option<&(u32, Weight)> {
+    pub(crate) fn get(&self, label: &i32) -> Option<(u32, &Weight)> {
         match self {
             Self::Inline(entries) => entries
                 .iter()
-                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
-            Self::Hash(entries) => entries.get(label),
+                .find_map(|(candidate, (target, weight))| {
+                    (candidate == label).then_some((*target, weight))
+                }),
+            Self::Hash(entries) => entries.get(label).map(|(target, weight)| (*target, weight)),
+            Self::Packed(row) => row.get_entry(label),
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub(crate) enum FastDwaTransitions {
+    Direct(Vec<FastDwaTransitionRow>),
+    Shared {
+        rows: Vec<FastDwaTransitionRow>,
+        state_rows: Vec<u32>,
+    },
+}
+
+impl Default for FastDwaTransitions {
+    fn default() -> Self {
+        Self::Direct(Vec::new())
+    }
+}
+
+impl FastDwaTransitions {
+    pub(crate) fn direct(rows: Vec<FastDwaTransitionRow>) -> Self {
+        Self::Direct(rows)
+    }
+
+    pub(crate) fn shared(rows: Vec<FastDwaTransitionRow>, state_rows: Vec<u32>) -> Self {
+        Self::Shared { rows, state_rows }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Direct(rows) => rows.len(),
+            Self::Shared { state_rows, .. } => state_rows.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, state: usize) -> Option<&FastDwaTransitionRow> {
+        match self {
+            Self::Direct(rows) => rows.get(state),
+            Self::Shared { rows, state_rows } => state_rows
+                .get(state)
+                .and_then(|&row| rows.get(row as usize)),
         }
     }
 }
 
-pub(crate) type FastDwaTransitions = Vec<FastDwaTransitionRow>;
+impl std::ops::Index<usize> for FastDwaTransitions {
+    type Output = FastDwaTransitionRow;
+
+    #[inline]
+    fn index(&self, state: usize) -> &Self::Output {
+        match self {
+            Self::Direct(rows) => &rows[state],
+            Self::Shared { rows, state_rows } => &rows[state_rows[state] as usize],
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum IndexedDagDenseMask {
@@ -258,6 +686,9 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
     Flat(Arc<[u32]>),
+    /// Runtime tokenizer already owns an allocation-light exact transition
+    /// table; call through instead of rebuilding a second dense table.
+    Fallback(usize),
     Hybrid {
         state_to_dense_row: Vec<u32>,
         dense_rows: Vec<Box<[u32; 256]>>,
@@ -286,6 +717,7 @@ impl FastTokenizerTransitions {
                 .get(state as usize * 256 + byte as usize)
                 .copied()
                 .unwrap_or(u32::MAX),
+            Self::Fallback(_) => tokenizer.get_transition(state, byte),
             Self::Hybrid {
                 state_to_dense_row,
                 dense_rows,
@@ -307,6 +739,7 @@ impl FastTokenizerTransitions {
         match self {
             Self::Dense(rows) => rows.len(),
             Self::Flat(flat) => flat.len() / 256,
+            Self::Fallback(len) => *len,
             Self::Hybrid {
                 state_to_dense_row,
                 ..
@@ -370,6 +803,7 @@ impl FastTokenizerTransitions {
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
+                    Self::Fallback(_) => return None,
                     Self::Hybrid {
                         state_to_dense_row,
                         dense_rows,
@@ -380,6 +814,7 @@ impl FastTokenizerTransitions {
                         return None;
                     }
                     match child {
+                        Self::Fallback(_) => return None,
                         Self::Dense(rows) => {
                             for row in rows {
                                 let dense = dense_rows.len() as u32;
@@ -551,6 +986,24 @@ pub(crate) struct DynamicMaskTrieNode {
     pub(crate) subtree_token_end: u32,
     /// Union of every byte on every edge strictly below this node.
     pub(crate) subtree_bytes: [u64; 4],
+    /// Bytes that may occur next on some non-empty token suffix below this
+    /// node. Unlike `subtree_bytes`, this records only the first consumed byte;
+    /// zero-byte structural layout edges transparently inherit their child's
+    /// first-byte set. Dynamic masking uses it to reject whole vocabulary
+    /// layout classes before entering the radix walk when the current lexer
+    /// configuration cannot consume any of their first bytes.
+    pub(crate) subtree_first_bytes: [u64; 4],
+    /// Number of vocabulary bytes consumed from the global trie root to reach
+    /// this node. Structural partition edges have length zero and therefore do
+    /// not affect it. This lets finite-horizon root-state certificates be
+    /// reused only for subtrees whose *complete token strings* fit the proof
+    /// horizon.
+    pub(crate) prefix_byte_len: u32,
+    /// Maximum number of token bytes still reachable strictly below this node.
+    /// This is a runtime-only certificate aid: dynamic masking can prove that
+    /// a lexer configuration stays safely live for this bounded horizon and
+    /// accept the whole subtree without walking every token edge.
+    pub(crate) subtree_max_byte_len: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -579,6 +1032,47 @@ pub(crate) struct DynamicMaskTrie {
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
+}
+
+/// Vocab-only layout refinement used by the dynamic-mask radix trie.
+///
+/// `base_partition` is the existing p0/p1/... character-type class.  The
+/// extra bits deliberately describe only coarse byte shape, not grammar
+/// semantics: their job is to stop a few lexer-sensitive bytes from
+/// contaminating otherwise uniform large subtrees.  The runtime never
+/// interprets this value after construction.
+pub(crate) fn dynamic_mask_vocab_layout_class(base_partition: u8, bytes: &[u8]) -> u16 {
+    #[inline]
+    fn first_kind(byte: Option<u8>) -> u16 {
+        match byte {
+            None => 0,
+            Some(b' ') => 1,
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => 2,
+            Some(b'0'..=b'9') => 3,
+            Some(b'"' | b'\\' | b'\'') => 4,
+            Some(0..=31 | 127) => 5,
+            Some(128..=255) => 6,
+            Some(_) => 7,
+        }
+    }
+
+    let mut flags = 0u16;
+    for &byte in bytes {
+        flags |= match byte {
+            b'"' => 1 << 0,
+            b'\\' => 1 << 1,
+            b'\'' => 1 << 2,
+            0..=31 | 127 => 1 << 3,
+            b' ' => 1 << 4,
+            b'{' | b'}' | b'[' | b']' | b'(' | b')' | b',' | b':' | b';' => 1 << 5,
+            b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>' | b'!'
+            | b'?' | b'&' | b'|' | b'^' | b'~' | b'@' | b'#' | b'$' | b'`' => 1 << 6,
+            128..=255 => 1 << 7,
+            _ => 0,
+        };
+    }
+
+    (u16::from(base_partition) << 11) | (first_kind(bytes.first().copied()) << 8) | flags
 }
 
 impl DynamicMaskTrie {
@@ -652,6 +1146,22 @@ impl DynamicMaskTrie {
         self.node(node).subtree_bytes
     }
 
+    #[inline]
+    pub(crate) fn subtree_first_bytes(&self, node: u32) -> [u64; 4] {
+        self.node(node).subtree_first_bytes
+    }
+
+    #[inline]
+    pub(crate) fn subtree_max_byte_len(&self, node: u32) -> u32 {
+        self.node(node).subtree_max_byte_len
+    }
+
+    #[inline]
+    pub(crate) fn subtree_max_total_byte_len(&self, node: u32) -> u32 {
+        let node = self.node(node);
+        node.prefix_byte_len.saturating_add(node.subtree_max_byte_len)
+    }
+
     pub(crate) fn push_edge_bytes(&mut self, bytes: &[u8]) -> (u32, u32) {
         let start = self.edge_bytes.len() as u32;
         self.edge_bytes.extend_from_slice(bytes);
@@ -663,7 +1173,12 @@ impl DynamicMaskTrie {
         self.edge_bytes.len()
     }
 
-    fn collect_subtree_metadata(&mut self, node_id: u32) -> [u64; 4] {
+    fn collect_subtree_metadata(
+        &mut self,
+        node_id: u32,
+        prefix_byte_len: u32,
+    ) -> ([u64; 4], [u64; 4], u32) {
+        self.nodes[node_id as usize].prefix_byte_len = prefix_byte_len;
         let start = self.subtree_tokens.len() as u32;
         if let Some(token_id) = self.nodes[node_id as usize].token_id {
             self.subtree_tokens.push(token_id);
@@ -672,6 +1187,8 @@ impl DynamicMaskTrie {
         let first_child = self.nodes[node_id as usize].first_child as usize;
         let child_len = self.nodes[node_id as usize].child_len as usize;
         let mut subtree_bytes = [0u64; 4];
+        let mut subtree_first_bytes = [0u64; 4];
+        let mut subtree_max_byte_len = 0u32;
         for edge_index in first_child..first_child + child_len {
             // Copy the compact edge fields before recursing so no borrow of
             // `self.edges` remains live across the mutable recursive call.
@@ -681,10 +1198,27 @@ impl DynamicMaskTrie {
             for &byte in &self.edge_bytes[byte_start..byte_end] {
                 subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
             }
-            let child_bytes = self.collect_subtree_metadata(edge.child);
+            let child_prefix_byte_len = prefix_byte_len
+                .checked_add(edge.byte_len)
+                .expect("dynamic mask trie token byte length exceeds u32");
+            let (child_bytes, child_first_bytes, child_max_byte_len) =
+                self.collect_subtree_metadata(edge.child, child_prefix_byte_len);
             for (target, child) in subtree_bytes.iter_mut().zip(child_bytes) {
                 *target |= child;
             }
+            if edge.byte_len == 0 {
+                for (target, child) in subtree_first_bytes.iter_mut().zip(child_first_bytes) {
+                    *target |= child;
+                }
+            } else {
+                let first = self.edge_bytes[byte_start];
+                subtree_first_bytes[first as usize >> 6] |= 1u64 << (first & 63);
+            }
+            subtree_max_byte_len = subtree_max_byte_len.max(
+                edge.byte_len
+                    .checked_add(child_max_byte_len)
+                    .expect("dynamic mask trie token byte length exceeds u32"),
+            );
         }
 
         let end = self.subtree_tokens.len() as u32;
@@ -692,14 +1226,16 @@ impl DynamicMaskTrie {
         node.subtree_token_start = start;
         node.subtree_token_end = end;
         node.subtree_bytes = subtree_bytes;
-        subtree_bytes
+        node.subtree_first_bytes = subtree_first_bytes;
+        node.subtree_max_byte_len = subtree_max_byte_len;
+        (subtree_bytes, subtree_first_bytes, subtree_max_byte_len)
     }
 
     pub(crate) fn finalize_subtree_metadata(&mut self) {
         self.subtree_tokens.clear();
         self.subtree_tokens.reserve(self.nodes.len());
         if !self.nodes.is_empty() {
-            self.collect_subtree_metadata(0);
+            self.collect_subtree_metadata(0, 0);
         }
         self.finalize_walk_edges();
     }
@@ -747,6 +1283,9 @@ impl DynamicMaskTrie {
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
+            subtree_first_bytes: [0; 4],
+            prefix_byte_len: 0,
+            subtree_max_byte_len: 0,
         });
 
         let children = node.children();
@@ -828,6 +1367,9 @@ impl DynamicMaskTrie {
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
+            subtree_first_bytes: [0; 4],
+            prefix_byte_len: 0,
+            subtree_max_byte_len: 0,
         });
         output
             .edges
@@ -850,6 +1392,84 @@ impl DynamicMaskTrie {
             output.nodes.append(&mut fragment.nodes);
             output.edges.append(&mut fragment.edges);
             let (byte_start, byte_len) = output.push_edge_bytes(&root_edge);
+            output.edges[root_slot] = DynamicMaskTrieEdge {
+                byte_start,
+                byte_len,
+                child: node_base,
+            };
+        }
+
+        output.finalize_subtree_metadata();
+        output
+    }
+
+    /// Build the same flat runtime radix-trie representation, but place one
+    /// zero-byte structural node above each caller-supplied vocabulary layout
+    /// class. `entries` must be ordered by `(class, token_bytes)` and token byte
+    /// strings must already be canonical/deduplicated.
+    ///
+    /// The structural edges are a layout device only: they consume no input
+    /// and are invisible to lexer semantics. Their purpose is to keep token
+    /// families with different byte behaviour from contaminating one another's
+    /// subtree metadata, so the generic runtime subtree certificates can skip
+    /// large groups without any partition-specific masking logic.
+    pub(crate) fn from_partitioned_token_refs(entries: &[(u16, usize, &[u8])]) -> Self {
+        let mut output = Self::new();
+        if entries.is_empty() {
+            return output;
+        }
+
+        // Empty-token aliases are canonicalized before this stage, so at most
+        // one canonical empty byte string may exist. Keep it on the true root.
+        let mut start = 0usize;
+        if entries[0].2.is_empty() {
+            output.nodes[0].token_id = Some(entries[0].1 as u32);
+            start = 1;
+        }
+
+        let mut groups = Vec::<Self>::new();
+        let mut index = start;
+        while index < entries.len() {
+            let class = entries[index].0;
+            let group_start = index;
+            index += 1;
+            while index < entries.len() && entries[index].0 == class {
+                index += 1;
+            }
+            let refs = entries[group_start..index]
+                .iter()
+                .map(|(_, token_id, bytes)| (*token_id, *bytes))
+                .collect::<Vec<_>>();
+            debug_assert!(refs.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+            let tree = VocabPrefixTree::build_presorted(&refs);
+            groups.push(Self::from_vocab_prefix_tree_node(&tree.root));
+        }
+
+        let root_child_count = groups.len();
+        output.edges.resize_with(root_child_count, DynamicMaskTrieEdge::default);
+        output.nodes[0].first_child = 0;
+        output.nodes[0].child_len = root_child_count as u32;
+
+        for (root_slot, mut fragment) in groups.into_iter().enumerate() {
+            let node_base = output.nodes.len() as u32;
+            let edge_base = output.edges.len() as u32;
+            let byte_base = output.edge_bytes.len() as u32;
+
+            output.edge_bytes.extend_from_slice(&fragment.edge_bytes);
+            for node in &mut fragment.nodes {
+                if node.child_len != 0 {
+                    node.first_child += edge_base;
+                }
+            }
+            for edge in &mut fragment.edges {
+                edge.byte_start += byte_base;
+                edge.child += node_base;
+            }
+            output.nodes.append(&mut fragment.nodes);
+            output.edges.append(&mut fragment.edges);
+
+            // Structural class edge: no lexer byte is consumed here.
+            let (byte_start, byte_len) = output.push_edge_bytes(&[]);
             output.edges[root_slot] = DynamicMaskTrieEdge {
                 byte_start,
                 byte_len,
@@ -1323,11 +1943,128 @@ pub(crate) type DynamicMaskStateKey =
     Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
 
 #[derive(Debug, Clone)]
+pub(crate) struct DynamicConfigSubtreeCertificate {
+    pub(crate) node: u32,
+    /// Lexer NFA configuration in the mask-tokenizer quotient coordinate.
+    pub(crate) projected_config: Arc<[u32]>,
+    /// Every vocabulary token below `node`, when entered in
+    /// `projected_config`, reaches token boundary without another lexer
+    /// finalization while retaining at least one of these terminals as a
+    /// possible future.  Runtime needs only one terminal to be parser-admissible.
+    pub(crate) common_future_terminals: Arc<[TerminalID]>,
+}
+
+/// Exact vocabulary-relative continuation row after one lexer terminal has
+/// finalized inside a model token and the lexer has reset.  Every token in
+/// `tokens` reaches token boundary without a second lexer finalization and is
+/// live for at least one terminal in `terminals`.  `terminals` are grouped by
+/// exact equality of their fused-token set, so runtime normally tests only a
+/// handful of rows even when many grammar terminals share the same lexical
+/// continuation language.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicFirstMatchPostRow {
+    pub(crate) terminals: Arc<[TerminalID]>,
+    pub(crate) tokens: Arc<[u32]>,
+    /// Prepacked token mask for broad rows.  Sparse rows leave this empty and
+    /// are cheaper to apply by setting their handful of token IDs directly.
+    pub(crate) dense_mask: Arc<[u32]>,
+}
+
+/// Second-finalization continuation from a first-match one-step projection.
+/// `terminal` is consumed on the post-first parser stack.  Exact-end tokens
+/// become immediately valid after that parser advance; `post_rows` describe
+/// residual lexer futures after the second reset for branches that reach token
+/// boundary without a third finalization.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicFirstMatchSecondRow {
+    pub(crate) terminal: TerminalID,
+    pub(crate) exact_end_tokens: Arc<[u32]>,
+    pub(crate) post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    /// Additional terminal finalizations after this terminal resets the lexer.
+    /// The row type is recursive so a short vocabulary-relative lexical-effect
+    /// program can represent arbitrarily many in-token finalizations without
+    /// returning to byte-wise trie traversal.
+    pub(crate) next_rows: Arc<[DynamicFirstMatchSecondRow]>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DynamicSelfLoopProjection {
     pub(crate) source_state: u32,
-    pub(crate) required_terminal: TerminalID,
+    /// Exact possible-future terminal set at `source_state`. Projection token
+    /// leaves are certified only when they restore this complete set, making
+    /// the projection independent of parser context. Runtime needs only one of
+    /// these terminals to be parser-admissible for the continuing witness.
+    pub(crate) future_terminals: Arc<[TerminalID]>,
     pub(crate) safe_no_match_mask: Arc<[u32]>,
     pub(crate) safe_subtrees: Arc<[u8]>,
+    /// Nodes whose complete suffix language is safe when entered with
+    /// `source_state` itself. `safe_subtrees` is relative to the state reached
+    /// by consuming the node's root prefix during projection construction; an
+    /// intermediate runtime walk may only reuse a projection at nodes where
+    /// that reached state has returned to the projection source.
+    pub(crate) source_reentry_safe_subtrees: Arc<[u8]>,
+    /// For a projection rooted at `source_state`, row `node` is a bitmask over
+    /// `future_terminals`: bit i is set iff that terminal remains a live
+    /// no-finalization continuation for every vocabulary token below `node`.
+    /// This is stronger than the historical exact-future-set projection for
+    /// accepting+continuing lexer states: unrelated finalizers/futures may
+    /// churn as long as one common continuing terminal witnesses the subtree.
+    pub(crate) common_future_masks: Arc<[u64]>,
+    /// Sparse trie nodes that are provably useless while following the
+    /// no-finalization path from `source_state`: every token below the node
+    /// dies before any lexer terminal can match and no token can end with a
+    /// live residual lexer state.  This certificate is parser-independent.
+    pub(crate) pre_match_dead_words: Arc<[u64]>,
+    /// Sparse trie nodes whose incoming radix edge reaches the first lexer
+    /// terminal match from `source_state`.  The dead-node certificate above is
+    /// no longer applicable below these nodes because parser-dependent reset
+    /// branches become possible there.
+    pub(crate) pre_match_frontier_words: Arc<[u64]>,
+    /// Experimental exact subset for tokens that first finalize the sole
+    /// future terminal from one concrete full tokenizer state and whose
+    /// post-reset byte suffix is itself an ordinary vocabulary token.
+    ///
+    /// Runtime validates only the suffix-token candidates after advancing the
+    /// parser once on `future_terminals[0]`; an accepted suffix then certifies
+    /// the corresponding fused original token.  This is deliberately a
+    /// one-sided baseline: tokens not represented here still go through the
+    /// ordinary exact dynamic walk.
+    pub(crate) first_match_fusion_source_state: u32,
+    pub(crate) first_match_fusion_match_state: u32,
+    pub(crate) first_match_fusion_candidate_mask: Arc<[u32]>,
+    /// One bit per dynamic vocabulary-trie node: set iff the subtree contains
+    /// at least one suffix token from `first_match_fusion_candidate_mask`.
+    pub(crate) first_match_fusion_candidate_subtrees: Arc<[u64]>,
+    /// `(fused_original_token, suffix_original_token)` pairs.
+    pub(crate) first_match_fusions: Arc<[(u32, u32)]>,
+    /// Experimental exact one-finalization decomposition for a concrete full
+    /// tokenizer state.  It is deliberately vocabulary-relative: tokens with
+    /// more than one possible first-match width or any second finalization
+    /// after reset are listed in `first_match_step_unknown_tokens` and are
+    /// validated by the ordinary exact dynamic walker.
+    pub(crate) first_match_step_source_state: u32,
+    pub(crate) first_match_step_root_live_tokens: Arc<[u32]>,
+    pub(crate) first_match_step_exact_end_tokens: Arc<[u32]>,
+    pub(crate) first_match_step_post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    pub(crate) first_match_step_second_rows: Arc<[DynamicFirstMatchSecondRow]>,
+    pub(crate) first_match_step_unknown_tokens: Arc<[u32]>,
+    /// One bit per runtime vocabulary-trie node, set iff that subtree contains
+    /// at least one token from `first_match_step_unknown_tokens`.
+    pub(crate) first_match_step_unknown_subtrees: Arc<[u64]>,
+    /// General vocabulary-relative lexical-effect program rooted directly at
+    /// a concrete tokenizer state. Unlike `first_match_step_*`, this does not
+    /// require a sole first terminal: residual no-finalization futures live in
+    /// `root_effect_post_rows`, while `root_effect_rows` encode arbitrary
+    /// terminal-finalization/reset sequences. Runtime executes only the parser
+    /// effects; unresolved depth-limited tokens fall back to the exact walker.
+    pub(crate) root_effect_source_state: u32,
+    pub(crate) root_effect_post_rows: Arc<[DynamicFirstMatchPostRow]>,
+    pub(crate) root_effect_rows: Arc<[DynamicFirstMatchSecondRow]>,
+    pub(crate) root_effect_unknown_tokens: Arc<[u32]>,
+    pub(crate) root_effect_unknown_subtrees: Arc<[u64]>,
+    /// Sparse post-finalization certificates discovered from repeated reset-NFA
+    /// configurations below this projection's first-match frontier.
+    pub(crate) config_subtree_certificates: Arc<[DynamicConfigSubtreeCertificate]>,
 }
 
 impl DynamicSelfLoopProjection {
@@ -1337,12 +2074,147 @@ impl DynamicSelfLoopProjection {
             .get(node as usize)
             .is_some_and(|&safe| safe != 0)
     }
+
+    #[inline]
+    pub(crate) fn subtree_is_safe_from_source(&self, node: u32) -> bool {
+        self.source_reentry_safe_subtrees
+            .get(node as usize)
+            .is_some_and(|&safe| safe != 0)
+    }
+
+    #[inline]
+    pub(crate) fn subtree_common_future_mask(&self, node: u32) -> u64 {
+        self.common_future_masks
+            .get(node as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[inline]
+    pub(crate) fn pre_match_subtree_is_dead(&self, node: u32) -> bool {
+        let word = node as usize >> 6;
+        let bit = node & 63;
+        self.pre_match_dead_words
+            .get(word)
+            .is_some_and(|bits| bits & (1u64 << bit) != 0)
+    }
+
+    #[inline]
+    pub(crate) fn pre_match_subtree_is_frontier(&self, node: u32) -> bool {
+        let word = node as usize >> 6;
+        let bit = node & 63;
+        self.pre_match_frontier_words
+            .get(word)
+            .is_some_and(|bits| bits & (1u64 << bit) != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_pre_match_dead_subtrees(&self) -> bool {
+        self.pre_match_dead_words.iter().any(|&word| word != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_first_match_fusions_from(&self, full_source_state: u32) -> bool {
+        self.first_match_fusion_source_state == full_source_state
+            && self.first_match_fusion_match_state != u32::MAX
+            && !self.first_match_fusions.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn has_root_effect_from(&self, full_source_state: u32) -> bool {
+        self.root_effect_source_state == full_source_state
+    }
+
+    #[inline]
+    pub(crate) fn has_first_match_step_from(&self, full_source_state: u32) -> bool {
+        self.first_match_step_source_state == full_source_state
+            && self.future_terminals.len() == 1
+            && (!self.first_match_step_root_live_tokens.is_empty()
+                || !self.first_match_step_exact_end_tokens.is_empty()
+                || !self.first_match_step_post_rows.is_empty()
+                || !self.first_match_step_unknown_tokens.is_empty())
+    }
+
+    #[inline]
+    pub(crate) fn config_subtree_certificates_for_node(
+        &self,
+        node: u32,
+    ) -> &[DynamicConfigSubtreeCertificate] {
+        let certificates = self.config_subtree_certificates.as_ref();
+        let start = certificates.partition_point(|certificate| certificate.node < node);
+        let end = start
+            + certificates[start..]
+                .partition_point(|certificate| certificate.node == node);
+        &certificates[start..end]
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocabSource {
     pub(crate) trie: Arc<VocabPrefixTree>,
     pub(crate) token_aliases: Arc<Vec<Vec<u32>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DynamicBoundedObservationSets {
+    pool: Arc<[U8Set]>,
+    horizon16: Arc<[u32]>,
+    horizon64: Arc<[u32]>,
+}
+
+impl DynamicBoundedObservationSets {
+    pub(crate) fn from_raw(horizon16: Box<[U8Set]>, horizon64: Box<[U8Set]>) -> Self {
+        debug_assert_eq!(horizon16.len(), horizon64.len());
+        let mut ids = FxHashMap::<U8Set, u32>::default();
+        let mut pool = Vec::<U8Set>::new();
+        let mut intern = |set: U8Set| -> u32 {
+            if let Some(&id) = ids.get(&set) {
+                return id;
+            }
+            let id = pool.len() as u32;
+            pool.push(set);
+            ids.insert(set, id);
+            id
+        };
+        let horizon16 = horizon16
+            .iter()
+            .copied()
+            .map(&mut intern)
+            .collect::<Vec<_>>();
+        let horizon64 = horizon64
+            .iter()
+            .copied()
+            .map(&mut intern)
+            .collect::<Vec<_>>();
+        Self {
+            pool: Arc::from(pool),
+            horizon16: Arc::from(horizon16),
+            horizon64: Arc::from(horizon64),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn safe_bytes(&self, state: u32, required_horizon: u32) -> Option<U8Set> {
+        let ids = if required_horizon <= 16 {
+            self.horizon16.as_ref()
+        } else if required_horizon <= 64 {
+            self.horizon64.as_ref()
+        } else {
+            return None;
+        };
+        let id = *ids.get(state as usize)? as usize;
+        self.pool.get(id).copied()
+    }
+
+    #[inline]
+    pub(crate) fn state_count(&self) -> usize {
+        self.horizon16.len()
+    }
+
+    #[inline]
+    pub(crate) fn unique_set_count(&self) -> usize {
+        self.pool.len()
+    }
 }
 
 /// Runtime-only vocabulary data for direct dynamic mask generation.
@@ -1363,6 +2235,16 @@ pub(crate) struct DynamicMaskVocab {
     direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, usize>>>,
     direct_regular_terminal_support: Arc<DirectRegularTerminalSupport>,
     self_loop_projections: Arc<Vec<DynamicSelfLoopProjection>>,
+    projection_by_source: Arc<[u32]>,
+    projection_alias_vocab: Arc<[u32]>,
+    projection_alias_h64: Arc<[u32]>,
+    bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
+    /// Optional mask-only finite-token quotient. Commit continues to use the
+    /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
+    /// built in this smaller coordinate and indexed from exact runtime states
+    /// through `full_to_mask_state`.
+    mask_tokenizer: Option<Arc<Tokenizer>>,
+    full_to_mask_state: Arc<[u32]>,
 }
 
 impl DynamicMaskVocab {
@@ -1416,6 +2298,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1452,6 +2340,12 @@ impl DynamicMaskVocab {
                 DirectRegularTerminalSupport::default(),
             ),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1471,6 +2365,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1507,6 +2407,12 @@ impl DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
         }
     }
 
@@ -1698,16 +2604,175 @@ impl DynamicMaskVocab {
         &mut self,
         projections: Vec<DynamicSelfLoopProjection>,
     ) {
+        let state_count = self.mask_tokenizer.as_ref().map_or_else(
+            || {
+                projections
+                    .iter()
+                    .map(|projection| projection.source_state as usize + 1)
+                    .max()
+                    .unwrap_or(0)
+            },
+            |tokenizer| tokenizer.num_states() as usize,
+        );
+        let mut by_source = vec![u32::MAX; state_count];
+        for (index, projection) in projections.iter().enumerate() {
+            if let Some(slot) = by_source.get_mut(projection.source_state as usize) {
+                *slot = index as u32;
+            }
+        }
+        self.projection_by_source = Arc::from(by_source);
         self.self_loop_projections = Arc::new(projections);
+    }
+
+    pub(crate) fn set_projection_alias_vocab(&mut self, aliases: Vec<u32>) {
+        self.projection_alias_vocab = Arc::from(aliases);
+    }
+
+    pub(crate) fn set_projection_alias_h64(&mut self, aliases: Vec<u32>) {
+        self.projection_alias_h64 = Arc::from(aliases);
+    }
+
+    pub(crate) fn set_mask_tokenizer_quotient(
+        &mut self,
+        tokenizer: Tokenizer,
+        full_to_mask_state: Vec<u32>,
+    ) {
+        debug_assert!(!full_to_mask_state.is_empty());
+        debug_assert!(full_to_mask_state
+            .iter()
+            .all(|&state| state < tokenizer.num_states()));
+        self.mask_tokenizer = Some(Arc::new(tokenizer));
+        self.full_to_mask_state = Arc::from(full_to_mask_state);
+    }
+
+    /// Preserve mask-only quotient metadata when a deferred dynamic-vocabulary
+    /// placeholder is replaced by its fully materialized runtime trie.
+    ///
+    /// The quotient is constraint/lexer derived while the trie is vocabulary
+    /// derived, so deferred dynamic compilation may construct them at different
+    /// times. Sharing the immutable Arc-backed metadata avoids cloning the
+    /// quotient tokenizer during that handoff.
+    pub(crate) fn inherit_mask_tokenizer_quotient_from(&mut self, source: &Self) {
+        self.mask_tokenizer = source.mask_tokenizer.clone();
+        self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
+    }
+
+    pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
+        self.mask_tokenizer.as_ref().map(|tokenizer| {
+            ((**tokenizer).clone(), self.full_to_mask_state.as_ref().to_vec())
+        })
+    }
+
+    #[inline]
+    pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
+        self.mask_tokenizer.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
+        self.full_to_mask_state
+            .get(full_state as usize)
+            .copied()
+            .unwrap_or(full_state)
+    }
+
+    pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
+        let tokenizer = self.mask_tokenizer.as_ref()?;
+        let mut counts = vec![0usize; tokenizer.num_states() as usize];
+        for &state in self.full_to_mask_state.iter() {
+            if let Some(count) = counts.get_mut(state as usize) {
+                *count += 1;
+            }
+        }
+        Some(counts)
+    }
+
+    /// Exact full-tokenizer preimage for quotient states that have exactly one
+    /// runtime source.  Non-unique and unreachable quotient states are
+    /// represented by `u32::MAX`.
+    pub(crate) fn mask_projection_unique_full_states(&self) -> Option<Vec<u32>> {
+        let tokenizer = self.mask_tokenizer.as_ref()?;
+        let mut unique = vec![u32::MAX; tokenizer.num_states() as usize];
+        let mut duplicate = vec![false; tokenizer.num_states() as usize];
+        for (full_state, &mask_state) in self.full_to_mask_state.iter().enumerate() {
+            let index = mask_state as usize;
+            if index >= unique.len() {
+                continue;
+            }
+            if unique[index] == u32::MAX && !duplicate[index] {
+                unique[index] = full_state as u32;
+            } else {
+                duplicate[index] = true;
+                unique[index] = u32::MAX;
+            }
+        }
+        Some(unique)
     }
 
     pub(crate) fn self_loop_projection(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        self.self_loop_projections
-            .iter()
-            .find(|projection| projection.source_state == source_state)
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_by_source.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    pub(crate) fn self_loop_projection_alias_h64(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSelfLoopProjection> {
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_alias_h64.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    pub(crate) fn self_loop_projection_alias_vocab(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSelfLoopProjection> {
+        let source_state = self.mask_projection_state(source_state);
+        let index = *self.projection_alias_vocab.get(source_state as usize)?;
+        if index == u32::MAX {
+            return None;
+        }
+        self.self_loop_projections.get(index as usize)
+    }
+
+    #[inline]
+    pub(crate) fn has_self_loop_projections(&self) -> bool {
+        !self.self_loop_projections.is_empty()
+    }
+
+    pub(crate) fn set_bounded_observation_sets(
+        &mut self,
+        sets: DynamicBoundedObservationSets,
+    ) {
+        self.bounded_observation_sets = Arc::new(sets);
+    }
+
+    #[inline]
+    pub(crate) fn bounded_observation_safe_bytes(
+        &self,
+        source: u32,
+        required_horizon: u32,
+    ) -> Option<U8Set> {
+        self.bounded_observation_sets
+            .safe_bytes(source, required_horizon)
+    }
+
+    #[inline]
+    pub(crate) fn bounded_observation_set_counts(&self) -> (usize, usize) {
+        (
+            self.bounded_observation_sets.state_count(),
+            self.bounded_observation_sets.unique_set_count(),
+        )
     }
 
     pub(crate) fn cached_direct_regular_frontier(
@@ -1810,6 +2875,1120 @@ impl Default for DynamicMaskVocab {
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
             self_loop_projections: Arc::new(Vec::new()),
+            projection_by_source: Arc::from(Vec::<u32>::new()),
+            projection_alias_vocab: Arc::from(Vec::<u32>::new()),
+            projection_alias_h64: Arc::from(Vec::<u32>::new()),
+            bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            mask_tokenizer: None,
+            full_to_mask_state: Arc::from(Vec::<u32>::new()),
+        }
+    }
+}
+
+/// Version-scoped serde for the inverse token-id map. Current sectioned
+/// artifacts carry only `original_token_to_internal`; the inverse is exactly
+/// derivable from it and is rebuilt after the core section is decoded. Older
+/// artifact versions leave this mode disabled and retain their historical wire
+/// shape.
+pub(crate) mod internal_token_inverse_artifact_serde {
+    use std::cell::Cell;
+
+    use serde::{Deserialize, Serialize};
+
+    thread_local! {
+        static OMIT_INVERSE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_omit(enabled: bool) -> bool {
+        OMIT_INVERSE.with(|mode| mode.replace(enabled))
+    }
+
+    pub fn serialize<S>(value: &[Vec<u32>], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            return ().serialize(serializer);
+        }
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<u32>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            <()>::deserialize(deserializer)?;
+            return Ok(Vec::new());
+        }
+        Vec::<Vec<u32>>::deserialize(deserializer)
+    }
+}
+
+/// Current-core serialization can omit the tokenizer-state inverse when it is
+/// exactly derivable from the scalar state -> internal-TSID map. The default
+/// mode preserves the historical `Vec<Vec<u32>>` bincode wire, so legacy
+/// artifact decoding is unchanged.
+pub(crate) mod internal_tsid_inverse_artifact_serde {
+    use std::cell::Cell;
+
+    use serde::{Deserialize, Serialize};
+
+    thread_local! {
+        static OMIT_INVERSE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_omit(enabled: bool) -> bool {
+        OMIT_INVERSE.with(|mode| mode.replace(enabled))
+    }
+
+    pub fn serialize<S>(value: &[Vec<u32>], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            return ().serialize(serializer);
+        }
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Vec<u32>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if OMIT_INVERSE.with(Cell::get) {
+            <()>::deserialize(deserializer)?;
+            return Ok(Vec::new());
+        }
+        Vec::<Vec<u32>>::deserialize(deserializer)
+    }
+}
+
+/// Compact v14+ wire form for the dense original-token -> internal-token map.
+/// Internal IDs are normally only a few thousand wide even for 128k-token
+/// vocabularies, so fixed-width u32 storage wastes roughly half this field.
+/// Zero encodes the historical `u32::MAX` sentinel; ordinary IDs are stored as
+/// `id + 1` varints. Older artifact versions leave this mode disabled.
+pub(crate) mod original_token_map_artifact_serde {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Serialize};
+
+    const VARINT_MAGIC: &[u8; 4] = b"OTM1";
+    const FIXED_MAGIC: &[u8; 4] = b"OTM2";
+    const FIXED_HEADER_LEN: usize = FIXED_MAGIC.len() + 1 + 4;
+
+    #[derive(Debug)]
+    pub(crate) struct PackedOriginalTokenMap {
+        backing: Arc<Vec<u8>>,
+        payload_start: usize,
+        count: usize,
+        width: usize,
+    }
+
+    impl PackedOriginalTokenMap {
+        pub(crate) fn parse_backed(
+            backing: Arc<Vec<u8>>,
+            start: usize,
+            len: usize,
+        ) -> Result<Self, String> {
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| "fixed original-token map range overflows".to_owned())?;
+            let input = backing
+                .get(start..end)
+                .ok_or_else(|| "fixed original-token map is outside artifact backing".to_owned())?;
+            if input.len() < FIXED_HEADER_LEN || !input.starts_with(FIXED_MAGIC) {
+                return Err("invalid fixed original-token map header".to_owned());
+            }
+            let width = input[FIXED_MAGIC.len()] as usize;
+            if !matches!(width, 1 | 2 | 4) {
+                return Err("invalid fixed original-token map width".to_owned());
+            }
+            let count_start = FIXED_MAGIC.len() + 1;
+            let count = u32::from_le_bytes(
+                input[count_start..count_start + 4]
+                    .try_into()
+                    .expect("fixed original-token count has fixed width"),
+            ) as usize;
+            let payload_len = count
+                .checked_mul(width)
+                .ok_or_else(|| "fixed original-token map payload overflows".to_owned())?;
+            if FIXED_HEADER_LEN
+                .checked_add(payload_len)
+                .is_none_or(|expected| expected != input.len())
+            {
+                return Err("invalid fixed original-token map length".to_owned());
+            }
+            Ok(Self {
+                backing,
+                payload_start: start + FIXED_HEADER_LEN,
+                count,
+                width,
+            })
+        }
+
+        #[inline]
+        pub(crate) fn len(&self) -> usize {
+            self.count
+        }
+
+        #[inline]
+        pub(crate) fn is_empty(&self) -> bool {
+            self.count == 0
+        }
+
+        #[inline]
+        pub(crate) fn get(&self, index: usize) -> Option<u32> {
+            if index >= self.count {
+                return None;
+            }
+            let start = self.payload_start + index * self.width;
+            let bytes = self.backing.get(start..start + self.width)?;
+            Some(match self.width {
+                1 => {
+                    let value = bytes[0];
+                    if value == u8::MAX { u32::MAX } else { value as u32 }
+                }
+                2 => {
+                    let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                    if value == u16::MAX { u32::MAX } else { value as u32 }
+                }
+                4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                _ => unreachable!(),
+            })
+        }
+
+        pub(crate) fn materialize(&self) -> Vec<u32> {
+            (0..self.count)
+                .map(|index| self.get(index).expect("validated packed original-token map index"))
+                .collect()
+        }
+    }
+
+    thread_local! {
+        static PACKED: Cell<bool> = const { Cell::new(false) };
+        static EXTERNAL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn set_packed(enabled: bool) -> bool {
+        PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn set_external(enabled: bool) -> bool {
+        EXTERNAL.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn to_fast_bytes(value: &[u32]) -> Vec<u8> {
+        pack_fixed(value)
+    }
+
+    pub(crate) fn from_fast_bytes(input: &[u8]) -> Result<Vec<u32>, String> {
+        unpack(input)
+    }
+
+    #[inline]
+    fn put_var_u32(out: &mut Vec<u8>, mut value: u32) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    #[inline]
+    fn take_var_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let byte = *input
+                .get(*pos)
+                .ok_or_else(|| "truncated packed original-token map".to_owned())?;
+            *pos += 1;
+            if shift == 28 && byte > 0x0f {
+                return Err("overflowing packed original-token map".to_owned());
+            }
+            value |= ((byte & 0x7f) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+        Err("overflowing packed original-token map".to_owned())
+    }
+
+    fn pack_varint(value: &[u32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(value.len().saturating_mul(2));
+        out.extend_from_slice(VARINT_MAGIC);
+        put_var_u32(
+            &mut out,
+            u32::try_from(value.len()).expect("token vocabulary should fit u32"),
+        );
+        for &internal in value {
+            let encoded = if internal == u32::MAX {
+                0
+            } else {
+                internal
+                    .checked_add(1)
+                    .expect("u32::MAX is reserved as the unmapped-token sentinel")
+            };
+            put_var_u32(&mut out, encoded);
+        }
+        out
+    }
+
+    fn unpack_varint(input: &[u8]) -> Result<Vec<u32>, String> {
+        if !input.starts_with(VARINT_MAGIC) {
+            return Err("invalid varint original-token map header".to_owned());
+        }
+        let mut pos = VARINT_MAGIC.len();
+        let count = take_var_u32(input, &mut pos)? as usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let encoded = take_var_u32(input, &mut pos)?;
+            out.push(if encoded == 0 { u32::MAX } else { encoded - 1 });
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed original-token map".to_owned());
+        }
+        Ok(out)
+    }
+
+    fn pack_fixed(value: &[u32]) -> Vec<u8> {
+        let max_internal = value
+            .iter()
+            .copied()
+            .filter(|&internal| internal != u32::MAX)
+            .max()
+            .unwrap_or(0);
+        let width = if max_internal < u8::MAX as u32 {
+            1u8
+        } else if max_internal < u16::MAX as u32 {
+            2u8
+        } else {
+            4u8
+        };
+        let payload_len = value
+            .len()
+            .checked_mul(width as usize)
+            .expect("original-token map payload should fit usize");
+        let mut out = Vec::with_capacity(FIXED_HEADER_LEN + payload_len);
+        out.extend_from_slice(FIXED_MAGIC);
+        out.push(width);
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("token vocabulary should fit u32")
+                .to_le_bytes(),
+        );
+        match width {
+            1 => {
+                for &internal in value {
+                    out.push(if internal == u32::MAX {
+                        u8::MAX
+                    } else {
+                        internal as u8
+                    });
+                }
+            }
+            2 => {
+                for &internal in value {
+                    let encoded = if internal == u32::MAX {
+                        u16::MAX
+                    } else {
+                        internal as u16
+                    };
+                    out.extend_from_slice(&encoded.to_le_bytes());
+                }
+            }
+            4 => {
+                for &internal in value {
+                    out.extend_from_slice(&internal.to_le_bytes());
+                }
+            }
+            _ => unreachable!(),
+        }
+        out
+    }
+
+    fn unpack_fixed(input: &[u8]) -> Result<Vec<u32>, String> {
+        if input.len() < FIXED_HEADER_LEN || !input.starts_with(FIXED_MAGIC) {
+            return Err("invalid fixed original-token map header".to_owned());
+        }
+        let width = input[FIXED_MAGIC.len()] as usize;
+        if !matches!(width, 1 | 2 | 4) {
+            return Err("invalid fixed original-token map width".to_owned());
+        }
+        let count_start = FIXED_MAGIC.len() + 1;
+        let count = u32::from_le_bytes(
+            input[count_start..count_start + 4]
+                .try_into()
+                .expect("fixed original-token count has fixed width"),
+        ) as usize;
+        let payload_len = count
+            .checked_mul(width)
+            .ok_or_else(|| "fixed original-token map payload overflows".to_owned())?;
+        if FIXED_HEADER_LEN
+            .checked_add(payload_len)
+            .is_none_or(|expected| expected != input.len())
+        {
+            return Err("invalid fixed original-token map length".to_owned());
+        }
+        let payload = &input[FIXED_HEADER_LEN..];
+        let mut out = Vec::with_capacity(count);
+        match width {
+            1 => out.extend(payload.iter().map(|&encoded| {
+                if encoded == u8::MAX {
+                    u32::MAX
+                } else {
+                    encoded as u32
+                }
+            })),
+            2 => out.extend(payload.chunks_exact(2).map(|bytes| {
+                let encoded = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if encoded == u16::MAX {
+                    u32::MAX
+                } else {
+                    encoded as u32
+                }
+            })),
+            4 => out.extend(payload.chunks_exact(4).map(|bytes| {
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            })),
+            _ => unreachable!(),
+        }
+        Ok(out)
+    }
+
+    fn unpack(input: &[u8]) -> Result<Vec<u32>, String> {
+        if input.starts_with(FIXED_MAGIC) {
+            unpack_fixed(input)
+        } else if input.starts_with(VARINT_MAGIC) {
+            unpack_varint(input)
+        } else {
+            Err("invalid packed original-token map header".to_owned())
+        }
+    }
+
+    pub fn serialize<S>(value: &[u32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if EXTERNAL.with(Cell::get) {
+            return 0u8.serialize(serializer);
+        }
+        if !PACKED.with(Cell::get) {
+            return value.serialize(serializer);
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let pack_started = profile.then(std::time::Instant::now);
+        let packed = pack_fixed(value);
+        let pack_ms = pack_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        let wire_bytes = packed.len();
+        let result = packed.serialize(serializer);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][original_token_map_encode] entries={} wire_bytes={} pack_ms={:.3} total_ms={:.3}",
+                value.len(),
+                wire_bytes,
+                pack_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if EXTERNAL.with(Cell::get) {
+            let marker = u8::deserialize(deserializer)?;
+            if marker != 0 {
+                return Err(serde::de::Error::custom(
+                    "invalid external original-token map placeholder",
+                ));
+            }
+            return Ok(Vec::new());
+        }
+        if !PACKED.with(Cell::get) {
+            return Vec::<u32>::deserialize(deserializer);
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+        let packed = Vec::<u8>::deserialize(deserializer)?;
+        let packed_len = packed.len();
+        let result = unpack(&packed).map_err(serde::de::Error::custom);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][original_token_map_decode] wire_bytes={} ms={:.3}",
+                packed_len,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fixed_original_token_map_roundtrips_all_widths_and_legacy() {
+            for values in [
+                vec![0, 12, u32::MAX, 254],
+                vec![0, 255, 4096, u32::MAX, 65534],
+                vec![0, 65535, 1_000_000, u32::MAX],
+            ] {
+                let packed = pack_fixed(&values);
+                assert_eq!(unpack(&packed).unwrap(), values);
+
+                let legacy = pack_varint(&values);
+                assert_eq!(unpack(&legacy).unwrap(), values);
+            }
+        }
+    }
+}
+
+/// Compact v14+ wire encoding for the immutable model-token byte vocabulary.
+/// Ordinary LLM vocabs are dense in token id, so the historical
+/// `BTreeMap<u32, Vec<u8>>` representation spends more bytes on map keys and
+/// per-Vec lengths than on useful token data. The packed form stores a dense
+/// sequence of varint lengths followed by token bytes, with a sparse fallback
+/// for unusual vocabularies. Deserialization reconstructs the exact historical
+/// in-memory BTreeMap, so compiler/composition/runtime APIs do not change.
+pub(crate) mod token_bytes_artifact_serde {
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Serialize};
+
+    const LEGACY_MAGIC: &[u8; 4] = b"TBP1";
+    const INDEXED_MAGIC: &[u8; 4] = b"TBP2";
+    const INDEXED_HEADER_LEN: usize = INDEXED_MAGIC.len() + 1 + 4;
+
+    thread_local! {
+        static PACKED: Cell<bool> = const { Cell::new(false) };
+        static DEFER_UNPACK: Cell<bool> = const { Cell::new(false) };
+        static EXTERNAL: Cell<bool> = const { Cell::new(false) };
+        static DEFERRED: RefCell<Option<Arc<PackedTokenBytes>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set_packed(enabled: bool) -> bool {
+        PACKED.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn set_defer_unpack(enabled: bool) -> bool {
+        DEFER_UNPACK.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn set_external(enabled: bool) -> bool {
+        EXTERNAL.with(|mode| mode.replace(enabled))
+    }
+
+    pub(crate) fn take_deferred() -> Option<Arc<PackedTokenBytes>> {
+        DEFERRED.with(|slot| slot.borrow_mut().take())
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct PackedTokenBytes {
+        wire: Arc<Vec<u8>>,
+        wire_start: usize,
+        wire_len: usize,
+        indexed: Option<PackedTokenBytesIndexed>,
+        spans: Box<[(u32, u32)]>,
+        sparse_ids: Option<Box<[u32]>>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct PackedTokenBytesIndexed {
+        count: usize,
+        sparse_ids_start: Option<usize>,
+        offsets_start: usize,
+        data_start: usize,
+    }
+
+    impl PackedTokenBytes {
+        pub(crate) fn from_runtime_entries(value: &BTreeMap<u32, Vec<u8>>) -> Result<Self, String> {
+            // The indexed representation is useful runtime state in its own
+            // right: token lookup/iteration reads it directly. Build it once
+            // when a compiler-created Constraint is finalized rather than
+            // rebuilding the same index inside every save().
+            Self::parse(pack(value))
+        }
+
+        fn parse(wire: Vec<u8>) -> Result<Self, String> {
+            let wire_len = wire.len();
+            Self::parse_backed(Arc::new(wire), 0, wire_len)
+        }
+
+        pub(crate) fn parse_backed(
+            wire: Arc<Vec<u8>>,
+            wire_start: usize,
+            wire_len: usize,
+        ) -> Result<Self, String> {
+            let wire_end = wire_start
+                .checked_add(wire_len)
+                .ok_or_else(|| "overflowing packed token-byte backing range".to_owned())?;
+            let input = wire
+                .get(wire_start..wire_end)
+                .ok_or_else(|| "packed token-byte backing range is out of bounds".to_owned())?;
+            if input.starts_with(INDEXED_MAGIC) {
+                return Self::parse_indexed_backed(wire, wire_start, wire_len);
+            }
+            if !input.starts_with(LEGACY_MAGIC) {
+                return Err("invalid packed token-byte header".to_owned());
+            }
+            let mut pos = LEGACY_MAGIC.len();
+            let sparse = match input.get(pos).copied() {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err("invalid packed token-byte mode".to_owned()),
+            };
+            pos += 1;
+            let count = take_var_u32(input, &mut pos)? as usize;
+            let mut spans = Vec::with_capacity(count);
+            let mut sparse_ids = sparse.then(|| Vec::with_capacity(count));
+            let mut previous_end = 0u64;
+            for dense_id in 0..count {
+                let id = if sparse {
+                    let gap = take_var_u32(input, &mut pos)? as u64;
+                    let id = previous_end
+                        .checked_add(gap)
+                        .ok_or_else(|| "overflowing packed token id".to_owned())?;
+                    let id = u32::try_from(id)
+                        .map_err(|_| "overflowing packed token id".to_owned())?;
+                    previous_end = id as u64 + 1;
+                    sparse_ids.as_mut().expect("sparse ids enabled").push(id);
+                    id
+                } else {
+                    u32::try_from(dense_id)
+                        .map_err(|_| "dense packed token id exceeds u32".to_owned())?
+                };
+                let _ = id;
+                let len = take_var_u32(input, &mut pos)? as usize;
+                let start = pos;
+                let end = start
+                    .checked_add(len)
+                    .ok_or_else(|| "overflowing packed token-byte length".to_owned())?;
+                if end > input.len() {
+                    return Err("truncated packed token bytes".to_owned());
+                }
+                spans.push((
+                    u32::try_from(start)
+                        .map_err(|_| "packed token byte offset exceeds u32".to_owned())?,
+                    u32::try_from(len)
+                        .map_err(|_| "packed token byte length exceeds u32".to_owned())?,
+                ));
+                pos = end;
+            }
+            if pos != input.len() {
+                return Err("trailing bytes in packed token-byte vocabulary".to_owned());
+            }
+            Ok(Self {
+                wire,
+                wire_start,
+                wire_len,
+                indexed: None,
+                spans: spans.into_boxed_slice(),
+                sparse_ids: sparse_ids.map(Vec::into_boxed_slice),
+            })
+        }
+
+        fn parse_indexed_backed(
+            wire: Arc<Vec<u8>>,
+            wire_start: usize,
+            wire_len: usize,
+        ) -> Result<Self, String> {
+            let wire_end = wire_start
+                .checked_add(wire_len)
+                .ok_or_else(|| "overflowing indexed token-byte backing range".to_owned())?;
+            let input = wire
+                .get(wire_start..wire_end)
+                .ok_or_else(|| "indexed token-byte backing range is out of bounds".to_owned())?;
+            if input.len() < INDEXED_HEADER_LEN || !input.starts_with(INDEXED_MAGIC) {
+                return Err("invalid indexed token-byte header".to_owned());
+            }
+            let sparse = match input[INDEXED_MAGIC.len()] {
+                0 => false,
+                1 => true,
+                _ => return Err("invalid indexed token-byte mode".to_owned()),
+            };
+            let count_start = INDEXED_MAGIC.len() + 1;
+            let count = u32::from_le_bytes(
+                input[count_start..count_start + 4]
+                    .try_into()
+                    .expect("indexed token count has fixed width"),
+            ) as usize;
+            let sparse_ids_start = sparse.then_some(INDEXED_HEADER_LEN);
+            let ids_bytes = if sparse {
+                count
+                    .checked_mul(4)
+                    .ok_or_else(|| "indexed token-id table overflows".to_owned())?
+            } else {
+                0
+            };
+            let offsets_start = INDEXED_HEADER_LEN
+                .checked_add(ids_bytes)
+                .ok_or_else(|| "indexed token-byte offsets start overflows".to_owned())?;
+            let offsets_bytes = count
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(4))
+                .ok_or_else(|| "indexed token-byte offset table overflows".to_owned())?;
+            let data_start = offsets_start
+                .checked_add(offsets_bytes)
+                .ok_or_else(|| "indexed token-byte data start overflows".to_owned())?;
+            if data_start > input.len() {
+                return Err("truncated indexed token-byte tables".to_owned());
+            }
+            let first_offset = read_u32_at(input, offsets_start)? as usize;
+            let final_offset = read_u32_at(input, offsets_start + count * 4)? as usize;
+            if first_offset != 0 || final_offset != input.len() - data_start {
+                return Err("invalid indexed token-byte offset bounds".to_owned());
+            }
+            Ok(Self {
+                wire,
+                wire_start,
+                wire_len,
+                indexed: Some(PackedTokenBytesIndexed {
+                    count,
+                    sparse_ids_start,
+                    offsets_start,
+                    data_start,
+                }),
+                spans: Box::new([]),
+                sparse_ids: None,
+            })
+        }
+
+        #[inline]
+        pub(crate) fn wire(&self) -> &[u8] {
+            &self.wire[self.wire_start..self.wire_start + self.wire_len]
+        }
+
+        pub(crate) fn whole_wire_arc(&self) -> Option<Arc<Vec<u8>>> {
+            (self.wire_start == 0 && self.wire_len == self.wire.len())
+                .then(|| Arc::clone(&self.wire))
+        }
+
+        #[inline]
+        pub(crate) fn len(&self) -> usize {
+            self.indexed.map_or(self.spans.len(), |indexed| indexed.count)
+        }
+
+        #[inline]
+        pub(crate) fn get(&self, token_id: u32) -> Option<&[u8]> {
+            if let Some(indexed) = self.indexed {
+                let index = match indexed.sparse_ids_start {
+                    None => usize::try_from(token_id)
+                        .ok()
+                        .filter(|&index| index < indexed.count)?,
+                    Some(_) => self.indexed_sparse_token_index(indexed, token_id)?,
+                };
+                return self.indexed_bytes_at(indexed, index);
+            }
+            let index = match &self.sparse_ids {
+                None => usize::try_from(token_id).ok().filter(|&index| index < self.spans.len())?,
+                Some(ids) => ids.binary_search(&token_id).ok()?,
+            };
+            let (start, len) = self.spans[index];
+            let start = start as usize;
+            self.wire().get(start..start + len as usize)
+        }
+
+        pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
+            (0..self.len()).map(|index| {
+                let token_id = self
+                    .token_id_at(index)
+                    .expect("validated packed token index should have an id");
+                let bytes = self
+                    .bytes_at_index(index)
+                    .expect("validated packed token index should have bytes");
+                (token_id, bytes)
+            })
+        }
+
+        pub(crate) fn max_token_id(&self) -> Option<u32> {
+            if self.indexed.is_some() {
+                return self.len().checked_sub(1).and_then(|index| self.token_id_at(index));
+            }
+            match &self.sparse_ids {
+                Some(ids) => ids.last().copied(),
+                None => self.spans.len().checked_sub(1).map(|id| id as u32),
+            }
+        }
+
+        pub(crate) fn materialize(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
+            Arc::new(
+                self.iter()
+                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                    .collect(),
+            )
+        }
+
+        fn token_id_at(&self, index: usize) -> Option<u32> {
+            if let Some(indexed) = self.indexed {
+                if index >= indexed.count {
+                    return None;
+                }
+                return indexed.sparse_ids_start.map_or_else(
+                    || u32::try_from(index).ok(),
+                    |start| read_u32_at(self.wire(), start + index * 4).ok(),
+                );
+            }
+            self.sparse_ids
+                .as_ref()
+                .map_or_else(|| u32::try_from(index).ok(), |ids| ids.get(index).copied())
+        }
+
+        fn bytes_at_index(&self, index: usize) -> Option<&[u8]> {
+            if let Some(indexed) = self.indexed {
+                return self.indexed_bytes_at(indexed, index);
+            }
+            let &(start, len) = self.spans.get(index)?;
+            let start = start as usize;
+            self.wire().get(start..start + len as usize)
+        }
+
+        fn indexed_bytes_at(
+            &self,
+            indexed: PackedTokenBytesIndexed,
+            index: usize,
+        ) -> Option<&[u8]> {
+            if index >= indexed.count {
+                return None;
+            }
+            let wire = self.wire();
+            let start = read_u32_at(wire, indexed.offsets_start + index * 4).ok()? as usize;
+            let end = read_u32_at(wire, indexed.offsets_start + (index + 1) * 4).ok()? as usize;
+            if start > end {
+                return None;
+            }
+            wire.get(indexed.data_start + start..indexed.data_start + end)
+        }
+
+        fn indexed_sparse_token_index(
+            &self,
+            indexed: PackedTokenBytesIndexed,
+            token_id: u32,
+        ) -> Option<usize> {
+            let start = indexed.sparse_ids_start?;
+            let wire = self.wire();
+            let mut lo = 0usize;
+            let mut hi = indexed.count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let candidate = read_u32_at(wire, start + mid * 4).ok()?;
+                match candidate.cmp(&token_id) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => return Some(mid),
+                }
+            }
+            None
+        }
+    }
+
+    #[inline]
+    fn read_u32_at(input: &[u8], pos: usize) -> Result<u32, String> {
+        let end = pos
+            .checked_add(4)
+            .ok_or_else(|| "packed token-byte u32 offset overflows".to_owned())?;
+        let bytes = input
+            .get(pos..end)
+            .ok_or_else(|| "truncated packed token-byte u32".to_owned())?;
+        Ok(u32::from_le_bytes(
+            bytes.try_into().expect("packed token u32 has fixed width"),
+        ))
+    }
+
+    #[inline]
+    fn put_var_u32(out: &mut Vec<u8>, mut value: u32) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    #[inline]
+    fn take_var_u32(input: &[u8], pos: &mut usize) -> Result<u32, String> {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let byte = *input
+                .get(*pos)
+                .ok_or_else(|| "truncated packed token-byte varint".to_owned())?;
+            *pos += 1;
+            if shift == 28 && byte > 0x0f {
+                return Err("overflowing packed token-byte varint".to_owned());
+            }
+            value |= ((byte & 0x7f) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+        Err("overflowing packed token-byte varint".to_owned())
+    }
+
+    fn pack_legacy(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        let dense = value
+            .keys()
+            .copied()
+            .enumerate()
+            .all(|(expected, actual)| actual as usize == expected);
+        let mut out = Vec::new();
+        out.extend_from_slice(LEGACY_MAGIC);
+        out.push(u8::from(!dense));
+        put_var_u32(
+            &mut out,
+            u32::try_from(value.len()).expect("token vocabulary should fit u32"),
+        );
+        let mut previous_end = 0u64;
+        for (&id, bytes) in value {
+            if !dense {
+                let gap = (id as u64)
+                    .checked_sub(previous_end)
+                    .expect("token ids are sorted");
+                put_var_u32(
+                    &mut out,
+                    u32::try_from(gap).expect("token-id gap should fit u32"),
+                );
+                previous_end = id as u64 + 1;
+            }
+            put_var_u32(
+                &mut out,
+                u32::try_from(bytes.len()).expect("token byte length should fit u32"),
+            );
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+
+    fn pack(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        let dense = value
+            .keys()
+            .copied()
+            .enumerate()
+            .all(|(expected, actual)| actual as usize == expected);
+        let count = value.len();
+        let data_len = value.values().try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes.len())
+        });
+        let Some(data_len) = data_len.filter(|&len| u32::try_from(len).is_ok()) else {
+            return pack_legacy(value);
+        };
+        let ids_len = if dense { 0 } else { count.saturating_mul(4) };
+        let Some(offsets_len) = count.checked_add(1).and_then(|count| count.checked_mul(4)) else {
+            return pack_legacy(value);
+        };
+        let capacity = INDEXED_HEADER_LEN
+            .checked_add(ids_len)
+            .and_then(|len| len.checked_add(offsets_len))
+            .and_then(|len| len.checked_add(data_len));
+        let Some(capacity) = capacity else {
+            return pack_legacy(value);
+        };
+        // Reserve the complete indexed representation up front and fill the
+        // id/offset/data regions in one BTreeMap traversal.  The previous
+        // implementation walked the pointer-heavy map once for offsets and a
+        // second time for bytes; on 100k+ token vocabularies that dominated a
+        // genuinely fresh Constraint::save().
+        let mut out = vec![0u8; capacity];
+        out[..INDEXED_MAGIC.len()].copy_from_slice(INDEXED_MAGIC);
+        out[INDEXED_MAGIC.len()] = u8::from(!dense);
+        out[INDEXED_MAGIC.len() + 1..INDEXED_HEADER_LEN].copy_from_slice(
+            &u32::try_from(count)
+                .expect("token vocabulary should fit u32")
+                .to_le_bytes(),
+        );
+
+        let ids_start = INDEXED_HEADER_LEN;
+        let offsets_start = ids_start + ids_len;
+        let data_start = offsets_start + offsets_len;
+        out[offsets_start..offsets_start + 4].copy_from_slice(&0u32.to_le_bytes());
+
+        let mut offset = 0u32;
+        let mut data_pos = data_start;
+        for (index, (&token_id, bytes)) in value.iter().enumerate() {
+            if !dense {
+                let id_pos = ids_start + index * 4;
+                out[id_pos..id_pos + 4].copy_from_slice(&token_id.to_le_bytes());
+            }
+            let next_offset = offset
+                .checked_add(bytes.len() as u32)
+                .expect("indexed token-byte data length was prevalidated");
+            let offset_pos = offsets_start + (index + 1) * 4;
+            out[offset_pos..offset_pos + 4].copy_from_slice(&next_offset.to_le_bytes());
+            let data_end = data_pos + bytes.len();
+            out[data_pos..data_end].copy_from_slice(bytes);
+            data_pos = data_end;
+            offset = next_offset;
+        }
+        debug_assert_eq!(data_pos, capacity);
+        out
+    }
+
+    pub(crate) fn pack_external(value: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
+        pack(value)
+    }
+
+    fn unpack(input: &[u8]) -> Result<Arc<BTreeMap<u32, Vec<u8>>>, String> {
+        if input.starts_with(INDEXED_MAGIC) {
+            return PackedTokenBytes::parse(input.to_vec()).map(|packed| packed.materialize());
+        }
+        if !input.starts_with(LEGACY_MAGIC) {
+            return Err("invalid packed token-byte header".to_owned());
+        }
+        let mut pos = LEGACY_MAGIC.len();
+        let sparse = match input.get(pos).copied() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err("invalid packed token-byte mode".to_owned()),
+        };
+        pos += 1;
+        let count = take_var_u32(input, &mut pos)? as usize;
+        let mut map = BTreeMap::new();
+        let mut previous_end = 0u64;
+        for dense_id in 0..count {
+            let id = if sparse {
+                let gap = take_var_u32(input, &mut pos)? as u64;
+                let id = previous_end
+                    .checked_add(gap)
+                    .ok_or_else(|| "overflowing packed token id".to_owned())?;
+                let id = u32::try_from(id)
+                    .map_err(|_| "overflowing packed token id".to_owned())?;
+                previous_end = id as u64 + 1;
+                id
+            } else {
+                u32::try_from(dense_id)
+                    .map_err(|_| "dense packed token id exceeds u32".to_owned())?
+            };
+            let len = take_var_u32(input, &mut pos)? as usize;
+            let end = pos
+                .checked_add(len)
+                .ok_or_else(|| "overflowing packed token-byte length".to_owned())?;
+            let bytes = input
+                .get(pos..end)
+                .ok_or_else(|| "truncated packed token bytes".to_owned())?
+                .to_vec();
+            pos = end;
+            if map.insert(id, bytes).is_some() {
+                return Err("duplicate packed token id".to_owned());
+            }
+        }
+        if pos != input.len() {
+            return Err("trailing bytes in packed token-byte vocabulary".to_owned());
+        }
+        Ok(Arc::new(map))
+    }
+
+    pub fn serialize<S>(
+        value: &Arc<BTreeMap<u32, Vec<u8>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !PACKED.with(Cell::get) {
+            return value.serialize(serializer);
+        }
+        if EXTERNAL.with(Cell::get) {
+            return Vec::<u8>::new().serialize(serializer);
+        }
+        pack(value).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Arc<BTreeMap<u32, Vec<u8>>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if !PACKED.with(Cell::get) {
+            return Arc::<BTreeMap<u32, Vec<u8>>>::deserialize(deserializer);
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZATION").is_some();
+        let total = profile.then(std::time::Instant::now);
+        let packed_started = profile.then(std::time::Instant::now);
+        let packed = Vec::<u8>::deserialize(deserializer)?;
+        let packed_len = packed.len();
+        let packed_ms = packed_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        if EXTERNAL.with(Cell::get) {
+            if !packed.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "external packed token-byte placeholder must be empty",
+                ));
+            }
+            return Ok(Arc::new(BTreeMap::new()));
+        }
+        let unpack_started = profile.then(std::time::Instant::now);
+        let result = if DEFER_UNPACK.with(Cell::get) {
+            let deferred = PackedTokenBytes::parse(packed)
+                .map(Arc::new)
+                .map_err(serde::de::Error::custom)?;
+            DEFERRED.with(|slot| *slot.borrow_mut() = Some(deferred));
+            Ok(Arc::new(BTreeMap::new()))
+        } else {
+            unpack(&packed).map_err(serde::de::Error::custom)
+        };
+        if let Some(total) = total {
+            eprintln!(
+                "[glrmask/profile][token_bytes_decode] wire_bytes={} vec_ms={packed_ms:.3} unpack_ms={:.3} total_ms={:.3}",
+                packed_len,
+                unpack_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0),
+                total.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn check_roundtrip(value: BTreeMap<u32, Vec<u8>>) {
+            let packed = pack(&value);
+            assert!(packed.starts_with(INDEXED_MAGIC));
+            let view = PackedTokenBytes::parse(packed).unwrap();
+            assert_eq!(view.len(), value.len());
+            assert_eq!(
+                view.iter()
+                    .map(|(id, bytes)| (id, bytes.to_vec()))
+                    .collect::<BTreeMap<_, _>>(),
+                value
+            );
+            for (&id, bytes) in &value {
+                assert_eq!(view.get(id), Some(bytes.as_slice()));
+            }
+            assert_eq!(view.max_token_id(), value.keys().next_back().copied());
+
+            let legacy = pack_legacy(&value);
+            let legacy_view = PackedTokenBytes::parse(legacy).unwrap();
+            assert_eq!(
+                legacy_view
+                    .iter()
+                    .map(|(id, bytes)| (id, bytes.to_vec()))
+                    .collect::<BTreeMap<_, _>>(),
+                value
+            );
+        }
+
+        #[test]
+        fn indexed_token_bytes_roundtrip_dense_and_sparse() {
+            check_roundtrip(BTreeMap::from([
+                (0, b"a".to_vec()),
+                (1, b"bc".to_vec()),
+                (2, Vec::new()),
+            ]));
+            check_roundtrip(BTreeMap::from([
+                (2, b"a".to_vec()),
+                (9, b"bc".to_vec()),
+                (1000, b"xyz".to_vec()),
+            ]));
         }
     }
 }
@@ -1903,6 +4082,58 @@ pub(crate) struct SegmentedBoundaryParser {
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum DeferredTerminalExprBytes {
+    Owned(Arc<[u8]>),
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl DeferredTerminalExprBytes {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+        }
+    }
+}
+
+/// Opaque current-format composition metadata retained without eagerly
+/// rebuilding the large parser-template/characterization graphs. Ordinary
+/// runtime masking never needs these bytes; constraint composition materializes
+/// them on demand.
+#[derive(Debug, Clone)]
+pub(crate) enum DeferredCompositionMetadataBytes {
+    Owned(Arc<[u8]>),
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl DeferredCompositionMetadataBytes {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+        }
+    }
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
@@ -1926,6 +4157,12 @@ pub struct Constraint {
     /// as well. Runtime-only for the same wire-compatibility reason as above.
     pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
     pub(crate) parser_dwa: DWA,
+    /// Current-format loaded constraints retain the immutable parser DWA in
+    /// its compact canonical pools instead of reconstructing RangeSet/Weight
+    /// objects. Compiler-created and legacy-loaded constraints leave this
+    /// empty and use `parser_dwa` directly.
+    pub(crate) packed_parser_dwa:
+        Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -1939,6 +4176,7 @@ pub struct Constraint {
     /// Kept once per grammar terminal rather than duplicated across every
     /// epsilon-closed parser row.
     pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
@@ -1996,6 +4234,11 @@ pub struct Constraint {
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Ordinary tokenizers have one internal TSID per physical state, making
+    /// `internal_tsid_to_states` the exact bucket inverse of
+    /// `state_to_internal_tsid`. Current artifacts can omit that redundant
+    /// allocation and reconstruct it only for composition/debug paths.
+    pub(crate) deferred_internal_tsid_to_states: OnceLock<Vec<Vec<u32>>>,
     /// Composition-preparation cache: row `t` lists original model-token IDs
     /// which, from this component's lexer reset, complete terminal `t` exactly
     /// at the end of the model token.  This is not part of the historical inner
@@ -2051,12 +4294,32 @@ pub struct Constraint {
     /// produced before possible-match reconciliation. It may contain additional
     /// splits required by possible_matches.
     pub(crate) original_token_to_internal: Vec<u32>,
+    /// Current-format loads retain the fixed-width original-token map inside
+    /// the owned artifact instead of expanding all model-token entries to
+    /// `u32`. Ordinary static mask/commit performs direct packed lookups; only
+    /// composition/debug-style bulk access materializes the vector lazily.
+    pub(crate) packed_original_token_to_internal:
+        Option<Arc<original_token_map_artifact_serde::PackedOriginalTokenMap>>,
+    pub(crate) deferred_original_token_to_internal: OnceLock<Vec<u32>>,
     /// Final shared constraint-internal token id -> original token ids.
     ///
     /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
     /// final internal token ids.
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
+    /// Current-format loads can defer reconstructing the explicit inverse of
+    /// `original_token_to_internal`. Static mask/commit only needs the internal
+    /// token count and the already-serialized mask fragments; composition and
+    /// token-space expansion materialize this inverse on first use.
+    pub(crate) deferred_internal_token_to_tokens: OnceLock<Vec<Vec<u32>>>,
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
+    /// Indexed immutable vocabulary used directly by runtime token lookup and
+    /// iteration. Loaded constraints can point into artifact backing; compiled
+    /// constraints own the same indexed representation alongside the source
+    /// map used by compiler/composition code.
+    pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
+    // Compiler-side scratch/result metadata only. No runtime or composition
+    // path reads this field; composition rebuilds the map for its result when
+    // needed. Persisting it duplicated token bytes inside every constraint.
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
 
@@ -2069,15 +4332,15 @@ pub struct Constraint {
     /// Used as a fast path in `or_to_buf` when a dense word is all-ones (!0u64).
     pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
     /// Precomputed dense output masks for groups of 128 internal tokens.
-    pub(crate) pair_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) pair_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 256 internal tokens.
-    pub(crate) quad_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) quad_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 512 internal tokens.
-    pub(crate) super_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) super_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 1024 internal tokens.
-    pub(crate) mega_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) mega_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 2048 internal tokens.
-    pub(crate) giga_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) giga_word_group_buf_masks: DenseBufMaskRows,
     /// Sparse OR-union for each 64-token internal word group.
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
     /// Dense prefix-unions of 64-token internal word groups.
@@ -2086,7 +4349,7 @@ pub struct Constraint {
     /// `[0, i)`. Internal-token groups are disjoint in original-token space,
     /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
     /// internal-word run `[start, end)`.
-    pub(crate) word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
     /// Prefix sums of `word_group_sparse_masks[i].len()`.
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
     pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -2103,6 +4366,11 @@ pub struct Constraint {
     pub(crate) all_tokens_buf_mask: Box<[u32]>,
     pub(crate) internal_token_dense_words: usize,
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
+    /// Dense masks for wide token sets retained in a current-format packed
+    /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
+    /// packed token-set id and can therefore be rebuilt directly from the
+    /// artifact without materializing RangeSet/Weight objects.
+    pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
     pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
     pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
     /// Final-weight token sets eligible for the direct sparse-intersection
@@ -2144,7 +4412,10 @@ pub struct Constraint {
     /// Flattened contiguous array of all internal token buf mask entries.
     /// All tokens' (word_index, or_mask) pairs concatenated in token order.
     /// Improves cache locality vs separate Vec allocations per token.
-    pub(crate) internal_token_buf_flat: Box<[(u16, u32)]>,
+    pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
+    /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
+    /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
+    pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
     /// Offsets into `internal_token_buf_flat` for each internal token.
     /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
     /// Length = n_internal + 1 (sentinel at end).
@@ -2154,7 +4425,7 @@ pub struct Constraint {
     pub(crate) total_internal_buf_cost: usize,
     /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
     pub(crate) heavy_token_indices: Vec<usize>,
-    /// Total cost of all heavy tokens combined (n_heavy × buf_len).
+    /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
     pub(crate) heavy_total_cost: usize,
     /// Average cost per light token: (total_cost - heavy_total) / n_light.
     /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
@@ -2179,6 +4450,30 @@ pub struct Constraint {
     /// compiled constraint participate in later subgrammar composition without
     /// conservatively degrading an identical global ignore into scoped skips.
     pub(crate) ignore_expr: Option<Expr>,
+    /// Exact current-format artifact backing for an unchanged loaded
+    /// constraint. Runtime cache rebuilds do not alter serialized semantics,
+    /// so resave can return a single bulk copy instead of rediscovering and
+    /// re-encoding the same canonical pools.
+    pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
+    /// Current-format terminal source expressions can be retained as their
+    /// canonical bincode payload instead of recursively rebuilding every Expr
+    /// node during an ordinary static load. Composition materializes the list
+    /// lazily through `retained_terminal_exprs` when it actually needs source
+    /// language proofs.
+    pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
+    pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
+    /// Serialized composition-only metadata (reset-token rows, parser template
+    /// cache, symbolic characterizations, and grammar summary). Current-format
+    /// loads keep this cold section backed by the artifact and materialize it
+    /// only if the constraint is later used as a composition component.
+    pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    /// Large current-format GLR rule vectors are composition metadata rather
+    /// than runtime parser data. Keep their canonical payload undecoded during
+    /// ordinary load; composition materializes it lazily through
+    /// `retained_table_rules`.
+    pub(crate) deferred_table_rules_blob:
+        Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
+    pub(crate) deferred_table_rules: OnceLock<Arc<[crate::grammar::flat::Rule]>>,
 }
 
 // Private Serde definition used only by the versioned artifact encoder/decoder.
@@ -2190,7 +4485,7 @@ pub struct Constraint {
 pub(crate) struct ConstraintSerde {
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
-    #[serde(default)]
+    #[serde(skip, default)]
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
@@ -2209,6 +4504,13 @@ pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) scoped_ignore_prefix_fusions: Vec<(TerminalID, Box<[(u32, u32)]>)>,
     pub(crate) parser_dwa: DWA,
+    /// Current-format loaded constraints retain the immutable parser DWA in
+    /// its compact canonical pools instead of reconstructing RangeSet/Weight
+    /// objects. Compiler-created and legacy-loaded constraints leave this
+    /// empty and use `parser_dwa` directly.
+    #[serde(skip, default)]
+    pub(crate) packed_parser_dwa:
+        Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -2225,6 +4527,8 @@ pub(crate) struct ConstraintSerde {
     /// epsilon-closed parser row.
     #[serde(default)]
     pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    #[serde(skip, default)]
+    pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
@@ -2247,6 +4551,7 @@ pub(crate) struct ConstraintSerde {
     /// runtime indexes. Static artifact format versioning covers this field.
     #[serde(default)]
     pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
+    #[serde(with = "crate::compiler::glr::table::artifact_serde")]
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,
@@ -2293,7 +4598,14 @@ pub(crate) struct ConstraintSerde {
     #[serde(default)]
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
+    #[serde(default, with = "internal_tsid_inverse_artifact_serde")]
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Ordinary tokenizers have one internal TSID per physical state, making
+    /// `internal_tsid_to_states` the exact bucket inverse of
+    /// `state_to_internal_tsid`. Current artifacts can omit that redundant
+    /// allocation and reconstruct it only for composition/debug paths.
+    #[serde(skip, default)]
+    pub(crate) deferred_internal_tsid_to_states: OnceLock<Vec<Vec<u32>>>,
     /// Composition-preparation cache: row `t` lists original model-token IDs
     /// which, from this component's lexer reset, complete terminal `t` exactly
     /// at the end of the model token.  This is not part of the historical inner
@@ -2361,16 +4673,41 @@ pub(crate) struct ConstraintSerde {
     /// This is not necessarily equal to the parser-DWA compaction vocab map
     /// produced before possible-match reconciliation. It may contain additional
     /// splits required by possible_matches.
-    #[serde(default)]
+    #[serde(default, with = "original_token_map_artifact_serde")]
     pub(crate) original_token_to_internal: Vec<u32>,
+    /// Current-format loads retain the fixed-width original-token map inside
+    /// the owned artifact instead of expanding all model-token entries to
+    /// `u32`. Ordinary static mask/commit performs direct packed lookups; only
+    /// composition/debug-style bulk access materializes the vector lazily.
+    #[serde(skip, default)]
+    pub(crate) packed_original_token_to_internal:
+        Option<Arc<original_token_map_artifact_serde::PackedOriginalTokenMap>>,
+    #[serde(skip, default)]
+    pub(crate) deferred_original_token_to_internal: OnceLock<Vec<u32>>,
     /// Final shared constraint-internal token id -> original token ids.
     ///
     /// Parser-DWA weights and Constraint.possible_matches bitmaps both use these
     /// final internal token ids.
-    #[serde(default)]
+    #[serde(default, with = "internal_token_inverse_artifact_serde")]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
+    /// Current-format loads can defer reconstructing the explicit inverse of
+    /// `original_token_to_internal`. Static mask/commit only needs the internal
+    /// token count and the already-serialized mask fragments; composition and
+    /// token-space expansion materialize this inverse on first use.
+    #[serde(skip, default)]
+    pub(crate) deferred_internal_token_to_tokens: OnceLock<Vec<Vec<u32>>>,
+    #[serde(with = "token_bytes_artifact_serde")]
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
-    #[serde(default)]
+    /// Indexed immutable vocabulary used directly by runtime token lookup and
+    /// iteration. Loaded constraints can point into artifact backing; compiled
+    /// constraints own the same indexed representation alongside the source
+    /// map used by compiler/composition code.
+    #[serde(skip, default)]
+    pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
+    // Compiler-side scratch/result metadata only. No runtime or composition
+    // path reads this field; composition rebuilds the map for its result when
+    // needed. Persisting it duplicated token bytes inside every constraint.
+    #[serde(skip, default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
@@ -2387,19 +4724,19 @@ pub(crate) struct ConstraintSerde {
     pub(crate) word_group_buf_masks: Vec<Box<[u32]>>,
     /// Precomputed dense output masks for groups of 128 internal tokens.
     #[serde(skip)]
-    pub(crate) pair_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) pair_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 256 internal tokens.
     #[serde(skip)]
-    pub(crate) quad_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) quad_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 512 internal tokens.
     #[serde(skip)]
-    pub(crate) super_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) super_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 1024 internal tokens.
     #[serde(skip)]
-    pub(crate) mega_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) mega_word_group_buf_masks: DenseBufMaskRows,
     /// Precomputed dense output masks for groups of 2048 internal tokens.
     #[serde(skip)]
-    pub(crate) giga_word_group_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) giga_word_group_buf_masks: DenseBufMaskRows,
     /// Sparse OR-union for each 64-token internal word group.
     #[serde(skip)]
     pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
@@ -2410,7 +4747,7 @@ pub(crate) struct ConstraintSerde {
     /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
     /// internal-word run `[start, end)`.
     #[serde(skip)]
-    pub(crate) word_group_prefix_buf_masks: Vec<Box<[u32]>>,
+    pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
     /// Prefix sums of `word_group_sparse_masks[i].len()`.
     #[serde(skip)]
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
@@ -2436,6 +4773,12 @@ pub(crate) struct ConstraintSerde {
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
+    /// Dense masks for wide token sets retained in a current-format packed
+    /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
+    /// packed token-set id and can therefore be rebuilt directly from the
+    /// artifact without materializing RangeSet/Weight objects.
+    #[serde(skip, default)]
+    pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
     #[serde(skip)]
     pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
     #[serde(skip)]
@@ -2490,7 +4833,11 @@ pub(crate) struct ConstraintSerde {
     /// All tokens' (word_index, or_mask) pairs concatenated in token order.
     /// Improves cache locality vs separate Vec allocations per token.
     #[serde(skip)]
-    pub(crate) internal_token_buf_flat: Box<[(u16, u32)]>,
+    pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
+    /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
+    /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
+    #[serde(skip, default)]
+    pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
     /// Offsets into `internal_token_buf_flat` for each internal token.
     /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
     /// Length = n_internal + 1 (sentinel at end).
@@ -2503,7 +4850,7 @@ pub(crate) struct ConstraintSerde {
     /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
     #[serde(skip)]
     pub(crate) heavy_token_indices: Vec<usize>,
-    /// Total cost of all heavy tokens combined (n_heavy × buf_len).
+    /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
     #[serde(skip)]
     pub(crate) heavy_total_cost: usize,
     /// Average cost per light token: (total_cost - heavy_total) / n_light.
@@ -2535,6 +4882,36 @@ pub(crate) struct ConstraintSerde {
     /// conservatively degrading an identical global ignore into scoped skips.
     #[serde(skip, default)]
     pub(crate) ignore_expr: Option<Expr>,
+    /// Exact current-format artifact backing for an unchanged loaded
+    /// constraint. Runtime cache rebuilds do not alter serialized semantics,
+    /// so resave can return a single bulk copy instead of rediscovering and
+    /// re-encoding the same canonical pools.
+    #[serde(skip, default)]
+    pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
+    /// Current-format terminal source expressions can be retained as their
+    /// canonical bincode payload instead of recursively rebuilding every Expr
+    /// node during an ordinary static load. Composition materializes the list
+    /// lazily through `retained_terminal_exprs` when it actually needs source
+    /// language proofs.
+    #[serde(skip, default)]
+    pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
+    #[serde(skip, default)]
+    pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
+    /// Serialized composition-only metadata (reset-token rows, parser template
+    /// cache, symbolic characterizations, and grammar summary). Current-format
+    /// loads keep this cold section backed by the artifact and materialize it
+    /// only if the constraint is later used as a composition component.
+    #[serde(skip, default)]
+    pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    /// Large current-format GLR rule vectors are composition metadata rather
+    /// than runtime parser data. Keep their canonical payload undecoded during
+    /// ordinary load; composition materializes it lazily through
+    /// `retained_table_rules`.
+    #[serde(skip, default)]
+    pub(crate) deferred_table_rules_blob:
+        Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
+    #[serde(skip, default)]
+    pub(crate) deferred_table_rules: OnceLock<Arc<[crate::grammar::flat::Rule]>>,
 }
 
 

@@ -74,6 +74,16 @@ impl U8Set {
         }
     }
 
+    #[inline]
+    pub fn to_words(self) -> [u64; 4] {
+        [
+            self.lo as u64,
+            (self.lo >> 64) as u64,
+            self.hi as u64,
+            (self.hi >> 64) as u64,
+        ]
+    }
+
     pub fn from_range(lo: u8, hi: u8) -> Self {
         let mut set = Self::empty();
         for b in lo..=hi {
@@ -256,4 +266,3 @@ impl Iterator for U8SetIter {
         pop_lowest_bit(&mut self.lo, 0).or_else(|| pop_lowest_bit(&mut self.hi, 128))
     }
 }
-

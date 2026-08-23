@@ -11,6 +11,7 @@ default = []
 internal-api = []
 
 [dependencies]
+bincode = "1"
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
 glrmask-vocab = { version = "=0.1.1", path = "../glrmask-vocab", features = ["internal-api"] }
 rayon = "1"
@@ -21,5 +22,4 @@ serde = { version = "1", features = ["derive", "rc"] }
 smallvec = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
-bincode = "1"
 rand = "0.8"
