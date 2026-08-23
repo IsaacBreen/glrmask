@@ -5,26 +5,22 @@
 ## Rust
 
 ```rust
-use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+use glrmask::{Constraint, Grammar, Vocab};
 
 let vocab = Vocab::new(vec![
     (0, b"a".to_vec()),
     (1, b"b".to_vec()),
     (2, b"x".to_vec()),
 ]);
-let options = CompileOptions::default().end_token_ids(&[64]);
 let constraint = Constraint::compile(
     Grammar::ebnf(r#"start ::= "a" "b""#),
     &vocab,
-    &options,
 )?;
 let mut state = constraint.start();
 
 let checkpoint = state.clone();
 state.commit_token(0)?;
 state.commit_token(1)?;
-assert!(!state.is_accepting());
-state.commit_token(64)?;
 assert!(state.is_accepting());
 
 state = checkpoint;
@@ -43,14 +39,7 @@ There is no built-in rollback history or validation API. For speculative work, c
 
 ## End-token semantics
 
-End tokens belong to the compiled grammar:
-
-- pass IDs with `CompileOptions::end_tokens`;
-- before the byte-language portion accepts, the end-token mask bit is clear;
-- once it accepts, the end token is admitted;
-- committing the admitted end token makes the augmented grammar accepting;
-- multiple end-token IDs form a choice;
-- a token may simultaneously have ordinary byte semantics and exact end-token semantics.
+The core constraint has no EOS or end-token policy. `is_accepting()` tells the caller that the current prefix may validly end; the decoder or serving layer decides whether to stop generation. Do not commit an EOS token to the constraint merely to signal termination.
 
 Do not invent empty bytes for EOS. Size packed buffers from `constraint.mask_len()` or the serving model vocabulary, whichever is larger.
 

@@ -1,12 +1,11 @@
-use glrmask::{CompileOptions, DynamicConstraint, Grammar, StaticConstraint, Vocab};
+use glrmask::{DynamicConstraint, Grammar, Constraint, Vocab};
 
 #[test]
 fn termination_is_caller_policy_after_acceptance() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (64, Vec::new())]);
     let grammar = Grammar::ebnf(r#"start ::= "a""#);
-    let options = CompileOptions::default();
-    let static_constraint = StaticConstraint::compile(grammar.clone(), &vocab, &options).unwrap();
-    let dynamic_constraint = DynamicConstraint::compile(grammar, &vocab, &options).unwrap();
+    let static_constraint = Constraint::compile(grammar.clone(), &vocab).unwrap();
+    let dynamic_constraint = DynamicConstraint::compile(grammar, &vocab).unwrap();
 
     let mut static_state = static_constraint.start();
     let mut dynamic_state = dynamic_constraint.start();

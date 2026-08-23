@@ -7773,7 +7773,7 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{StaticConstraint as Constraint, Vocab};
+    use crate::{Constraint as Constraint, Vocab};
     use std::collections::BTreeSet;
 
     type CanonicalCommitState =

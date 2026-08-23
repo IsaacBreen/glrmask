@@ -1,4 +1,4 @@
-use glrmask::StaticConstraint;
+use glrmask::Constraint;
 use glrmask::__private::ConstraintStateExt as _;
 
 include!("../../fixtures/snowplow_hostname.rsinc");
@@ -12,10 +12,9 @@ fn token_allowed(mask: &[u32], token_id: u32) -> bool {
 #[test]
 fn snowplow_hostname_replay_mask_includes_token_15() {
     let vocab = snowplow_vocab();
-    let constraint = StaticConstraint::compile(
+    let constraint = Constraint::compile(
         glrmask::Grammar::json_schema(SNOWPLOW_SCHEMA),
         &vocab,
-        &glrmask::CompileOptions::default(),
     )
     .unwrap();
 

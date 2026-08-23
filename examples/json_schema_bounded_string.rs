@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Instant;
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();
@@ -23,7 +23,7 @@ fn main() {
     );
 
     let started_at = Instant::now();
-    let _constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &byte_vocab(), &glrmask::CompileOptions::default()).unwrap();
+    let _constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &byte_vocab()).unwrap();
     println!(
         "compiled bounded string maxLength={} in {:.3}s",
         max_length,

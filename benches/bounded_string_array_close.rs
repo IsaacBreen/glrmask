@@ -9,7 +9,7 @@ use criterion::{
     criterion_group,
     criterion_main,
 };
-use glrmask::{CompileOptions, Grammar, StaticConstraint};
+use glrmask::{Grammar, Constraint};
 use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 use std::time::Duration;
 
@@ -108,10 +108,9 @@ fn prepare_state<'a>(
     token_id_override: Option<u32>,
 ) -> glrmask::ConstraintState<'a> {
     let constraint = Box::leak(Box::new(
-        StaticConstraint::compile(
+        Constraint::compile(
             Grammar::json_schema(schema),
             vocab,
-            &CompileOptions::default(),
         )
         .unwrap(),
     ));
@@ -259,10 +258,9 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let mut total_ns = 0u128;
                     for _ in 0..iters {
-                        let constraint = StaticConstraint::compile(
+                        let constraint = Constraint::compile(
                             Grammar::json_schema(case.schema),
                             &vocab,
-                            &CompileOptions::default(),
                         )
                         .unwrap();
                         let mut state = constraint.start();
@@ -284,10 +282,9 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                 || vocab.clone(),
                 |fresh_vocab| {
                     cfa_sweep::clear_compile_caches();
-                    let constraint = StaticConstraint::compile(
+                    let constraint = Constraint::compile(
                         Grammar::json_schema(black_box(case.schema)),
                         black_box(&fresh_vocab),
-                        &CompileOptions::default(),
                     )
                     .unwrap();
                     black_box(constraint.num_parser_states());

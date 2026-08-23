@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, ConstraintState, Vocab};
+use glrmask::{Constraint as Constraint, ConstraintState, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 use serde_json::{json, Map, Value};
 
@@ -229,7 +229,7 @@ fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
         let spec = one_hole_then_suffix_family(n_caps);
         let schema = singleton_required_anyof_schema(&spec);
         let example = example_from_capability_mask(&spec, capability_mask);
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab).unwrap();
         let (max_stacks, max_paths) = measure_max_stack_and_path_counts(&constraint, &example);
 
         println!(
@@ -264,7 +264,7 @@ fn minimized_anyof_pattern_object_stack_depth_stays_bounded() {
     for n_props in cases {
         let schema = minimized_stack_growth_schema(n_props);
         let example = minimized_stack_growth_example(n_props);
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab).unwrap();
         let depth = stack_depth_before_closing_suffix(&constraint, &example);
 
         println!("n_props={n_props} depth_before_suffix={depth}");
@@ -409,7 +409,7 @@ fn build_config_schema_with_optional_environment_branches() -> &'static str {
 #[test]
 fn build_config_optional_environment_branches_collapse_stack_continuations() {
     let vocab = make_byte_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(build_config_schema_with_optional_environment_branches()), &vocab, &glrmask::CompileOptions::default())
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(build_config_schema_with_optional_environment_branches()), &vocab)
     .unwrap();
     let example = r#"{"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css/**/*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}"#;
 

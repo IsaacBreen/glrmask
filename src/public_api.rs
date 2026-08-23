@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::runtime::{Constraint as RuntimeConstraint, ConstraintState as RuntimeConstraintState};
-use crate::{DynamicConstraint, DynamicConstraintState, Error, Result, Vocab};
+use crate::runtime::Constraint as RuntimeConstraint;
+use crate::{DynamicConstraint, Error, Result, Vocab};
 
 /// Target-neutral grammar source, optionally with source-level subgrammar bindings.
 ///
@@ -76,38 +76,6 @@ impl<'a> Grammar<'a> {
         let Self { source, grammar_bindings } = self;
         (Self::new(source), grammar_bindings)
     }
-}
-
-/// Lowering and compilation policy shared by static and dynamic compilation.
-///
-/// Version 1 defines no public policy switches yet. The non-exhaustive shape
-/// permits future lowering choices without mixing target bindings into this type.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CompileOptions {}
-
-/// A compiled constraint that can start an independent mutable sequence state.
-pub trait Constraint {
-    type State<'a>
-    where
-        Self: 'a;
-
-    fn start(&self) -> Self::State<'_>;
-    fn mask_len(&self) -> usize;
-}
-
-impl Constraint for RuntimeConstraint {
-    type State<'a> = RuntimeConstraintState<'a>;
-
-    fn start(&self) -> Self::State<'_> { RuntimeConstraint::start(self) }
-    fn mask_len(&self) -> usize { RuntimeConstraint::mask_len(self) }
-}
-
-impl Constraint for DynamicConstraint {
-    type State<'a> = DynamicConstraintState<'a>;
-
-    fn start(&self) -> Self::State<'_> { DynamicConstraint::start(self) }
-    fn mask_len(&self) -> usize { DynamicConstraint::mask_len(self) }
 }
 
 /// A target-bound, immutable grammar specification with complete extern bindings.
@@ -218,14 +186,13 @@ impl<'a> ConstraintSpec<'a> {
     }
 
     /// Compile this specification into a reusable static artifact.
-    pub fn compile_static(&self, options: &CompileOptions) -> Result<RuntimeConstraint> {
-        let _ = options;
+    pub fn compile(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
             return compile_static_source(&self.grammar, self.vocab, &token_bindings);
         }
 
-        let children = self.compile_children(options)?;
+        let children = self.compile_children()?;
         let child_refs = children
             .iter()
             .map(|(name, child)| (name.as_str(), child.as_ref()))
@@ -243,13 +210,13 @@ impl<'a> ConstraintSpec<'a> {
     }
 
     /// Compile this specification into a lower-build-latency dynamic artifact.
-    pub fn compile_dynamic(&self, options: &CompileOptions) -> Result<DynamicConstraint> {
+    pub fn compile_dynamic(&self) -> Result<DynamicConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
             return compile_dynamic_source(&self.grammar, self.vocab, &token_bindings);
         }
 
-        let children = self.compile_children(options)?;
+        let children = self.compile_children()?;
         let child_refs = children
             .iter()
             .map(|(name, child)| (name.as_str(), child.as_ref()))
@@ -272,13 +239,10 @@ impl<'a> ConstraintSpec<'a> {
             .collect()
     }
 
-    fn compile_children(
-        &self,
-        options: &CompileOptions,
-    ) -> Result<Vec<(String, CompiledChild<'_>)>> {
+    fn compile_children(&self) -> Result<Vec<(String, CompiledChild<'_>)>> {
         self.grammar_bindings
             .iter()
-            .map(|(name, binding)| Ok((name.clone(), binding.compile(self.vocab, options)?)))
+            .map(|(name, binding)| Ok((name.clone(), binding.compile(self.vocab)?)))
             .collect()
     }
 
@@ -500,17 +464,13 @@ impl GrammarBinding<'_> {
         }
     }
 
-    fn compile<'a>(
-        &'a self,
-        vocab: &Vocab,
-        options: &CompileOptions,
-    ) -> Result<CompiledChild<'a>> {
+    fn compile<'a>(&'a self, vocab: &Vocab) -> Result<CompiledChild<'a>> {
         match self {
             Self::Source(grammar) => {
                 let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
-                Ok(CompiledChild::Owned(spec.compile_static(options)?))
+                Ok(CompiledChild::Owned(spec.compile()?))
             }
-            Self::Spec(spec) => Ok(CompiledChild::Owned(spec.compile_static(options)?)),
+            Self::Spec(spec) => Ok(CompiledChild::Owned(spec.compile()?)),
             Self::StaticBorrowed(constraint) => Ok(CompiledChild::Borrowed(constraint)),
             Self::StaticOwned(constraint) => Ok(CompiledChild::Borrowed(constraint)),
             Self::DynamicBorrowed(_) | Self::DynamicOwned(_) => {
@@ -595,22 +555,14 @@ fn compile_dynamic_source(
 
 impl RuntimeConstraint {
     /// Compile a reusable static constraint without external declarations.
-    pub fn compile(
-        grammar: Grammar<'_>,
-        vocab: &Vocab,
-        options: &CompileOptions,
-    ) -> Result<Self> {
-        ConstraintSpec::builder(grammar, vocab)?.build()?.compile_static(options)
+    pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+        ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
 }
 
 impl DynamicConstraint {
     /// Compile a dynamic constraint without external declarations.
-    pub fn compile(
-        grammar: Grammar<'_>,
-        vocab: &Vocab,
-        options: &CompileOptions,
-    ) -> Result<Self> {
-        ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic(options)
+    pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+        ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic()
     }
 }

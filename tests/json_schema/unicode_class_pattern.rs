@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 #[test]
 fn unicode_class_pattern_preserves_ascii_and_non_ascii_entries() {
@@ -16,7 +16,7 @@ fn unicode_class_pattern_preserves_ascii_and_non_ascii_entries() {
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -53,7 +53,7 @@ fn unicode_class_pattern_preserves_explicit_superscript_two_in_mixed_class() {
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -93,7 +93,7 @@ fn unicode_class_pattern_keeps_generic_digit_shorthand_ascii_only() {
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -135,7 +135,7 @@ fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_inside_class() 
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -170,7 +170,7 @@ fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_outside_class()
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -205,7 +205,7 @@ fn unicode_class_pattern_preserves_explicit_fullwidth_digit_range_in_mixed_class
     }
     let vocab = Vocab::new(entries);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -245,7 +245,7 @@ fn non_whitespace_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
             (1, br#"\u00B2"#.to_vec()),
         ]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -273,7 +273,7 @@ fn mixed_word_whitespace_class_accepts_bmp_unicode_escape_for_nbsp() {
             (1, br#"\u00A0"#.to_vec()),
         ]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -301,7 +301,7 @@ fn negated_ascii_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
             (1, br#"\u00B2"#.to_vec()),
         ]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 
@@ -329,7 +329,7 @@ fn literal_prefix_pattern_accepts_unicode_escape_for_printable_bmp_character() {
             (1, br#"\u004BONG_"#.to_vec()),
         ]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"").unwrap();
 

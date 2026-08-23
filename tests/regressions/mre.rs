@@ -1,6 +1,6 @@
 use std::{env, ffi::OsString, sync::{Mutex, MutexGuard}};
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -18,7 +18,7 @@ impl EnvVarGuard {
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
-            glrmask::StaticConstraint::set_test_compat_mode(enabled);
+            glrmask::Constraint::set_test_compat_mode(enabled);
         }
         Self { key, original }
     }
@@ -38,7 +38,7 @@ impl Drop for EnvVarGuard {
             },
         };
         if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
-            glrmask::StaticConstraint::set_test_compat_mode(original_enabled);
+            glrmask::Constraint::set_test_compat_mode(original_enabled);
         }
     }
 }
@@ -87,7 +87,7 @@ t WS ::= ' '+ ;
 nt start ::= 'if' '(' 'true' ')' ;
 "#;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_token(0).unwrap();
 
@@ -115,7 +115,7 @@ t WS ::= ' '+ ;
 nt start ::= 'a' ;
 "#;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
 
     let mut separate_token_state = constraint.start();
     assert!(
@@ -155,7 +155,7 @@ nt item ::= A | B;
 nt start ::= item item? item?;
 "#;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
     let initial = state.mask();
     assert!(token_allowed(&initial, 2), "two items in one token must be admitted");
@@ -199,7 +199,7 @@ t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\x
             (end_of_text, b"<|endoftext|>".to_vec()),
         ]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"\"a").unwrap();
 
@@ -226,7 +226,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 
@@ -239,7 +239,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 
@@ -252,7 +252,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= "\\n" | " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
     let state = constraint.start();
     // Regression: after `a `, the optional body may finish before `\`, allowing the
     // suffix NON_WS to consume `\"`. The regex-suffix optimizer used to greedily
@@ -268,7 +268,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
         t CHAR ::= "a" | "\\\"";
         t WS ::= " ";
     "####;
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
     let state = constraint.start();
     assert!(token_allowed(&state.mask(), token_id as usize));
 }
@@ -284,7 +284,7 @@ fn bounded_repeat_suffix_must_not_greedily_drop_suffix_path() {
         t X ::= ("a"+)? "a";
     "####;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let state = constraint.start();
 
     // Semantically valid:
@@ -315,7 +315,7 @@ fn optional_choice_allows_viable_prefix_before_required_suffix() {
         t X ::= "a"* "b" | "";
     "####;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
     let mask = state.mask();
 
@@ -351,7 +351,7 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let prefix = br#"{"serviceName": ""#;
     let vocab = Vocab::new(vec![(0, vec![b' '; 24])]);
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let table_ambiguities = constraint.table_ambiguous_actions();
     assert!(
         table_ambiguities.is_empty(),
@@ -401,7 +401,7 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     let prefix = b"{\"failure\": {\"messages\": [{\"error\": \"Json parsing issue\",";
     let (vocab, separator_token_id) = byte_vocab_with_separator_token();
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
 
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
@@ -469,7 +469,7 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
     let prefix = b"{\"failure\": {\"messages\": [{\"error\": \"Json parsing issue\",";
     let (vocab, separator_token_id) = byte_vocab_with_separator_token();
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
 
@@ -535,7 +535,7 @@ fn kb304_nullable_enum_bare_quote_requires_canonical_separator_space() {
     let token_id = 22u32;
     let token_bytes = b"\"";
     let vocab = Vocab::new(vec![(token_id, token_bytes.to_vec())]);
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
 
     let invalid_prefix = br#"{"apiVersion":"#;
     let canonical_prefix = br#"{"apiVersion": "#;
@@ -634,7 +634,7 @@ t X ::= /./;
 nt S ::= X X "!";
 "#;
 
-    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mask = constraint.start().mask();
     assert!(token_allowed(&mask, 0));
     assert!(!token_allowed(&mask, INVALID as usize));

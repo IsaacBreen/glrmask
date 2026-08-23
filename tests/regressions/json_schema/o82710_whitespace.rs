@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn vocab(entries: &[&[u8]]) -> Vocab {
     Vocab::new(
@@ -55,7 +55,7 @@ fn object_prefix() -> Vec<u8> {
 
 fn assert_token_in_mask(schema: &str, prefix: &[u8], tokens: &[&[u8]], token_id: usize) {
     let vocab = vocab(tokens);
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     assert!(
@@ -77,7 +77,7 @@ fn o82710_string_prefix_allows_control_token() {
 #[test]
 fn o82710_string_prefix_commits_disputed_single_token() {
     let vocab = vocab(&[b"');?>\""]);
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(string_schema()), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(string_schema()), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(&string_prefix()).unwrap();
     assert!(token_allowed(&state.mask(), 0));
@@ -103,7 +103,7 @@ fn json_schema_pattern_s_allows_ecma_unicode_whitespace_lead_byte_token() {
 #[test]
 fn json_schema_pattern_s_accepts_ecma_unicode_whitespace_string() {
     let vocab = vocab(&["\"".as_bytes(), "\u{3000}".as_bytes()]);
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes("\"\u{3000}\"".as_bytes()).unwrap();
     assert!(state.is_accepting());
@@ -112,7 +112,7 @@ fn json_schema_pattern_s_accepts_ecma_unicode_whitespace_string() {
 #[test]
 fn json_schema_pattern_s_accepts_llguidance_nel_whitespace_string() {
     let vocab = vocab(&["\"".as_bytes(), "\u{0085}".as_bytes()]);
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes("\"\u{0085}\"".as_bytes()).unwrap();
     assert!(state.is_accepting());

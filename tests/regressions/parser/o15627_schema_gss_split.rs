@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, ConstraintState, Vocab};
+use glrmask::{Constraint as Constraint, ConstraintState, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 // The second root key is load-bearing. It is globally subtracted from the shared
@@ -60,7 +60,7 @@ fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
 
 #[test]
 fn o15627_schema_prefix_has_single_unique_gss_path_at_next_key_quote() {
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(O15627_SCHEMA_MRE), &bytes_vocab(), &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(O15627_SCHEMA_MRE), &bytes_vocab()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(O15627_PREFIX).unwrap();
 

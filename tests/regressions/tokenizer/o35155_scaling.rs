@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 use serde_json::json;
 
@@ -83,7 +83,7 @@ fn o35155_bad_family_tokenizer_states_stay_under_current_budget() {
     let mut minimized_tokenizer_states = Vec::new();
 
     for n in 2..=BAD_FAMILY.len() {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_n(n)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_n(n)), &vocab).unwrap();
         tokenizer_states.push(constraint.num_tokenizer_states());
         minimized_tokenizer_states.push(constraint.compute_forced_minimized_tokenizer_state_count());
     }
@@ -111,7 +111,7 @@ fn o35155_bad_family_tokenizer_states_stay_under_current_budget() {
 #[test]
 fn o35155_bad_family_just_3_and_4_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[2, 3])), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[2, 3])), &vocab).unwrap();
 
     eprintln!(
         "o35155 tokenizer states for just branches 3 and 4: current={} minimized={}",
@@ -123,7 +123,7 @@ fn o35155_bad_family_just_3_and_4_tokenizer_states() {
 #[test]
 fn o35155_bad_family_just_2_3_and_4_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[1, 2, 3])), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[1, 2, 3])), &vocab).unwrap();
 
     eprintln!(
         "o35155 tokenizer states for just branches 2, 3, and 4: current={} minimized={}",
@@ -135,7 +135,7 @@ fn o35155_bad_family_just_2_3_and_4_tokenizer_states() {
 #[test]
 fn o35155_bad_family_just_1_3_and_4_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[0, 2, 3])), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[0, 2, 3])), &vocab).unwrap();
 
     eprintln!(
         "o35155 tokenizer states for just branches 1, 3, and 4: current={} minimized={}",
@@ -147,7 +147,7 @@ fn o35155_bad_family_just_1_3_and_4_tokenizer_states() {
 #[test]
 fn o35155_bad_family_just_1_2_3_and_4_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[0, 1, 2, 3])), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[0, 1, 2, 3])), &vocab).unwrap();
 
     eprintln!(
         "o35155 tokenizer states for just branches 1, 2, 3, and 4: current={} minimized={}",
@@ -167,7 +167,7 @@ fn o35155_bad_family_requested_prefix_window_tokenizer_states() {
     ];
 
     for (label, indexes) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -179,7 +179,7 @@ fn o35155_bad_family_requested_prefix_window_tokenizer_states() {
 #[test]
 fn o35155_branch_5_schema_is_now_lowerable() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_index(4)), &vocab, &glrmask::CompileOptions::default())
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_index(4)), &vocab)
         .expect("branch 5 schema should now lower successfully");
 
     eprintln!(
@@ -200,7 +200,7 @@ fn o35155_bad_family_all_pairs_with_5_tokenizer_states() {
     ];
 
     for (label, indexes) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -231,7 +231,7 @@ fn o35155_bad_family_all_combinations_with_5_tokenizer_states() {
     ];
 
     for (label, indexes) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -258,7 +258,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
 
         let mut measured = false;
         for (combiner, schema) in schema_variants {
-            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()) {
+            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab) {
                 eprintln!(
                     "o35155 tokenizer states for just branch {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
@@ -276,7 +276,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
         }
     }
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_branch("VIAF", r"\d{7,9}")), &vocab, &glrmask::CompileOptions::default())
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_branch("VIAF", r"\d{7,9}")), &vocab)
         .expect("standalone VIAF singleton schema should now lower successfully");
     eprintln!(
         "o35155 standalone singleton branch 5 schema now lowers: current={} minimized={}",
@@ -284,7 +284,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
         constraint.compute_forced_minimized_tokenizer_state_count()
     );
 
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&[("WIKIPEDIA", r"\w+"), ("VIAF", r"\d{7}")])), &vocab, &glrmask::CompileOptions::default())
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&[("WIKIPEDIA", r"\w+"), ("VIAF", r"\d{7}")])), &vocab)
     .unwrap();
     eprintln!(
         "o35155 tokenizer states for just branches 4 and modified 5(7,7): current={} minimized={}",
@@ -312,7 +312,7 @@ fn o35155_bad_family_viaf_7_7_selected_combinations() {
     ];
 
     for (label, branches) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -339,7 +339,7 @@ fn o35155_bad_family_duplicate_branch_pairs() {
 
         let mut measured = false;
         for (combiner, schema) in schema_variants {
-            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()) {
+            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab) {
                 eprintln!(
                     "o35155 tokenizer states for just branches {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
@@ -369,7 +369,7 @@ fn o35155_bad_family_with_2_and_2_3_selected_combinations() {
     ];
 
     for (label, indexes) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&indexes)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -381,7 +381,7 @@ fn o35155_bad_family_with_2_and_2_3_selected_combinations() {
 #[test]
 fn o35155_bad_family_just_2_and_3_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[1, 2])), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_indexes(&[1, 2])), &vocab).unwrap();
 
     eprintln!(
         "o35155 tokenizer states for just branches 2 and 3: current={} minimized={}",
@@ -397,7 +397,7 @@ fn o35155_bad_family_2_3_5_with_viaf_2_2_tokenizer_states() {
             ("ARXIV", r"\w+_(\w_)?\d+"),
             ("GOOGLESCHOLAR", r"(\w|-){12}"),
             ("VIAF", r"\d{2}"),
-        ])), &vocab, &glrmask::CompileOptions::default())
+        ])), &vocab)
     .unwrap();
 
     eprintln!(
@@ -430,7 +430,7 @@ fn o35155_bad_family_2_3rep2_5_variants() {
     ];
 
     for (label, branches) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -460,7 +460,7 @@ fn o35155_bad_family_2_3rep2_and_2_5len2_variants() {
     ];
 
     for (label, branches) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
@@ -479,7 +479,7 @@ fn o35155_bad_family_singletons_for_2_3rep2_and_5len2() {
     ];
 
     for (label, branch) in singleton_branches {
-        let direct = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_branch(branch.0, branch.1)), &vocab, &glrmask::CompileOptions::default());
+        let direct = Constraint::compile(glrmask::Grammar::json_schema(&standalone_schema_for_branch(branch.0, branch.1)), &vocab);
 
         if direct.is_ok() {
             let constraint = direct.unwrap();
@@ -499,7 +499,7 @@ fn o35155_bad_family_singletons_for_2_3rep2_and_5len2() {
 
         let mut measured = false;
         for (combiner, schema) in schema_variants {
-            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()) {
+            if let Ok(constraint) = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab) {
                 eprintln!(
                     "o35155 tokenizer states for just branch {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
@@ -573,7 +573,7 @@ fn o35155_bad_family_viaf_fixed_length_variants_with_2_and_2_3() {
     ];
 
     for (label, branches) in requested_subsets {
-        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema_for_branches(&branches)), &vocab).unwrap();
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),

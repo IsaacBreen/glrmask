@@ -5,7 +5,7 @@
 /// This dropped the `required` constraint entirely, allowing property-only
 /// variants (e.g. `kaniko` without `image`) that should have been rejected.
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn build_small_vocab() -> Vocab {
     let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -66,7 +66,7 @@ fn artifact_schema() -> String {
 fn test_required_propagated_through_anyof_base_merge() {
     let vocab = build_small_vocab();
     let schema = artifact_schema();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab).unwrap();
     let mut state = constraint.start();
 
     // Valid: `{"image": "x"}` — image is present (required + first in order).

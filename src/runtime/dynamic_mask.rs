@@ -3062,7 +3062,7 @@ fn fill_mask_dynamic_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DynamicConstraint, StaticConstraint as Constraint, Vocab};
+    use crate::{DynamicConstraint, Constraint as Constraint, Vocab};
     use std::collections::BTreeSet;
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {

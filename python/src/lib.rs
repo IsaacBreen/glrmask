@@ -68,14 +68,14 @@ type DynamicConstraintState<'a> = glrmask::DynamicConstraintState<'a>;
 
 self_cell!(
     struct OwnedState {
-        owner: Arc<glrmask::StaticConstraint>,
+        owner: Arc<glrmask::Constraint>,
         #[not_covariant]
         dependent: ConstraintState,
     }
 );
 
 impl OwnedState {
-    fn from_arc(arc: Arc<glrmask::StaticConstraint>) -> Self {
+    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
         OwnedState::new(arc, |arc_ref| arc_ref.start())
     }
 }
@@ -764,13 +764,13 @@ impl PyProgrammaticJsCompiler {
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyConstraint {
-    inner: Arc<glrmask::StaticConstraint>,
+    inner: Arc<glrmask::Constraint>,
     max_token: u32,
 }
 
 impl PyConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
-        constraint: Result<glrmask::StaticConstraint, E>,
+        constraint: Result<glrmask::Constraint, E>,
         _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
@@ -805,12 +805,10 @@ impl PyConstraint {
     #[staticmethod]
     #[pyo3(signature = (schema, vocab))]
     fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::StaticConstraint::compile(
+            glrmask::Constraint::compile(
                 glrmask::Grammar::json_schema(schema),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -819,12 +817,10 @@ impl PyConstraint {
     #[staticmethod]
     #[pyo3(signature = (lark_source, vocab))]
     fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::StaticConstraint::compile(
+            glrmask::Constraint::compile(
                 glrmask::Grammar::lark(lark_source),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -861,7 +857,7 @@ impl PyConstraint {
             .build()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Self::from_constraint_result(
-            spec.compile_static(&glrmask::CompileOptions::default()),
+            spec.compile(),
             vocab,
         )
     }
@@ -869,12 +865,10 @@ impl PyConstraint {
     #[staticmethod]
     #[pyo3(signature = (ebnf_source, vocab))]
     fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
-            glrmask::StaticConstraint::compile(
+            glrmask::Constraint::compile(
                 glrmask::Grammar::ebnf(ebnf_source),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -917,7 +911,7 @@ impl PyConstraint {
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let mut constraint = constraint_result(glrmask::StaticConstraint::load(data))?;
+        let mut constraint = constraint_result(glrmask::Constraint::load(data))?;
         constraint
             .bind_vocab_exact(&vocab.inner)
             .map_err(PyValueError::new_err)?;
@@ -967,12 +961,10 @@ impl PyDynamicConstraint {
     #[staticmethod]
     #[pyo3(signature = (schema, vocab))]
     fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::json_schema(schema),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -981,12 +973,10 @@ impl PyDynamicConstraint {
     #[staticmethod]
     #[pyo3(signature = (lark_source, vocab))]
     fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::lark(lark_source),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -1023,7 +1013,7 @@ impl PyDynamicConstraint {
             .build()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         Self::from_constraint_result(
-            spec.compile_dynamic(&glrmask::CompileOptions::default()),
+            spec.compile_dynamic(),
             vocab,
         )
     }
@@ -1031,12 +1021,10 @@ impl PyDynamicConstraint {
     #[staticmethod]
     #[pyo3(signature = (ebnf_source, vocab))]
     fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        let options = glrmask::CompileOptions::default();
         Self::from_constraint_result(
             glrmask::DynamicConstraint::compile(
                 glrmask::Grammar::ebnf(ebnf_source),
-                &vocab.inner,
-                &options,
+                &vocab.inner
             ),
             vocab,
         )
@@ -1791,7 +1779,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // touches only a zero-length NumPy array and does not build or execute a
     // constraint.
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
-    glrmask::StaticConstraint::warm_ti_pool();
+    glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyProgrammaticJsCompiler>()?;
     m.add_class::<PyConstraint>()?;
@@ -1845,18 +1833,18 @@ fn collect_allocator(force: bool) {
 
 #[pyfunction]
 fn clear_stale_weights() {
-    glrmask::StaticConstraint::clear_stale_weights();
+    glrmask::Constraint::clear_stale_weights();
 }
 
 #[pyfunction]
 fn clear_weight_op_caches() {
-    glrmask::StaticConstraint::clear_weight_op_caches();
+    glrmask::Constraint::clear_weight_op_caches();
 }
 
 #[pyfunction]
 fn clear_weight_caches() {
-    glrmask::StaticConstraint::clear_weight_op_caches();
-    glrmask::StaticConstraint::clear_stale_weights();
+    glrmask::Constraint::clear_weight_op_caches();
+    glrmask::Constraint::clear_stale_weights();
 }
 
 #[pyfunction]
@@ -1885,7 +1873,7 @@ fn prepare_vocab_for_compile(vocab: &PyVocab) {
 
 #[pyfunction]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-    let constraint = glrmask::StaticConstraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
+    let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
     let max_token = constraint.max_original_token_id().unwrap_or(0);
     Ok(PyConstraint {
@@ -1896,6 +1884,6 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
 
 #[pyfunction]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
-    glrmask::StaticConstraint::dump_json_schema_grammar_glrm(schema_json)
+    glrmask::Constraint::dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }

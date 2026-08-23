@@ -1,4 +1,4 @@
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
     let word = id / 32;
@@ -247,7 +247,7 @@ obj_ord_0_0_nc: "\"certificationConditions\": " JSON_STRING ", " "\"certificatio
 start: "{" obj_ord_0_0_nc "}"
 "#;
 
-    let c = Constraint::compile(glrmask::Grammar::lark(lark), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let c = Constraint::compile(glrmask::Grammar::lark(lark), &vocab).unwrap();
     let mut s = c.start();
     s.commit_bytes(b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \"")
         .unwrap();

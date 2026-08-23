@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt;
 use serde_json::Value;
 
@@ -95,7 +95,7 @@ fn name_cache_path(cache_dir: &Path, index: usize) -> PathBuf {
 fn build_name_constraint(index: usize, vocab: &Vocab) -> Constraint {
     Constraint::compile(glrmask::Grammar::glrm(&format!(
             "start name;\nnt name ::= \"tool_{index}\";\n"
-        )), vocab, &glrmask::CompileOptions::default())
+        )), vocab)
     .unwrap()
 }
 
@@ -166,7 +166,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         if rebuild || !path.exists() {
             let source = schema_source(cfa_root, file);
             let started = Instant::now();
-            let constraint = Constraint::compile(glrmask::Grammar::json_schema(&source), vocab, &glrmask::CompileOptions::default())
+            let constraint = Constraint::compile(glrmask::Grammar::json_schema(&source), vocab)
                 .unwrap_or_else(|error| panic!("compile {short_name}: {error}"));
             eprintln!("[selected10] schema {index:02} {short_name}: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
             save_constraint(&path, &constraint);
@@ -192,7 +192,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
     if rebuild || !dispatch_path.exists() {
         let parent_started = Instant::now();
         let parent_source = if literal_names { dispatcher_literal_names_parent_source() } else { dispatcher_parent_source() };
-        let parent = Constraint::compile(glrmask::Grammar::glrm(&parent_source), vocab, &glrmask::CompileOptions::default()).unwrap();
+        let parent = Constraint::compile(glrmask::Grammar::glrm(&parent_source), vocab).unwrap();
         eprintln!("[selected10] dispatcher parent compile: {:.3} ms", parent_started.elapsed().as_secs_f64() * 1000.0);
 
         let schemas = SELECTED10
@@ -226,7 +226,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
     let core_path = cache_dir.join("core.bin");
     if rebuild || !core_path.exists() {
         let started = Instant::now();
-        let core = Constraint::compile(glrmask::Grammar::glrm(&js_core_source(cfa_root)), vocab, &glrmask::CompileOptions::default()).unwrap();
+        let core = Constraint::compile(glrmask::Grammar::glrm(&js_core_source(cfa_root)), vocab).unwrap();
         eprintln!("[selected10] JS core compile: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
         save_constraint(&core_path, &core);
     } else if upgrade_summaries {

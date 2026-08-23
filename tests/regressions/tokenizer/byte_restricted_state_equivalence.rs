@@ -1,7 +1,7 @@
 //! Minimal TI-off reproducer for byte-restricted L2P state equivalence.
 //!
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn contains(mask: &[u32], token: u32) -> bool {
     let word = token as usize / 32;
@@ -26,7 +26,7 @@ fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token(
 
     // Exactly one grammar terminal, and exactly the two necessary tokens.
     let vocab = Vocab::new(vec![(0, b"{\"".to_vec()), (1, b"a".to_vec())]);
-    let constraint = Constraint::compile(glrmask::Grammar::lark("start: A\nA: \"{\\\"a\""), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::lark("start: A\nA: \"{\\\"a\""), &vocab).unwrap();
 
     let mut state = constraint.start();
     assert!(

@@ -30,7 +30,7 @@ cargo add glrmask
 
 ## Usage
 
-GLRMask compiles a grammar and vocabulary into a `StaticConstraint`. The resulting `StaticConstraint` can be serialized and cached for reuse across requests.
+GLRMask compiles a grammar and vocabulary into a `Constraint`. The resulting `Constraint` can be serialized and cached for reuse across requests.
 
 At runtime, call `constraint.start()` to initialize a `ConstraintState`. In the decoding loop, run `state.mask()` in parallel with the model’s forward pass so the mask is ready in time for sampling. Then apply the mask to the logits, sample a token, and call `state.commit_token(token_id)` to advance the state.
 
@@ -47,7 +47,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-For constraints that will not be reused enough to justify static compilation, `DynamicConstraint` leaves more work in the token loop and avoids the full static build. The corresponding `StaticConstraint` can be compiled separately and cached for later requests.
+For constraints that will not be reused enough to justify static compilation, `DynamicConstraint` leaves more work in the token loop and avoids the full static build. The corresponding `Constraint` can be compiled separately and cached for later requests.
 
 ## Python quickstart
 
@@ -132,18 +132,17 @@ print(llm.detokenize(generated).decode())
 
 ## Rust quickstart
 
-Rust uses one shared grammar/options compilation surface for both static and dynamic constraints. `Constraint` is the trait common to both compiled artifact types; `StaticConstraint` is the default concrete artifact:
+Rust uses `Constraint` as the normal compiled artifact and `DynamicConstraint` as the lower-build-latency alternative:
 
 ```rust
-use glrmask::{CompileOptions, Grammar, StaticConstraint, Vocab};
+use glrmask::{Grammar, Constraint, Vocab};
 
 let vocab = Vocab::new(vec![
     (0, b"\"yes\"".to_vec()),
     (1, b"\"no\"".to_vec()),
 ]);
 let schema = r#"{"type":"string","enum":["yes","no"]}"#;
-let options = CompileOptions::default();
-let constraint = StaticConstraint::compile(Grammar::json_schema(schema), &vocab, &options)?;
+let constraint = Constraint::compile(Grammar::json_schema(schema), &vocab)?;
 let mut state = constraint.start();
 
 let mask = state.mask();
@@ -158,7 +157,7 @@ if state.is_rejected() {
 # Ok::<(), glrmask::Error>(())
 ```
 
-Use `DynamicConstraint::compile(...)` with the same `Grammar` and `CompileOptions` when startup latency matters more than per-token mask latency. Once started, static and dynamic states expose the same decoding interface.
+Use `DynamicConstraint::compile(...)` with the same `Grammar` when startup latency matters more than per-token mask latency. Once started, static and dynamic states expose the same decoding interface.
 
 When an external subgrammar is still just source, it can be attached before choosing a vocabulary:
 
@@ -168,24 +167,23 @@ let grammar = Grammar::glrm(
 )
 .bind_grammar("payload", Grammar::json_schema(r#"{\"type\":\"null\"}"#))?;
 
-let constraint = StaticConstraint::compile(grammar, &vocab, &options)?;
+let constraint = Constraint::compile(grammar, &vocab)?;
 # Ok::<(), glrmask::Error>(())
 ```
 
 `Grammar::bind_grammar(...)` is deliberately target-neutral. Exact token IDs and compiled child constraints are bound through `ConstraintSpec` instead.
 
-For GLRM extern declarations that need target-specific bindings, build a target-bound `ConstraintSpec`. The completed immutable spec can be reused to compile either artifact type, and the same `bind_grammar(...)` method accepts source, another spec, a `StaticConstraint`, or a `DynamicConstraint`:
+For GLRM extern declarations that need target-specific bindings, build a target-bound `ConstraintSpec`. The completed immutable spec can be reused to compile either artifact type, and the same `bind_grammar(...)` method accepts source, another spec, a `Constraint`, or a `DynamicConstraint`:
 
 ```rust
-use glrmask::{CompileOptions, ConstraintSpec, Grammar, StaticConstraint, Vocab};
+use glrmask::{ConstraintSpec, Grammar, Constraint, Vocab};
 
 let vocab = Vocab::new(vec![
     (0, b"{".to_vec()),
     (1, b"}".to_vec()),
     (2, b"null".to_vec()),
 ]);
-let options = CompileOptions::default();
-let child = StaticConstraint::compile(
+let child = Constraint::compile(
     Grammar::json_schema(r#"{"type":"null"}"#),
     &vocab,
     &options,
@@ -202,8 +200,8 @@ let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)?
     .bind_grammar("payload", &child)?
     .build()?;
 
-let static_constraint = spec.compile_static(&options)?;
-let dynamic_constraint = spec.compile_dynamic(&options)?;
+let static_constraint = spec.compile()?;
+let dynamic_constraint = spec.compile_dynamic()?;
 let mut state = static_constraint.start();
 # Ok::<(), glrmask::Error>(())
 ```
@@ -280,14 +278,14 @@ The state becomes accepting only after one of those tokens is committed.
 
 ## Saving compiled constraints
 
-A compiled `StaticConstraint` can be serialized and loaded again:
+A compiled `Constraint` can be serialized and loaded again:
 
 ```python
 blob = constraint.save()
 constraint = glrmask.Constraint.load(blob, vocab)
 ```
 
-Load an artifact only with the exact vocabulary it was compiled against. `StaticConstraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
+Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
 
 `DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify static compilation.
 

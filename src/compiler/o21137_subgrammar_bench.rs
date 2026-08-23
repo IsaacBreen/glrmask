@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Lexer;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
-use crate::{StaticConstraint as Constraint, Vocab};
+use crate::{Constraint, Vocab};
 
 const SCHEMA_PATH: &str = "/Users/isaacbreen/Projects2/constraint-framework-analysis/data/sources/jsonschemabench/maskbench/data/Github_ultra---o21137.json";
 const VOCAB_PATH: &str = "/Users/isaacbreen/Projects2/constraint-framework-analysis/.cache/vocab_cache/llama3_vocab.json";

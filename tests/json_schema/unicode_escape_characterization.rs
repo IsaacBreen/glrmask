@@ -1,6 +1,6 @@
 use std::{env, ffi::OsString};
 
-use glrmask::{StaticConstraint as Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
 
 struct EnvVarGuard {
@@ -16,7 +16,7 @@ impl EnvVarGuard {
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
-            glrmask::StaticConstraint::set_test_compat_mode(enabled);
+            glrmask::Constraint::set_test_compat_mode(enabled);
         }
         Self { key, original }
     }
@@ -34,7 +34,7 @@ impl Drop for EnvVarGuard {
         }
         if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let original_enabled = self.original.as_ref().is_some_and(|value| value != "0" && !value.is_empty());
-            glrmask::StaticConstraint::set_test_compat_mode(original_enabled);
+            glrmask::Constraint::set_test_compat_mode(original_enabled);
         }
     }
 }
@@ -56,7 +56,7 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 
 fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     let mask = state.mask();
@@ -65,7 +65,7 @@ fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) 
 
 fn assert_token_rejected_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token]), &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     let mask = state.mask();

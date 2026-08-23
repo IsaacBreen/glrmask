@@ -1274,7 +1274,7 @@ mod tests {
         crate::grammar::ast::lower(&factored).unwrap()
     }
 
-    fn compile_compressed_static(source: &str, vocab: &Vocab) -> crate::StaticConstraint {
+    fn compile_compressed_static(source: &str, vocab: &Vocab) -> crate::Constraint {
         crate::compiler::pipeline::compile_owned_with_table_construction(
             compressed_lark_grammar(source),
             vocab,
@@ -1309,7 +1309,7 @@ mod tests {
             t B ::= 'b';
             nt start ::= A B;
         "#;
-        let normal = crate::StaticConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let normal = crate::Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut normal_state = normal.start();
         let mut dynamic_state = dynamic.start();
@@ -1611,7 +1611,7 @@ mod tests {
         }
         grammar.push_str("r63: \"b\"\n");
 
-        let constraint = crate::StaticConstraint::from_lark(&grammar, &vocab).unwrap();
+        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
         let dynamic = compile_compressed_dynamic(&grammar, &vocab);
@@ -1640,7 +1640,7 @@ mod tests {
         static_state.commit_token(0).unwrap();
         assert_eq!(static_state.mask(), after_third);
 
-        let loaded = crate::StaticConstraint::load(&constraint.save()).unwrap();
+        let loaded = crate::Constraint::load(&constraint.save()).unwrap();
         assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();
@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn non_regular_constraint_keeps_static_backend() {
         let vocab = vocab();
-        let constraint = crate::StaticConstraint::from_ebnf(
+        let constraint = crate::Constraint::from_ebnf(
             "start ::= 'a' start 'b' | ''",
             &vocab,
         )

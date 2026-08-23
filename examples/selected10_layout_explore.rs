@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glrmask::{CompileOptions, StaticConstraint as Constraint, Grammar, Vocab};
+use glrmask::{Constraint as Constraint, Grammar, Vocab};
 use glrmask::__private::{ConstraintExt, ConstraintStateExt};
 use serde_json::Value;
 
@@ -136,7 +136,6 @@ fn build_name_constraint(index: usize, vocab: &Vocab) -> Constraint {
     Constraint::compile(
         Grammar::glrm(&format!("start name;\nnt name ::= \"tool_{index}\";\n")),
         vocab,
-        &CompileOptions::default(),
     )
     .unwrap()
 }
@@ -236,7 +235,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         if rebuild || !path.exists() {
             let source = schema_source(cfa_root, file);
             let started = Instant::now();
-            let constraint = Constraint::compile(Grammar::json_schema(&source), vocab, &CompileOptions::default())
+            let constraint = Constraint::compile(Grammar::json_schema(&source), vocab)
                 .unwrap_or_else(|error| panic!("compile {short_name}: {error}"));
             eprintln!("[selected10] schema {index:02} {short_name}: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
             save_constraint(&path, &constraint);
@@ -266,7 +265,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
             .collect::<Vec<_>>();
         let dispatch = if layout == Layout::Current {
             let parent_started = Instant::now();
-            let parent = Constraint::compile(Grammar::glrm(&dispatcher_literal_names_parent_source()), vocab, &CompileOptions::default()).unwrap();
+            let parent = Constraint::compile(Grammar::glrm(&dispatcher_literal_names_parent_source()), vocab).unwrap();
             eprintln!("[selected10-layout] dispatcher parent compile: {:.3} ms", parent_started.elapsed().as_secs_f64() * 1000.0);
             let bindings = (0..SELECTED10.len())
                 .map(|index| (format!("TOOL_ARGS_SLOT_{index}"), &schemas[index]))
@@ -276,10 +275,10 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
         } else {
             let mut wrapped = Vec::with_capacity(SELECTED10.len());
             for index in 0..SELECTED10.len() {
-                let parent = Constraint::compile(Grammar::glrm(&wrapped_schema_parent_source(index, layout)), vocab, &CompileOptions::default()).unwrap();
+                let parent = Constraint::compile(Grammar::glrm(&wrapped_schema_parent_source(index, layout)), vocab).unwrap();
                 wrapped.push(parent.compose_compiled_subgrammars(&[("TOOL_ARGS_SLOT", &schemas[index])], vocab).unwrap());
             }
-            let dispatcher_parent = Constraint::compile(Grammar::glrm(&dispatcher_whole_child_parent_source()), vocab, &CompileOptions::default()).unwrap();
+            let dispatcher_parent = Constraint::compile(Grammar::glrm(&dispatcher_whole_child_parent_source()), vocab).unwrap();
             let bindings = (0..SELECTED10.len())
                 .map(|index| (format!("WRAPPED_CALL_SLOT_{index}"), &wrapped[index]))
                 .collect::<Vec<_>>();
@@ -296,7 +295,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
     let core_path = cache_dir.join("core.bin");
     if rebuild || !core_path.exists() {
         let started = Instant::now();
-        let core = Constraint::compile(Grammar::glrm(&js_core_source(cfa_root, layout)), vocab, &CompileOptions::default()).unwrap();
+        let core = Constraint::compile(Grammar::glrm(&js_core_source(cfa_root, layout)), vocab).unwrap();
         eprintln!("[selected10] JS core compile: {:.3} ms", started.elapsed().as_secs_f64() * 1000.0);
         save_constraint(&core_path, &core);
     } else if upgrade_summaries {

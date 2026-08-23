@@ -1,5 +1,5 @@
 use glrmask::{
-    CompileOptions, ConstraintSpec, DynamicConstraint, Grammar, StaticConstraint, Vocab,
+    ConstraintSpec, DynamicConstraint, Grammar, Constraint, Vocab,
 };
 
 fn allowed(mask: &[u32], token_id: u32) -> bool {
@@ -25,7 +25,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
         .unwrap()
         .build()
         .unwrap();
-    let constraint = spec.compile_static(&CompileOptions::default()).unwrap();
+    let constraint = spec.compile().unwrap();
 
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 0));
@@ -52,8 +52,8 @@ fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
         .unwrap()
         .build()
         .unwrap();
-    let static_constraint = spec.compile_static(&CompileOptions::default()).unwrap();
-    let dynamic_constraint = spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let static_constraint = spec.compile().unwrap();
+    let dynamic_constraint = spec.compile_dynamic().unwrap();
 
     for token in [100, 101] {
         let mut static_state = static_constraint.start();
@@ -110,7 +110,7 @@ nt start = "a" SPECIAL | "x" "a" "z";
         .unwrap()
         .build()
         .unwrap()
-        .compile_static(&CompileOptions::default())
+        .compile()
         .unwrap();
 
     let mut byte_path = constraint.start();
@@ -136,13 +136,13 @@ fn exact_tokens_survive_static_and_dynamic_serialization() {
         .build()
         .unwrap();
 
-    let compiled = spec.compile_static(&CompileOptions::default()).unwrap();
-    let loaded = StaticConstraint::load(&compiled.save()).unwrap();
+    let compiled = spec.compile().unwrap();
+    let loaded = Constraint::load(&compiled.save()).unwrap();
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
     assert!(state.is_accepting());
 
-    let compiled = spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let compiled = spec.compile_dynamic().unwrap();
     let loaded = DynamicConstraint::load(&compiled.save()).unwrap();
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
@@ -159,8 +159,8 @@ fn compiled_children_are_authoritative_and_compose_both_directions() {
         .unwrap()
         .build()
         .unwrap();
-    let static_child = child_spec.compile_static(&CompileOptions::default()).unwrap();
-    let dynamic_child = child_spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let static_child = child_spec.compile().unwrap();
+    let dynamic_child = child_spec.compile_dynamic().unwrap();
     let loaded_dynamic_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
     let parent_source = r#"
 glrm 1;
@@ -181,8 +181,8 @@ nt document = MARK payload;
                 .build()
                 .unwrap();
             (
-                spec.compile_static(&CompileOptions::default()).unwrap(),
-                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+                spec.compile().unwrap(),
+                spec.compile_dynamic().unwrap(),
             )
         },
         {
@@ -195,8 +195,8 @@ nt document = MARK payload;
                 .build()
                 .unwrap();
             (
-                spec.compile_static(&CompileOptions::default()).unwrap(),
-                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+                spec.compile().unwrap(),
+                spec.compile_dynamic().unwrap(),
             )
         },
         {
@@ -209,8 +209,8 @@ nt document = MARK payload;
                 .build()
                 .unwrap();
             (
-                spec.compile_static(&CompileOptions::default()).unwrap(),
-                spec.compile_dynamic(&CompileOptions::default()).unwrap(),
+                spec.compile().unwrap(),
+                spec.compile_dynamic().unwrap(),
             )
         },
     ] {
@@ -233,7 +233,6 @@ fn loaded_direct_regular_dynamic_child_remains_composable() {
     let dynamic_child = DynamicConstraint::compile(
         Grammar::lark("start: /a+/"),
         &vocab,
-        &CompileOptions::default(),
     )
     .unwrap();
     let loaded_child = DynamicConstraint::load(&dynamic_child.save()).unwrap();
@@ -244,8 +243,8 @@ fn loaded_direct_regular_dynamic_child_remains_composable() {
         .unwrap()
         .build()
         .unwrap();
-    let static_parent = spec.compile_static(&CompileOptions::default()).unwrap();
-    let dynamic_parent = spec.compile_dynamic(&CompileOptions::default()).unwrap();
+    let static_parent = spec.compile().unwrap();
+    let dynamic_parent = spec.compile_dynamic().unwrap();
     for token in [0, 1] {
         let mut static_state = static_parent.start();
         let mut dynamic_state = dynamic_parent.start();
@@ -266,9 +265,9 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
     .unwrap();
 
     let static_constraint =
-        StaticConstraint::compile(parent.clone(), &vocab, &CompileOptions::default()).unwrap();
+        Constraint::compile(parent.clone(), &vocab).unwrap();
     let dynamic_constraint =
-        DynamicConstraint::compile(parent, &vocab, &CompileOptions::default()).unwrap();
+        DynamicConstraint::compile(parent, &vocab).unwrap();
 
     for token in [0, 1] {
         let mut static_state = static_constraint.start();
@@ -301,7 +300,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .unwrap()
         .build()
         .unwrap();
-    let constraint = spec.compile_static(&CompileOptions::default()).unwrap();
+    let constraint = spec.compile().unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
     state.commit_token(8).unwrap();
@@ -346,7 +345,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .unwrap()
         .build()
         .unwrap()
-        .compile_static(&CompileOptions::default())
+        .compile()
         .unwrap();
     let mut state = source_bound.start();
     state.commit_token(0).unwrap();
@@ -372,17 +371,16 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .unwrap()
         .build()
         .unwrap();
-    assert!(spec.compile_static(&CompileOptions::default()).is_err());
+    assert!(spec.compile().is_err());
 }
 
 #[test]
 fn incompatible_compiled_child_target_is_rejected_at_bind_time() {
     let child_vocab = Vocab::new(vec![(0, b"a".to_vec())]);
     let parent_vocab = Vocab::new(vec![(0, b"b".to_vec())]);
-    let child = StaticConstraint::compile(
+    let child = Constraint::compile(
         Grammar::ebnf(r#"start ::= "a""#),
         &child_vocab,
-        &CompileOptions::default(),
     )
     .unwrap();
     let parent = "glrm 1; start start; extern grammar child; nt start = child;";
@@ -406,10 +404,9 @@ t WORD = fa {
 };
 nt start = WORD;
 "#;
-    let constraint = StaticConstraint::compile(
+    let constraint = Constraint::compile(
         Grammar::glrm(source),
         &vocab,
-        &CompileOptions::default(),
     )
     .unwrap();
     let mut state = constraint.start();
@@ -438,7 +435,7 @@ nt document = inner;
         .unwrap()
         .build()
         .unwrap()
-        .compile_static(&CompileOptions::default())
+        .compile()
         .unwrap();
     let mut state = constraint.start();
     state.commit_token(123).unwrap();
@@ -464,8 +461,8 @@ nt start = fa {
         .unwrap()
         .build()
         .unwrap();
-    assert!(allowed(&spec.compile_static(&CompileOptions::default()).unwrap().start().mask(), 77));
-    assert!(allowed(&spec.compile_dynamic(&CompileOptions::default()).unwrap().start().mask(), 77));
+    assert!(allowed(&spec.compile().unwrap().start().mask(), 77));
+    assert!(allowed(&spec.compile_dynamic().unwrap().start().mask(), 77));
 }
 
 #[test]
@@ -479,9 +476,8 @@ pragma glrmask { lexer group words = WORD; }
 t WORD = /[a-z]+/;
 nt start = WORD;
 "#;
-    let options = CompileOptions::default();
-    let plain = StaticConstraint::compile(Grammar::glrm(plain), &vocab, &options).unwrap();
-    let hinted = StaticConstraint::compile(Grammar::glrm(hinted), &vocab, &options).unwrap();
+    let plain = Constraint::compile(Grammar::glrm(plain), &vocab).unwrap();
+    let hinted = Constraint::compile(Grammar::glrm(hinted), &vocab).unwrap();
     let mut left = plain.start();
     let mut right = hinted.start();
     assert_eq!(left.mask(), right.mask());
