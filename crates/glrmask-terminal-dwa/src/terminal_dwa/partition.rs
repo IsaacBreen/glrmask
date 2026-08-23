@@ -534,6 +534,16 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let classify_started_at = Instant::now();
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][partition_classify_start] partition={} vocab_tokens={} tokenizer_states={} terminals={} force_all_l2p={}",
+            partition_label,
+            vocab.len(),
+            tokenizer.num_states(),
+            num_terminals,
+            force_all_l2p,
+        );
+    }
     let mut terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else if let Some(precomputed) = precomputed_terminal_path_lengths {
@@ -576,6 +586,12 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         }
     }
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][partition_classify_end] partition={} classify_ms={:.3}",
+            partition_label, classify_ms,
+        );
+    }
 
     let routing_started_at = Instant::now();
     let mut l1_mask = vec![false; num_terminals as usize];

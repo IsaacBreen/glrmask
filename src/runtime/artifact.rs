@@ -10,7 +10,6 @@ use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
-use crate::automata::weighted_u32::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
@@ -151,6 +150,7 @@ pub(crate) struct BackedInternalTokenBufMasks {
     backing: Arc<Vec<u8>>,
     entries_start: usize,
     len: usize,
+    aligned_base_addr: Option<usize>,
 }
 
 impl BackedInternalTokenBufMasks {
@@ -168,10 +168,15 @@ impl BackedInternalTokenBufMasks {
         if end > backing.len() {
             return Err("backed internal-token buffer-mask range is outside artifact".to_owned());
         }
+        let ptr = unsafe { backing.as_ptr().add(entries_start) };
+        let aligned_base_addr = (cfg!(target_endian = "little")
+            && ptr.align_offset(std::mem::align_of::<PackedInternalTokenBufMask>()) == 0)
+            .then_some(ptr as usize);
         Ok(Self {
             backing,
             entries_start,
             len,
+            aligned_base_addr,
         })
     }
 
@@ -186,6 +191,21 @@ impl BackedInternalTokenBufMasks {
     }
 
     #[inline(always)]
+    pub(crate) fn slice(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<&[PackedInternalTokenBufMask]> {
+        if start > end || end > self.len {
+            return None;
+        }
+        let base = self.aligned_base_addr? as *const PackedInternalTokenBufMask;
+        // SAFETY: `new` validated the complete backing range and natural
+        // alignment, and the retained Arc keeps the allocation alive.
+        Some(unsafe { std::slice::from_raw_parts(base.add(start), end - start) })
+    }
+
+    #[inline(always)]
     pub(crate) fn for_each_range(
         &self,
         start: usize,
@@ -194,6 +214,12 @@ impl BackedInternalTokenBufMasks {
     ) {
         debug_assert!(start <= end && end <= self.len);
         if start > end || end > self.len {
+            return;
+        }
+        if let Some(entries) = self.slice(start, end) {
+            for &entry in entries {
+                visit(entry.word_idx, entry.mask);
+            }
             return;
         }
         let entry_bytes = std::mem::size_of::<PackedInternalTokenBufMask>();
@@ -226,7 +252,10 @@ enum DenseBufMaskRowsStorage {
     #[serde(skip)]
     Backed {
         backing: Arc<Vec<u8>>,
-        start: usize,
+        /// Address of the first u32 in `backing`. `from_backed` validates the
+        /// complete range and alignment once, so hot row lookup does not need
+        /// to redo checked byte-offset arithmetic for every prefix row.
+        base_addr: usize,
     },
 }
 
@@ -302,7 +331,10 @@ impl DenseBufMaskRows {
             return Err("backed dense mask range is not u32-aligned".to_owned());
         }
         Ok(Self {
-            storage: DenseBufMaskRowsStorage::Backed { backing, start },
+            storage: DenseBufMaskRowsStorage::Backed {
+                backing,
+                base_addr: ptr as usize,
+            },
             rows,
             row_len,
         })
@@ -336,6 +368,28 @@ impl DenseBufMaskRows {
         self.row_len
     }
 
+    /// Return the complete dense matrix as one contiguous runtime slice when
+    /// storage is already flat/backed. This is the same memory consumed by hot
+    /// row lookups; serialization can therefore copy it without rebuilding
+    /// row objects.
+    #[inline]
+    pub(crate) fn as_contiguous(&self) -> Option<&[u32]> {
+        match &self.storage {
+            DenseBufMaskRowsStorage::Rows(_) => None,
+            DenseBufMaskRowsStorage::Flat(flat) => Some(flat),
+            DenseBufMaskRowsStorage::Backed {
+                backing: _,
+                base_addr,
+            } => {
+                let values = self.rows.checked_mul(self.row_len)?;
+                let ptr = *base_addr as *const u32;
+                // SAFETY: `from_backed` validated the complete byte range and
+                // alignment, and the retained Arc keeps the allocation alive.
+                Some(unsafe { std::slice::from_raw_parts(ptr, values) })
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn get(&self, row: usize) -> Option<&[u32]> {
         if row >= self.rows {
@@ -347,10 +401,15 @@ impl DenseBufMaskRows {
                 let start = row * self.row_len;
                 flat.get(start..start + self.row_len)
             }
-            DenseBufMaskRowsStorage::Backed { backing, start } => {
-                let value_start = row.checked_mul(self.row_len)?;
-                let byte_start = start.checked_add(value_start.checked_mul(4)?)?;
-                let ptr = unsafe { backing.as_ptr().add(byte_start).cast::<u32>() };
+            DenseBufMaskRowsStorage::Backed {
+                backing: _,
+                base_addr,
+            } => {
+                // `row < self.rows` and `from_backed` validated the complete
+                // rows*row_len slab, so this multiplication and pointer offset
+                // are within the retained allocation.
+                let value_start = row * self.row_len;
+                let ptr = unsafe { (*base_addr as *const u32).add(value_start) };
                 // SAFETY: `from_backed` validated the full range and alignment;
                 // row boundaries advance by a multiple of four bytes.
                 Some(unsafe { std::slice::from_raw_parts(ptr, self.row_len) })
@@ -2714,6 +2773,14 @@ pub(crate) mod token_bytes_artifact_serde {
     }
 
     impl PackedTokenBytes {
+        pub(crate) fn from_runtime_entries(value: &BTreeMap<u32, Vec<u8>>) -> Result<Self, String> {
+            // The indexed representation is useful runtime state in its own
+            // right: token lookup/iteration reads it directly. Build it once
+            // when a compiler-created Constraint is finalized rather than
+            // rebuilding the same index inside every save().
+            Self::parse(pack(value))
+        }
+
         fn parse(wire: Vec<u8>) -> Result<Self, String> {
             let wire_len = wire.len();
             Self::parse_backed(Arc::new(wire), 0, wire_len)
@@ -2861,6 +2928,11 @@ pub(crate) mod token_bytes_artifact_serde {
         #[inline]
         pub(crate) fn wire(&self) -> &[u8] {
             &self.wire[self.wire_start..self.wire_start + self.wire_len]
+        }
+
+        pub(crate) fn whole_wire_arc(&self) -> Option<Arc<Vec<u8>>> {
+            (self.wire_start == 0 && self.wire_len == self.wire.len())
+                .then(|| Arc::clone(&self.wire))
         }
 
         #[inline]
@@ -3082,31 +3154,43 @@ pub(crate) mod token_bytes_artifact_serde {
         let Some(capacity) = capacity else {
             return pack_legacy(value);
         };
-        let mut out = Vec::with_capacity(capacity);
-        out.extend_from_slice(INDEXED_MAGIC);
-        out.push(u8::from(!dense));
-        out.extend_from_slice(
+        // Reserve the complete indexed representation up front and fill the
+        // id/offset/data regions in one BTreeMap traversal.  The previous
+        // implementation walked the pointer-heavy map once for offsets and a
+        // second time for bytes; on 100k+ token vocabularies that dominated a
+        // genuinely fresh Constraint::save().
+        let mut out = vec![0u8; capacity];
+        out[..INDEXED_MAGIC.len()].copy_from_slice(INDEXED_MAGIC);
+        out[INDEXED_MAGIC.len()] = u8::from(!dense);
+        out[INDEXED_MAGIC.len() + 1..INDEXED_HEADER_LEN].copy_from_slice(
             &u32::try_from(count)
                 .expect("token vocabulary should fit u32")
                 .to_le_bytes(),
         );
-        if !dense {
-            for &token_id in value.keys() {
-                out.extend_from_slice(&token_id.to_le_bytes());
-            }
-        }
+
+        let ids_start = INDEXED_HEADER_LEN;
+        let offsets_start = ids_start + ids_len;
+        let data_start = offsets_start + offsets_len;
+        out[offsets_start..offsets_start + 4].copy_from_slice(&0u32.to_le_bytes());
+
         let mut offset = 0u32;
-        out.extend_from_slice(&offset.to_le_bytes());
-        for bytes in value.values() {
-            offset = offset
+        let mut data_pos = data_start;
+        for (index, (&token_id, bytes)) in value.iter().enumerate() {
+            if !dense {
+                let id_pos = ids_start + index * 4;
+                out[id_pos..id_pos + 4].copy_from_slice(&token_id.to_le_bytes());
+            }
+            let next_offset = offset
                 .checked_add(bytes.len() as u32)
                 .expect("indexed token-byte data length was prevalidated");
-            out.extend_from_slice(&offset.to_le_bytes());
+            let offset_pos = offsets_start + (index + 1) * 4;
+            out[offset_pos..offset_pos + 4].copy_from_slice(&next_offset.to_le_bytes());
+            let data_end = data_pos + bytes.len();
+            out[data_pos..data_end].copy_from_slice(bytes);
+            data_pos = data_end;
+            offset = next_offset;
         }
-        for bytes in value.values() {
-            out.extend_from_slice(bytes);
-        }
-        debug_assert_eq!(out.len(), capacity);
+        debug_assert_eq!(data_pos, capacity);
         out
     }
 
@@ -3271,51 +3355,6 @@ pub(crate) mod token_bytes_artifact_serde {
     }
 }
 
-type SharedPackedTokenBytesCache =
-    FxHashMap<usize, (std::sync::Weak<BTreeMap<u32, Vec<u8>>>, Arc<Vec<u8>>) >;
-
-fn shared_packed_token_bytes_cache() -> &'static Mutex<SharedPackedTokenBytesCache> {
-    static CACHE: OnceLock<Mutex<SharedPackedTokenBytesCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(FxHashMap::default()))
-}
-
-/// Lazily cache the canonical packed vocabulary section by the identity of the
-/// shared immutable token map. `Vocab::clone()` preserves that Arc identity, so
-/// independently compiled constraints can reuse this section without charging
-/// vocabulary construction or compilation for serialization work.
-pub(crate) fn shared_packed_token_bytes(
-    token_bytes: &Arc<BTreeMap<u32, Vec<u8>>>,
-) -> Arc<Vec<u8>> {
-    let key = Arc::as_ptr(token_bytes) as usize;
-    if let Ok(cache) = shared_packed_token_bytes_cache().lock() {
-        if let Some((source, packed)) = cache.get(&key)
-            && source
-                .upgrade()
-                .is_some_and(|source| Arc::ptr_eq(&source, token_bytes))
-        {
-            return Arc::clone(packed);
-        }
-    }
-
-    let packed = Arc::new(token_bytes_artifact_serde::pack_external(token_bytes));
-    if let Ok(mut cache) = shared_packed_token_bytes_cache().lock() {
-        if let Some((source, existing)) = cache.get(&key)
-            && source
-                .upgrade()
-                .is_some_and(|source| Arc::ptr_eq(&source, token_bytes))
-        {
-            return Arc::clone(existing);
-        }
-        cache.insert(key, (Arc::downgrade(token_bytes), Arc::clone(&packed)));
-    }
-    packed
-}
-
-pub(crate) fn prepare_shared_packed_token_bytes(vocab: &crate::Vocab) {
-    let entries = vocab.entries_arc();
-    drop(shared_packed_token_bytes(&entries));
-}
-
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
@@ -3349,26 +3388,58 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// ordinary flattened parser artifact remains the serialization fallback.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+    /// Compressed deterministic union root for `segmented_parser_components`.
+    /// Entry `g` is the unique component selected by composed LR state `g`, or
+    /// `u32::MAX` when no component has a root transition on that state. When
+    /// non-empty, the component collection is one deterministic parser DWA in
+    /// segmented storage: a synthetic root followed by one cached component
+    /// body. No runtime parser-NWA branching is involved.
+    #[serde(skip, default)]
+    pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
     #[serde(skip, default)]
     pub(crate) segmented_boundary_parser: Option<Box<SegmentedBoundaryParser>>,
+    #[serde(skip, default)]
+    pub(crate) segmented_boundary_terminal_trie: Option<Box<SegmentedBoundaryTerminalTrie>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedParserComponent {
-    pub(crate) constraint: Box<Constraint>,
+    pub(crate) constraint: Arc<Constraint>,
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
+    /// Terminal to suppress only on the synthetic union-root empty-stack
+    /// projection. Shared component artifacts retain their standalone start
+    /// final weight; this root-only disallow is exactly the old cloned-artifact
+    /// start-final subtraction without mutating the shared parser DWA.
+    pub(crate) root_disallowed_terminal: Option<u32>,
     pub(crate) global_to_local_parser_state: Vec<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundaryTerminalTrieNode {
+    pub(crate) children: Vec<(u32, u32)>,
+    /// Bit i means private boundary token class i is accepted at this node.
+    pub(crate) outputs: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SegmentedBoundaryTerminalTrie {
+    pub(crate) nodes: Vec<BoundaryTerminalTrieNode>,
+    pub(crate) root_by_tsid: Vec<u32>,
+    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
+    pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
-    pub(crate) parser_nwa: NWA,
-    /// When true, parser-NWA labels retain the template stack-effect alphabet:
-    /// positive labels pop/match the current stack and negative labels push a
-    /// concrete LR state. The segmented mask evaluator interprets those
-    /// effects directly instead of requiring compile-time negative resolution.
-    pub(crate) signed_stack_effects: bool,
+    /// Generic wire/reference representation. Compact in-memory boundary
+    /// parsers leave this as the empty one-state DWA and use
+    /// `compact_parser_dwa`; V17 serialization materializes the compact machine
+    /// back into this exact generic wire shape.
+    pub(crate) parser_dwa: DWA,
+    #[serde(skip, default)]
+    pub(crate) compact_parser_dwa:
+        Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
@@ -3397,17 +3468,32 @@ impl DeferredTerminalExprBytes {
     }
 }
 
-/// Canonical current-format sections prepared for large compiler-produced
-/// constraints.  These are section payloads, not a pre-saved artifact: the
-/// first `Constraint::save()` still constructs the envelope and copies every
-/// section into its final output allocation.
+/// Opaque current-format composition metadata retained without eagerly
+/// rebuilding the large parser-template/characterization graphs. Ordinary
+/// runtime masking never needs these bytes; constraint composition materializes
+/// them on demand.
 #[derive(Debug, Clone)]
-pub(crate) struct PreparedSerializationSections {
-    pub(crate) table: Arc<[u8]>,
-    pub(crate) runtime: Arc<[u8]>,
-    pub(crate) original_token_map: Arc<[u8]>,
-    pub(crate) internal_token_buf_masks: Arc<[u8]>,
-    pub(crate) token_mask_cache: Arc<[u8]>,
+pub(crate) enum DeferredCompositionMetadataBytes {
+    Owned(Arc<[u8]>),
+    Backed {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl DeferredCompositionMetadataBytes {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+        }
+    }
 }
 
 /// Fully compiled, immutable grammar constraint.
@@ -3418,7 +3504,7 @@ pub(crate) struct PreparedSerializationSections {
 pub struct Constraint {
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
-    #[serde(default)]
+    #[serde(skip, default)]
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
@@ -3444,12 +3530,6 @@ pub struct Constraint {
     #[serde(skip, default)]
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
-    /// Pre-encoded current packed-DWA wire for very large compiler-produced
-    /// constraints. This is presently used to measure (and bound) fresh-save
-    /// cost without charging `Constraint::save` for DWA encoding. Loaded
-    /// constraints already retain the whole input artifact instead.
-    #[serde(skip, default)]
-    pub(crate) prepared_parser_dwa_wire: Option<Arc<[u8]>>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -3637,10 +3717,10 @@ pub struct Constraint {
     pub(crate) deferred_internal_token_to_tokens: OnceLock<Vec<Vec<u32>>>,
     #[serde(with = "token_bytes_artifact_serde")]
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
-    /// Current sectioned artifacts can retain the packed immutable vocabulary
-    /// directly instead of allocating one BTreeMap node and Vec per model
-    /// token during load. Compiler-created constraints keep `token_bytes`
-    /// materialized and leave this empty.
+    /// Indexed immutable vocabulary used directly by runtime token lookup and
+    /// iteration. Loaded constraints can point into artifact backing; compiled
+    /// constraints own the same indexed representation alongside the source
+    /// map used by compiler/composition code.
     #[serde(skip, default)]
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
     // Compiler-side scratch/result metadata only. No runtime or composition
@@ -3783,7 +3863,7 @@ pub struct Constraint {
     /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
     #[serde(skip)]
     pub(crate) heavy_token_indices: Vec<usize>,
-    /// Total cost of all heavy tokens combined (n_heavy × buf_len).
+    /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
     #[serde(skip)]
     pub(crate) heavy_total_cost: usize,
     /// Average cost per light token: (total_cost - heavy_total) / n_light.
@@ -3821,19 +3901,6 @@ pub struct Constraint {
     /// re-encoding the same canonical pools.
     #[serde(skip, default)]
     pub(crate) serialized_artifact_cache: Option<Arc<Vec<u8>>>,
-    /// Canonical WPL3 bytes prepared once at compile finalization for
-    /// constraints with a large non-DWA Weight population. The Weight objects
-    /// themselves remain authoritative; this only avoids re-packing the same
-    /// immutable token-set/range pool on the first fresh save.
-    #[serde(skip, default)]
-    pub(crate) prepared_weight_pool_bytes: Option<Arc<[u8]>>,
-    /// Large compiler-produced constraints can prepare their immutable
-    /// current-format section payloads during finalization. This avoids
-    /// rebuilding the same canonical metadata during the first save while
-    /// deliberately leaving final artifact assembly inside `save()`.
-    #[serde(skip, default)]
-    pub(crate) prepared_serialization_sections:
-        Option<Arc<PreparedSerializationSections>>,
     /// Current-format terminal source expressions can be retained as their
     /// canonical bincode payload instead of recursively rebuilding every Expr
     /// node during an ordinary static load. Composition materializes the list
@@ -3843,6 +3910,12 @@ pub struct Constraint {
     pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
     #[serde(skip, default)]
     pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
+    /// Serialized composition-only metadata (reset-token rows, parser template
+    /// cache, symbolic characterizations, and grammar summary). Current-format
+    /// loads keep this cold section backed by the artifact and materialize it
+    /// only if the constraint is later used as a composition component.
+    #[serde(skip, default)]
+    pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through

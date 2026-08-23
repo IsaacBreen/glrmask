@@ -3526,7 +3526,7 @@ mod tests {
             rules,
             start,
             terminals: (0..num_terminals)
-                .map(|id| terminal(id, b'a' + id as u8))
+                .map(|id| terminal(id, b'a'.wrapping_add(id as u8)))
                 .collect(),
             ..GrammarDef::default()
         };

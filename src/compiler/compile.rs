@@ -19,9 +19,6 @@ pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
             );
         }
     };
-    run("packed_token_bytes", &mut || {
-        crate::runtime::prepare_shared_packed_token_bytes(vocab)
-    });
     run("terminal_dwa", &mut || {
         super::stages::id_map_and_terminal_dwa::prepare_vocab_for_terminal_dwa(vocab)
     });

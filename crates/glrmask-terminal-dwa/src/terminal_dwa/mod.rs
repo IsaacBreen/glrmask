@@ -1612,6 +1612,14 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa_families_entry] tokenizer_states={} vocab_tokens={} terminals={}",
+            tokenizer.num_states(),
+            vocab.len(),
+            grammar.num_terminals,
+        );
+    }
 
     // Shared cache for terminal classification byte sets. The DFA scanning
     // (reachable_bytes, first_bytes, last_bytes) is identical across partitions;
@@ -1631,6 +1639,13 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         )
         .into_boxed_slice(),
     );
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa_families_setup_done] disallowed={} normalized={}",
+            token_path_disallowed_follows.len(),
+            normalized_token_path_disallowed_follows.len(),
+        );
+    }
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // A grammar with one ordinary byte terminal has a two-state, one-transition
@@ -1685,6 +1700,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     }
 
     let partition_vocab_started_at = Instant::now();
+    if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_vocab_start] scheme={}", std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string())); }
     let requested_partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
     let partition_scheme = requested_partition_scheme.as_str();
@@ -1850,6 +1866,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     };
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
+    if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_vocab_end] partitions={} ms={:.3}", sub_vocabs.len(), partition_vocab_ms); }
 
     // Lazily-initialized shared compact transition table cache over the one
     // raw lexer DFA used by every L2P partition. Subsequent partitions reuse
@@ -1879,6 +1896,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         .unwrap_or_else(l2p::SharedTiTokenizerOutputCache::new);
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_shared_setup_end] ms={:.3}", shared_cache_setup_ms); }
 
     use rayon::prelude::*;
     let build_partition = |idx: usize,
@@ -1886,6 +1904,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
      -> (Option<(types::PartitionTerminalDwas, f64)>, usize) {
         let started_at = Instant::now();
         let label = format!("p{}", idx);
+        if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_build_entry] label={} tokens={}", label, sub_vocab.len()); }
 
         let ready_local = prepared_partition_local_tokenizers
             .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))

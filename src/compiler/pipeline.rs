@@ -1860,10 +1860,13 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
+    if constraint.packed_token_bytes.is_none() {
+        constraint.packed_token_bytes = Some(std::sync::Arc::new(
+            crate::runtime::PackedTokenBytes::from_runtime_entries(&constraint.token_bytes)
+            .expect("compiler-produced token bytes should form a valid indexed runtime vocabulary"),
+        ));
+    }
     constraint.rebuild_runtime_caches();
-    constraint.tokenizer.prepare_artifact_wire_cache();
-    constraint.prepare_serialization_weight_pool_cache();
-    constraint.prepare_large_serialization_sections();
     constraint
 }
 
@@ -3158,12 +3161,26 @@ fn launch_classify_dag_if_ready<'scope>(
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_ms = elapsed_ms(compile_started_at.clone());
         let classify_started_at = Instant::now();
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+            eprintln!(
+                "[glrmask/profile][compile_dag_classify_start] tokenizer_states={} terminals={} disallowed={}",
+                tokenizer.tokenizer.num_states(),
+                analysis.analyzed_grammar.num_terminals,
+                token_path_disallowed_follows.len(),
+            );
+        }
         prewarm_shared_classify_cache(
             &tokenizer.tokenizer,
             analysis.analyzed_grammar.num_terminals,
             &shared_classify_cache,
         );
         let classify_ms = elapsed_ms(classify_started_at);
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+            eprintln!(
+                "[glrmask/profile][compile_dag_classify_end] ms={:.3}",
+                classify_ms,
+            );
+        }
         let classify_finished_ms = elapsed_ms(compile_started_at.clone());
 
         terminal_state
@@ -3551,12 +3568,24 @@ fn compile_prepared_with_profile_and_table_construction(
                 scope.spawn(move |scope| {
                     let flat_global_started_ms = elapsed_ms(compile_started_for_terminal.clone());
                     let flat_trans_started_at = Instant::now();
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_flat_start] tokenizer_states={}",
+                            flat_global_tokenizer.num_states(),
+                        );
+                    }
                     let flat_trans: Arc<[u32]> = Arc::from(
                         crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(
                             &flat_global_tokenizer,
                         ),
                     );
                     let flat_trans_ms = elapsed_ms(flat_trans_started_at);
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_flat_end] ms={:.3}",
+                            flat_trans_ms,
+                        );
+                    }
                     let shared_transition_cache = Arc::new(std::sync::OnceLock::new());
 
                     if eager_possible_matches {
@@ -3601,6 +3630,9 @@ fn compile_prepared_with_profile_and_table_construction(
                     }
 
                     let global_max_length_started_at = Instant::now();
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!("[glrmask/profile][compile_dag_global_max_start]");
+                    }
                     let global_max_length_state_map =
                         crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map_with_initial(
                             &flat_global_tokenizer,
@@ -3609,6 +3641,12 @@ fn compile_prepared_with_profile_and_table_construction(
                             flat_global_initial_state_map.as_ref(),
                         );
                     let global_max_length_ms = elapsed_ms(global_max_length_started_at);
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][compile_dag_global_max_end] ms={:.3}",
+                            global_max_length_ms,
+                        );
+                    }
                     let flat_global_finished_ms = elapsed_ms(compile_started_for_terminal.clone());
                     terminal_state_ref
                         .lock()
@@ -4455,7 +4493,10 @@ fn compile_prepared_with_profile_and_table_construction(
         )
         .is_none()
         .then(|| composition_grammar_summary_from_analysis(&analyzed_grammar));
-        let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
+        let mut tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
+        if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
+            crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
+        }
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
@@ -4463,7 +4504,6 @@ fn compile_prepared_with_profile_and_table_construction(
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
             packed_parser_dwa: None,
-            prepared_parser_dwa_wire: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
@@ -4562,10 +4602,9 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
             serialized_artifact_cache: None,
-            prepared_weight_pool_bytes: None,
-            prepared_serialization_sections: None,
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
+            deferred_composition_metadata_blob: None,
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         };
@@ -4584,25 +4623,10 @@ fn compile_prepared_with_profile_and_table_construction(
                     elapsed_ms(started_at),
                 );
             }
-            const PREPARE_LARGE_DWA_WIRE_MIN_BYTES: usize = 8 * 1024 * 1024;
-            let prepared_wire = packed
-                .fast_wire_len()
-                .filter(|&len| len >= PREPARE_LARGE_DWA_WIRE_MIN_BYTES)
-                .map(|_| std::sync::Arc::<[u8]>::from(packed.fast_wire_bytes().into_boxed_slice()));
-            if std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some() {
-                let started_at = Instant::now();
-                let bytes = prepared_wire
-                    .as_deref()
-                    .map(|bytes| bytes.to_vec())
-                    .unwrap_or_else(|| packed.fast_wire_bytes());
-                eprintln!(
-                    "[glrmask/profile][packed_runtime_dwa_fast_wire] ms={:.3} bytes={}",
-                    elapsed_ms(started_at),
-                    bytes.len(),
-                );
-                std::hint::black_box(bytes);
-            }
-            constraint.prepared_parser_dwa_wire = prepared_wire;
+            // Keep the packed runtime DWA because masking/loading use it
+            // directly, but do not pre-encode the serialization wire here.
+            // Fresh-save timings must include serialization work rather than
+            // shifting it into compile finalization.
             constraint.packed_parser_dwa = Some(std::sync::Arc::new(packed));
         }
         if let Some(caches) = prebuilt_token_mask_caches
@@ -4610,7 +4634,13 @@ fn compile_prepared_with_profile_and_table_construction(
         {
             caches.install(&mut constraint);
         }
-        let constraint = finalize_constraint(constraint);
+        let mut constraint = finalize_constraint(constraint);
+        crate::runtime::compact_large_non_dwa_weight_runtime(&mut constraint);
+        // Keep compiler-produced packed runtime storage in its owned form.
+        // Converting it to a backed artifact representation here would perform
+        // serialization work during compilation and make first-save benchmarks
+        // dishonest. Loaded constraints use a zero-copy backed view of the same
+        // logical packed pools; only save() is allowed to create wire bytes.
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
 

@@ -219,6 +219,11 @@ pub mod __private {
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
+        fn compose_compiled_subgrammars_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
     }
 
     impl ConstraintExt for Constraint {
@@ -271,6 +276,46 @@ pub mod __private {
                 });
             }
             compose_constraints_owned_parent(self, &inputs, vocab)
+                .map(|composition| composition.constraint)
+                .map_err(Error::Compilation)
+        }
+
+        fn compose_compiled_subgrammars_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, compose_constraints_owned_parent_shared,
+            };
+            use std::collections::BTreeSet;
+            use std::sync::Arc;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut shared = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for (name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| {
+                        Error::Compilation(format!(
+                            "parent has no subgrammar placeholder terminal {name:?}",
+                        ))
+                    })? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    constraint: child.as_ref(),
+                });
+                shared.push(Arc::clone(child));
+            }
+            compose_constraints_owned_parent_shared(self, &inputs, &shared, vocab)
                 .map(|composition| composition.constraint)
                 .map_err(Error::Compilation)
         }
@@ -425,6 +470,7 @@ pub mod __private {
         fn parser_root_count(&self) -> usize {
             ConstraintState::parser_root_count(self)
         }
+
     }
 
     pub trait VocabExt {

@@ -1,4 +1,4 @@
-﻿use crate::automata::lexer::Lexer;
+use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 mod template_advance;
 pub(crate) use template_advance::advance_stacks_template_dfa;
@@ -705,7 +705,7 @@ fn parser_may_advance_on_any(
         )
 }
 
-fn advance_parser_stacks_if_possible(
+pub(crate) fn advance_parser_stacks_if_possible(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: u32,
@@ -8109,7 +8109,7 @@ mod tests {
             }
             let mut l1 = Vec::new();
             constraint.for_each_direct_regular_l1_acceptance(22, |weight| {
-                l1.push(tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>());
+                l1.push(tsids.iter().map(|&tsid| { let tokens = weight.token_set_for_tsid(tsid).map(|tokens| tokens.to_range_set()).unwrap_or_default(); (tsid, tokens.contains(internal_token), tokens.len()) }).collect::<Vec<_>>());
             });
             eprintln!("WEIGHT_TRANSPORT {name} l1={l1:?}");
         }

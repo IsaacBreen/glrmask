@@ -1,4 +1,4 @@
-﻿//! Runtime-facing tokenizer API built on top of the lexer DFA.
+//! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
@@ -103,11 +103,6 @@ pub struct Tokenizer {
     /// targets as source-relative deltas.
     #[serde(default, skip)]
     pub(super) packed_compressed_transition_segments: Arc<[PackedCompressedTransitionSegment]>,
-    /// Freshly compiled giant tokenizers prebuild their compact artifact once
-    /// during compiler finalization. A later `Constraint::save()` should only
-    /// copy these bytes; row interning is deliberately not on the save path.
-    #[serde(default, skip)]
-    pub(super) huge_artifact_cache: OnceLock<Arc<[u8]>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -332,6 +327,14 @@ impl PackedI16Values {
                 start,
                 len,
             } => backing.get(*start..start.checked_add(len.checked_mul(2)?)?),
+        }
+    }
+
+    #[inline]
+    fn owned_values(&self) -> Option<&[i16]> {
+        match self {
+            Self::Owned(values) => Some(values),
+            Self::Backed { .. } => None,
         }
     }
 }
@@ -891,7 +894,6 @@ pub mod artifact_serde {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
-                huge_artifact_cache: OnceLock::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -917,7 +919,6 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -930,7 +931,8 @@ pub mod artifact_serde {
     }
 
     #[derive(Clone, Copy)]
-    struct FastLayout {
+    #[doc(hidden)]
+    pub struct FastLayout {
         state_count: usize,
         transition_count: usize,
         epsilon_count: usize,
@@ -940,6 +942,13 @@ pub mod artifact_serde {
         state_id_width: usize,
         terminal_id_width: usize,
         len: usize,
+    }
+
+    impl FastLayout {
+        #[inline]
+        pub fn len(self) -> usize {
+            self.len
+        }
     }
 
     fn fast_layout(tokenizer: &Tokenizer, dfa: &DFA) -> FastLayout {
@@ -1029,19 +1038,22 @@ pub mod artifact_serde {
     /// Exact TKF2 wire length without constructing the wire buffer. Returns
     /// `None` only for the uncommon compressed-segment representation, whose
     /// direct writer requires materialized transition rows.
+    pub fn fast_layout_for_write(tokenizer: &Tokenizer) -> Option<FastLayout> {
+        (tokenizer.compressed_transition_segments.is_empty()
+            && tokenizer.packed_compressed_transition_segments.is_empty())
+        .then(|| fast_layout(tokenizer, &tokenizer.dfa))
+    }
+
     pub fn fast_len(tokenizer: &Tokenizer) -> Option<usize> {
-        tokenizer
-            .compressed_transition_segments
-            .is_empty()
-            .then(|| fast_layout(tokenizer, &tokenizer.dfa).len)
+        fast_layout_for_write(tokenizer).map(FastLayout::len)
     }
 
     fn write_fast_bytes_for_dfa(
         tokenizer: &Tokenizer,
         dfa: &DFA,
+        layout: FastLayout,
         out: &mut [u8],
     ) -> Result<(), String> {
-        let layout = fast_layout(tokenizer, dfa);
         if out.len() != layout.len {
             return Err(format!(
                 "fast tokenizer output has length {}, expected {}",
@@ -1094,21 +1106,91 @@ pub mod artifact_serde {
                 put(out, &mut pos, &word.to_le_bytes());
             }
         }
-        put_offsets(
-            out,
-            &mut pos,
-            &mut states.iter().map(|state| state.transitions.len()),
-        );
-        for state in states {
-            for (byte, _) in state.transitions.iter() {
-                out[pos] = byte;
-                pos += 1;
+        let packed_transitions = tokenizer
+            .packed_runtime_transitions
+            .as_deref()
+            .filter(|packed| {
+                packed.state_count() == states.len()
+                    && packed.bytes.as_slice().len() == layout.transition_count
+            });
+        if let Some(packed) = packed_transitions {
+            for &offset in packed.byte_offsets.iter() {
+                put_u32(out, &mut pos, offset);
             }
-        }
-        for state in states {
-            for &target in state.transitions.values() {
-                debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
-                put_id(out, &mut pos, target, layout.state_id_width);
+            put(out, &mut pos, packed.bytes.as_slice());
+            match (&packed.targets, layout.state_id_width) {
+                (PackedRuntimeTargets::U16(values), 2) if cfg!(target_endian = "little") => {
+                    // SAFETY: u16 has no padding, the source allocation remains
+                    // alive for the copy, and TKF2 is explicitly little-endian.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            values.as_ptr().cast::<u8>(),
+                            values.len() * std::mem::size_of::<u16>(),
+                        )
+                    };
+                    put(out, &mut pos, bytes);
+                }
+                (PackedRuntimeTargets::U32(values), 4) if cfg!(target_endian = "little") => {
+                    // SAFETY: u32 has no padding; see the U16 branch above.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            values.as_ptr().cast::<u8>(),
+                            values.len() * std::mem::size_of::<u32>(),
+                        )
+                    };
+                    put(out, &mut pos, bytes);
+                }
+                (
+                    PackedRuntimeTargets::BackedU16 {
+                        backing,
+                        start,
+                        len,
+                    },
+                    2,
+                ) => put(out, &mut pos, &backing[*start..*start + *len * 2]),
+                (
+                    PackedRuntimeTargets::BackedU32 {
+                        backing,
+                        start,
+                        len,
+                    },
+                    4,
+                ) => put(out, &mut pos, &backing[*start..*start + *len * 4]),
+                _ => {
+                    for state in 0..states.len() as u32 {
+                        let (_, targets) = packed
+                            .row(state)
+                            .expect("packed runtime transition rows must cover every state");
+                        for index in 0..targets.len() {
+                            put_id(
+                                out,
+                                &mut pos,
+                                targets
+                                    .get(index)
+                                    .expect("packed runtime target row length was validated"),
+                                layout.state_id_width,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            put_offsets(
+                out,
+                &mut pos,
+                &mut states.iter().map(|state| state.transitions.len()),
+            );
+            for state in states {
+                for (byte, _) in state.transitions.iter() {
+                    out[pos] = byte;
+                    pos += 1;
+                }
+            }
+            for state in states {
+                for &target in state.transitions.values() {
+                    debug_assert!(layout.state_id_width == 4 || target <= u16::MAX as u32);
+                    put_id(out, &mut pos, target, layout.state_id_width);
+                }
             }
         }
         put_offsets(
@@ -1159,7 +1241,24 @@ pub mod artifact_serde {
         if !tokenizer.compressed_transition_segments.is_empty() {
             return Err("direct fast tokenizer write requires materialized transitions".to_owned());
         }
-        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, out)
+        let layout = fast_layout(tokenizer, &tokenizer.dfa);
+        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out)
+    }
+
+    /// Write TKF2 using an exact layout already computed by the caller. This
+    /// avoids rescanning every DFA state after `fast_layout_for_write()` was
+    /// used to size the final artifact section.
+    pub fn write_fast_bytes_with_layout(
+        tokenizer: &Tokenizer,
+        layout: FastLayout,
+        out: &mut [u8],
+    ) -> Result<(), String> {
+        if !tokenizer.compressed_transition_segments.is_empty()
+            || !tokenizer.packed_compressed_transition_segments.is_empty()
+        {
+            return Err("direct fast tokenizer write requires materialized transitions".to_owned());
+        }
+        write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out)
     }
 
     /// Runtime-native current-format tokenizer wire. Unlike the older packed
@@ -1175,12 +1274,13 @@ pub mod artifact_serde {
             materialized = tokenizer.materialized_dfa();
             &materialized
         };
-        let len = fast_layout(tokenizer, dfa).len;
+        let layout = fast_layout(tokenizer, dfa);
+        let len = layout.len;
         let mut out = Vec::<u8>::with_capacity(len);
         unsafe {
             out.set_len(len);
         }
-        write_fast_bytes_for_dfa(tokenizer, dfa, &mut out)
+        write_fast_bytes_for_dfa(tokenizer, dfa, layout, &mut out)
             .expect("exact fast tokenizer layout should always write successfully");
         out
     }
@@ -1509,7 +1609,6 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -1743,10 +1842,474 @@ pub mod artifact_serde {
         Some((final_rows, final_ids, future_rows, future_ids))
     }
 
+    fn packed_row_ids_from_u32(ids: Vec<u32>, row_count: usize) -> PackedRowIds {
+        match packed_row_id_width(row_count) {
+            1 => PackedRowIds::U8(Arc::from(
+                ids.into_iter()
+                    .map(|id| id as u8)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )),
+            2 => PackedRowIds::U16(Arc::from(
+                ids.into_iter()
+                    .map(|id| id as u16)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )),
+            4 => PackedRowIds::U32(Arc::from(ids.into_boxed_slice())),
+            _ => unreachable!(),
+        }
+    }
+
+    fn bitset_from_words2(words: [u64; 2], terminal_count: usize) -> BitSet {
+        let mut bits = BitSet::new(terminal_count);
+        for (slot, value) in bits.words_mut().iter_mut().zip(words) {
+            *slot = value;
+        }
+        bits
+    }
+
+    /// Convert a large compressed-suffix tokenizer into the same packed form
+    /// used by freshly loaded TKS3 artifacts. This is a runtime storage change,
+    /// not a serialization cache: subsequent tokenization reads packed metadata
+    /// and packed compressed transition rows directly.
+    pub fn compact_large_runtime(tokenizer: &mut Tokenizer) -> bool {
+        const MIN_COMPRESSED_STATES: usize = 100_000;
+        if tokenizer.compressed_transition_segments.is_empty()
+            || tokenizer.packed_runtime_metadata.is_some()
+            || !tokenizer.packed_compressed_transition_segments.is_empty()
+            || tokenizer.num_terminals > 128
+        {
+            return false;
+        }
+        let compressed_states = tokenizer
+            .compressed_transition_segments
+            .iter()
+            .map(|segment| segment.state_count as usize)
+            .sum::<usize>();
+        if compressed_states < MIN_COMPRESSED_STATES {
+            return false;
+        }
+
+        let packed_builds = match tokenizer
+            .compressed_transition_segments
+            .iter()
+            .map(packed_segment_build)
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(value) => value,
+            None => return false,
+        };
+        let (final_rows_raw, final_ids, future_rows_raw, future_ids) =
+            match metadata_rows(tokenizer) {
+                Some(value) => value,
+                None => return false,
+            };
+
+        let terminal_count = tokenizer.num_terminals as usize;
+        let finalizer_rows = final_rows_raw
+            .into_iter()
+            .map(|words| bitset_from_words2(words, terminal_count))
+            .collect::<Vec<_>>();
+        let finalizer_lists = finalizer_rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|terminal| terminal as TerminalID)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .collect::<Vec<_>>();
+        let future_rows = future_rows_raw
+            .into_iter()
+            .map(|words| bitset_from_words2(words, terminal_count))
+            .collect::<Vec<_>>();
+
+        let mut epsilon_states = Vec::<u32>::new();
+        let mut epsilon_offsets = vec![0u32];
+        let mut epsilon_targets = Vec::<u32>::new();
+        for (state, row) in tokenizer.dfa.states().iter().enumerate() {
+            if row.epsilon_transitions.is_empty() {
+                continue;
+            }
+            epsilon_states.push(state as u32);
+            epsilon_targets.extend_from_slice(&row.epsilon_transitions);
+            let Some(end) = u32::try_from(epsilon_targets.len()).ok() else {
+                return false;
+            };
+            epsilon_offsets.push(end);
+        }
+
+        let metadata = Arc::new(PackedTokenizerMetadata {
+            state_count: tokenizer.dfa.num_states() as u32,
+            finalizer_row_ids: packed_row_ids_from_u32(final_ids, finalizer_rows.len()),
+            finalizer_rows: Arc::from(finalizer_rows.into_boxed_slice()),
+            finalizer_lists: Arc::from(finalizer_lists.into_boxed_slice()),
+            future_row_ids: packed_row_ids_from_u32(future_ids, future_rows.len()),
+            future_rows: Arc::from(future_rows.into_boxed_slice()),
+            epsilon_states: Arc::from(epsilon_states.into_boxed_slice()),
+            epsilon_offsets: Arc::from(epsilon_offsets.into_boxed_slice()),
+            epsilon_targets: Arc::from(epsilon_targets.into_boxed_slice()),
+        });
+
+        let packed_segments = tokenizer
+            .compressed_transition_segments
+            .iter()
+            .zip(packed_builds)
+            .map(|(segment, packed)| PackedCompressedTransitionSegment {
+                state_offset: segment.state_offset,
+                state_count: segment.state_count,
+                byte_to_class: PackedRuntimeBytes::Owned(Arc::clone(&segment.byte_to_class)),
+                class_members: Arc::clone(&segment.class_members),
+                row_ids: packed_row_ids_from_u32(
+                    packed.row_ids,
+                    packed.row_offsets.len().saturating_sub(1),
+                ),
+                row_offsets: Arc::from(packed.row_offsets.into_boxed_slice()),
+                classes: PackedRuntimeBytes::Owned(Arc::from(packed.classes.into_boxed_slice())),
+                deltas: PackedI16Values::Owned(Arc::from(packed.deltas.into_boxed_slice())),
+                overflow_indices: Arc::from(packed.overflow_indices.into_boxed_slice()),
+                overflow_deltas: Arc::from(packed.overflow_deltas.into_boxed_slice()),
+                expanded_transition_count: segment.expanded_transition_count,
+            })
+            .collect::<Vec<_>>();
+
+        tokenizer.packed_runtime_metadata = Some(metadata);
+        tokenizer.packed_compressed_transition_segments =
+            Arc::from(packed_segments.into_boxed_slice());
+        tokenizer.compressed_transition_segments = Arc::from([]);
+        tokenizer.invalidate_derived_caches();
+        true
+    }
+
+    /// Add contiguous runtime transition storage for large ordinary DFAs.  The
+    /// full DFA is retained for compiler/analysis consumers, but runtime byte
+    /// stepping immediately prefers this sidecar.  This is therefore a real
+    /// runtime representation, not serialized-wire precomputation.
+    pub fn compact_large_fast_runtime(tokenizer: &mut Tokenizer) -> bool {
+        const MIN_TRANSITIONS: usize = 1_000_000;
+        if tokenizer.packed_runtime_transitions.is_some()
+            || !tokenizer.packed_runtime_transition_segments.is_empty()
+            || !tokenizer.compressed_transition_segments.is_empty()
+            || !tokenizer.packed_compressed_transition_segments.is_empty()
+        {
+            return false;
+        }
+        let transition_count = tokenizer.dfa.transition_count();
+        if transition_count < MIN_TRANSITIONS {
+            return false;
+        }
+        let states = tokenizer.dfa.states();
+        let state_count = states.len();
+        let mut offsets = Vec::<u32>::with_capacity(state_count + 1);
+        let mut bytes = Vec::<u8>::with_capacity(transition_count);
+        offsets.push(0);
+        if state_count <= u16::MAX as usize + 1 {
+            let mut targets = Vec::<u16>::with_capacity(transition_count);
+            for state in states {
+                bytes.extend(state.transitions.iter().map(|(byte, _)| byte));
+                targets.extend(state.transitions.values().map(|&target| {
+                    u16::try_from(target).expect("u16-sized DFA must have u16 transition targets")
+                }));
+                offsets.push(
+                    u32::try_from(bytes.len())
+                        .expect("runtime tokenizer transition count must fit u32"),
+                );
+            }
+            tokenizer.packed_runtime_transitions = Some(Arc::new(PackedRuntimeTransitions {
+                byte_offsets: Arc::from(offsets.into_boxed_slice()),
+                bytes: PackedRuntimeBytes::Owned(Arc::from(bytes.into_boxed_slice())),
+                targets: PackedRuntimeTargets::U16(Arc::from(targets.into_boxed_slice())),
+            }));
+        } else {
+            let mut targets = Vec::<u32>::with_capacity(transition_count);
+            for state in states {
+                bytes.extend(state.transitions.iter().map(|(byte, _)| byte));
+                targets.extend(state.transitions.values().copied());
+                offsets.push(
+                    u32::try_from(bytes.len())
+                        .expect("runtime tokenizer transition count must fit u32"),
+                );
+            }
+            tokenizer.packed_runtime_transitions = Some(Arc::new(PackedRuntimeTransitions {
+                byte_offsets: Arc::from(offsets.into_boxed_slice()),
+                bytes: PackedRuntimeBytes::Owned(Arc::from(bytes.into_boxed_slice())),
+                targets: PackedRuntimeTargets::U32(Arc::from(targets.into_boxed_slice())),
+            }));
+        }
+        true
+    }
+
+    fn write_packed_row_ids_any(out: &mut Vec<u8>, ids: &PackedRowIds, width: usize) {
+        match (ids, width) {
+            (PackedRowIds::U8(values), 1) => out.extend_from_slice(values),
+            (PackedRowIds::U16(values), 2) if cfg!(target_endian = "little") => {
+                // SAFETY: u16 has no padding and TKS3 is little-endian.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        values.len() * std::mem::size_of::<u16>(),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            }
+            (PackedRowIds::U32(values), 4) if cfg!(target_endian = "little") => {
+                // SAFETY: u32 has no padding and TKS3 is little-endian.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        values.len() * std::mem::size_of::<u32>(),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            }
+            _ => {
+                for index in 0..ids.len() {
+                    let id = ids
+                        .get(index)
+                        .expect("packed row id was validated to cover every state")
+                        as u32;
+                    match width {
+                        1 => out.push(id as u8),
+                        2 => out.extend_from_slice(&(id as u16).to_le_bytes()),
+                        4 => out.extend_from_slice(&id.to_le_bytes()),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn extend_u32_le(out: &mut Vec<u8>, values: &[u32]) {
+        if cfg!(target_endian = "little") {
+            // SAFETY: u32 has no padding and the source slice outlives the copy.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(values),
+                )
+            };
+            out.extend_from_slice(bytes);
+        } else {
+            for &value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    #[inline]
+    fn extend_i16_le(out: &mut Vec<u8>, values: &[i16]) {
+        if cfg!(target_endian = "little") {
+            // SAFETY: i16 has no padding and the source slice outlives the copy.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(values),
+                )
+            };
+            out.extend_from_slice(bytes);
+        } else {
+            for &value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    #[inline]
+    fn extend_i32_le(out: &mut Vec<u8>, values: &[i32]) {
+        if cfg!(target_endian = "little") {
+            // SAFETY: i32 has no padding and the source slice outlives the copy.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(values),
+                )
+            };
+            out.extend_from_slice(bytes);
+        } else {
+            for &value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    fn build_huge_bytes_from_packed_runtime(tokenizer: &Tokenizer) -> Option<Vec<u8>> {
+        let metadata = tokenizer.packed_runtime_metadata.as_deref()?;
+        let segments = tokenizer.packed_compressed_transition_segments.as_ref();
+        if segments.is_empty()
+            || tokenizer.num_terminals > 128
+            || tokenizer.packed_runtime_transitions.is_some()
+            || !tokenizer.packed_runtime_transition_segments.is_empty()
+            || !tokenizer.packed_runtime_metadata_segments.is_empty()
+        {
+            return None;
+        }
+        let state_count = tokenizer.dfa.num_states();
+        if metadata.state_count as usize != state_count
+            || metadata.finalizer_row_ids.len() != state_count
+            || metadata.future_row_ids.len() != state_count
+        {
+            return None;
+        }
+        let prefix_state_count = segments.first()?.state_offset as usize;
+        let mut expected = prefix_state_count;
+        for segment in segments {
+            if segment.state_offset as usize != expected {
+                return None;
+            }
+            expected = expected.checked_add(segment.state_count as usize)?;
+        }
+        if expected != state_count {
+            return None;
+        }
+
+        let prefix_states = &tokenizer.dfa.states()[..prefix_state_count];
+        let residual_transition_count = prefix_states
+            .iter()
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        let expanded_transition_count = residual_transition_count
+            + segments
+                .iter()
+                .map(|segment| segment.expanded_transition_count)
+                .sum::<usize>();
+        let final_width = packed_row_id_width(metadata.finalizer_rows.len());
+        let future_width = packed_row_id_width(metadata.future_rows.len());
+
+        let metadata_word_count = (tokenizer.num_terminals as usize).div_ceil(64);
+        let mut exact_len = HUGE_WIRE_HEADER_LEN
+            + tokenizer.num_terminals as usize * 32
+            + (prefix_state_count + 1) * 4
+            + residual_transition_count
+            + residual_transition_count * 4
+            + metadata.finalizer_rows.len() * metadata_word_count * 8
+            + metadata.future_rows.len() * metadata_word_count * 8
+            + state_count * final_width
+            + state_count * future_width
+            + metadata.epsilon_states.len() * 4
+            + metadata.epsilon_offsets.len() * 4
+            + metadata.epsilon_targets.len() * 4;
+        for segment in segments {
+            let row_count = segment.row_offsets.len().checked_sub(1)?;
+            let entry_count = segment.classes.as_slice().len();
+            let row_width = packed_row_id_width(row_count);
+            exact_len = exact_len
+                .checked_add(28)?
+                .checked_add(segment.byte_to_class.as_slice().len())?
+                .checked_add(segment.row_ids.len().checked_mul(row_width)?)?
+                .checked_add(segment.row_offsets.len().checked_mul(4)?)?
+                .checked_add(entry_count)?
+                .checked_add(entry_count.checked_mul(2)?)?
+                .checked_add(segment.overflow_indices.len().checked_mul(4)?)?
+                .checked_add(segment.overflow_deltas.len().checked_mul(4)?)?;
+        }
+        let mut out = Vec::<u8>::with_capacity(exact_len);
+        out.extend_from_slice(HUGE_WIRE_MAGIC);
+        for value in [
+            tokenizer.num_terminals,
+            state_count as u32,
+            prefix_state_count as u32,
+            residual_transition_count as u32,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(expanded_transition_count as u64).to_le_bytes());
+        for value in [
+            segments.len() as u32,
+            metadata.finalizer_rows.len() as u32,
+            metadata.future_rows.len() as u32,
+            metadata.epsilon_states.len() as u32,
+            metadata.epsilon_targets.len() as u32,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&[final_width as u8, future_width as u8, 0, 0]);
+        debug_assert_eq!(out.len(), HUGE_WIRE_HEADER_LEN);
+        for terminal in 0..tokenizer.num_terminals {
+            for word in tokenizer.dfa.group_id_to_u8set(terminal).to_words() {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let mut end = 0u32;
+        out.extend_from_slice(&end.to_le_bytes());
+        for state in prefix_states {
+            end += state.transitions.len() as u32;
+            out.extend_from_slice(&end.to_le_bytes());
+        }
+        for state in prefix_states {
+            out.extend(state.transitions.iter().map(|(byte, _)| byte));
+        }
+        for state in prefix_states {
+            for &target in state.transitions.values() {
+                out.extend_from_slice(&target.to_le_bytes());
+            }
+        }
+        for row in metadata.finalizer_rows.iter() {
+            for word in row.words().iter().take(metadata_word_count) {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        for row in metadata.future_rows.iter() {
+            for word in row.words().iter().take(metadata_word_count) {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        write_packed_row_ids_any(&mut out, &metadata.finalizer_row_ids, final_width);
+        write_packed_row_ids_any(&mut out, &metadata.future_row_ids, future_width);
+        extend_u32_le(&mut out, &metadata.epsilon_states);
+        extend_u32_le(&mut out, &metadata.epsilon_offsets);
+        extend_u32_le(&mut out, &metadata.epsilon_targets);
+        for segment in segments {
+            let class_count = u16::try_from(segment.class_members.len()).ok()?;
+            let row_count = segment.row_offsets.len().checked_sub(1)?;
+            let entry_count = segment.classes.as_slice().len();
+            let row_width = packed_row_id_width(row_count);
+            for value in [
+                segment.state_offset,
+                segment.state_count,
+                u32::try_from(segment.expanded_transition_count).ok()?,
+                u32::try_from(row_count).ok()?,
+                u32::try_from(entry_count).ok()?,
+                u32::try_from(segment.overflow_indices.len()).ok()?,
+            ] {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            out.extend_from_slice(&class_count.to_le_bytes());
+            out.extend_from_slice(&[row_width as u8, 0]);
+            out.extend_from_slice(segment.byte_to_class.as_slice());
+            write_packed_row_ids_any(&mut out, &segment.row_ids, row_width);
+            extend_u32_le(&mut out, &segment.row_offsets);
+            out.extend_from_slice(segment.classes.as_slice());
+            if let Some(bytes) = segment.deltas.backed_le_bytes() {
+                out.extend_from_slice(bytes);
+            } else if let Some(values) = segment.deltas.owned_values() {
+                extend_i16_le(&mut out, values);
+            } else {
+                for index in 0..entry_count {
+                    out.extend_from_slice(
+                        &segment
+                            .deltas
+                            .get(index)
+                            .expect("packed delta row must cover every entry")
+                            .to_le_bytes(),
+                    );
+                }
+            }
+            extend_u32_le(&mut out, &segment.overflow_indices);
+            extend_i32_le(&mut out, &segment.overflow_deltas);
+        }
+        debug_assert_eq!(out.len(), exact_len);
+        Some(out)
+    }
+
     /// Build the compact giant-tokenizer artifact. This is intentionally gated
     /// to the already-compressed suffix representation; normal tokenizers stay
     /// on TKF2 byte-for-byte.
     pub fn build_huge_bytes(tokenizer: &Tokenizer) -> Option<Vec<u8>> {
+        if tokenizer.compressed_transition_segments.is_empty() {
+            return build_huge_bytes_from_packed_runtime(tokenizer);
+        }
         let segments = tokenizer.compressed_transition_segments.as_ref();
         if segments.is_empty() || tokenizer.num_terminals > 128 {
             return None;
@@ -2356,7 +2919,6 @@ pub mod artifact_serde {
             packed_runtime_metadata: Some(metadata),
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from(packed_segments.into_boxed_slice()),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -2709,7 +3271,6 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures,
             matched_terminals_cache: OnceLock::new(),
@@ -2989,7 +3550,6 @@ pub mod compact_artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -3528,7 +4088,6 @@ mod packed_artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -4462,7 +5021,6 @@ impl Tokenizer {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
-                huge_artifact_cache: OnceLock::new(),
                 exprs: self.exprs.clone(),
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -4601,7 +5159,6 @@ impl Tokenizer {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
-                huge_artifact_cache: OnceLock::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -4750,7 +5307,6 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -4996,7 +5552,6 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5026,7 +5581,6 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
-            huge_artifact_cache: OnceLock::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5096,61 +5650,6 @@ impl Tokenizer {
     #[inline]
     pub fn has_packed_runtime_metadata(&self) -> bool {
         self.packed_runtime_metadata.is_some() || !self.packed_runtime_metadata_segments.is_empty()
-    }
-
-    /// Precompute the giant-tokenizer wire outside `Constraint::save()`. This
-    /// is deliberately restricted to the existing compressed-suffix shape;
-    /// ordinary tokenizers remain on TKF2 and pay no extra compile work.
-    fn prepare_artifact_wire_cache_min_bytes(&self, min_bytes: usize) {
-        if self.huge_artifact_cache.get().is_some()
-            || self.packed_runtime_metadata.is_some()
-        {
-            return;
-        }
-        const HUGE_FAST_WIRE_THRESHOLD: usize = 64 * 1024 * 1024;
-        let estimated = artifact_serde::estimated_fast_len(self);
-        if estimated < min_bytes {
-            return;
-        }
-        let bytes = if estimated > HUGE_FAST_WIRE_THRESHOLD {
-            // Prefer the packed giant suffix form when the topology admits it.
-            // Other large synthesized tokenizers can still have compressed
-            // transition segments whose compact current wire is TKS2.  Encode
-            // that once here as well rather than paying the same multi-ms
-            // segment serialization on every Constraint::save().
-            artifact_serde::build_huge_bytes(self).or_else(|| {
-                (!self.compressed_transition_segments.is_empty())
-                    .then(|| artifact_serde::to_segment_bytes(self))
-            })
-        } else {
-            // `fast_len()` is unavailable while compile-time compressed
-            // segments are still resident, but `to_fast_bytes()` already
-            // knows how to materialize those rows exactly. Large constraints
-            // should pay that cost once here, not on every save.
-            Some(artifact_serde::to_fast_bytes(self))
-        };
-        if let Some(bytes) = bytes {
-            let _ = self
-                .huge_artifact_cache
-                .set(Arc::from(bytes.into_boxed_slice()));
-        }
-    }
-
-    pub fn prepare_artifact_wire_cache(&self) {
-        self.prepare_artifact_wire_cache_min_bytes(1024 * 1024);
-    }
-
-    /// Large parser constraints are already paying for prepared immutable
-    /// serialization sections.  For those, cache ordinary TKF2 tokenizers too
-    /// once they are large enough that rebuilding them on first save is
-    /// measurable. Small constraints keep the historical 1 MiB threshold.
-    pub fn prepare_artifact_wire_cache_for_large_save(&self) {
-        self.prepare_artifact_wire_cache_min_bytes(128 * 1024);
-    }
-
-    #[inline]
-    pub fn prepared_artifact_wire_bytes(&self) -> Option<&[u8]> {
-        self.huge_artifact_cache.get().map(AsRef::as_ref)
     }
 
     pub fn has_compressed_transition_state(&self, state: u32) -> bool {

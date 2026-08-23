@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+﻿use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -469,25 +469,30 @@ pub mod artifact_serde {
         // per row) are dominated by independent hash-row construction. A 512
         // row floor left only two jobs on a 16-thread host. Keep chunks large
         // enough to amortize Rayon, but expose the row-allocation parallelism.
-        let chunk_size = rows.len().div_ceil(target_chunks).max(512);
-        let chunks = rows
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut body = Vec::new();
-                for row in chunk {
-                    put_fixed_u32(&mut body, row.len() as u32);
-                    for (terminal, action) in row.iter() {
-                        put_fixed_u32(&mut body, terminal);
-                        encode_simple_action(&mut body, action);
-                    }
+        let encode_chunk = |chunk: &[ActionRow]| {
+            let mut body = Vec::new();
+            for row in chunk {
+                put_fixed_u32(&mut body, row.len() as u32);
+                for (terminal, action) in row.iter() {
+                    put_fixed_u32(&mut body, terminal);
+                    encode_simple_action(&mut body, action);
                 }
-                body
-            })
-            .collect::<Vec<_>>();
-        let chunk_rows = rows
-            .chunks(chunk_size)
-            .map(|chunk| chunk.len())
-            .collect::<Vec<_>>();
+            }
+            body
+        };
+        let (chunks, chunk_rows) = if rayon::current_num_threads() == 1 {
+            (vec![encode_chunk(rows)], vec![rows.len()])
+        } else {
+            let chunk_size = rows.len().div_ceil(target_chunks).max(64);
+            (
+                rows.par_chunks(chunk_size)
+                    .map(encode_chunk)
+                    .collect::<Vec<_>>(),
+                rows.chunks(chunk_size)
+                    .map(|chunk| chunk.len())
+                    .collect::<Vec<_>>(),
+            )
+        };
         let payload_len = chunks.iter().map(Vec::len).sum::<usize>();
         let mut out = Vec::with_capacity(
             CHUNKED_ACTION_HEADER_LEN + chunks.len() * (4 + 8) + payload_len,

@@ -288,6 +288,7 @@ pub struct PackedDwaTokenSetInventory {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 struct PackedRuntimeTokenSetSpan {
     start: u32,
     len: u32,
@@ -360,6 +361,11 @@ pub struct PackedRuntimeDwa {
     /// Zero-copy DWF3 view used by current-format loads. Compiler-produced
     /// constraints keep the owned fields below and leave this unset.
     backed: Option<BackedPackedRuntimeDwa>,
+    /// Owned narrow execution view for compiler-produced DWAs whose row/state/
+    /// weight domains fit the DWF6 widths. Runtime transition/state/weight
+    /// access prefers these arrays, so they are live execution storage rather
+    /// than serialization-only preparation.
+    owned_narrow: Option<OwnedNarrowPackedRuntimeDwa>,
     // DWF1 compatibility representation: one decoded range slab per wire
     // chunk plus token-id -> (chunk,local) indirection.
     token_set_chunks: Box<[PackedRuntimeTokenSetChunk]>,
@@ -368,6 +374,11 @@ pub struct PackedRuntimeDwa {
     // carries per-chunk set/range counts, so the loader can allocate these
     // arrays once and decode all chunks directly into disjoint final slices.
     flat_token_ranges: Option<Box<[[u32; 2]]>>,
+    /// Narrow runtime token-set slab used when every internal token id fits
+    /// in u16. This is execution data, not a serialization cache: mask
+    /// planning reads these ranges directly and DWF6 can persist the slab
+    /// without re-encoding millions of RangeSetBlaze ranges.
+    flat_token_ranges_u16: Option<Box<[[u16; 2]]>>,
     flat_token_spans: Option<Box<[PackedRuntimeTokenSetSpan]>>,
     // Freshly compiled constraints already own canonical interned token sets.
     // Keep those Arcs directly instead of immediately copying millions of
@@ -393,6 +404,109 @@ pub struct PackedRuntimeDwa {
 }
 
 #[derive(Debug)]
+struct OwnedNarrowPackedRuntimeDwa {
+    /// Mixed live token-range slab. Compact sets use one u16 per range
+    /// (13-bit start + 3-bit length code); selected large sets use two u16s per
+    /// range (`start,end`) so masking can take the old flat16 fast path.
+    /// `token_spans.start` is the byte offset into this slab; bit 0 marks a
+    /// flat16 set (real byte offsets are always even). The exact same marked
+    /// offsets and slab bytes are persisted by DWF8, so this is runtime state,
+    /// not serialization preparation.
+    token_ranges: Box<[u16]>,
+    token_spans: Box<[PackedRuntimeTokenSetSpan]>,
+    /// Per-token-set starting index into `token_range_overflows`.
+    token_range_overflow_starts: Box<[u32]>,
+    /// Overflow lengths for compact token ranges whose three-bit code is 7.
+    /// DWF8 persists these as little-endian u16s.
+    token_range_overflows: Box<[u16]>,
+    /// Row-local [u16 label | u24 target | u16 weight-id] entries.
+    transitions: Box<[u8]>,
+    /// One packed (22-bit start, 10-bit len) word per transition row.
+    spans: Box<[u32]>,
+    /// One [u16 row | u16(final-weight+1)] record per state.
+    states: Box<[u8]>,
+    /// One [u16 geometry | u24 token-id-start | u8 full] record per weight.
+    weights: Box<[u8]>,
+    weight_token_ids: Box<[u16]>,
+}
+
+impl OwnedNarrowPackedRuntimeDwa {
+    const TRANSITION_STRIDE: usize = 7;
+    const STATE_STRIDE: usize = 4;
+    const WEIGHT_STRIDE: usize = 6;
+
+    #[inline]
+    fn read_u16(bytes: &[u8], pos: usize) -> Option<u16> {
+        Some(u16::from_le_bytes([
+            *bytes.get(pos)?,
+            *bytes.get(pos + 1)?,
+        ]))
+    }
+
+    #[inline]
+    fn read_u24(bytes: &[u8], pos: usize) -> Option<u32> {
+        Some(
+            *bytes.get(pos)? as u32
+                | ((*bytes.get(pos + 1)? as u32) << 8)
+                | ((*bytes.get(pos + 2)? as u32) << 16),
+        )
+    }
+
+    #[inline]
+    fn state(&self, id: u32) -> Option<PackedRuntimeState> {
+        let pos = id as usize * Self::STATE_STRIDE;
+        let row = Self::read_u16(&self.states, pos)? as u32;
+        let final_plus_one = Self::read_u16(&self.states, pos + 2)?;
+        Some(PackedRuntimeState {
+            row,
+            final_weight: if final_plus_one == 0 {
+                u32::MAX
+            } else {
+                final_plus_one as u32 - 1
+            },
+        })
+    }
+
+    #[inline]
+    fn span(&self, id: u32) -> Option<[u32; 2]> {
+        const SPAN_LEN_BITS: u32 = 10;
+        const SPAN_LEN_MASK: u32 = (1 << SPAN_LEN_BITS) - 1;
+        let packed = *self.spans.get(id as usize)?;
+        Some([packed >> SPAN_LEN_BITS, packed & SPAN_LEN_MASK])
+    }
+
+    #[inline]
+    fn label(&self, index: usize) -> Option<Label> {
+        let encoded = Self::read_u16(&self.transitions, index * Self::TRANSITION_STRIDE)?;
+        Some(if encoded == u16::MAX {
+            i32::MAX - 1
+        } else {
+            encoded as Label
+        })
+    }
+
+    #[inline]
+    fn target(&self, index: usize) -> Option<u32> {
+        Self::read_u24(&self.transitions, index * Self::TRANSITION_STRIDE + 2)
+    }
+
+    #[inline]
+    fn weight_id(&self, index: usize) -> Option<u32> {
+        Self::read_u16(&self.transitions, index * Self::TRANSITION_STRIDE + 5).map(u32::from)
+    }
+
+    #[inline]
+    fn weight(&self, id: u32) -> Option<PackedRuntimeWeight> {
+        let pos = id as usize * Self::WEIGHT_STRIDE;
+        Some(PackedRuntimeWeight {
+            geometry: Self::read_u16(&self.weights, pos)? as u32,
+            token_ids_start: Self::read_u24(&self.weights, pos + 2)?,
+            full: *self.weights.get(pos + 5)? as u32,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct BackedPackedRuntimeDwa {
     backing: Arc<Vec<u8>>,
     section_start: usize,
@@ -400,9 +514,23 @@ struct BackedPackedRuntimeDwa {
     /// DWF4/5 use a narrower directly-readable tail. DWF3 keeps the original
     /// fixed-width u32 representation.
     narrow: bool,
-    /// DWF5 interns repeated label sequences separately from the packed
-    /// target/weight stream. DWF4 keeps labels interleaved with target/weight.
+    /// DWF5/6 intern repeated label sequences separately from the transition
+    /// stream. DWF4 keeps labels interleaved with target/weight.
     label_dedup: bool,
+    /// DWF6 stores each transition as u24 target + u16 weight. DWF5 packs a
+    /// 17-bit target and 15-bit weight into one u32; DWF4 uses that same packed
+    /// u32 after each interleaved u16 label.
+    split_target_weight: bool,
+    /// DWF7 stores the owned runtime token-span table verbatim as
+    /// (u32 start, u32 len, u32 word_spans) followed by the flat u16 range slab.
+    /// Its remaining tail uses the ordinary wide runtime pools.
+    direct_token_spans: bool,
+    /// DWF8 uses the same narrow DWA tail as DWF6, but token ranges are the
+    /// compact live execution stream rather than fixed u16 endpoint pairs.
+    compact_token_ranges: bool,
+    compact_overflow_locations_start: usize,
+    compact_overflow_values_start: usize,
+    compact_overflow_count: usize,
     token_set_count: usize,
     token_locations_start: usize,
     token_word_spans_start: usize,
@@ -411,6 +539,11 @@ struct BackedPackedRuntimeDwa {
     chunk_starts: Box<[u32]>,
     chunk_lens: Box<[u32]>,
     geometry_offsets: Box<[u32]>,
+    /// DWF4/5/6/8 narrow geometries decoded once at load. These are tiny
+    /// compared with the transition/token slabs and are hit repeatedly by
+    /// mask-time weight lookup.
+    narrow_geometry_spans: Box<[[u32; 2]]>,
+    narrow_geometry_pairs: Box<[[u16; 2]]>,
     weights_start: usize,
     weight_count: usize,
     weight_token_ids_start: usize,
@@ -445,6 +578,15 @@ impl BackedPackedRuntimeDwa {
         let input = backing
             .get(section_start..section_end)
             .ok_or_else(|| "backed DWA section is outside artifact backing".to_owned())?;
+        if input.starts_with(b"DWF8") {
+            return Self::parse_dwf8(backing, section_start, section_len);
+        }
+        if input.starts_with(b"DWF7") {
+            return Self::parse_dwf7(backing, section_start, section_len);
+        }
+        if input.starts_with(b"DWF6") {
+            return Self::parse_dwf6(backing, section_start, section_len);
+        }
         if input.starts_with(b"DWF5") {
             return Self::parse_dwf5(backing, section_start, section_len);
         }
@@ -598,6 +740,12 @@ impl BackedPackedRuntimeDwa {
                 section_len,
                 narrow: false,
                 label_dedup: false,
+                split_target_weight: false,
+                direct_token_spans: false,
+                compact_token_ranges: false,
+                compact_overflow_locations_start: 0,
+                compact_overflow_values_start: 0,
+                compact_overflow_count: 0,
                 token_set_count,
                 token_locations_start,
                 token_word_spans_start,
@@ -606,6 +754,186 @@ impl BackedPackedRuntimeDwa {
                 chunk_starts: chunk_starts.into_boxed_slice(),
                 chunk_lens: chunk_lens.into_boxed_slice(),
                 geometry_offsets: geometry_offsets.into_boxed_slice(),
+                narrow_geometry_spans: Box::new([]),
+                narrow_geometry_pairs: Box::new([]),
+                weights_start,
+                weight_count,
+                weight_token_ids_start,
+                weight_token_id_count,
+                label_values_start,
+                label_value_count,
+                label_spans_start,
+                label_span_count,
+                target_values_start,
+                target_value_count,
+                target_spans_start,
+                target_span_count,
+                weight_values_start,
+                weight_value_count,
+                weight_spans_start,
+                weight_span_count,
+                rows_start,
+                row_count,
+                states_start,
+                state_count,
+            },
+        ))
+    }
+
+    /// DWF7 is the runtime-shaped zero-copy layout used by compiler-created
+    /// packed DWAs with a u16 token-range slab. Token spans and ranges are
+    /// persisted exactly in their runtime widths; the remaining DWA tail keeps
+    /// the ordinary wide fixed-width pools from DWF3. That makes fresh save a
+    /// sequence of bulk copies rather than a narrowing/repacking pass.
+    fn parse_dwf7(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        let section_end = section_start
+            .checked_add(section_len)
+            .ok_or_else(|| "overflowing DWF7 backing range".to_owned())?;
+        let input = backing
+            .get(section_start..section_end)
+            .ok_or_else(|| "DWF7 section is outside artifact backing".to_owned())?;
+        if input.len() < 16 || !input.starts_with(b"DWF7") {
+            return Err("invalid DWF7 runtime DWA header".to_owned());
+        }
+        #[inline]
+        fn read_u32(input: &[u8], pos: usize) -> Result<u32, String> {
+            let bytes: [u8; 4] = input
+                .get(pos..pos + 4)
+                .ok_or_else(|| "truncated DWF7 u32".to_owned())?
+                .try_into()
+                .expect("four-byte slice");
+            Ok(u32::from_le_bytes(bytes))
+        }
+        #[inline]
+        fn skip(pos: &mut usize, bytes: usize, len: usize, what: &str) -> Result<usize, String> {
+            let start = *pos;
+            *pos = pos
+                .checked_add(bytes)
+                .ok_or_else(|| format!("overflowing DWF7 {what} range"))?;
+            if *pos > len {
+                return Err(format!("truncated DWF7 {what}"));
+            }
+            Ok(start)
+        }
+
+        let start_state = read_u32(input, 4)?;
+        let token_set_count = read_u32(input, 8)? as usize;
+        let token_range_count = read_u32(input, 12)? as usize;
+        let mut pos = 16usize;
+        let token_locations_start = skip(
+            &mut pos,
+            token_set_count
+                .checked_mul(12)
+                .ok_or_else(|| "overflowing DWF7 token spans".to_owned())?,
+            input.len(),
+            "token spans",
+        )?;
+        let token_body_start = pos;
+        skip(
+            &mut pos,
+            token_range_count
+                .checked_mul(4)
+                .ok_or_else(|| "overflowing DWF7 token ranges".to_owned())?,
+            input.len(),
+            "token ranges",
+        )?;
+        let token_body_end = pos;
+        for index in 0..token_set_count {
+            let span = token_locations_start + index * 12;
+            let start = read_u32(input, span)? as usize;
+            let len = read_u32(input, span + 4)? as usize;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| "overflowing DWF7 token span".to_owned())?;
+            if end > token_range_count {
+                return Err("DWF7 token span is outside range slab".to_owned());
+            }
+        }
+
+        let geometry_count = read_u32(input, pos)? as usize;
+        pos += 4;
+        let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        for _ in 0..geometry_count {
+            geometry_offsets.push(
+                u32::try_from(pos).map_err(|_| "DWF7 geometry offset exceeds u32".to_owned())?,
+            );
+            let count = read_u32(input, pos)? as usize;
+            pos += 4;
+            skip(
+                &mut pos,
+                count
+                    .checked_mul(8)
+                    .ok_or_else(|| "overflowing DWF7 geometry ranges".to_owned())?,
+                input.len(),
+                "geometry ranges",
+            )?;
+        }
+
+        macro_rules! fixed_section {
+            ($name:literal, $stride:expr) => {{
+                let count = read_u32(input, pos)? as usize;
+                pos += 4;
+                let start = skip(
+                    &mut pos,
+                    count
+                        .checked_mul($stride)
+                        .ok_or_else(|| format!("overflowing DWF7 {}", $name))?,
+                    input.len(),
+                    $name,
+                )?;
+                (start, count)
+            }};
+        }
+        let (weights_start, weight_count) = fixed_section!("weights", 12);
+        let (weight_token_ids_start, weight_token_id_count) =
+            fixed_section!("weight token ids", 4);
+        let (label_values_start, label_value_count) = fixed_section!("label values", 4);
+        let (label_spans_start, label_span_count) = fixed_section!("label spans", 8);
+        let (target_values_start, target_value_count) = fixed_section!("target values", 4);
+        let (target_spans_start, target_span_count) = fixed_section!("target spans", 8);
+        let (weight_values_start, weight_value_count) =
+            fixed_section!("weight-id values", 4);
+        let (weight_spans_start, weight_span_count) = fixed_section!("weight-id spans", 8);
+        if label_span_count != target_span_count || label_span_count != weight_span_count {
+            return Err("DWF7 row-pool span counts do not match".to_owned());
+        }
+        let (rows_start, row_count) = fixed_section!("rows", 12);
+        let (states_start, state_count) = fixed_section!("states", 8);
+        if pos != input.len() {
+            return Err("trailing bytes in DWF7 runtime DWA".to_owned());
+        }
+        if state_count != 0 && start_state as usize >= state_count {
+            return Err("invalid DWF7 start state".to_owned());
+        }
+
+        Ok((
+            start_state,
+            Self {
+                backing,
+                section_start,
+                section_len,
+                narrow: false,
+                label_dedup: false,
+                split_target_weight: false,
+                direct_token_spans: true,
+                compact_token_ranges: false,
+                compact_overflow_locations_start: 0,
+                compact_overflow_values_start: 0,
+                compact_overflow_count: 0,
+                token_set_count,
+                token_locations_start,
+                token_word_spans_start: 0,
+                token_body_start,
+                token_body_end,
+                chunk_starts: Box::new([]),
+                chunk_lens: Box::new([]),
+                geometry_offsets: geometry_offsets.into_boxed_slice(),
+                narrow_geometry_spans: Box::new([]),
+                narrow_geometry_pairs: Box::new([]),
                 weights_start,
                 weight_count,
                 weight_token_ids_start,
@@ -640,7 +968,7 @@ impl BackedPackedRuntimeDwa {
         section_start: usize,
         section_len: usize,
     ) -> Result<(u32, Self), String> {
-        Self::parse_narrow(backing, section_start, section_len, false)
+        Self::parse_narrow(backing, section_start, section_len, false, false, false)
     }
 
     fn parse_dwf5(
@@ -648,7 +976,27 @@ impl BackedPackedRuntimeDwa {
         section_start: usize,
         section_len: usize,
     ) -> Result<(u32, Self), String> {
-        Self::parse_narrow(backing, section_start, section_len, true)
+        Self::parse_narrow(backing, section_start, section_len, true, false, false)
+    }
+
+    fn parse_dwf6(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        // DWF6 favors fresh-save speed over the DWF5 label dictionary: each
+        // transition is one row-local u16 label + u24 target + u16 weight.
+        // This keeps the wire directly readable while avoiding a whole-DWA
+        // hash/intern pass during every independent save.
+        Self::parse_narrow(backing, section_start, section_len, false, true, false)
+    }
+
+    fn parse_dwf8(
+        backing: Arc<Vec<u8>>,
+        section_start: usize,
+        section_len: usize,
+    ) -> Result<(u32, Self), String> {
+        Self::parse_narrow(backing, section_start, section_len, false, true, true)
     }
 
     fn parse_narrow(
@@ -656,6 +1004,8 @@ impl BackedPackedRuntimeDwa {
         section_start: usize,
         section_len: usize,
         label_dedup: bool,
+        split_target_weight: bool,
+        compact_token_ranges: bool,
     ) -> Result<(u32, Self), String> {
         let section_end = section_start
             .checked_add(section_len)
@@ -663,7 +1013,15 @@ impl BackedPackedRuntimeDwa {
         let input = backing
             .get(section_start..section_end)
             .ok_or_else(|| "DWF4 section is outside artifact backing".to_owned())?;
-        let expected_magic = if label_dedup { b"DWF5" } else { b"DWF4" };
+        let expected_magic = if compact_token_ranges {
+            b"DWF8"
+        } else if split_target_weight {
+            b"DWF6"
+        } else if label_dedup {
+            b"DWF5"
+        } else {
+            b"DWF4"
+        };
         if input.len() < 16 || !input.starts_with(expected_magic) {
             return Err("invalid backed narrow runtime DWA header".to_owned());
         }
@@ -675,6 +1033,13 @@ impl BackedPackedRuntimeDwa {
                 .try_into()
                 .expect("two-byte slice");
             Ok(u16::from_le_bytes(bytes))
+        }
+        #[inline]
+        fn read_u24(input: &[u8], pos: usize) -> Result<u32, String> {
+            let bytes = input
+                .get(pos..pos + 3)
+                .ok_or_else(|| "truncated DWF4 u24".to_owned())?;
+            Ok(bytes[0] as u32 | ((bytes[1] as u32) << 8) | ((bytes[2] as u32) << 16))
         }
         #[inline]
         fn read_u32(input: &[u8], pos: usize) -> Result<u32, String> {
@@ -709,6 +1074,18 @@ impl BackedPackedRuntimeDwa {
             input.len(),
             "token locations",
         )?;
+        let compact_overflow_locations_start = if compact_token_ranges {
+            skip(
+                &mut pos,
+                token_set_count
+                    .checked_mul(3)
+                    .ok_or_else(|| "overflowing DWF8 overflow locations".to_owned())?,
+                input.len(),
+                "compact overflow locations",
+            )?
+        } else {
+            0
+        };
         let token_word_spans_start = skip(
             &mut pos,
             token_set_count
@@ -721,15 +1098,68 @@ impl BackedPackedRuntimeDwa {
         skip(&mut pos, token_body_len, input.len(), "token body")?;
         let token_body_end = pos;
 
+        let (compact_overflow_values_start, compact_overflow_count) = if compact_token_ranges {
+            if token_body_len % 2 != 0 {
+                return Err("DWF8 compact token body is not u16-aligned".to_owned());
+            }
+            let overflow_count = read_u32(input, pos)? as usize;
+            pos += 4;
+            let values_start = skip(
+                &mut pos,
+                overflow_count
+                    .checked_mul(2)
+                    .ok_or_else(|| "overflowing DWF8 compact overflow stream".to_owned())?,
+                input.len(),
+                "compact overflow stream",
+            )?;
+
+            // Validate only the tiny per-set offset tables. The multi-megabyte
+            // range body remains zero-copy and is decoded lazily by masking.
+            let mut previous_range = 0usize;
+            let mut previous_overflow = 0usize;
+            for index in 0..token_set_count {
+                let range_location = read_u24(input, token_locations_start + index * 3)? as usize;
+                let range_start = range_location & !1usize;
+                let overflow_start =
+                    read_u24(input, compact_overflow_locations_start + index * 3)? as usize;
+                if range_start < previous_range
+                    || range_start > token_body_len
+                    || range_start % 2 != 0
+                    || overflow_start < previous_overflow
+                    || overflow_start > overflow_count
+                {
+                    return Err("invalid DWF8 compact token offsets".to_owned());
+                }
+                previous_range = range_start;
+                previous_overflow = overflow_start;
+            }
+            (values_start, overflow_count)
+        } else {
+            (0, 0)
+        };
+
         let geometry_count = read_u32(input, pos)? as usize;
         pos += 4;
         let mut geometry_offsets = Vec::with_capacity(geometry_count);
+        let mut narrow_geometry_spans = Vec::<[u32; 2]>::with_capacity(geometry_count);
+        let mut narrow_geometry_pairs = Vec::<[u16; 2]>::new();
         for _ in 0..geometry_count {
             geometry_offsets.push(
                 u32::try_from(pos).map_err(|_| "DWF4 geometry offset exceeds u32".to_owned())?,
             );
             let count = read_u16(input, pos)? as usize;
             pos += 2;
+            let pair_start = narrow_geometry_pairs.len();
+            for index in 0..count {
+                let pair = pos + index * 4;
+                narrow_geometry_pairs.push([read_u16(input, pair)?, read_u16(input, pair + 2)?]);
+            }
+            narrow_geometry_spans.push([
+                u32::try_from(pair_start)
+                    .map_err(|_| "DWF4 geometry pair offset exceeds u32".to_owned())?,
+                u32::try_from(count)
+                    .map_err(|_| "DWF4 geometry pair count exceeds u32".to_owned())?,
+            ]);
             skip(
                 &mut pos,
                 count
@@ -780,8 +1210,9 @@ impl BackedPackedRuntimeDwa {
             let (label_values_start, label_value_count) = fixed_section!("label values", 2);
             let (label_spans_start, label_span_count) = fixed_section!("label spans", 4);
             let (rows_start, row_count) = fixed_section!("row label ids", 2);
+            let transition_stride = if split_target_weight { 5 } else { 4 };
             let (target_values_start, target_value_count) =
-                fixed_section!("target-weight entries", 4);
+                fixed_section!("target-weight entries", transition_stride);
             let (target_spans_start, target_span_count) = fixed_section!("transition spans", 4);
             if row_count != target_span_count {
                 return Err("DWF5 row/span count mismatch".to_owned());
@@ -803,9 +1234,13 @@ impl BackedPackedRuntimeDwa {
                 row_count,
             )
         } else {
-            // DWF4 interleaves u16 label + packed u32(target, weight), and all
-            // three compiler pools share one identity row/span mapping.
-            let (label_values_start, label_value_count) = fixed_section!("transition entries", 6);
+            // DWF4 interleaves u16 label + packed u32(target, weight). DWF6
+            // widens that row-local record to u16 label + u24 target + u16
+            // weight. All three compiler pools still share one identity
+            // row/span mapping, so no label dictionary is required.
+            let transition_stride = if split_target_weight { 7 } else { 6 };
+            let (label_values_start, label_value_count) =
+                fixed_section!("transition entries", transition_stride);
             let (label_spans_start, label_span_count) = fixed_section!("transition spans", 4);
             (
                 label_values_start,
@@ -840,6 +1275,12 @@ impl BackedPackedRuntimeDwa {
                 section_len,
                 narrow: true,
                 label_dedup,
+                split_target_weight,
+                direct_token_spans: false,
+                compact_token_ranges,
+                compact_overflow_locations_start,
+                compact_overflow_values_start,
+                compact_overflow_count,
                 token_set_count,
                 token_locations_start,
                 token_word_spans_start,
@@ -848,6 +1289,8 @@ impl BackedPackedRuntimeDwa {
                 chunk_starts: Box::new([]),
                 chunk_lens: Box::new([]),
                 geometry_offsets: geometry_offsets.into_boxed_slice(),
+                narrow_geometry_spans: narrow_geometry_spans.into_boxed_slice(),
+                narrow_geometry_pairs: narrow_geometry_pairs.into_boxed_slice(),
                 weights_start,
                 weight_count,
                 weight_token_ids_start,
@@ -874,23 +1317,41 @@ impl BackedPackedRuntimeDwa {
 
     #[inline(always)]
     fn read_u32(&self, relative: usize) -> Option<u32> {
-        let start = self.section_start.checked_add(relative)?;
-        let bytes = self.backing.get(start..start + 4)?;
-        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+        if relative.checked_add(4)? > self.section_len {
+            return None;
+        }
+        let ptr = unsafe {
+            self.backing
+                .as_ptr()
+                .add(self.section_start + relative)
+                .cast::<u32>()
+        };
+        Some(u32::from_le(unsafe { std::ptr::read_unaligned(ptr) }))
     }
 
     #[inline(always)]
     fn read_u16(&self, relative: usize) -> Option<u16> {
-        let start = self.section_start.checked_add(relative)?;
-        let bytes = self.backing.get(start..start + 2)?;
-        Some(u16::from_le_bytes(bytes.try_into().ok()?))
+        if relative.checked_add(2)? > self.section_len {
+            return None;
+        }
+        let ptr = unsafe {
+            self.backing
+                .as_ptr()
+                .add(self.section_start + relative)
+                .cast::<u16>()
+        };
+        Some(u16::from_le(unsafe { std::ptr::read_unaligned(ptr) }))
     }
 
     #[inline(always)]
     fn read_u24(&self, relative: usize) -> Option<u32> {
-        let start = self.section_start.checked_add(relative)?;
-        let bytes = self.backing.get(start..start + 3)?;
-        Some(bytes[0] as u32 | ((bytes[1] as u32) << 8) | ((bytes[2] as u32) << 16))
+        if relative.checked_add(3)? > self.section_len {
+            return None;
+        }
+        let ptr = unsafe { self.backing.as_ptr().add(self.section_start + relative) };
+        let lo = u16::from_le(unsafe { std::ptr::read_unaligned(ptr.cast::<u16>()) }) as u32;
+        let hi = unsafe { *ptr.add(2) } as u32;
+        Some(lo | (hi << 16))
     }
 
     #[inline(always)]
@@ -987,28 +1448,32 @@ impl BackedPackedRuntimeDwa {
 
     #[inline]
     fn geometry_len(&self, id: u32) -> Option<usize> {
-        let pos = *self.geometry_offsets.get(id as usize)? as usize;
         if self.narrow {
-            Some(self.read_u16(pos)? as usize)
-        } else {
-            Some(self.read_u32(pos)? as usize)
+            return self
+                .narrow_geometry_spans
+                .get(id as usize)
+                .map(|span| span[1] as usize);
         }
+        let pos = *self.geometry_offsets.get(id as usize)? as usize;
+        Some(self.read_u32(pos)? as usize)
     }
 
     #[inline]
     fn geometry_pair(&self, id: u32, index: usize) -> Option<(u32, u32)> {
+        if self.narrow {
+            let [start, len] = *self.narrow_geometry_spans.get(id as usize)?;
+            if index >= len as usize {
+                return None;
+            }
+            let pair = *self
+                .narrow_geometry_pairs
+                .get(start as usize + index)?;
+            return Some((pair[0] as u32, pair[1] as u32));
+        }
         let pos = *self.geometry_offsets.get(id as usize)? as usize;
-        let len = if self.narrow {
-            self.read_u16(pos)? as usize
-        } else {
-            self.read_u32(pos)? as usize
-        };
+        let len = self.read_u32(pos)? as usize;
         if index >= len {
             return None;
-        }
-        if self.narrow {
-            let pair = pos + 2 + index * 4;
-            return Some((self.read_u16(pair)? as u32, self.read_u16(pair + 2)? as u32));
         }
         let pair = pos + 4 + index * 8;
         Some((self.read_u32(pair)?, self.read_u32(pair + 4)?))
@@ -1045,6 +1510,21 @@ impl BackedPackedRuntimeDwa {
         let id = id as usize;
         if id >= self.token_set_count {
             return None;
+        }
+        if self.direct_token_spans {
+            let span = self.token_locations_start + id * 12;
+            let start = self.read_u32(span)? as usize;
+            let len = self.read_u32(span + 4)? as usize;
+            let word_spans = self.read_u32(span + 8)?;
+            let byte_start = start.checked_mul(4)?;
+            let byte_end = start.checked_add(len)?.checked_mul(4)?;
+            let body_len = self.token_body_end.checked_sub(self.token_body_start)?;
+            if byte_end > body_len {
+                return None;
+            }
+            let absolute_start = self.section_start + self.token_body_start + byte_start;
+            let absolute_end = self.section_start + self.token_body_start + byte_end;
+            return Some((self.backing.get(absolute_start..absolute_end)?, word_spans));
         }
         if self.narrow {
             let local = self.read_u24(self.token_locations_start + id * 3)? as usize;
@@ -1084,6 +1564,17 @@ pub struct PackedRuntimeTokenSetRef<'a> {
 #[derive(Clone, Copy)]
 enum PackedRuntimeTokenSetStorageRef<'a> {
     Flat(&'a [[u32; 2]]),
+    Flat16(&'a [[u16; 2]]),
+    BackedFlat16(&'a [u8]),
+    Compact16 {
+        ranges: &'a [u16],
+        overflows: &'a [u16],
+    },
+    Compact {
+        bytes: &'a [u8],
+        range_count: u32,
+        overflows: &'a [u8],
+    },
     Varint {
         bytes: &'a [u8],
         range_count: u32,
@@ -1101,6 +1592,10 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
     pub fn range_count(self) -> usize {
         match self.storage {
             PackedRuntimeTokenSetStorageRef::Flat(ranges) => ranges.len(),
+            PackedRuntimeTokenSetStorageRef::Flat16(ranges) => ranges.len(),
+            PackedRuntimeTokenSetStorageRef::BackedFlat16(bytes) => bytes.len() / 4,
+            PackedRuntimeTokenSetStorageRef::Compact16 { ranges, .. } => ranges.len(),
+            PackedRuntimeTokenSetStorageRef::Compact { range_count, .. } => range_count as usize,
             PackedRuntimeTokenSetStorageRef::Varint { range_count, .. } => range_count as usize,
             PackedRuntimeTokenSetStorageRef::Materialized(tokens) => tokens.ranges().len(),
         }
@@ -1116,6 +1611,10 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
         match self.storage {
             PackedRuntimeTokenSetStorageRef::Materialized(tokens) => Some(tokens),
             PackedRuntimeTokenSetStorageRef::Flat(_)
+            | PackedRuntimeTokenSetStorageRef::Flat16(_)
+            | PackedRuntimeTokenSetStorageRef::BackedFlat16(_)
+            | PackedRuntimeTokenSetStorageRef::Compact16 { .. }
+            | PackedRuntimeTokenSetStorageRef::Compact { .. }
             | PackedRuntimeTokenSetStorageRef::Varint { .. } => None,
         }
     }
@@ -1126,6 +1625,76 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
             PackedRuntimeTokenSetStorageRef::Flat(ranges) => {
                 for &[start, end] in ranges {
                     f(start, end);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::Flat16(ranges) => {
+                for &[start, end] in ranges {
+                    f(start as u32, end as u32);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::BackedFlat16(bytes) => {
+                for pair in bytes.chunks_exact(4) {
+                    let start = u16::from_le_bytes([pair[0], pair[1]]) as u32;
+                    let end = u16::from_le_bytes([pair[2], pair[3]]) as u32;
+                    f(start, end);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::Compact16 { ranges, overflows } => {
+                let mut overflow_pos = 0usize;
+                for &packed in ranges {
+                    let start = (packed & 0x1fff) as u32;
+                    let code = packed >> 13;
+                    let len = if code != 7 {
+                        code as u32
+                    } else {
+                        let Some(&len) = overflows.get(overflow_pos) else {
+                            return;
+                        };
+                        overflow_pos += 1;
+                        len as u32
+                    };
+                    f(start, start + len);
+                }
+            }
+            PackedRuntimeTokenSetStorageRef::Compact {
+                bytes,
+                range_count,
+                overflows,
+            } => {
+                let range_count = range_count as usize;
+                if bytes.len() < range_count.saturating_mul(2) {
+                    return;
+                }
+                let mut overflow_pos = 0usize;
+                let range_base = bytes.as_ptr();
+                let overflow_base = overflows.as_ptr();
+                let overflow_count = overflows.len() / 2;
+                for index in 0..range_count {
+                    // The compact wire is intentionally only two-byte aligned.
+                    // `read_unaligned` avoids constructing a temporary byte pair
+                    // for every hot-path range while remaining valid for backed
+                    // artifact storage with arbitrary base alignment.
+                    let packed = unsafe {
+                        std::ptr::read_unaligned(range_base.add(index * 2).cast::<u16>())
+                    };
+                    let packed = u16::from_le(packed);
+                    let start = (packed & 0x1fff) as u32;
+                    let code = packed >> 13;
+                    let len = if code != 7 {
+                        code as u32
+                    } else {
+                        if overflow_pos >= overflow_count {
+                            return;
+                        }
+                        let len = unsafe {
+                            std::ptr::read_unaligned(
+                                overflow_base.add(overflow_pos * 2).cast::<u16>(),
+                            )
+                        };
+                        overflow_pos += 1;
+                        u16::from_le(len) as u32
+                    };
+                    f(start, start + len);
                 }
             }
             PackedRuntimeTokenSetStorageRef::Varint {
@@ -1161,6 +1730,7 @@ impl<'a> PackedRuntimeTokenSetRef<'a> {
             }
         }
     }
+
 }
 
 #[derive(Clone, Copy)]
@@ -1267,6 +1837,9 @@ impl<'a> PackedRuntimeWeightRef<'a> {
 impl PackedRuntimeDwa {
     #[inline]
     fn weight_record(&self, id: u32) -> Option<PackedRuntimeWeight> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.weight(id);
+        }
         self.backed
             .as_ref()
             .map_or_else(|| self.weights.get(id as usize).copied(), |backed| backed.weight(id))
@@ -1274,6 +1847,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn state_record(&self, id: u32) -> Option<PackedRuntimeState> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.state(id);
+        }
         self.backed
             .as_ref()
             .map_or_else(|| self.states.get(id as usize).copied(), |backed| backed.state(id))
@@ -1281,6 +1857,16 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn row_record(&self, id: u32) -> Option<PackedRuntimeRow> {
+        if let Some(narrow) = &self.owned_narrow {
+            if id as usize >= narrow.spans.len() {
+                return None;
+            }
+            return Some(PackedRuntimeRow {
+                labels: id,
+                targets: id,
+                weights: id,
+            });
+        }
         self.backed
             .as_ref()
             .map_or_else(|| self.rows.get(id as usize).copied(), |backed| backed.row(id))
@@ -1304,6 +1890,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn weight_token_id_at(&self, index: usize) -> Option<u32> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.weight_token_ids.get(index).copied().map(u32::from);
+        }
         self.backed.as_ref().map_or_else(
             || self.weight_token_ids.get(index).copied(),
             |backed| backed.weight_token_id(index),
@@ -1312,6 +1901,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn pool_span_at(&self, kind: u8, id: u32) -> Option<[u32; 2]> {
+        if let Some(narrow) = &self.owned_narrow {
+            return (kind <= 2).then(|| narrow.span(id)).flatten();
+        }
         if let Some(backed) = &self.backed {
             return match kind {
                 0 => backed.span(backed.label_spans_start, backed.label_span_count, id),
@@ -1330,6 +1922,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn label_value_at(&self, index: usize) -> Option<i32> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.label(index);
+        }
         self.backed.as_ref().map_or_else(
             || self.label_pool.values.get(index).copied(),
             |backed| {
@@ -1337,7 +1932,13 @@ impl PackedRuntimeDwa {
                     if index >= backed.label_value_count {
                         return None;
                     }
-                    let stride = if backed.label_dedup { 2 } else { 6 };
+                    let stride = if backed.label_dedup {
+                        2
+                    } else if backed.split_target_weight {
+                        7
+                    } else {
+                        6
+                    };
                     let encoded = backed.read_u16(backed.label_values_start + index * stride)?;
                     Some(if encoded == u16::MAX {
                         i32::MAX - 1
@@ -1353,12 +1954,20 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn target_value_at(&self, index: usize) -> Option<u32> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.target(index);
+        }
         self.backed.as_ref().map_or_else(
             || self.target_pool.values.get(index).copied(),
             |backed| {
                 if backed.narrow {
                     if index >= backed.target_value_count {
                         return None;
+                    }
+                    if backed.split_target_weight {
+                        let stride = if backed.label_dedup { 5 } else { 7 };
+                        let offset = if backed.label_dedup { 0 } else { 2 };
+                        return backed.read_u24(backed.target_values_start + index * stride + offset);
                     }
                     let pos = if backed.label_dedup {
                         backed.target_values_start + index * 4
@@ -1375,12 +1984,22 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn weight_value_at(&self, index: usize) -> Option<u32> {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.weight_id(index);
+        }
         self.backed.as_ref().map_or_else(
             || self.weight_id_pool.values.get(index).copied(),
             |backed| {
                 if backed.narrow {
                     if index >= backed.weight_value_count {
                         return None;
+                    }
+                    if backed.split_target_weight {
+                        let stride = if backed.label_dedup { 5 } else { 7 };
+                        let offset = if backed.label_dedup { 3 } else { 5 };
+                        return backed
+                            .read_u16(backed.weight_values_start + index * stride + offset)
+                            .map(u32::from);
                     }
                     let pos = if backed.label_dedup {
                         backed.weight_values_start + index * 4
@@ -1418,23 +2037,711 @@ impl PackedRuntimeDwa {
         self.fast_wire_len_for_chunks(&[]).saturating_sub(12)
     }
 
+    fn owned_narrow_fast_wire_len(&self) -> Option<usize> {
+        let narrow = self.owned_narrow.as_ref()?;
+        let spans = narrow.token_spans.as_ref();
+        if spans.len() != self.token_set_count()
+            || narrow.token_range_overflow_starts.len() != spans.len()
+        {
+            return None;
+        }
+        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        Some(
+            16usize
+                .saturating_add(spans.len().saturating_mul(3))
+                .saturating_add(spans.len().saturating_mul(3))
+                .saturating_add(spans.len().saturating_mul(2))
+                .saturating_add(narrow.token_ranges.len().saturating_mul(2))
+                .saturating_add(4 + narrow.token_range_overflows.len().saturating_mul(2))
+                .saturating_add(4 + self.geometries.len().saturating_mul(2))
+                .saturating_add(geometry_range_count.saturating_mul(4))
+                .saturating_add(4 + narrow.weights.len())
+                .saturating_add(4 + narrow.weight_token_ids.len().saturating_mul(2))
+                .saturating_add(4 + narrow.transitions.len())
+                .saturating_add(4 + narrow.spans.len().saturating_mul(4))
+                .saturating_add(4 + narrow.states.len()),
+        )
+    }
+
+    fn write_owned_narrow_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
+        if !cfg!(target_endian = "little") {
+            return None;
+        }
+        let narrow = self.owned_narrow.as_ref()?;
+        let spans = narrow.token_spans.as_ref();
+        let expected_len = self.owned_narrow_fast_wire_len()?;
+        if dst.len() != expected_len
+            || spans.len() != self.token_set_count()
+            || narrow.token_range_overflow_starts.len() != spans.len()
+        {
+            return None;
+        }
+
+        #[inline]
+        fn put_u16(dst: &mut [u8], pos: &mut usize, value: u16) {
+            dst[*pos..*pos + 2].copy_from_slice(&value.to_le_bytes());
+            *pos += 2;
+        }
+        #[inline]
+        fn put_u24(dst: &mut [u8], pos: &mut usize, value: u32) {
+            dst[*pos] = value as u8;
+            dst[*pos + 1] = (value >> 8) as u8;
+            dst[*pos + 2] = (value >> 16) as u8;
+            *pos += 3;
+        }
+        #[inline]
+        fn put_u32(dst: &mut [u8], pos: &mut usize, value: u32) {
+            dst[*pos..*pos + 4].copy_from_slice(&value.to_le_bytes());
+            *pos += 4;
+        }
+        #[inline]
+        fn schedule_pod_copy<T>(
+            jobs: &mut Vec<(usize, usize, usize)>,
+            dst: &mut [u8],
+            pos: &mut usize,
+            values: &[T],
+            split_chunks: usize,
+        ) {
+            let len = std::mem::size_of_val(values);
+            if len != 0 {
+                const SPLIT_MIN_BYTES: usize = 4 * 1024 * 1024;
+                let destination = dst[*pos..*pos + len].as_mut_ptr() as usize;
+                let source = values.as_ptr().cast::<u8>() as usize;
+                if len >= SPLIT_MIN_BYTES && split_chunks > 1 {
+                    let chunk_size = len.div_ceil(split_chunks).max(1024 * 1024);
+                    let mut offset = 0usize;
+                    while offset < len {
+                        let count = chunk_size.min(len - offset);
+                        jobs.push((destination + offset, source + offset, count));
+                        offset += count;
+                    }
+                } else {
+                    jobs.push((destination, source, len));
+                }
+            }
+            *pos += len;
+        }
+
+        // The large parts of DWF6 are already the live execution arrays.
+        // Reserve their final ranges while writing the small scalar metadata,
+        // then copy the disjoint slabs concurrently. This is still fresh-save
+        // work: no wire bytes are prepared or retained by compilation.
+        let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(7);
+        // Two-way slab copies were the best crossover in the canonical large
+        // parser save benchmarks; more jobs increased scheduling/memory-bandwidth
+        // overhead without improving wall time.
+        let split_chunks = 2;
+        let mut pos = 0usize;
+        dst[pos..pos + 4].copy_from_slice(b"DWF8");
+        pos += 4;
+        put_u32(dst, &mut pos, self.start_state);
+        put_u32(dst, &mut pos, spans.len() as u32);
+        put_u32(
+            dst,
+            &mut pos,
+            u32::try_from(narrow.token_ranges.len().saturating_mul(2)).ok()?,
+        );
+        for span in spans {
+            put_u24(dst, &mut pos, span.start);
+        }
+        for &overflow_start in narrow.token_range_overflow_starts.iter() {
+            put_u24(dst, &mut pos, overflow_start);
+        }
+        for span in spans {
+            put_u16(dst, &mut pos, span.word_spans as u16);
+        }
+        schedule_pod_copy(
+            &mut copy_jobs,
+            dst,
+            &mut pos,
+            &narrow.token_ranges,
+            split_chunks,
+        );
+
+        put_u32(
+            dst,
+            &mut pos,
+            u32::try_from(narrow.token_range_overflows.len()).ok()?,
+        );
+        schedule_pod_copy(
+            &mut copy_jobs,
+            dst,
+            &mut pos,
+            &narrow.token_range_overflows,
+            split_chunks,
+        );
+
+        put_u32(dst, &mut pos, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u16(dst, &mut pos, geometry.len() as u16);
+            for &(start, end) in geometry {
+                put_u16(dst, &mut pos, start as u16);
+                put_u16(dst, &mut pos, end as u16);
+            }
+        }
+
+        put_u32(
+            dst,
+            &mut pos,
+            (narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE) as u32,
+        );
+        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.weights, split_chunks);
+
+        put_u32(dst, &mut pos, narrow.weight_token_ids.len() as u32);
+        schedule_pod_copy(
+            &mut copy_jobs,
+            dst,
+            &mut pos,
+            &narrow.weight_token_ids,
+            split_chunks,
+        );
+
+        put_u32(
+            dst,
+            &mut pos,
+            (narrow.transitions.len() / OwnedNarrowPackedRuntimeDwa::TRANSITION_STRIDE) as u32,
+        );
+        schedule_pod_copy(
+            &mut copy_jobs,
+            dst,
+            &mut pos,
+            &narrow.transitions,
+            split_chunks,
+        );
+
+        put_u32(dst, &mut pos, narrow.spans.len() as u32);
+        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.spans, split_chunks);
+
+        put_u32(
+            dst,
+            &mut pos,
+            (narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE) as u32,
+        );
+        schedule_pod_copy(&mut copy_jobs, dst, &mut pos, &narrow.states, split_chunks);
+        debug_assert_eq!(pos, dst.len());
+
+        let copy_one = |(destination, source, len): (usize, usize, usize)| unsafe {
+            std::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, len);
+        };
+        if rayon::current_num_threads() > 1 && copy_jobs.len() > 1 {
+            copy_jobs.into_par_iter().for_each(copy_one);
+        } else {
+            copy_jobs.into_iter().for_each(copy_one);
+        }
+        Some(())
+    }
+
+    /// Exact directly-writable wire size for compiler-owned runtime storage.
+    /// DWF6 is preferred when the hot execution view is narrow; DWF7 remains
+    /// the wide runtime-shaped fallback.
+    pub fn direct_fast_wire_len(&self) -> Option<usize> {
+        self.owned_narrow_fast_wire_len()
+            .or_else(|| self.runtime_shaped_fast_wire_len())
+    }
+
+    pub fn write_direct_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
+        if self.owned_narrow.is_some() {
+            return self.write_owned_narrow_fast_wire_bytes(dst);
+        }
+        self.write_runtime_shaped_fast_wire_bytes(dst)
+    }
+
     /// DWF3 keeps the compact per-token-set varint bodies from DWF2, but adds
     /// a direct token-id -> (chunk, byte-offset) index and word-span table.
     /// The fixed-width DWA tail remains byte-for-byte runtime-readable, so a
     /// current-format loader can retain the artifact backing instead of
     /// allocating/decoding millions of token ranges and pool entries.
     fn try_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(len) = self.owned_narrow_fast_wire_len() {
+            let mut out = vec![0u8; len];
+            self.write_owned_narrow_fast_wire_bytes(&mut out)?;
+            return Some(out);
+        }
+        if self.prefer_runtime_shaped_wire() {
+            let mut out = Vec::with_capacity(self.runtime_shaped_fast_wire_len()?);
+            self.try_append_runtime_shaped_fast_wire_bytes(&mut out)?;
+            return Some(out);
+        }
         self.try_narrow_backed_fast_wire_bytes()
             .or_else(|| self.try_backed_fast_wire_bytes_dwf3())
     }
 
-    /// DWF5 narrows the directly-read fixed tail while preserving DWF3's
-    /// zero-copy execution model. The layout is deliberately fixed: if any
-    /// value does not fit, serialization falls back to DWF3 rather than adding
-    /// per-artifact width tags to hot runtime accessors.
+    #[inline]
+    fn prefer_runtime_shaped_wire(&self) -> bool {
+        self.backed.is_none()
+            && self.flat_token_ranges_u16.is_some()
+            && self.flat_token_spans.is_some()
+            && (self.states.len() >= 20_000
+                || self
+                    .flat_token_ranges_u16
+                    .as_ref()
+                    .is_some_and(|ranges| ranges.len() >= 262_144))
+    }
+
+    pub fn runtime_shaped_fast_wire_len(&self) -> Option<usize> {
+        if !self.prefer_runtime_shaped_wire() {
+            return None;
+        }
+        let ranges = self.flat_token_ranges_u16.as_deref()?;
+        let spans = self.flat_token_spans.as_deref()?;
+        if spans.len() != self.token_set_count() {
+            return None;
+        }
+        let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        Some(
+            16usize
+                .saturating_add(spans.len().saturating_mul(12))
+                .saturating_add(ranges.len().saturating_mul(4))
+                .saturating_add(4 + self.geometries.len().saturating_mul(4))
+                .saturating_add(geometry_range_count.saturating_mul(8))
+                .saturating_add(4 + self.weights.len().saturating_mul(12))
+                .saturating_add(4 + self.weight_token_ids.len().saturating_mul(4))
+                .saturating_add(4 + self.label_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + self.label_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + self.target_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + self.weight_id_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + self.weight_id_pool.spans.len().saturating_mul(8))
+                .saturating_add(4 + self.rows.len().saturating_mul(12))
+                .saturating_add(4 + self.states.len().saturating_mul(8)),
+        )
+    }
+
+    /// Write the DWF7 runtime-shaped representation directly into an exact
+    /// caller-provided destination. This avoids both the temporary DWA buffer
+    /// and the zero-fill performed by `Vec::resize` before overwriting the
+    /// section. The destination must have exactly
+    /// [`Self::runtime_shaped_fast_wire_len`] bytes.
+    pub fn write_runtime_shaped_fast_wire_bytes(&self, dst: &mut [u8]) -> Option<()> {
+        if !cfg!(target_endian = "little") {
+            return None;
+        }
+        let expected_len = self.runtime_shaped_fast_wire_len()?;
+        if dst.len() != expected_len {
+            return None;
+        }
+        let ranges = self.flat_token_ranges_u16.as_deref()?;
+        let spans = self.flat_token_spans.as_deref()?;
+        if spans.len() != self.token_set_count() {
+            return None;
+        }
+
+        #[inline]
+        fn put_u32_at(dst: &mut [u8], pos: &mut usize, value: u32) {
+            dst[*pos..*pos + 4].copy_from_slice(&value.to_le_bytes());
+            *pos += 4;
+        }
+
+        #[inline]
+        fn put_pod_slice<T>(dst: &mut [u8], pos: &mut usize, values: &[T]) {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(values),
+                )
+            };
+            dst[*pos..*pos + bytes.len()].copy_from_slice(bytes);
+            *pos += bytes.len();
+        }
+
+        debug_assert_eq!(std::mem::size_of::<PackedRuntimeTokenSetSpan>(), 12);
+        debug_assert_eq!(std::mem::size_of::<PackedRuntimeWeight>(), 12);
+        debug_assert_eq!(std::mem::size_of::<PackedRuntimeRow>(), 12);
+        debug_assert_eq!(std::mem::size_of::<PackedRuntimeState>(), 8);
+
+        dst[..4].copy_from_slice(b"DWF7");
+        dst[4..8].copy_from_slice(&self.start_state.to_le_bytes());
+        dst[8..12].copy_from_slice(&(spans.len() as u32).to_le_bytes());
+        dst[12..16].copy_from_slice(&(ranges.len() as u32).to_le_bytes());
+
+        // The runtime-shaped wire is almost entirely POD slabs. Queue those
+        // slabs as disjoint copy jobs instead of grouping them into only three
+        // coarse branches; on large parser DWAs the ~11 MiB token slab alone
+        // otherwise becomes the critical path. Geometry metadata is small and
+        // irregular, so keep that part scalar while the fixed-width pools are
+        // copied in parallel below.
+        let mut pos = 16usize;
+        let mut copy_jobs = Vec::<(usize, usize, usize)>::with_capacity(64);
+
+        #[inline]
+        fn queue_pod_copy<T>(
+            dst: &mut [u8],
+            pos: &mut usize,
+            values: &[T],
+            jobs: &mut Vec<(usize, usize, usize)>,
+        ) {
+            let byte_len = std::mem::size_of_val(values);
+            if byte_len == 0 {
+                return;
+            }
+            let dst_base = unsafe { dst.as_mut_ptr().add(*pos) } as usize;
+            let src_base = values.as_ptr().cast::<u8>() as usize;
+            const COPY_CHUNK: usize = 1024 * 1024;
+            let mut offset = 0usize;
+            while offset < byte_len {
+                let len = COPY_CHUNK.min(byte_len - offset);
+                jobs.push((dst_base + offset, src_base + offset, len));
+                offset += len;
+            }
+            *pos += byte_len;
+        }
+
+        queue_pod_copy(dst, &mut pos, spans, &mut copy_jobs);
+        queue_pod_copy(dst, &mut pos, ranges, &mut copy_jobs);
+
+        put_u32_at(dst, &mut pos, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u32_at(dst, &mut pos, geometry.len() as u32);
+            for &(start, end) in geometry {
+                put_u32_at(dst, &mut pos, start);
+                put_u32_at(dst, &mut pos, end);
+            }
+        }
+
+        put_u32_at(dst, &mut pos, self.weights.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.weights, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.weight_token_ids.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.weight_token_ids, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.label_pool.values.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.label_pool.values, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.label_pool.spans.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.label_pool.spans, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.target_pool.values.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.target_pool.values, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.target_pool.spans.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.target_pool.spans, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.weight_id_pool.values.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.weight_id_pool.values, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.weight_id_pool.spans.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.weight_id_pool.spans, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.rows.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.rows, &mut copy_jobs);
+        put_u32_at(dst, &mut pos, self.states.len() as u32);
+        queue_pod_copy(dst, &mut pos, &self.states, &mut copy_jobs);
+
+        debug_assert_eq!(pos, expected_len);
+        if rayon::current_num_threads() > 1 && copy_jobs.len() > 1 {
+            copy_jobs.into_par_iter().for_each(|(destination, source, len)| {
+                // SAFETY: every job targets a disjoint byte range in `dst`,
+                // and all source runtime slabs outlive this parallel copy.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        source as *const u8,
+                        destination as *mut u8,
+                        len,
+                    );
+                }
+            });
+        } else {
+            for (destination, source, len) in copy_jobs {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        source as *const u8,
+                        destination as *mut u8,
+                        len,
+                    );
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn try_append_runtime_shaped_fast_wire_bytes(&self, out: &mut Vec<u8>) -> Option<usize> {
+        if !self.prefer_runtime_shaped_wire() {
+            return None;
+        }
+        let ranges = self.flat_token_ranges_u16.as_deref()?;
+        let spans = self.flat_token_spans.as_deref()?;
+        if spans.len() != self.token_set_count() {
+            return None;
+        }
+
+        #[inline]
+        fn put_u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        #[inline]
+        fn put_u32s(out: &mut Vec<u8>, values: &[u32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    put_u32(out, value);
+                }
+            }
+        }
+        #[inline]
+        fn put_i32s(out: &mut Vec<u8>, values: &[i32]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        values.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(values),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        #[inline]
+        fn put_spans(out: &mut Vec<u8>, spans: &[[u32; 2]]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        spans.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(spans),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &[start, len] in spans {
+                    put_u32(out, start);
+                    put_u32(out, len);
+                }
+            }
+        }
+        #[inline]
+        fn put_token_spans(out: &mut Vec<u8>, spans: &[PackedRuntimeTokenSetSpan]) {
+            if cfg!(target_endian = "little") {
+                debug_assert_eq!(std::mem::size_of::<PackedRuntimeTokenSetSpan>(), 12);
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        spans.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(spans),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for span in spans {
+                    put_u32(out, span.start);
+                    put_u32(out, span.len);
+                    put_u32(out, span.word_spans);
+                }
+            }
+        }
+        #[inline]
+        fn put_ranges16(out: &mut Vec<u8>, ranges: &[[u16; 2]]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        ranges.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(ranges),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &[start, end] in ranges {
+                    out.extend_from_slice(&start.to_le_bytes());
+                    out.extend_from_slice(&end.to_le_bytes());
+                }
+            }
+        }
+        #[inline]
+        fn put_weights(out: &mut Vec<u8>, weights: &[PackedRuntimeWeight]) {
+            if cfg!(target_endian = "little") {
+                debug_assert_eq!(std::mem::size_of::<PackedRuntimeWeight>(), 12);
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        weights.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(weights),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for weight in weights {
+                    put_u32(out, weight.geometry);
+                    put_u32(out, weight.token_ids_start);
+                    put_u32(out, weight.full);
+                }
+            }
+        }
+        #[inline]
+        fn put_rows(out: &mut Vec<u8>, rows: &[PackedRuntimeRow]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        rows.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(rows),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for row in rows {
+                    put_u32(out, row.labels);
+                    put_u32(out, row.targets);
+                    put_u32(out, row.weights);
+                }
+            }
+        }
+        #[inline]
+        fn put_states(out: &mut Vec<u8>, states: &[PackedRuntimeState]) {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        states.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(states),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for state in states {
+                    put_u32(out, state.row);
+                    put_u32(out, state.final_weight);
+                }
+            }
+        }
+
+        let expected_len = self.runtime_shaped_fast_wire_len()?;
+
+        // DWF7 mirrors the owned runtime widths, so on little-endian hosts the
+        // large sections are already byte-for-byte wire data. Size the final
+        // region once and copy the independent runtime slabs concurrently
+        // instead of serially extending the Vec through ~20+ MiB of pools.
+        if cfg!(target_endian = "little") {
+            let output_start = out.len();
+            out.resize(output_start + expected_len, 0);
+            self.write_runtime_shaped_fast_wire_bytes(
+                &mut out[output_start..output_start + expected_len],
+            )?;
+            return Some(expected_len);
+        }
+
+        let output_start = out.len();
+        out.reserve(expected_len);
+        out.extend_from_slice(b"DWF7");
+        put_u32(out, self.start_state);
+        put_u32(out, spans.len() as u32);
+        put_u32(out, ranges.len() as u32);
+        put_token_spans(out, spans);
+        put_ranges16(out, ranges);
+
+        put_u32(out, self.geometries.len() as u32);
+        for geometry in self.geometries.iter() {
+            put_u32(out, geometry.len() as u32);
+            for &(start, end) in geometry {
+                put_u32(out, start);
+                put_u32(out, end);
+            }
+        }
+        put_u32(out, self.weights.len() as u32);
+        put_weights(out, &self.weights);
+        put_u32(out, self.weight_token_ids.len() as u32);
+        put_u32s(out, &self.weight_token_ids);
+        put_u32(out, self.label_pool.values.len() as u32);
+        put_i32s(out, &self.label_pool.values);
+        put_u32(out, self.label_pool.spans.len() as u32);
+        put_spans(out, &self.label_pool.spans);
+        put_u32(out, self.target_pool.values.len() as u32);
+        put_u32s(out, &self.target_pool.values);
+        put_u32(out, self.target_pool.spans.len() as u32);
+        put_spans(out, &self.target_pool.spans);
+        put_u32(out, self.weight_id_pool.values.len() as u32);
+        put_u32s(out, &self.weight_id_pool.values);
+        put_u32(out, self.weight_id_pool.spans.len() as u32);
+        put_spans(out, &self.weight_id_pool.spans);
+        put_u32(out, self.rows.len() as u32);
+        put_rows(out, &self.rows);
+        put_u32(out, self.states.len() as u32);
+        put_states(out, &self.states);
+
+        let written = out.len() - output_start;
+        debug_assert_eq!(written, expected_len);
+        Some(written)
+    }
+
+    /// DWF5/6 narrow the directly-read fixed tail while preserving DWF3's
+    /// zero-copy execution model. DWF5 packs a 17-bit target and 15-bit weight
+    /// into one u32. DWF6 keeps the same compact pools/state records but stores
+    /// each transition as u24 target + u16 weight, covering larger parser DWAs
+    /// without falling all the way back to DWF3.
     fn try_narrow_backed_fast_wire_bytes(&self) -> Option<Vec<u8>> {
-        let chunks = self.fast_wire_token_chunks.as_deref()?;
-        let word_spans = self.materialized_token_word_spans.as_deref()?;
+        let mut out = Vec::new();
+        self.try_append_narrow_backed_fast_wire_bytes(&mut out)?;
+        Some(out)
+    }
+
+    fn try_append_narrow_backed_fast_wire_bytes(&self, mut out: &mut Vec<u8>) -> Option<usize> {
+        let split_target_weight = self.states.len() > (1usize << 17)
+            || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
+            || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15));
+        let raw_u16_ranges = split_target_weight
+            .then(|| self.flat_token_ranges_u16.as_deref())
+            .flatten();
+        let raw_u16_spans = split_target_weight
+            .then(|| self.flat_token_spans.as_deref())
+            .flatten();
+        // DWF6's token body is the fixed-width u16 runtime slab. A large DWA
+        // that does not use that runtime representation must fall back to
+        // DWF3 rather than writing a varint body under DWF6 magic.
+        if split_target_weight && (raw_u16_ranges.is_none() || raw_u16_spans.is_none()) {
+            return None;
+        }
+        // Loaded artifacts may already carry their varint token chunks. Fresh
+        // compiler-produced PackedRuntimeDwa values deliberately do not: those
+        // chunks are a wire representation, not runtime state. Build them here
+        // inside save() when needed so DWF5 remains available without moving
+        // serialization work into compiler finalization.
+        const TOKEN_SET_WIRE_CHUNK: usize = 1024;
+        let owned_chunks;
+        let chunks: &[Box<[u8]>] = if raw_u16_ranges.is_some() {
+            &[]
+        } else if let Some(chunks) = self.fast_wire_token_chunks.as_deref() {
+            chunks
+        } else {
+            let token_set_count = self.token_set_count();
+            let chunk_ranges = (0..token_set_count)
+                .step_by(TOKEN_SET_WIRE_CHUNK)
+                .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_set_count)))
+                .collect::<Vec<_>>();
+            let encode_chunk = |&(start_id, end_id): &(usize, usize)| {
+                let mut body = Vec::<u8>::new();
+                put_var_u32(&mut body, (end_id - start_id) as u32);
+                for id in start_id..end_id {
+                    let token_set = self.token_set(id as u32)?;
+                    put_var_u32(&mut body, token_set.range_count() as u32);
+                    let mut previous_end_plus_one = 0u64;
+                    token_set.for_each_range(|lo, hi| {
+                        put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
+                        put_var_u32(&mut body, hi - lo);
+                        previous_end_plus_one = hi as u64 + 1;
+                    });
+                }
+                Some(body.into_boxed_slice())
+            };
+            owned_chunks = if chunk_ranges.len() >= 4 && rayon::current_num_threads() > 1 {
+                chunk_ranges
+                    .par_iter()
+                    .map(encode_chunk)
+                    .collect::<Option<Vec<_>>>()?
+            } else {
+                chunk_ranges
+                    .iter()
+                    .map(encode_chunk)
+                    .collect::<Option<Vec<_>>>()?
+            };
+            &owned_chunks
+        };
+        let owned_word_spans;
+        let word_spans: &[u32] = if let Some(spans) = raw_u16_spans {
+            owned_word_spans = spans.iter().map(|span| span.word_spans).collect::<Vec<_>>();
+            &owned_word_spans
+        } else if let Some(spans) = self.materialized_token_word_spans.as_deref() {
+            spans
+        } else {
+            owned_word_spans = (0..self.token_set_count())
+                .map(|id| self.token_set(id as u32).map(|set| set.word_spans()))
+                .collect::<Option<Vec<_>>>()?;
+            &owned_word_spans
+        };
         let token_set_count = self.token_set_count();
         if word_spans.len() != token_set_count
             || token_set_count > u16::MAX as usize + 1
@@ -1443,7 +2750,9 @@ impl PackedRuntimeDwa {
             return None;
         }
 
-        let token_bytes = chunks.iter().map(|chunk| chunk.len()).sum::<usize>();
+        let token_bytes = raw_u16_ranges
+            .map(|ranges| ranges.len().saturating_mul(4))
+            .unwrap_or_else(|| chunks.iter().map(|chunk| chunk.len()).sum::<usize>());
         if token_bytes > (1usize << 24) {
             return None;
         }
@@ -1451,28 +2760,44 @@ impl PackedRuntimeDwa {
         // DWF4 stores a single 24-bit offset into the concatenated token body.
         // The chunking remains an encoder implementation detail only.
         let mut locations = Vec::<u32>::with_capacity(token_set_count);
-        let mut body_base = 0usize;
-        for body in chunks {
-            let mut pos = 0usize;
-            let set_count = take_var_u32(body, &mut pos).ok()? as usize;
-            for _ in 0..set_count {
-                let location = body_base.checked_add(pos)?;
+        if let Some(spans) = raw_u16_spans {
+            if spans.len() != token_set_count || raw_u16_ranges.is_none() {
+                return None;
+            }
+            for span in spans {
+                let location = (span.start as usize).checked_mul(4)?;
                 if location >= (1usize << 24) {
                     return None;
                 }
                 locations.push(location as u32);
-                let range_count = take_var_u32(body, &mut pos).ok()? as usize;
-                for _ in 0..range_count {
-                    let _ = take_var_u64(body, &mut pos).ok()?;
-                    let _ = take_var_u32(body, &mut pos).ok()?;
-                }
             }
-            if pos != body.len() {
+        } else {
+            let mut body_base = 0usize;
+            for body in chunks {
+                let mut pos = 0usize;
+                let set_count = take_var_u32(body, &mut pos).ok()? as usize;
+                for _ in 0..set_count {
+                    let location = body_base.checked_add(pos)?;
+                    if location >= (1usize << 24) {
+                        return None;
+                    }
+                    locations.push(location as u32);
+                    let range_count = take_var_u32(body, &mut pos).ok()? as usize;
+                    for _ in 0..range_count {
+                        let _ = take_var_u64(body, &mut pos).ok()?;
+                        let _ = take_var_u32(body, &mut pos).ok()?;
+                    }
+                }
+                if pos != body.len() {
+                    return None;
+                }
+                body_base = body_base.checked_add(body.len())?;
+            }
+            if body_base != token_bytes {
                 return None;
             }
-            body_base = body_base.checked_add(body.len())?;
         }
-        if locations.len() != token_set_count || body_base != token_bytes {
+        if locations.len() != token_set_count {
             return None;
         }
 
@@ -1503,8 +2828,22 @@ impl PackedRuntimeDwa {
             || self.label_pool.values.len() != self.weight_id_pool.values.len()
             || self.label_pool.spans.len() > u16::MAX as usize + 1
             || self.label_pool.spans.iter().any(|span| !span_fits(span))
-            || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
-            || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15))
+            || self.target_pool.values.iter().any(|&value| {
+                value
+                    >= if split_target_weight {
+                        1u32 << 24
+                    } else {
+                        1u32 << 17
+                    }
+            })
+            || self.weight_id_pool.values.iter().any(|&value| {
+                value
+                    >= if split_target_weight {
+                        1u32 << 16
+                    } else {
+                        1u32 << 15
+                    }
+            })
             || self.label_pool.spans.len() != self.target_pool.spans.len()
             || self.label_pool.spans.len() != self.weight_id_pool.spans.len()
             || self
@@ -1529,37 +2868,41 @@ impl PackedRuntimeDwa {
             return None;
         }
 
-        // Parser rows often differ only in target/weight destinations while
-        // admitting exactly the same sorted labels. JS is extreme here: tens
-        // of thousands of rows collapse to only a few hundred label vectors.
-        // Intern borrowed slices so this preparation allocates only the compact
-        // dictionary itself, not one temporary Vec per row.
-        let mut label_ids = FxHashMap::<&[Label], u16>::default();
-        label_ids.reserve(self.label_pool.spans.len().min(u16::MAX as usize));
-        let mut unique_label_values = Vec::<Label>::new();
-        let mut unique_label_spans = Vec::<[u32; 2]>::new();
-        let mut row_label_ids = Vec::<u16>::with_capacity(self.label_pool.spans.len());
-        for &[start, len] in self.label_pool.spans.iter() {
-            let start_usize = start as usize;
-            let labels = self
-                .label_pool
-                .values
-                .get(start_usize..start_usize.checked_add(len as usize)?)?;
-            let id = if let Some(&id) = label_ids.get(labels) {
-                id
-            } else {
-                let id = u16::try_from(unique_label_spans.len()).ok()?;
-                let unique_start = u32::try_from(unique_label_values.len()).ok()?;
-                if unique_start > SPAN_START_MAX || len > SPAN_LEN_MAX {
+        // DWF5 still interns repeated label vectors for compactness. DWF6 is
+        // intentionally row-local instead: avoiding this whole-DWA hash pass
+        // makes a genuinely fresh save cheap, and its u16/u24/u16 transition
+        // record remains directly executable after load.
+        let (unique_label_values, unique_label_spans, row_label_ids) = if split_target_weight {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let mut label_ids = FxHashMap::<&[Label], u16>::default();
+            label_ids.reserve(self.label_pool.spans.len().min(u16::MAX as usize));
+            let mut unique_label_values = Vec::<Label>::new();
+            let mut unique_label_spans = Vec::<[u32; 2]>::new();
+            let mut row_label_ids = Vec::<u16>::with_capacity(self.label_pool.spans.len());
+            for &[start, len] in self.label_pool.spans.iter() {
+                let start_usize = start as usize;
+                let Some(end) = start_usize.checked_add(len as usize) else {
                     return None;
-                }
-                unique_label_values.extend_from_slice(labels);
-                unique_label_spans.push([unique_start, len]);
-                label_ids.insert(labels, id);
-                id
-            };
-            row_label_ids.push(id);
-        }
+                };
+                let labels = self.label_pool.values.get(start_usize..end)?;
+                let id = if let Some(&id) = label_ids.get(labels) {
+                    id
+                } else {
+                    let id = u16::try_from(unique_label_spans.len()).ok()?;
+                    let unique_start = u32::try_from(unique_label_values.len()).ok()?;
+                    if unique_start > SPAN_START_MAX || len > SPAN_LEN_MAX {
+                        return None;
+                    }
+                    unique_label_values.extend_from_slice(labels);
+                    unique_label_spans.push([unique_start, len]);
+                    label_ids.insert(labels, id);
+                    id
+                };
+                row_label_ids.push(id);
+            }
+            (unique_label_values, unique_label_spans, row_label_ids)
+        };
 
         #[inline]
         fn put_u16(out: &mut Vec<u8>, value: u16) {
@@ -1583,6 +2926,18 @@ impl PackedRuntimeDwa {
         }
 
         let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+        let transition_section_len = if split_target_weight {
+            4usize
+                .saturating_add(self.label_pool.values.len().saturating_mul(7))
+                .saturating_add(4 + self.label_pool.spans.len().saturating_mul(4))
+        } else {
+            4usize
+                .saturating_add(unique_label_values.len().saturating_mul(2))
+                .saturating_add(4 + unique_label_spans.len().saturating_mul(4))
+                .saturating_add(4 + row_label_ids.len().saturating_mul(2))
+                .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
+                .saturating_add(4 + self.target_pool.spans.len().saturating_mul(4))
+        };
         let expected_len = 16usize
             .saturating_add(token_set_count.saturating_mul(3))
             .saturating_add(token_set_count.saturating_mul(2))
@@ -1592,14 +2947,11 @@ impl PackedRuntimeDwa {
             .saturating_add(geometry_range_count.saturating_mul(4))
             .saturating_add(4 + self.weights.len().saturating_mul(6))
             .saturating_add(4 + self.weight_token_ids.len().saturating_mul(2))
-            .saturating_add(4 + unique_label_values.len().saturating_mul(2))
-            .saturating_add(4 + unique_label_spans.len().saturating_mul(4))
-            .saturating_add(4 + row_label_ids.len().saturating_mul(2))
-            .saturating_add(4 + self.target_pool.values.len().saturating_mul(4))
-            .saturating_add(4 + self.target_pool.spans.len().saturating_mul(4))
+            .saturating_add(transition_section_len)
             .saturating_add(4 + self.states.len().saturating_mul(4));
-        let mut out = Vec::with_capacity(expected_len);
-        out.extend_from_slice(b"DWF5");
+        let output_start = out.len();
+        out.reserve(expected_len);
+        out.extend_from_slice(if split_target_weight { b"DWF6" } else { b"DWF5" });
         put_u32(&mut out, self.start_state);
         put_u32(&mut out, token_set_count as u32);
         put_u32(&mut out, token_bytes as u32);
@@ -1609,8 +2961,25 @@ impl PackedRuntimeDwa {
         for &word_span in word_spans {
             put_u16(&mut out, word_span as u16);
         }
-        for body in chunks {
-            out.extend_from_slice(body);
+        if let Some(ranges) = raw_u16_ranges {
+            if cfg!(target_endian = "little") {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        ranges.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(ranges),
+                    )
+                };
+                out.extend_from_slice(bytes);
+            } else {
+                for &[start, end] in ranges {
+                    put_u16(&mut out, start);
+                    put_u16(&mut out, end);
+                }
+            }
+        } else {
+            for body in chunks {
+                out.extend_from_slice(body);
+            }
         }
 
         put_u32(&mut out, self.geometries.len() as u32);
@@ -1628,55 +2997,158 @@ impl PackedRuntimeDwa {
             out.push(weight.full as u8);
         }
         put_u32(&mut out, self.weight_token_ids.len() as u32);
-        for &value in self.weight_token_ids.iter() {
-            put_u16(&mut out, value as u16);
+        let weight_token_ids_start = out.len();
+        out.resize(
+            weight_token_ids_start + self.weight_token_ids.len().saturating_mul(2),
+            0,
+        );
+        if self.weight_token_ids.len() >= 4096 && rayon::current_num_threads() > 1 {
+            out[weight_token_ids_start..]
+                .par_chunks_exact_mut(2)
+                .zip(self.weight_token_ids.par_iter())
+                .for_each(|(dst, &value)| dst.copy_from_slice(&(value as u16).to_le_bytes()));
+        } else {
+            for (dst, &value) in out[weight_token_ids_start..]
+                .chunks_exact_mut(2)
+                .zip(self.weight_token_ids.iter())
+            {
+                dst.copy_from_slice(&(value as u16).to_le_bytes());
+            }
         }
-        put_u32(&mut out, unique_label_values.len() as u32);
-        for &label in &unique_label_values {
-            put_u16(
-                &mut out,
-                if label == DEFAULT_LABEL_WIRE {
-                    u16::MAX
-                } else {
-                    label as u16
-                },
+        if split_target_weight {
+            put_u32(&mut out, self.label_pool.values.len() as u32);
+            let transitions_start = out.len();
+            out.resize(
+                transitions_start + self.label_pool.values.len().saturating_mul(7),
+                0,
             );
-        }
-        put_u32(&mut out, unique_label_spans.len() as u32);
-        for &span in &unique_label_spans {
-            put_span(&mut out, span);
-        }
-        put_u32(&mut out, row_label_ids.len() as u32);
-        for &label_id in &row_label_ids {
-            put_u16(&mut out, label_id);
-        }
-        put_u32(&mut out, self.target_pool.values.len() as u32);
-        for (&target, &weight_id) in self
-            .target_pool
-            .values
-            .iter()
-            .zip(self.weight_id_pool.values.iter())
-        {
-            put_u32(&mut out, target | (weight_id << 17));
-        }
-        put_u32(&mut out, self.target_pool.spans.len() as u32);
-        for &span in self.target_pool.spans.iter() {
-            put_span(&mut out, span);
+            let write_transition =
+                |dst: &mut [u8], ((&label, &target), &weight_id): ((&Label, &u32), &u32)| {
+                    let label = if label == DEFAULT_LABEL_WIRE {
+                        u16::MAX
+                    } else {
+                        label as u16
+                    };
+                    dst[..2].copy_from_slice(&label.to_le_bytes());
+                    dst[2] = target as u8;
+                    dst[3] = (target >> 8) as u8;
+                    dst[4] = (target >> 16) as u8;
+                    dst[5..7].copy_from_slice(&(weight_id as u16).to_le_bytes());
+                };
+            if self.label_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
+                out[transitions_start..]
+                    .par_chunks_exact_mut(7)
+                    .zip(
+                        self.label_pool
+                            .values
+                            .par_iter()
+                            .zip(self.target_pool.values.par_iter())
+                            .zip(self.weight_id_pool.values.par_iter()),
+                    )
+                    .for_each(|(dst, entry)| write_transition(dst, entry));
+            } else {
+                for (dst, entry) in out[transitions_start..]
+                    .chunks_exact_mut(7)
+                    .zip(
+                        self.label_pool
+                            .values
+                            .iter()
+                            .zip(self.target_pool.values.iter())
+                            .zip(self.weight_id_pool.values.iter()),
+                    )
+                {
+                    write_transition(dst, entry);
+                }
+            }
+            put_u32(&mut out, self.label_pool.spans.len() as u32);
+            for &span in self.label_pool.spans.iter() {
+                put_span(&mut out, span);
+            }
+        } else {
+            put_u32(&mut out, unique_label_values.len() as u32);
+            for &label in &unique_label_values {
+                put_u16(
+                    &mut out,
+                    if label == DEFAULT_LABEL_WIRE {
+                        u16::MAX
+                    } else {
+                        label as u16
+                    },
+                );
+            }
+            put_u32(&mut out, unique_label_spans.len() as u32);
+            for &span in &unique_label_spans {
+                put_span(&mut out, span);
+            }
+            put_u32(&mut out, row_label_ids.len() as u32);
+            for &label_id in &row_label_ids {
+                put_u16(&mut out, label_id);
+            }
+            put_u32(&mut out, self.target_pool.values.len() as u32);
+            let transitions_start = out.len();
+            out.resize(
+                transitions_start + self.target_pool.values.len().saturating_mul(4),
+                0,
+            );
+            let write_transition = |dst: &mut [u8], (&target, &weight_id): (&u32, &u32)| {
+                dst.copy_from_slice(&(target | (weight_id << 17)).to_le_bytes());
+            };
+            if self.target_pool.values.len() >= 4096 && rayon::current_num_threads() > 1 {
+                out[transitions_start..]
+                    .par_chunks_exact_mut(4)
+                    .zip(
+                        self.target_pool
+                            .values
+                            .par_iter()
+                            .zip(self.weight_id_pool.values.par_iter()),
+                    )
+                    .for_each(|(dst, pair)| write_transition(dst, pair));
+            } else {
+                for (dst, pair) in out[transitions_start..]
+                    .chunks_exact_mut(4)
+                    .zip(
+                        self.target_pool
+                            .values
+                            .iter()
+                            .zip(self.weight_id_pool.values.iter()),
+                    )
+                {
+                    write_transition(dst, pair);
+                }
+            }
+            put_u32(&mut out, self.target_pool.spans.len() as u32);
+            for &span in self.target_pool.spans.iter() {
+                put_span(&mut out, span);
+            }
         }
         put_u32(&mut out, self.states.len() as u32);
-        for state in self.states.iter() {
-            put_u16(&mut out, state.row as u16);
-            put_u16(
-                &mut out,
-                if state.final_weight == u32::MAX {
-                    0
-                } else {
-                    state.final_weight as u16 + 1
-                },
-            );
+        let states_start = out.len();
+        out.resize(states_start + self.states.len().saturating_mul(4), 0);
+        let write_state = |dst: &mut [u8], state: &PackedRuntimeState| {
+            dst[..2].copy_from_slice(&(state.row as u16).to_le_bytes());
+            let final_weight = if state.final_weight == u32::MAX {
+                0
+            } else {
+                state.final_weight as u16 + 1
+            };
+            dst[2..4].copy_from_slice(&final_weight.to_le_bytes());
+        };
+        if self.states.len() >= 4096 && rayon::current_num_threads() > 1 {
+            out[states_start..]
+                .par_chunks_exact_mut(4)
+                .zip(self.states.par_iter())
+                .for_each(|(dst, state)| write_state(dst, state));
+        } else {
+            for (dst, state) in out[states_start..]
+                .chunks_exact_mut(4)
+                .zip(self.states.iter())
+            {
+                write_state(dst, state);
+            }
         }
-        debug_assert_eq!(out.len(), expected_len);
-        Some(out)
+        let written = out.len() - output_start;
+        debug_assert_eq!(written, expected_len);
+        Some(written)
     }
 
     fn try_backed_fast_wire_bytes_dwf3(&self) -> Option<Vec<u8>> {
@@ -1854,9 +3326,59 @@ impl PackedRuntimeDwa {
     /// Fresh compiler-produced packed DWAs satisfy this; loaded unchanged
     /// constraints return their cached whole artifact before reaching here.
     pub fn fast_wire_len(&self) -> Option<usize> {
-        self.fast_wire_token_chunks
-            .as_deref()
-            .map(|chunks| self.fast_wire_len_for_chunks(chunks))
+        self.backed
+            .as_ref()
+            .map(|backed| backed.section_len)
+            .or_else(|| self.owned_narrow_fast_wire_len())
+            .or_else(|| self.runtime_shaped_fast_wire_len())
+            .or_else(|| {
+                // Compiler-owned JS-like DWAs use the row-local DWF6 layout.
+                // Its exact byte length depends only on already-materialized
+                // runtime array lengths, not on any serialization pass. Return
+                // that size here so the outer Constraint serializer can reserve
+                // the final artifact once instead of growing again after the
+                // 10+ MiB DWA has already been appended.
+                if self.states.len() <= (1usize << 17) {
+                    return None;
+                }
+                let ranges = self.flat_token_ranges_u16.as_deref()?;
+                let spans = self.flat_token_spans.as_deref()?;
+                if spans.len() != self.token_set_count() {
+                    return None;
+                }
+                let geometry_range_count = self.geometries.iter().map(Vec::len).sum::<usize>();
+                let transition_section_len = 4usize
+                    .saturating_add(self.label_pool.values.len().saturating_mul(7))
+                    .saturating_add(4 + self.label_pool.spans.len().saturating_mul(4));
+                Some(
+                    16usize
+                        .saturating_add(spans.len().saturating_mul(3))
+                        .saturating_add(spans.len().saturating_mul(2))
+                        .saturating_add(ranges.len().saturating_mul(4))
+                        .saturating_add(4)
+                        .saturating_add(self.geometries.len().saturating_mul(2))
+                        .saturating_add(geometry_range_count.saturating_mul(4))
+                        .saturating_add(4 + self.weights.len().saturating_mul(6))
+                        .saturating_add(4 + self.weight_token_ids.len().saturating_mul(2))
+                        .saturating_add(transition_section_len)
+                        .saturating_add(4 + self.states.len().saturating_mul(4)),
+                )
+            })
+            .or_else(|| {
+                self.fast_wire_token_chunks
+                    .as_deref()
+                    .map(|chunks| self.fast_wire_len_for_chunks(chunks))
+            })
+    }
+
+    /// Borrow the canonical runtime wire when this DWA already executes from
+    /// a backed DWF3/4/5/6 section. Compiler-produced constraints are
+    /// canonicalized into this representation after runtime caches are built,
+    /// so save() can copy actual runtime state rather than re-encode it.
+    pub fn backed_fast_wire_bytes(&self) -> Option<&[u8]> {
+        let backed = self.backed.as_ref()?;
+        let end = backed.section_start.checked_add(backed.section_len)?;
+        backed.backing.get(backed.section_start..end)
     }
 
     /// Runtime wire format: compress only the enormous token-range
@@ -1954,7 +3476,51 @@ impl PackedRuntimeDwa {
     /// multi-megabyte DWA buffer.
     pub fn append_fast_wire_bytes(&self, out: &mut Vec<u8>) {
         let profile = std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some();
+        if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
+            let token_ranges = self
+                .flat_token_ranges_u16
+                .as_ref()
+                .map_or(0, |ranges| ranges.len());
+            eprintln!(
+                "[glrmask/profile][packed_runtime_dwa_append_layout] states={} token_sets={} token_ranges_u16={} prefer_runtime_shaped={} direct_len={:?}",
+                self.states.len(),
+                self.token_set_count(),
+                token_ranges,
+                self.prefer_runtime_shaped_wire(),
+                self.direct_fast_wire_len(),
+            );
+        }
         let total_started = profile.then(std::time::Instant::now);
+        let runtime_start = out.len();
+        if let Some(written) = self.try_append_runtime_shaped_fast_wire_bytes(out) {
+            if let Some(total_started) = total_started {
+                eprintln!(
+                    "[glrmask/profile][packed_runtime_dwa_fast_wire_emit] format=DWF7 total_ms={:.3} bytes={}",
+                    total_started.elapsed().as_secs_f64() * 1000.0,
+                    written,
+                );
+            }
+            return;
+        }
+        debug_assert_eq!(out.len(), runtime_start);
+        let narrow_start = out.len();
+        if let Some(written) = self.try_append_narrow_backed_fast_wire_bytes(out) {
+            if let Some(total_started) = total_started {
+                let format = if out.get(narrow_start..narrow_start + 4) == Some(b"DWF6") {
+                    "DWF6"
+                } else {
+                    "DWF5"
+                };
+                eprintln!(
+                    "[glrmask/profile][packed_runtime_dwa_fast_wire_emit] format={} total_ms={:.3} bytes={}",
+                    format,
+                    total_started.elapsed().as_secs_f64() * 1000.0,
+                    written,
+                );
+            }
+            return;
+        }
+        debug_assert_eq!(out.len(), narrow_start);
         #[inline]
         fn put_u32(out: &mut Vec<u8>, value: u32) {
             out.extend_from_slice(&value.to_le_bytes());
@@ -2224,6 +3790,9 @@ impl PackedRuntimeDwa {
         if !input.starts_with(b"DWF3")
             && !input.starts_with(b"DWF4")
             && !input.starts_with(b"DWF5")
+            && !input.starts_with(b"DWF6")
+            && !input.starts_with(b"DWF7")
+            && !input.starts_with(b"DWF8")
         {
             return Self::from_fast_wire_bytes(input);
         }
@@ -2232,9 +3801,11 @@ impl PackedRuntimeDwa {
         Ok(Self {
             start_state,
             backed: Some(backed),
+            owned_narrow: None,
             token_set_chunks: Box::new([]),
             token_set_locations: Box::new([]),
             flat_token_ranges: None,
+            flat_token_ranges_u16: None,
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
@@ -2261,7 +3832,13 @@ impl PackedRuntimeDwa {
     }
 
     pub fn from_fast_wire_bytes(input: &[u8]) -> Result<Self, String> {
-        if input.starts_with(b"DWF3") || input.starts_with(b"DWF4") || input.starts_with(b"DWF5") {
+        if input.starts_with(b"DWF3")
+            || input.starts_with(b"DWF4")
+            || input.starts_with(b"DWF5")
+            || input.starts_with(b"DWF6")
+            || input.starts_with(b"DWF7")
+            || input.starts_with(b"DWF8")
+        {
             let backing = Arc::new(input.to_vec());
             let section = backing.as_slice();
             return Self::from_fast_wire_bytes_backed(section, Arc::clone(&backing), 0);
@@ -3008,9 +4585,11 @@ impl PackedRuntimeDwa {
         Ok(Self {
             start_state,
             backed: None,
+            owned_narrow: None,
             token_set_chunks,
             token_set_locations,
             flat_token_ranges,
+            flat_token_ranges_u16: None,
             flat_token_spans,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
@@ -3191,73 +4770,222 @@ impl PackedRuntimeDwa {
         let weight_pool_ms = weights_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+        let token_range_count = token_sets
+            .iter()
+            .map(|tokens| tokens.ranges_len())
+            .sum::<usize>();
         let token_stats_started = profile.then(std::time::Instant::now);
-        // DWF2 groups token sets into independently decodable chunks. Build
-        // those chunk bodies during the metadata traversal we already need for
-        // compiled runtime masking. 1024-set chunks gave the best observed
-        // balance between Rayon scheduling overhead and JS decode stragglers;
-        // DWF2's explicit per-chunk range counts remove allocation uncertainty
-        // without requiring very fine-grained tasks.
-        const TOKEN_SET_WIRE_CHUNK: usize = 1024;
-        struct TokenChunkBuild {
-            body: Box<[u8]>,
-            word_spans: Vec<u32>,
-            range_count: usize,
-        }
-        let chunk_ranges = (0..token_sets.len())
-            .step_by(TOKEN_SET_WIRE_CHUNK)
-            .map(|start| (start, (start + TOKEN_SET_WIRE_CHUNK).min(token_sets.len())))
-            .collect::<Vec<_>>();
-        let build_chunk = |&(start, end): &(usize, usize)| {
-            let mut body = Vec::<u8>::new();
-            put_var_u32(&mut body, (end - start) as u32);
-            let mut spans = Vec::<u32>::with_capacity(end - start);
-            let mut chunk_range_count = 0usize;
-            for tokens in &token_sets[start..end] {
-                let range_count = tokens.ranges_len();
-                put_var_u32(&mut body, range_count as u32);
-                chunk_range_count += range_count;
-                let mut word_spans = 0u32;
-                let mut previous_end_plus_one = 0u64;
-                for token_range in tokens.ranges() {
-                    let lo = *token_range.start();
-                    let hi = *token_range.end();
-                    word_spans = word_spans.saturating_add(hi / 64 - lo / 64 + 1);
-                    put_var_u64(&mut body, lo as u64 - previous_end_plus_one);
-                    put_var_u32(&mut body, hi - lo);
-                    previous_end_plus_one = hi as u64 + 1;
+        // Token-set ranges are runtime data: masking walks them on every
+        // relevant weight. Store the compact u16 slab directly when possible
+        // instead of retaining RangeSetBlaze Arcs and later rebuilding a wire
+        // representation in save(). The same pass computes word-span metadata
+        // already required by mask planning.
+        let mut flat_token_ranges_u16 = Vec::<[u16; 2]>::with_capacity(token_range_count);
+        let mut flat_token_spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(token_sets.len());
+        let mut token_word_spans = Vec::<u32>::with_capacity(token_sets.len());
+        let mut narrow_token_ranges = true;
+        for tokens in &token_sets {
+            let start = flat_token_ranges_u16.len();
+            let mut word_spans = 0u32;
+            for range in tokens.ranges() {
+                let lo = *range.start();
+                let hi = *range.end();
+                word_spans = word_spans.saturating_add(hi / 64 - lo / 64 + 1);
+                if hi <= u16::MAX as u32 {
+                    flat_token_ranges_u16.push([lo as u16, hi as u16]);
+                } else {
+                    narrow_token_ranges = false;
                 }
-                spans.push(word_spans);
             }
-            TokenChunkBuild {
-                body: body.into_boxed_slice(),
-                word_spans: spans,
-                range_count: chunk_range_count,
+            token_word_spans.push(word_spans);
+            if narrow_token_ranges {
+                flat_token_spans.push(PackedRuntimeTokenSetSpan {
+                    start: u32::try_from(start)
+                        .map_err(|_| "packed runtime token range slab exceeds u32".to_owned())?,
+                    len: u32::try_from(flat_token_ranges_u16.len() - start)
+                        .map_err(|_| "packed runtime token set exceeds u32 ranges".to_owned())?,
+                    word_spans,
+                });
             }
-        };
-        let token_chunks = if chunk_ranges.len() >= 4 && rayon::current_num_threads() > 1 {
-            chunk_ranges.par_iter().map(build_chunk).collect::<Vec<_>>()
-        } else {
-            chunk_ranges.iter().map(build_chunk).collect::<Vec<_>>()
-        };
-        let token_range_count = token_chunks.iter().map(|chunk| chunk.range_count).sum::<usize>();
-        let token_word_spans = token_chunks
-            .iter()
-            .flat_map(|chunk| chunk.word_spans.iter().copied())
-            .collect::<Vec<_>>();
-        let fast_wire_token_chunk_range_counts = token_chunks
-            .iter()
-            .map(|chunk| {
-                u32::try_from(chunk.range_count)
-                    .expect("packed runtime token chunk range count should fit u32")
-            })
-            .collect::<Vec<_>>();
-        let fast_wire_token_chunks = token_chunks
-            .into_iter()
-            .map(|chunk| chunk.body)
-            .collect::<Vec<_>>();
+        }
+        if !narrow_token_ranges {
+            flat_token_ranges_u16.clear();
+            flat_token_spans.clear();
+        }
         let token_stats_ms = token_stats_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        // When the finalized parser fits DWF6's widths, build the same narrow
+        // arrays as a live execution view. Runtime accessors below prefer this
+        // representation, so the work is part of runtime packing rather than
+        // serialization preparation. Keeping the wide compiler-facing pools
+        // alongside it preserves cheap cold materialization/composition.
+        const DEFAULT_LABEL_WIRE: i32 = i32::MAX - 1;
+        const SPAN_LEN_BITS: u32 = 10;
+        const SPAN_LEN_MAX: u32 = (1 << SPAN_LEN_BITS) - 1;
+        const SPAN_START_MAX: u32 = (1 << (32 - SPAN_LEN_BITS)) - 1;
+        let requires_dwf6 = states.len() > (1usize << 17)
+            || target_values.iter().any(|&target| target >= (1 << 17))
+            || weight_values.iter().any(|&weight| weight >= (1 << 15));
+        let compact_tokens = if narrow_token_ranges
+            && flat_token_ranges_u16
+                .iter()
+                .all(|&[start, _]| start < (1 << 13))
+        {
+            const LENGTH_ESCAPE: u16 = 7;
+            // Very range-heavy token sets are materially faster to apply as
+            // direct [start,end] pairs, while keeping the common sets compact
+            // preserves most of DWF8's size/save advantage.
+            const WIDE_RANGE_THRESHOLD: usize = 320;
+            let mut ranges = Vec::<u16>::with_capacity(flat_token_ranges_u16.len());
+            let mut spans = Vec::<PackedRuntimeTokenSetSpan>::with_capacity(flat_token_spans.len());
+            let mut overflow_starts = Vec::<u32>::with_capacity(flat_token_spans.len());
+            let mut overflows = Vec::<u16>::new();
+            for span in &flat_token_spans {
+                let byte_start = ranges.len().saturating_mul(2);
+                let wide = span.len as usize > WIDE_RANGE_THRESHOLD;
+                overflow_starts.push(
+                    u32::try_from(overflows.len())
+                        .map_err(|_| "compact runtime overflow stream exceeds u32".to_owned())?,
+                );
+                let range_start = span.start as usize;
+                let range_end = range_start + span.len as usize;
+                if wide {
+                    for &[start, end] in &flat_token_ranges_u16[range_start..range_end] {
+                        ranges.push(start);
+                        ranges.push(end);
+                    }
+                } else {
+                    for &[start, end] in &flat_token_ranges_u16[range_start..range_end] {
+                        let len = end - start;
+                        let encoded_len = len.min(LENGTH_ESCAPE);
+                        let packed = start | (encoded_len << 13);
+                        ranges.push(packed);
+                        if len >= LENGTH_ESCAPE {
+                            overflows.push(len);
+                        }
+                    }
+                }
+                spans.push(PackedRuntimeTokenSetSpan {
+                    start: u32::try_from(byte_start)
+                        .map_err(|_| "compact runtime token stream exceeds u32".to_owned())?
+                        | u32::from(wide),
+                    len: span.len,
+                    word_spans: span.word_spans,
+                });
+            }
+            (ranges.len().saturating_mul(2) < (1 << 24) && overflows.len() < (1 << 24))
+                .then_some((ranges, spans, overflow_starts, overflows))
+        } else {
+            None
+        };
+
+        let owned_narrow = if requires_dwf6
+            && compact_tokens.is_some()
+            && flat_token_spans.len() <= u16::MAX as usize + 1
+            && flat_token_spans
+                .iter()
+                .all(|span| span.word_spans <= u16::MAX as u32)
+            && weights.len() < u16::MAX as usize
+            && geometries.len() <= u16::MAX as usize + 1
+            && geometries.iter().all(|geometry| {
+                geometry.len() <= u16::MAX as usize
+                    && geometry.iter().all(|&(start, end)| {
+                        start <= u16::MAX as u32 && end <= u16::MAX as u32
+                    })
+            })
+            && weight_token_ids.iter().all(|&id| id <= u16::MAX as u32)
+            && weights.iter().all(|weight| {
+                weight.geometry <= u16::MAX as u32
+                    && weight.token_ids_start < (1 << 24)
+                    && weight.full <= u8::MAX as u32
+            })
+            && label_values.len() == target_values.len()
+            && label_values.len() == weight_values.len()
+            && label_values.iter().all(|&label| {
+                label == DEFAULT_LABEL_WIRE || (0..u16::MAX as i32).contains(&label)
+            })
+            && target_values.iter().all(|&target| target < (1 << 24))
+            && weight_values.iter().all(|&weight| weight < (1 << 16))
+            && label_spans.iter().all(|&[start, len]| {
+                start <= SPAN_START_MAX && len <= SPAN_LEN_MAX
+            })
+            && states.iter().all(|state| {
+                state.row <= u16::MAX as u32
+                    && (state.final_weight == u32::MAX || state.final_weight < u16::MAX as u32)
+            })
+        {
+            let (
+                compact_token_ranges,
+                compact_token_spans,
+                compact_token_overflow_starts,
+                compact_token_overflows,
+            ) =
+                compact_tokens.expect("checked compact token runtime");
+            let mut transitions = Vec::<u8>::with_capacity(label_values.len() * 7);
+            for ((&label, &target), &weight_id) in label_values
+                .iter()
+                .zip(target_values.iter())
+                .zip(weight_values.iter())
+            {
+                let label = if label == DEFAULT_LABEL_WIRE {
+                    u16::MAX
+                } else {
+                    label as u16
+                };
+                transitions.extend_from_slice(&label.to_le_bytes());
+                transitions.push(target as u8);
+                transitions.push((target >> 8) as u8);
+                transitions.push((target >> 16) as u8);
+                transitions.extend_from_slice(&(weight_id as u16).to_le_bytes());
+            }
+
+            let spans = label_spans
+                .iter()
+                .map(|&[start, len]| (start << SPAN_LEN_BITS) | len)
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+
+            let mut narrow_states = Vec::<u8>::with_capacity(states.len() * 4);
+            for state in &states {
+                narrow_states.extend_from_slice(&(state.row as u16).to_le_bytes());
+                let final_plus_one = if state.final_weight == u32::MAX {
+                    0
+                } else {
+                    state.final_weight as u16 + 1
+                };
+                narrow_states.extend_from_slice(&final_plus_one.to_le_bytes());
+            }
+
+            let mut narrow_weights = Vec::<u8>::with_capacity(weights.len() * 6);
+            for weight in &weights {
+                narrow_weights.extend_from_slice(&(weight.geometry as u16).to_le_bytes());
+                narrow_weights.push(weight.token_ids_start as u8);
+                narrow_weights.push((weight.token_ids_start >> 8) as u8);
+                narrow_weights.push((weight.token_ids_start >> 16) as u8);
+                narrow_weights.push(weight.full as u8);
+            }
+
+            Some(OwnedNarrowPackedRuntimeDwa {
+                token_ranges: compact_token_ranges.into_boxed_slice(),
+                token_spans: compact_token_spans.into_boxed_slice(),
+                token_range_overflow_starts: compact_token_overflow_starts.into_boxed_slice(),
+                token_range_overflows: compact_token_overflows.into_boxed_slice(),
+                transitions: transitions.into_boxed_slice(),
+                spans,
+                states: narrow_states.into_boxed_slice(),
+                weights: narrow_weights.into_boxed_slice(),
+                weight_token_ids: weight_token_ids
+                    .iter()
+                    .map(|&id| id as u16)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            })
+        } else {
+            None
+        };
+        let owned_narrow_present = owned_narrow.is_some();
+        let keep_flat_token_ranges = narrow_token_ranges && !owned_narrow_present;
 
         if let Some(total_started) = total_started {
             eprintln!(
@@ -3277,16 +5005,19 @@ impl PackedRuntimeDwa {
         Ok(Self {
             start_state: dwa.start_state(),
             backed: None,
+            owned_narrow,
             token_set_chunks: Box::new([]),
             token_set_locations: Box::new([]),
             flat_token_ranges: None,
-            flat_token_spans: None,
-            materialized_token_sets: Some(token_sets.into_boxed_slice()),
-            materialized_token_word_spans: Some(token_word_spans.into_boxed_slice()),
-            fast_wire_token_chunks: Some(fast_wire_token_chunks.into_boxed_slice()),
-            fast_wire_token_chunk_range_counts: Some(
-                fast_wire_token_chunk_range_counts.into_boxed_slice(),
-            ),
+            flat_token_ranges_u16: keep_flat_token_ranges
+                .then(|| flat_token_ranges_u16.into_boxed_slice()),
+            flat_token_spans: keep_flat_token_ranges.then(|| flat_token_spans.into_boxed_slice()),
+            materialized_token_sets: (!narrow_token_ranges && !owned_narrow_present)
+                .then(|| token_sets.into_boxed_slice()),
+            materialized_token_word_spans: (!narrow_token_ranges && !owned_narrow_present)
+                .then(|| token_word_spans.into_boxed_slice()),
+            fast_wire_token_chunks: None,
+            fast_wire_token_chunk_range_counts: None,
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -3533,9 +5264,11 @@ impl PackedRuntimeDwa {
         Ok(Self {
             start_state: dwa.start_state(),
             backed: None,
+            owned_narrow: None,
             token_set_chunks: token_set_chunks.into_boxed_slice(),
             token_set_locations: token_set_locations.into_boxed_slice(),
             flat_token_ranges: None,
+            flat_token_ranges_u16: None,
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
@@ -3863,9 +5596,11 @@ impl PackedRuntimeDwa {
         let result = Self {
             start_state,
             backed: None,
+            owned_narrow: None,
             token_set_chunks: token_set_chunks.into_boxed_slice(),
             token_set_locations: token_set_locations.into_boxed_slice(),
             flat_token_ranges: None,
+            flat_token_ranges_u16: None,
             flat_token_spans: None,
             materialized_token_sets: None,
             materialized_token_word_spans: None,
@@ -3896,6 +5631,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn state_count(&self) -> usize {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.states.len() / OwnedNarrowPackedRuntimeDwa::STATE_STRIDE;
+        }
         self.backed
             .as_ref()
             .map_or(self.states.len(), |backed| backed.state_count)
@@ -3903,6 +5641,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn token_set_count(&self) -> usize {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.token_spans.len();
+        }
         if let Some(backed) = &self.backed {
             return backed.token_set_count;
         }
@@ -3928,6 +5669,9 @@ impl PackedRuntimeDwa {
 
     #[inline]
     pub fn weight_count(&self) -> usize {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.weights.len() / OwnedNarrowPackedRuntimeDwa::WEIGHT_STRIDE;
+        }
         self.backed
             .as_ref()
             .map_or(self.weights.len(), |backed| backed.weight_count)
@@ -3936,6 +5680,124 @@ impl PackedRuntimeDwa {
     #[inline]
     pub fn token_set(&self, id: u32) -> Option<PackedRuntimeTokenSetRef<'_>> {
         if let Some(backed) = &self.backed {
+            if backed.direct_token_spans {
+                let index = id as usize;
+                if index >= backed.token_set_count {
+                    return None;
+                }
+                let span = backed.token_locations_start + index * 12;
+                let start = backed.read_u32(span)? as usize;
+                let len = backed.read_u32(span + 4)? as usize;
+                let word_spans = backed.read_u32(span + 8)?;
+                let byte_start = start.checked_mul(4)?;
+                let byte_end = start.checked_add(len)?.checked_mul(4)?;
+                let body_len = backed.token_body_end.checked_sub(backed.token_body_start)?;
+                if byte_end > body_len {
+                    return None;
+                }
+                let absolute_start = backed.section_start + backed.token_body_start + byte_start;
+                let absolute_end = backed.section_start + backed.token_body_start + byte_end;
+                return Some(PackedRuntimeTokenSetRef {
+                    id,
+                    storage: PackedRuntimeTokenSetStorageRef::BackedFlat16(
+                        backed.backing.get(absolute_start..absolute_end)?,
+                    ),
+                    word_spans,
+                });
+            }
+            if backed.split_target_weight {
+                let index = id as usize;
+                if index >= backed.token_set_count {
+                    return None;
+                }
+                let start_location =
+                    backed.read_u24(backed.token_locations_start + index * 3)? as usize;
+                let wide_compact_set = backed.compact_token_ranges && (start_location & 1) != 0;
+                let start = if backed.compact_token_ranges {
+                    start_location & !1usize
+                } else {
+                    start_location
+                };
+                let body_len = backed.token_body_end.checked_sub(backed.token_body_start)?;
+                let end = if index + 1 < backed.token_set_count {
+                    let next = backed
+                        .read_u24(backed.token_locations_start + (index + 1) * 3)?
+                        as usize;
+                    if backed.compact_token_ranges {
+                        next & !1usize
+                    } else {
+                        next
+                    }
+                } else {
+                    body_len
+                };
+                if start > end || end > body_len {
+                    return None;
+                }
+                let absolute_start = backed.section_start + backed.token_body_start + start;
+                let absolute_end = backed.section_start + backed.token_body_start + end;
+                if backed.compact_token_ranges {
+                    let word_spans =
+                        backed.read_u16(backed.token_word_spans_start + index * 2)? as u32;
+                    if wide_compact_set {
+                        if (end - start) % 4 != 0 {
+                            return None;
+                        }
+                        return Some(PackedRuntimeTokenSetRef {
+                            id,
+                            storage: PackedRuntimeTokenSetStorageRef::BackedFlat16(
+                                backed.backing.get(absolute_start..absolute_end)?,
+                            ),
+                            word_spans,
+                        });
+                    }
+                    if start % 2 != 0 || end % 2 != 0 {
+                        return None;
+                    }
+                    let range_count = ((end - start) / 2) as u32;
+                    let overflow_start = backed
+                        .read_u24(backed.compact_overflow_locations_start + index * 3)?
+                        as usize;
+                    let overflow_end = if index + 1 < backed.token_set_count {
+                        backed.read_u24(
+                            backed.compact_overflow_locations_start + (index + 1) * 3,
+                        )? as usize
+                    } else {
+                        backed.compact_overflow_count
+                    };
+                    if overflow_start > overflow_end || overflow_end > backed.compact_overflow_count {
+                        return None;
+                    }
+                    let overflow_absolute_start = backed.section_start
+                        + backed.compact_overflow_values_start
+                        + overflow_start * 2;
+                    let overflow_absolute_end = backed.section_start
+                        + backed.compact_overflow_values_start
+                        + overflow_end * 2;
+                    return Some(PackedRuntimeTokenSetRef {
+                        id,
+                        storage: PackedRuntimeTokenSetStorageRef::Compact {
+                            bytes: backed.backing.get(absolute_start..absolute_end)?,
+                            range_count,
+                            overflows: backed
+                                .backing
+                                .get(overflow_absolute_start..overflow_absolute_end)?,
+                        },
+                        word_spans,
+                    });
+                }
+                if (end - start) % 4 != 0 {
+                    return None;
+                }
+                let word_spans = backed.read_u16(backed.token_word_spans_start + index * 2)? as u32;
+                return Some(PackedRuntimeTokenSetRef {
+                    id,
+                    storage: PackedRuntimeTokenSetStorageRef::BackedFlat16(
+                        backed.backing.get(absolute_start..absolute_end)?,
+                    ),
+                    word_spans,
+                });
+            }
             let (bytes, word_spans) = backed.token_bytes(id)?;
             let mut pos = 0usize;
             let range_count = take_var_u32(bytes, &mut pos).ok()?;
@@ -3948,6 +5810,65 @@ impl PackedRuntimeDwa {
                 word_spans,
             });
         }
+        if let Some(narrow) = &self.owned_narrow {
+            let span = *narrow.token_spans.get(id as usize)?;
+            let wide = span.start & 1 != 0;
+            let start_bytes = (span.start & !1) as usize;
+            let end_bytes = if id as usize + 1 < narrow.token_spans.len() {
+                (narrow.token_spans[id as usize + 1].start & !1) as usize
+            } else {
+                narrow.token_ranges.len().checked_mul(2)?
+            };
+            if start_bytes > end_bytes
+                || end_bytes > narrow.token_ranges.len().checked_mul(2)?
+                || start_bytes % 2 != 0
+                || end_bytes % 2 != 0
+            {
+                return None;
+            }
+            let start = start_bytes / 2;
+            let end = end_bytes / 2;
+            if wide {
+                if (end - start) % 2 != 0 || (end - start) / 2 != span.len as usize {
+                    return None;
+                }
+                let words = narrow.token_ranges.get(start..end)?;
+                // [u16; 2] has the same alignment as u16 and every u16 bit
+                // pattern is valid, so an even-length u16 slice can be viewed
+                // as start/end pairs without copying.
+                let ranges = unsafe {
+                    std::slice::from_raw_parts(
+                        words.as_ptr().cast::<[u16; 2]>(),
+                        words.len() / 2,
+                    )
+                };
+                return Some(PackedRuntimeTokenSetRef {
+                    id,
+                    storage: PackedRuntimeTokenSetStorageRef::Flat16(ranges),
+                    word_spans: span.word_spans,
+                });
+            }
+            if end - start != span.len as usize {
+                return None;
+            }
+            let overflow_start = *narrow.token_range_overflow_starts.get(id as usize)? as usize;
+            let overflow_end = if id as usize + 1 < narrow.token_range_overflow_starts.len() {
+                narrow.token_range_overflow_starts[id as usize + 1] as usize
+            } else {
+                narrow.token_range_overflows.len()
+            };
+            if overflow_start > overflow_end || overflow_end > narrow.token_range_overflows.len() {
+                return None;
+            }
+            return Some(PackedRuntimeTokenSetRef {
+                id,
+                storage: PackedRuntimeTokenSetStorageRef::Compact16 {
+                    ranges: narrow.token_ranges.get(start..end)?,
+                    overflows: narrow.token_range_overflows.get(overflow_start..overflow_end)?,
+                },
+                word_spans: span.word_spans,
+            });
+        }
         if let Some(sets) = &self.materialized_token_sets {
             let tokens = sets.get(id as usize)?;
             let word_spans = *self
@@ -3958,6 +5879,16 @@ impl PackedRuntimeDwa {
                 id,
                 storage: PackedRuntimeTokenSetStorageRef::Materialized(tokens),
                 word_spans,
+            });
+        }
+        if let (Some(ranges), Some(spans)) = (&self.flat_token_ranges_u16, &self.flat_token_spans) {
+            let span = *spans.get(id as usize)?;
+            let start = span.start as usize;
+            let end = start.checked_add(span.len as usize)?;
+            return Some(PackedRuntimeTokenSetRef {
+                id,
+                storage: PackedRuntimeTokenSetStorageRef::Flat16(ranges.get(start..end)?),
+                word_spans: span.word_spans,
             });
         }
         if let (Some(ranges), Some(spans)) = (&self.flat_token_ranges, &self.flat_token_spans) {
@@ -3998,12 +5929,29 @@ impl PackedRuntimeDwa {
             return None;
         }
         if target_start == weight_start
+            && let Some(narrow) = &self.owned_narrow
+        {
+            let flat_index = target_start as usize + index;
+            let target = narrow.target(flat_index)?;
+            let weight = narrow.weight_id(flat_index)?;
+            return Some((target, self.weight(weight)?));
+        }
+        if target_start == weight_start
             && let Some(backed) = &self.backed
             && backed.narrow
         {
             let flat_index = target_start as usize + index;
             if flat_index >= backed.target_value_count || flat_index >= backed.weight_value_count {
                 return None;
+            }
+            if backed.split_target_weight {
+                let stride = if backed.label_dedup { 5 } else { 7 };
+                let pos = backed.target_values_start
+                    + flat_index * stride
+                    + if backed.label_dedup { 0 } else { 2 };
+                let target = backed.read_u24(pos)?;
+                let weight = backed.read_u16(pos + 3)? as u32;
+                return Some((target, self.weight(weight)?));
             }
             let pos = if backed.label_dedup {
                 backed.target_values_start + flat_index * 4
@@ -4025,6 +5973,98 @@ impl PackedRuntimeDwa {
         (state.final_weight != u32::MAX)
             .then(|| self.weight(state.final_weight))
             .flatten()
+    }
+
+    /// Materialize the read-only packed runtime representation back into the
+    /// ordinary compiler DWA representation. Runtime loads intentionally keep
+    /// the packed form to avoid rebuilding allocation-heavy Weight/transition
+    /// structures; compiler operations such as constraint composition can opt
+    /// into this conversion only when they actually need to transform the DWA.
+    pub fn to_dwa(&self) -> Result<DWA, String> {
+        let mut weights = Vec::<Weight>::with_capacity(self.weight_count());
+        for id in 0..self.weight_count() as u32 {
+            let packed = self
+                .weight(id)
+                .ok_or_else(|| format!("packed parser DWA is missing weight {id}"))?;
+            if packed.is_full() {
+                weights.push(Weight::all());
+                continue;
+            }
+            let mut runs = Vec::new();
+            for ((start, end), token_set) in packed.entries() {
+                let tokens = if let Some(tokens) = token_set.materialized_arc() {
+                    Arc::clone(tokens)
+                } else {
+                    let mut ranges = Vec::with_capacity(token_set.range_count());
+                    token_set.for_each_range(|lo, hi| ranges.push(lo..=hi));
+                    shared_rangeset(RangeSetBlaze::from_iter(ranges))
+                };
+                runs.push((start, end, tokens));
+            }
+            weights.push(Weight::from_tsid_runs_shared(runs));
+        }
+
+        let mut states = Vec::with_capacity(self.state_count());
+        for state_id in 0..self.state_count() as u32 {
+            let packed_state = self
+                .state_record(state_id)
+                .ok_or_else(|| format!("packed parser DWA is missing state {state_id}"))?;
+            let row = self
+                .row_record(packed_state.row)
+                .ok_or_else(|| format!("packed parser DWA state {state_id} has an invalid row"))?;
+            let [label_start, label_len] = self
+                .pool_span_at(0, row.labels)
+                .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid labels"))?;
+            let [target_start, target_len] = self
+                .pool_span_at(1, row.targets)
+                .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid targets"))?;
+            let [weight_start, weight_len] = self
+                .pool_span_at(2, row.weights)
+                .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid weights"))?;
+            if label_len != target_len || label_len != weight_len {
+                return Err(format!(
+                    "packed parser DWA state {state_id} has mismatched row lengths"
+                ));
+            }
+
+            let mut transitions = BTreeMap::new();
+            for index in 0..label_len as usize {
+                let label = self
+                    .label_value_at(label_start as usize + index)
+                    .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid label"))?;
+                let target = self
+                    .target_value_at(target_start as usize + index)
+                    .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid target"))?;
+                let weight_id = self
+                    .weight_value_at(weight_start as usize + index)
+                    .ok_or_else(|| format!("packed parser DWA state {state_id} has invalid weight id"))?;
+                let weight = weights
+                    .get(weight_id as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("packed parser DWA references missing weight {weight_id}"))?;
+                transitions.insert(label, (target, weight));
+            }
+            let final_weight = if packed_state.final_weight == u32::MAX {
+                None
+            } else {
+                Some(
+                    weights
+                        .get(packed_state.final_weight as usize)
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "packed parser DWA state {state_id} references missing final weight {}",
+                                packed_state.final_weight
+                            )
+                        })?,
+                )
+            };
+            states.push(DWAState {
+                transitions: transitions.into(),
+                final_weight,
+            });
+        }
+        Ok(DWA::from_parts(states, self.start_state))
     }
 
     #[inline]
@@ -6726,6 +8766,7 @@ mod cache_tests {
         let dwa = dwa.share_exact_transition_rows_owned();
 
         let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
+        assert!(packed.owned_narrow.is_none());
         let wire = packed.fast_wire_bytes();
         assert!(wire.starts_with(b"DWF5"));
         let loaded = PackedRuntimeDwa::from_fast_wire_bytes(&wire).unwrap();
@@ -6752,6 +8793,38 @@ mod cache_tests {
         let mut final_ranges = Vec::new();
         final_tokens.for_each_range(|start, end| final_ranges.push((start, end)));
         assert_eq!(final_ranges, vec![(3, 4), (9, 9)]);
+    }
+
+    #[test]
+    fn packed_runtime_dwf8_roundtrip_preserves_large_targets() {
+        let mut dwa = DWA::new(1, 1);
+        let large_target = 1u32 << 17;
+        while dwa.num_states() <= large_target {
+            dwa.add_state();
+        }
+        let restricted = Weight::from_per_tsid_token_sets(std::iter::once((
+            0,
+            RangeSetBlaze::from_iter([3..=3000, 4000..=4000]),
+        )));
+        dwa.add_transition(0, 7, large_target, restricted.clone());
+        let dwa = dwa.share_exact_transition_rows_owned();
+
+        let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
+        assert!(packed.owned_narrow.is_some());
+        let (owned_target, owned_weight) = packed.transition(0, 7).unwrap();
+        assert_eq!(owned_target, large_target);
+        assert!(!owned_weight.is_full());
+        let narrow_wire = packed.fast_wire_bytes();
+        assert!(narrow_wire.starts_with(b"DWF8"));
+        let narrow_loaded = PackedRuntimeDwa::from_fast_wire_bytes(&narrow_wire).unwrap();
+        assert_eq!(narrow_loaded.transition(0, 7).unwrap().0, large_target);
+        let (target, weight) = narrow_loaded.transition(0, 7).unwrap();
+        assert_eq!(target, large_target);
+        assert!(!weight.is_full());
+        let tokens = weight.token_set_for_tsid(0).unwrap();
+        let mut ranges = Vec::new();
+        tokens.for_each_range(|start, end| ranges.push((start, end)));
+        assert_eq!(ranges, vec![(3, 3000), (4000, 4000)]);
     }
 
     #[test]

@@ -4134,20 +4134,66 @@ fn pooled_take_var_u64(input: &[u8], pos: &mut usize) -> Result<u64, String> {
 /// ordinary Weight fields can serialize as pool indices.
 #[cfg(feature = "internal-api")]
 pub fn pack_pooled_weights(weights: &[Weight]) -> Vec<u8> {
+    let total_weight_ranges = weights
+        .iter()
+        .filter(|weight| !weight.is_full())
+        .map(|weight| weight.0.range_values_len())
+        .sum::<usize>();
     let mut token_set_by_ptr = FxHashMap::<usize, u32>::default();
-    let mut token_sets = Vec::<SharedTokenSet>::new();
+    let token_set_capacity_hint = weights.len().saturating_mul(2).min(total_weight_ranges);
+    token_set_by_ptr.reserve(token_set_capacity_hint);
+    let mut token_sets = Vec::<SharedTokenSet>::with_capacity(token_set_capacity_hint);
+    let mut weight_body_bytes = Vec::<u8>::with_capacity(
+        total_weight_ranges
+            .saturating_mul(5)
+            .saturating_add(weights.len().saturating_mul(2)),
+    );
+    let mut weight_body_offsets = Vec::<u32>::with_capacity(weights.len() + 1);
+    weight_body_offsets.push(0);
+    let mut last_token_set: Option<(usize, u32)> = None;
     for weight in weights {
         if weight.is_full() {
-            continue;
-        }
-        for (_, tokens) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(tokens) as usize;
-            if !token_set_by_ptr.contains_key(&ptr) {
-                let index = token_sets.len() as u32;
-                token_set_by_ptr.insert(ptr, index);
-                token_sets.push(tokens.clone());
+            weight_body_bytes.push(1);
+        } else {
+            weight_body_bytes.push(0);
+            pooled_put_var_u32(&mut weight_body_bytes, weight.0.range_values_len() as u32);
+            let mut previous_end_plus_one = 0u64;
+            for (range, tokens) in weight.raw_range_values() {
+                let start = *range.start();
+                let end = *range.end();
+                let gap = (start as u64)
+                    .checked_sub(previous_end_plus_one)
+                    .expect("pooled weight ranges are sorted and disjoint");
+                pooled_put_var_u64(&mut weight_body_bytes, gap);
+                pooled_put_var_u32(&mut weight_body_bytes, end - start);
+
+                let ptr = Arc::as_ptr(tokens) as usize;
+                let token_set = if let Some((last_ptr, last_id)) = last_token_set {
+                    if last_ptr == ptr {
+                        last_id
+                    } else {
+                        let next_index = token_sets.len() as u32;
+                        *token_set_by_ptr.entry(ptr).or_insert_with(|| {
+                            token_sets.push(tokens.clone());
+                            next_index
+                        })
+                    }
+                } else {
+                    let next_index = token_sets.len() as u32;
+                    *token_set_by_ptr.entry(ptr).or_insert_with(|| {
+                        token_sets.push(tokens.clone());
+                        next_index
+                    })
+                };
+                last_token_set = Some((ptr, token_set));
+                pooled_put_var_u32(&mut weight_body_bytes, token_set);
+                previous_end_plus_one = end as u64 + 1;
             }
         }
+        weight_body_offsets.push(
+            u32::try_from(weight_body_bytes.len())
+                .expect("packed Weight-pool bodies must fit the WPL3 u32 length domain"),
+        );
     }
 
     // WPL3 keeps the artifact-local token-set identity pool and makes every
@@ -4156,14 +4202,21 @@ pub fn pack_pooled_weights(weights: &[Weight]) -> Vec<u8> {
     // share complete geometry, so geometry interning added hashing/save work and
     // a few bytes without meaningful deduplication. Length-prefixing the Weight
     // records is sufficient to recover parallel decode.
-    let mut out = Vec::new();
-    let mut body = Vec::new();
+    let mut out = Vec::with_capacity(
+        weight_body_bytes
+            .len()
+            .saturating_add(token_sets.len().saturating_mul(8))
+            .saturating_add(weights.len().saturating_mul(2))
+            .saturating_add(16),
+    );
     out.extend_from_slice(b"WPL3");
     pooled_put_var_u32(&mut out, token_sets.len() as u32);
+    let mut token_set_body_bytes = Vec::<u8>::new();
+    let mut token_set_body_offsets = Vec::<u32>::with_capacity(token_sets.len() + 1);
+    token_set_body_offsets.push(0);
     for tokens in &token_sets {
-        body.clear();
         let range_count = tokens.ranges().count();
-        pooled_put_var_u32(&mut body, range_count as u32);
+        pooled_put_var_u32(&mut token_set_body_bytes, range_count as u32);
         let mut previous_end_plus_one = 0u64;
         for range in tokens.ranges() {
             let start = *range.start();
@@ -4171,41 +4224,28 @@ pub fn pack_pooled_weights(weights: &[Weight]) -> Vec<u8> {
             let gap = (start as u64)
                 .checked_sub(previous_end_plus_one)
                 .expect("pooled token-set ranges are sorted and disjoint");
-            pooled_put_var_u64(&mut body, gap);
-            pooled_put_var_u32(&mut body, end - start);
+            pooled_put_var_u64(&mut token_set_body_bytes, gap);
+            pooled_put_var_u32(&mut token_set_body_bytes, end - start);
             previous_end_plus_one = end as u64 + 1;
         }
-        pooled_put_var_u32(&mut out, body.len() as u32);
-        out.extend_from_slice(&body);
+        token_set_body_offsets.push(
+            u32::try_from(token_set_body_bytes.len())
+                .expect("packed Weight-pool token-set bodies must fit u32"),
+        );
+    }
+    for offsets in token_set_body_offsets.windows(2) {
+        let start = offsets[0] as usize;
+        let end = offsets[1] as usize;
+        pooled_put_var_u32(&mut out, (end - start) as u32);
+        out.extend_from_slice(&token_set_body_bytes[start..end]);
     }
 
     pooled_put_var_u32(&mut out, weights.len() as u32);
-    for weight in weights {
-        body.clear();
-        if weight.is_full() {
-            body.push(1);
-            pooled_put_var_u32(&mut out, body.len() as u32);
-            out.extend_from_slice(&body);
-            continue;
-        }
-        body.push(0);
-        let entry_count = weight.raw_range_values().count();
-        pooled_put_var_u32(&mut body, entry_count as u32);
-        let mut previous_end_plus_one = 0u64;
-        for (range, tokens) in weight.raw_range_values() {
-            let start = *range.start();
-            let end = *range.end();
-            let gap = (start as u64)
-                .checked_sub(previous_end_plus_one)
-                .expect("pooled weight ranges are sorted and disjoint");
-            pooled_put_var_u64(&mut body, gap);
-            pooled_put_var_u32(&mut body, end - start);
-            let token_set = token_set_by_ptr[&(Arc::as_ptr(tokens) as usize)];
-            pooled_put_var_u32(&mut body, token_set);
-            previous_end_plus_one = end as u64 + 1;
-        }
-        pooled_put_var_u32(&mut out, body.len() as u32);
-        out.extend_from_slice(&body);
+    for offsets in weight_body_offsets.windows(2) {
+        let start = offsets[0] as usize;
+        let end = offsets[1] as usize;
+        pooled_put_var_u32(&mut out, (end - start) as u32);
+        out.extend_from_slice(&weight_body_bytes[start..end]);
     }
     out
 }
@@ -4424,6 +4464,9 @@ impl PackedRuntimeWeightPool {
 
     #[inline]
     pub fn weight_count(&self) -> usize { self.weight_spans.len() }
+
+    #[inline]
+    pub fn packed_bytes(&self) -> &[u8] { self.wire.as_ref() }
 
     #[inline]
     pub fn weight(&self, id: u32) -> Option<PackedRuntimePoolWeightRef<'_>> {

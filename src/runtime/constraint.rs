@@ -412,6 +412,71 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
     Some(token_ids)
 }
 
+pub(crate) struct InternalTokenMaskPrebuild {
+    internal_token_buf_masks: Vec<InternalTokenBufMasks>,
+}
+
+impl InternalTokenMaskPrebuild {
+    pub(crate) fn build(
+        original_to_internal: &[u32],
+        internal_to_tokens: &[Vec<u32>],
+    ) -> Self {
+        Self {
+            internal_token_buf_masks: build_internal_token_buf_masks_from_maps(
+                original_to_internal,
+                internal_to_tokens,
+            ),
+        }
+    }
+
+    pub(crate) fn install(self, constraint: &mut Constraint) {
+        debug_assert_eq!(
+            self.internal_token_buf_masks.len(),
+            constraint.internal_token_to_tokens.len(),
+            "base token-mask prebuild must match final internal-token coordinate",
+        );
+        constraint.internal_token_buf_masks = self.internal_token_buf_masks;
+    }
+}
+
+fn build_internal_token_buf_masks_from_maps(
+    original_to_internal: &[u32],
+    internal_to_tokens: &[Vec<u32>],
+) -> Vec<InternalTokenBufMasks> {
+    let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if !grouped && !original_to_internal.is_empty() {
+        let mut masks = vec![Vec::<(u16, u32)>::new(); internal_to_tokens.len()];
+        for (original, &internal) in original_to_internal.iter().enumerate() {
+            if internal == u32::MAX {
+                continue;
+            }
+            let Some(mask) = masks.get_mut(internal as usize) else {
+                continue;
+            };
+            let word = (original as u32 / 32) as u16;
+            let bit = original as u32 % 32;
+            if let Some((last_word, last_mask)) = mask.last_mut()
+                && *last_word == word
+            {
+                *last_mask |= 1u32 << bit;
+                continue;
+            }
+            mask.push((word, 1u32 << bit));
+        }
+        masks
+    } else {
+        internal_to_tokens
+            .iter()
+            .map(|originals| Constraint::build_internal_token_buf_mask(originals))
+            .collect()
+    }
+}
+
 pub(crate) struct TokenMaskCachePrebuild {
     mask_words: usize,
     internal_token_buf_masks: Vec<InternalTokenBufMasks>,
@@ -448,38 +513,10 @@ impl TokenMaskCachePrebuild {
         internal_to_tokens: &[Vec<u32>],
         mask_words: usize,
     ) -> Self {
-        let grouped = std::env::var("GLRMASK_GROUPED_INTERNAL_TOKEN_MASKS")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        let internal_token_buf_masks = if !grouped && !original_to_internal.is_empty() {
-            let mut masks = vec![Vec::<(u16, u32)>::new(); internal_to_tokens.len()];
-            for (original, &internal) in original_to_internal.iter().enumerate() {
-                if internal == u32::MAX {
-                    continue;
-                }
-                let Some(mask) = masks.get_mut(internal as usize) else {
-                    continue;
-                };
-                let word = (original as u32 / 32) as u16;
-                let bit = original as u32 % 32;
-                if let Some((last_word, last_mask)) = mask.last_mut()
-                    && *last_word == word
-                {
-                    *last_mask |= 1u32 << bit;
-                    continue;
-                }
-                mask.push((word, 1u32 << bit));
-            }
-            masks
-        } else {
-            internal_to_tokens
-                .iter()
-                .map(|originals| Constraint::build_internal_token_buf_mask(originals))
-                .collect()
-        };
+        let internal_token_buf_masks = build_internal_token_buf_masks_from_maps(
+            original_to_internal,
+            internal_to_tokens,
+        );
 
         let build_blocks = |block_size: usize| {
             if internal_token_buf_masks.is_empty() {
@@ -906,15 +943,11 @@ impl Constraint {
             return true;
         }
         if let Some(packed) = &self.packed_token_bytes {
-            let expected = crate::runtime::artifact::shared_packed_token_bytes(&vocab_entries);
-            if packed.wire() == expected.as_slice() {
-                return true;
-            }
-            // Current writers use the canonical indexed vocabulary section,
-            // but experimental/older v17 artifacts may still contain TBP1.
-            // Preserve exact composition compatibility without materializing
-            // either side; this slower path is only reached when wire formats
-            // differ.
+            // Validate the supplied vocabulary directly. Do not manufacture a
+            // second packed wire through a process-global cache: that made the
+            // first load for a vocabulary pay work that every later benchmark
+            // load got for free. PackedTokenBytes iteration is zero-copy, so a
+            // fresh load now pays only the actual exact comparison.
             return packed.len() == vocab.entries_map().len()
                 && packed.iter().eq(
                     vocab
@@ -928,14 +961,10 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn token_bytes_for_id(&self, token_id: u32) -> Option<&[u8]> {
-        self.token_bytes
-            .get(&token_id)
-            .map(Vec::as_slice)
-            .or_else(|| {
-                self.packed_token_bytes
-                    .as_ref()
-                    .and_then(|packed| packed.get(token_id))
-            })
+        self.packed_token_bytes
+            .as_ref()
+            .and_then(|packed| packed.get(token_id))
+            .or_else(|| self.token_bytes.get(&token_id).map(Vec::as_slice))
     }
 
     #[inline]
@@ -955,6 +984,23 @@ impl Constraint {
                     .map(|(&token_id, bytes)| (token_id, bytes.as_slice())),
             )
         }
+    }
+
+    /// Bind a loaded constraint to an exact model vocabulary once.
+    ///
+    /// The deep byte-map equality check is paid at load/bind time; successful
+    /// binding then lets repeated composition prove compatibility by `Arc` identity.
+    #[doc(hidden)]
+    pub fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
+        let entries = vocab.entries_arc();
+        if Arc::ptr_eq(&self.token_bytes, &entries) {
+            return Ok(());
+        }
+        if !self.token_bytes_match_vocab(vocab) {
+            return Err("constraint was not compiled for the supplied vocabulary".to_string());
+        }
+        self.token_bytes = entries;
+        Ok(())
     }
 
     #[inline]
@@ -2785,6 +2831,13 @@ impl Constraint {
         {
             return Some(mask);
         }
+        if let (Some(backed), Some(&start), Some(&end)) = (
+            self.backed_internal_token_buf_flat.as_ref(),
+            self.internal_token_buf_offsets.get(internal_token),
+            self.internal_token_buf_offsets.get(internal_token + 1),
+        ) {
+            return backed.slice(start as usize, end as usize);
+        }
         None
     }
 
@@ -2801,6 +2854,15 @@ impl Constraint {
 
     #[inline]
     fn internal_token_buf_mask_len(&self, internal_token: usize) -> usize {
+        if let (Some(&start), Some(&end)) = (
+            self.internal_token_buf_offsets.get(internal_token),
+            self.internal_token_buf_offsets.get(internal_token + 1),
+        ) {
+            let flat_len = self.internal_token_buf_flat_len();
+            if start <= end && end as usize <= flat_len {
+                return (end - start) as usize;
+            }
+        }
         self.internal_token_buf_packed_slice(internal_token)
             .map(<[PackedInternalTokenBufMask]>::len)
             .unwrap_or_else(|| {
@@ -3223,6 +3285,24 @@ impl Constraint {
             }
         }
         (tokens, fusions)
+    }
+
+    /// Compiler-side escape hatch for a constraint loaded in the packed
+    /// runtime representation. Ordinary load/mask/commit paths deliberately
+    /// keep `packed_parser_dwa` zero-copy; transformations such as composition
+    /// need the mutable ordinary DWA and pay this materialization cost only
+    /// when invoked.
+    pub(crate) fn materialize_parser_dwa_for_compilation(&mut self) -> Result<(), String> {
+        let Some(packed) = self.packed_parser_dwa.take() else {
+            return Ok(());
+        };
+        self.parser_dwa = packed.to_dwa()?;
+        self.serialized_artifact_cache = None;
+        self.parser_runtime_caches_prebuilt = false;
+        self.dwa_fast_transitions = Default::default();
+        self.indexed_dag_dense_transitions.clear();
+        self.indexed_dag_dense_finals.clear();
+        Ok(())
     }
 
     pub(crate) fn rebuild_scoped_ignore_runtime_tokens(&mut self) {
@@ -4997,11 +5077,35 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_heavy_and_sliding_token_mask_caches(&mut self) {
-        let build_sliding = || self.compute_all_sliding_word_group_dense_masks();
+        let n_word_groups = self.word_group_prefix_buf_masks.len().saturating_sub(1);
+        let buf_words = self.mask_len();
+        let sliding_useful = [2usize, 4, 8, 16, 32].into_iter().any(|len| {
+            n_word_groups >= len
+                && (0..=n_word_groups - len).any(|start| {
+                    Self::prefer_dense_buf_scan(
+                        buf_words,
+                        self.sparse_word_group_entries_in(start, len),
+                    )
+                })
+        });
+        let build_heavy = || self.compute_heavy_token_dense_masks();
+        let build_sliding = || {
+            if sliding_useful {
+                self.compute_all_sliding_word_group_dense_masks()
+            } else {
+                (
+                    DenseBufMaskRows::default(),
+                    DenseBufMaskRows::default(),
+                    DenseBufMaskRows::default(),
+                    DenseBufMaskRows::default(),
+                    DenseBufMaskRows::default(),
+                )
+            }
+        };
         let (heavy, (pair, quad, super_group, mega, giga)) = if rayon::current_num_threads() == 1 {
-            (self.compute_heavy_token_dense_masks(), build_sliding())
+            (build_heavy(), build_sliding())
         } else {
-            rayon::join(|| self.compute_heavy_token_dense_masks(), build_sliding)
+            rayon::join(build_heavy, build_sliding)
         };
         self.heavy_token_dense_masks = heavy;
         self.pair_word_group_buf_masks = pair;
@@ -7502,6 +7606,26 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod dense_internal_token_mask_tests {
     use super::*;
+
+    #[test]
+    fn bind_vocab_exact_rebinds_equal_vocab_and_rejects_mismatch() {
+        let vocab_a = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_b = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let vocab_bad = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+        let mut constraint = Constraint::from_glrm_grammar(
+            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            &vocab_a,
+        )
+        .unwrap();
+
+        assert!(!Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+        constraint.bind_vocab_exact(&vocab_b).unwrap();
+        assert!(Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+
+        let bound = Arc::clone(&constraint.token_bytes);
+        assert!(constraint.bind_vocab_exact(&vocab_bad).is_err());
+        assert!(Arc::ptr_eq(&constraint.token_bytes, &bound));
+    }
     use crate::Vocab;
 
     #[test]
@@ -7650,6 +7774,44 @@ mod dense_internal_token_mask_tests {
             Constraint::direct_sparse_expanded_work(&selected, &work_prefix),
             (1 + 1) + (1 + 16) + (1 + 3)
         );
+    }
+
+    #[test]
+    fn load_owned_preserves_heavy_token_mask_classification_for_backed_buf_masks() {
+        let vocab = Vocab::new(
+            (0..200u32)
+                .map(|token| (token, b"a".to_vec()))
+                .collect(),
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            &vocab,
+        )
+        .unwrap();
+        assert!(
+            !constraint.heavy_token_indices.is_empty(),
+            "duplicate-token expansion should produce at least one heavy internal token",
+        );
+
+        let loaded = Constraint::load_owned(constraint.save()).unwrap();
+        let backed = loaded
+            .backed_internal_token_buf_flat
+            .as_ref()
+            .expect("current load_owned should retain IBM2 entries in artifact backing");
+        assert!(
+            backed.slice(0, backed.len()).is_some(),
+            "fresh current-format IBM2 entries should be naturally aligned for native access",
+        );
+        assert_eq!(loaded.heavy_token_indices, constraint.heavy_token_indices);
+        assert_eq!(
+            loaded.internal_token_buf_op_costs,
+            constraint.internal_token_buf_op_costs,
+        );
+        assert_eq!(
+            loaded.word_group_buf_op_costs,
+            constraint.word_group_buf_op_costs,
+        );
+        assert_eq!(loaded.total_internal_buf_cost, constraint.total_internal_buf_cost);
     }
 
     #[test]
