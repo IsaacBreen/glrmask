@@ -36,7 +36,7 @@ use super::artifact::{
     FastTemplateDfasByTerminal, FastTokenizerTransitions,
     IndexedDagDenseMask, IndexedDagDenseTransition, IndexedDagDenseTransitionMasks,
     IndexedDagDenseTransitionRow, IndexedDagDenseTransitions,
-    InternalTokenBufMasks, PackedInternalTokenBufMask,
+    InternalTokenBufMasks, PackedDwaDenseWeightMaskCache, PackedInternalTokenBufMask,
     SeedTerminalDenseMasks,
     SparseWeightBufMaskCache,
 };
@@ -3299,6 +3299,7 @@ impl Constraint {
         self.parser_dwa = packed.to_dwa()?;
         self.serialized_artifact_cache = None;
         self.parser_runtime_caches_prebuilt = false;
+        self.packed_dwa_token_dense_masks.clear();
         self.dwa_fast_transitions = Default::default();
         self.indexed_dag_dense_transitions.clear();
         self.indexed_dag_dense_finals.clear();
@@ -3349,6 +3350,7 @@ impl Constraint {
         );
         self.internal_token_dense_words = dense_words;
         self.weight_token_dense_masks = dense_masks;
+        self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         self.dwa_fast_transitions = fast_transitions;
         let (weight_token_buf_masks, weight_token_sparse_buf_masks, direct_sparse_weight_token_sets) =
             self.compute_weight_token_buf_mask_caches_with_prebuilt_sparse(prebuilt_sparse);
@@ -3754,6 +3756,7 @@ impl Constraint {
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
+        self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         let full_dense = Self::dense_words_from_internal_set_with_words(
             &self.internal_token_universe(),
             self.internal_token_dense_words,
@@ -5448,6 +5451,15 @@ impl Constraint {
     // work than scanning the full dense mask. Keep dense bitmaps only for wide
     // transition sets and for residual final sets that need contained-mask IO.
     const DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS: usize = 16;
+    // Packed token sets are decoded directly from the artifact, so eagerly
+    // densifying every set that clears the compiler-side threshold would trade
+    // a large amount of load work and memory for little runtime benefit. A
+    // packed intersection scans one callback per covered word span, while its
+    // dense equivalent scans `internal_token_dense_words` words. Require at
+    // least four dense scans worth of packed span work before paying the load
+    // cost. This is representation-level work accounting, independent of any
+    // parser state or benchmark corpus.
+    const PACKED_DWA_DENSE_MIN_SCAN_MULTIPLIER: usize = 4;
 
     fn token_set_dense_word_spans_at_least(
         tokens: &RangeSetBlaze<u32>,
@@ -5562,6 +5574,51 @@ impl Constraint {
         (internal_token_dense_words, dense_masks)
     }
 
+    fn compute_packed_dwa_dense_token_masks(&self) -> PackedDwaDenseWeightMaskCache {
+        let Some(dwa) = self.packed_parser_dwa.as_ref() else {
+            return PackedDwaDenseWeightMaskCache::default();
+        };
+        if self.internal_token_dense_words == 0 {
+            return PackedDwaDenseWeightMaskCache::default();
+        }
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let started = profile.then(std::time::Instant::now);
+        let min_word_spans = Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS.max(
+            self.internal_token_dense_words
+                .saturating_mul(Self::PACKED_DWA_DENSE_MIN_SCAN_MULTIPLIER),
+        );
+        let transition_ids = dwa.transition_token_set_ids();
+        let transition_count = transition_ids.len();
+        let build = |id: u32| {
+            let token_set = dwa.token_set(id)?;
+            if (token_set.word_spans() as usize) < min_word_spans {
+                return None;
+            }
+            Some((
+                id,
+                self.dense_words_from_runtime_token_set(RuntimeTokenSetRef::PackedDwa(token_set)),
+            ))
+        };
+        let result: PackedDwaDenseWeightMaskCache = if rayon::current_num_threads() == 1 {
+            transition_ids.into_iter().filter_map(build).collect()
+        } else {
+            transition_ids.into_par_iter().filter_map(build).collect()
+        };
+        if let Some(started) = started {
+            eprintln!(
+                "[glrmask/profile][packed_dwa_dense_weight_masks] token_sets={} transition_sets={} cached_sets={} min_word_spans={} words_per_set={} bytes={} total_ms={:.3}",
+                dwa.token_set_count(),
+                transition_count,
+                result.len(),
+                min_word_spans,
+                self.internal_token_dense_words,
+                result.len().saturating_mul(self.internal_token_dense_words).saturating_mul(8),
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
     /// Build precomputed bitmask fragments for each internal token.
     pub(crate) fn build_buf_masks(&mut self) {
         self.internal_token_buf_masks = self.compute_buf_masks();
@@ -5783,17 +5840,16 @@ impl Constraint {
         Self::dense_words_from_internal_set_with_words(internal_tokens, self.internal_token_dense_words)
     }
 
-    fn dense_words_from_runtime_token_set(
-        &self,
+    fn fill_dense_words_from_runtime_token_set(
+        words: &mut [u64],
         internal_tokens: RuntimeTokenSetRef<'_>,
-    ) -> DenseWords {
-        let mut words = vec![0u64; self.internal_token_dense_words];
-        let Some(max_token) = self
-            .internal_token_dense_words
+    ) {
+        let Some(max_token) = words
+            .len()
             .checked_mul(64)
             .and_then(|count| count.checked_sub(1))
         else {
-            return Arc::from(words.into_boxed_slice());
+            return;
         };
         internal_tokens.for_each_range(|start, end| {
             let start = start as usize;
@@ -5825,7 +5881,28 @@ impl Constraint {
             };
             words[last_word] |= last_mask;
         });
+    }
+
+    fn dense_words_from_runtime_token_set(
+        &self,
+        internal_tokens: RuntimeTokenSetRef<'_>,
+    ) -> DenseWords {
+        let mut words = vec![0u64; self.internal_token_dense_words];
+        Self::fill_dense_words_from_runtime_token_set(&mut words, internal_tokens);
         Arc::from(words.into_boxed_slice())
+    }
+
+    #[inline]
+    pub(crate) fn runtime_token_set_dense_mask(
+        &self,
+        token_set: RuntimeTokenSetRef<'_>,
+    ) -> Option<&DenseWords> {
+        if let Some(key) = token_set.materialized_key() {
+            return self.weight_token_dense_masks.get(&key);
+        }
+        token_set
+            .packed_id()
+            .and_then(|id| self.packed_dwa_token_dense_masks.get(&id))
     }
 
     /// Create a fresh state for one generated sequence.

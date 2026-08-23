@@ -475,6 +475,7 @@ impl<'a> IntoIterator for &'a DenseBufMaskRows {
 }
 
 pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
+pub(crate) type PackedDwaDenseWeightMaskCache = FxHashMap<u32, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
@@ -3792,6 +3793,12 @@ pub struct Constraint {
     pub(crate) internal_token_dense_words: usize,
     #[serde(skip)]
     pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
+    /// Dense masks for wide token sets retained in a current-format packed
+    /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
+    /// packed token-set id and can therefore be rebuilt directly from the
+    /// artifact without materializing RangeSet/Weight objects.
+    #[serde(skip, default)]
+    pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
     #[serde(skip)]
     pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
     #[serde(skip)]

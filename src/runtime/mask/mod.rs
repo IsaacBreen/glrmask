@@ -136,7 +136,7 @@ fn materialize_single_path_seed_intersection(
     dense: &mut Vec<u64>,
     internal_tsid: u32,
     weight: RuntimeWeightRef<'_>,
-    precomputed: &DenseTokenMaskCache,
+    constraint: &Constraint,
 ) -> bool {
     debug_assert!(!weight.is_full());
     let Some(token_set) = weight.token_set_for_tsid(internal_tsid) else {
@@ -146,15 +146,13 @@ fn materialize_single_path_seed_intersection(
 
     dense.clear();
     dense.resize(base.len(), 0);
-    if let Some(token_set_key) = token_set.materialized_key() {
-    if let Some(mask) = precomputed.get(&token_set_key) {
+    if let Some(mask) = constraint.runtime_token_set_dense_mask(token_set) {
         let mut any = false;
         for (idx, dense_word) in dense.iter_mut().enumerate() {
             *dense_word = base[idx] & mask.get(idx).copied().unwrap_or(0);
             any |= *dense_word != 0;
         }
         return any;
-    }
     }
 
     let mut any = false;
@@ -3802,7 +3800,7 @@ impl<'a> ConstraintState<'a> {
                                     &mut single_path_acc,
                                     internal_tsid,
                                     weight,
-                                    precomputed,
+                                    self.constraint,
                                 ) {
                                     break;
                                 }
@@ -3812,7 +3810,7 @@ impl<'a> ConstraintState<'a> {
                                 &mut single_path_aux,
                                 internal_tsid,
                                 weight,
-                                precomputed,
+                                self.constraint,
                             ) {
                                 break;
                             }
@@ -3952,7 +3950,7 @@ impl<'a> ConstraintState<'a> {
                                 &mut single_path_acc,
                                 internal_tsid,
                                 weight,
-                                precomputed,
+                                self.constraint,
                             ) {
                                 break;
                             }
@@ -3963,7 +3961,7 @@ impl<'a> ConstraintState<'a> {
                         &mut single_path_aux,
                         internal_tsid,
                         weight,
-                        precomputed,
+                        self.constraint,
                     ) {
                         break;
                     }
@@ -4070,7 +4068,7 @@ impl<'a> ConstraintState<'a> {
         aux: &mut Vec<u64>,
         internal_tsid: u32,
         weight: RuntimeWeightRef<'_>,
-        precomputed: &DenseTokenMaskCache,
+        constraint: &Constraint,
     ) -> bool {
         if weight.is_full() {
             return dense.iter().any(|&word| word != 0);
@@ -4080,15 +4078,13 @@ impl<'a> ConstraintState<'a> {
             dense.fill(0);
             return false;
         };
-        if let Some(token_set_key) = token_set.materialized_key() {
-        if let Some(mask) = precomputed.get(&token_set_key) {
+        if let Some(mask) = constraint.runtime_token_set_dense_mask(token_set) {
             let mut any = false;
             for (idx, dense_word) in dense.iter_mut().enumerate() {
                 *dense_word &= mask.get(idx).copied().unwrap_or(0);
                 any |= *dense_word != 0;
             }
             return any;
-        }
         }
 
         aux.clear();

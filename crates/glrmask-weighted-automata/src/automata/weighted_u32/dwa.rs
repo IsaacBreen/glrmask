@@ -5640,6 +5640,16 @@ impl PackedRuntimeDwa {
     }
 
     #[inline]
+    fn row_count(&self) -> usize {
+        if let Some(narrow) = &self.owned_narrow {
+            return narrow.spans.len();
+        }
+        self.backed
+            .as_ref()
+            .map_or(self.rows.len(), |backed| backed.row_count)
+    }
+
+    #[inline]
     pub fn token_set_count(&self) -> usize {
         if let Some(narrow) = &self.owned_narrow {
             return narrow.token_spans.len();
@@ -5657,6 +5667,68 @@ impl PackedRuntimeDwa {
         )
     }
 
+    /// Return the packed token-set ids referenced by transition weights.
+    ///
+    /// This scans only compact row/weight metadata; it does not decode token
+    /// ranges or materialize Weight/RangeSet values. Runtime cache builders can
+    /// therefore recover the same transition-only token-set domain used by the
+    /// compiler without defeating packed-DWA loading.
+    pub fn transition_token_set_ids(&self) -> Vec<u32> {
+        let mut transition_weights = vec![false; self.weight_count()];
+        for row_id in 0..self.row_count() {
+            let Some(row_id) = u32::try_from(row_id).ok() else {
+                break;
+            };
+            let Some(row) = self.row_record(row_id) else {
+                continue;
+            };
+            let Some([start, len]) = self.pool_span_at(2, row.weights) else {
+                continue;
+            };
+            for index in 0..len as usize {
+                let Some(weight_id) = self.weight_value_at(start as usize + index) else {
+                    continue;
+                };
+                if let Some(used) = transition_weights.get_mut(weight_id as usize) {
+                    *used = true;
+                }
+            }
+        }
+
+        let mut transition_tokens = vec![false; self.token_set_count()];
+        for (weight_id, used) in transition_weights.into_iter().enumerate() {
+            if !used {
+                continue;
+            }
+            let Some(weight_id) = u32::try_from(weight_id).ok() else {
+                break;
+            };
+            let Some(weight) = self.weight_record(weight_id) else {
+                continue;
+            };
+            if weight.full != 0 {
+                continue;
+            }
+            let Some(len) = self.geometry_len_at(weight.geometry) else {
+                continue;
+            };
+            for index in 0..len {
+                let Some(token_id) = self.weight_token_id_at(weight.token_ids_start as usize + index)
+                else {
+                    continue;
+                };
+                if let Some(used) = transition_tokens.get_mut(token_id as usize) {
+                    *used = true;
+                }
+            }
+        }
+
+        transition_tokens
+            .into_iter()
+            .enumerate()
+            .filter_map(|(id, used)| used.then(|| u32::try_from(id).ok()).flatten())
+            .collect()
+    }
     #[inline]
     pub fn materialized_token_sets_with_word_spans(
         &self,
@@ -8796,6 +8868,40 @@ mod cache_tests {
     }
 
     #[test]
+    fn packed_runtime_transition_token_set_ids_exclude_final_only_sets() {
+        let mut dwa = DWA::new(1, 1);
+        let accept = dwa.add_state();
+        let transition_weight = token_weight([3, 4, 9]);
+        let final_weight = token_weight([20, 21, 40]);
+        dwa.add_transition(0, 7, accept, transition_weight);
+        dwa.set_final_weight(accept, final_weight);
+        let dwa = dwa.share_exact_transition_rows_owned();
+
+        let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
+        let wire = packed.fast_wire_bytes();
+        let loaded = PackedRuntimeDwa::from_fast_wire_bytes(&wire).unwrap();
+
+        let transition_id = loaded
+            .transition(0, 7)
+            .unwrap()
+            .1
+            .token_set_for_tsid(0)
+            .unwrap()
+            .id();
+        let final_id = loaded
+            .final_weight(accept)
+            .unwrap()
+            .token_set_for_tsid(0)
+            .unwrap()
+            .id();
+        assert_ne!(transition_id, final_id);
+
+        let transition_ids = loaded.transition_token_set_ids();
+        assert!(transition_ids.contains(&transition_id));
+        assert!(!transition_ids.contains(&final_id));
+    }
+
+    #[test]
     fn packed_runtime_dwf8_roundtrip_preserves_large_targets() {
         let mut dwa = DWA::new(1, 1);
         let large_target = 1u32 << 17;
@@ -8814,6 +8920,10 @@ mod cache_tests {
         let (owned_target, owned_weight) = packed.transition(0, 7).unwrap();
         assert_eq!(owned_target, large_target);
         assert!(!owned_weight.is_full());
+        let owned_transition_token_id = owned_weight.token_set_for_tsid(0).unwrap().id();
+        assert!(packed
+            .transition_token_set_ids()
+            .contains(&owned_transition_token_id));
         let narrow_wire = packed.fast_wire_bytes();
         assert!(narrow_wire.starts_with(b"DWF8"));
         let narrow_loaded = PackedRuntimeDwa::from_fast_wire_bytes(&narrow_wire).unwrap();
@@ -8822,6 +8932,9 @@ mod cache_tests {
         assert_eq!(target, large_target);
         assert!(!weight.is_full());
         let tokens = weight.token_set_for_tsid(0).unwrap();
+        assert!(narrow_loaded
+            .transition_token_set_ids()
+            .contains(&tokens.id()));
         let mut ranges = Vec::new();
         tokens.for_each_range(|start, end| ranges.push((start, end)));
         assert_eq!(ranges, vec![(3, 3000), (4000, 4000)]);
