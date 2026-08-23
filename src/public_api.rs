@@ -52,7 +52,7 @@ impl Constraint {
         options: &CompileOptions<'_>,
     ) -> Result<Self> {
         let end_tokens = options.end_tokens;
-        match grammar {
+        let mut constraint = match grammar {
             Grammar::Ebnf(source) => {
                 reject_non_glrm_subgrammars(options)?;
                 Self::from_ebnf_with_end_tokens(source, vocab, end_tokens)
@@ -74,7 +74,9 @@ impl Constraint {
                 vocab,
                 end_tokens,
             ),
-        }
+        }?;
+        constraint.cache_serialized_artifact_for_save();
+        Ok(constraint)
     }
 }
 

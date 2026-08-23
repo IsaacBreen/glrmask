@@ -6449,7 +6449,10 @@ impl Constraint {
         self.parser_runtime_caches_prebuilt = true;
     }
 
-    pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
+    pub(crate) fn rebuild_runtime_caches_impl(
+        &mut self,
+        preserve_packed_dwa_dense_masks: bool,
+    ) {
         let mut packed_weight_token_sets =
             crate::automata::weighted::dwa::take_packed_decode_token_set_inventory();
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
@@ -6845,7 +6848,9 @@ impl Constraint {
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
-        self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
+        if !preserve_packed_dwa_dense_masks {
+            self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
+        }
         let full_dense = Self::dense_words_from_internal_set_with_words(
             &self.internal_token_universe(),
             self.internal_token_dense_words,
@@ -8693,11 +8698,17 @@ impl Constraint {
                 self.dense_words_from_runtime_token_set(RuntimeTokenSetRef::PackedDwa(token_set)),
             ))
         };
-        let result: PackedDwaDenseWeightMaskCache = if rayon::current_num_threads() == 1 {
+        let rows: Vec<(u32, DenseWords)> = if rayon::current_num_threads() == 1 {
             transition_ids.into_iter().filter_map(build).collect()
         } else {
             transition_ids.into_par_iter().filter_map(build).collect()
         };
+        let result = PackedDwaDenseWeightMaskCache::from_rows(
+            dwa.token_set_count(),
+            self.internal_token_dense_words,
+            rows,
+        )
+        .expect("compiler-built packed DWA dense-mask cache must be internally consistent");
         if let Some(started) = started {
             eprintln!(
                 "[glrmask/profile][packed_dwa_dense_weight_masks] token_sets={} transition_sets={} cached_sets={} min_word_spans={} words_per_set={} bytes={} total_ms={:.3}",
@@ -8989,13 +9000,13 @@ impl Constraint {
     pub(crate) fn runtime_token_set_dense_mask(
         &self,
         token_set: RuntimeTokenSetRef<'_>,
-    ) -> Option<&DenseWords> {
+    ) -> Option<&[u64]> {
         if let Some(key) = token_set.materialized_key() {
-            return self.weight_token_dense_masks.get(&key);
+            return self.weight_token_dense_masks.get(&key).map(AsRef::as_ref);
         }
         token_set
             .packed_id()
-            .and_then(|id| self.packed_dwa_token_dense_masks.get(&id))
+            .and_then(|id| self.packed_dwa_token_dense_masks.get(id))
     }
 
     /// Create a fresh state for one generated sequence.

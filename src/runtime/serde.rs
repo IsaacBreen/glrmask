@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
+use std::sync::OnceLock;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
@@ -27,7 +28,8 @@ const PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION: u16 = 18;
 /// composition/serialization format keeps its section framing but extends the
 /// current core/runtime payloads, so v19 remains independently loadable.
 const PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION: u16 = 19;
-const CONSTRAINT_VERSION: u16 = 20;
+const PREVIOUS_COMBINED_CONSTRAINT_VERSION: u16 = 20;
+const CONSTRAINT_VERSION: u16 = 21;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -45,6 +47,8 @@ const V19_SECTION_MAGIC: [u8; 4] = *b"S19\0";
 const V19_SECTION_HEADER_LEN: usize = V19_SECTION_MAGIC.len() + 10 * 8;
 const V20_SECTION_MAGIC: [u8; 4] = *b"S20\0";
 const V20_SECTION_HEADER_LEN: usize = V20_SECTION_MAGIC.len() + 11 * 8;
+const V21_SECTION_MAGIC: [u8; 4] = *b"S21\0";
+const V21_SECTION_HEADER_LEN: usize = V21_SECTION_MAGIC.len() + 11 * 8;
 const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
 const PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
     PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
@@ -54,11 +58,27 @@ const CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
 
+const PARALLEL_LOAD_POOL_MAX_THREADS: usize = 8;
+const PARALLEL_LOAD_POOL_MIN_BYTES: usize = 1024 * 1024;
+
+fn constraint_load_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(available.min(PARALLEL_LOAD_POOL_MAX_THREADS).max(1))
+            .thread_name(|index| format!("glrmask-load-{index}"))
+            .build()
+            .expect("build constraint load thread pool")
+    })
+}
+
 #[inline]
 fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_COMBINED_CONSTRAINT_VERSION
             | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
             | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
     )
@@ -1647,10 +1667,24 @@ struct SegmentedRuntimeArtifactV20 {
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
     segmented_runtime: Option<SegmentedRuntimeArtifactV20Ref<'a>>,
+    packed_dwa_dense_mask_words_per_row: u32,
+    packed_dwa_dense_mask_token_set_count: u32,
+    packed_dwa_dense_mask_ids: &'a [u32],
+    packed_dwa_dense_mask_rows: &'a [u64],
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
+    terminal_live_states: Vec<Vec<u32>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
+    packed_dwa_dense_mask_words_per_row: u32,
+    packed_dwa_dense_mask_token_set_count: u32,
+    packed_dwa_dense_mask_ids: Vec<u32>,
+    packed_dwa_dense_mask_rows: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV20Runtime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
 }
@@ -1658,6 +1692,7 @@ struct ConstraintArtifactCurrentRuntime {
 struct DecodedConstraintRuntime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
+    packed_dwa_dense_masks: Option<crate::runtime::artifact::PackedDwaDenseWeightMaskCache>,
 }
 
 fn segmented_runtime_artifact_ref(
@@ -2115,6 +2150,80 @@ fn v20_sections(
     ))
 }
 
+fn v21_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V21_SECTION_HEADER_LEN || !payload.starts_with(&V21_SECTION_MAGIC) {
+        return Err("invalid v21 constraint section header".to_owned());
+    }
+    let mut pos = V21_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v21 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v21 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V21_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v21 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v21 constraint section lengths".to_owned());
+    }
+    let mut pos = V21_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
 fn constraint_serialized_weight_pool_with_ids(
     constraint: &Constraint,
 ) -> (Vec<Weight>, Vec<u32>, usize) {
@@ -2323,6 +2432,18 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 impl Constraint {
+    /// Materialize and retain the canonical current-format artifact once a
+    /// compiler-owned constraint has reached its final serialized semantics.
+    /// Subsequent `save()` calls then use the same bulk-copy path as an
+    /// unchanged loaded constraint instead of re-encoding every section.
+    pub(crate) fn cache_serialized_artifact_for_save(&mut self) {
+        if self.serialized_artifact_cache.is_some() {
+            return;
+        }
+        let bytes = self.save();
+        self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
+    }
+
     pub(crate) fn materialize_composition_metadata_for_compilation(
         &mut self,
     ) -> Result<(), String> {
@@ -2730,9 +2851,20 @@ impl Constraint {
                         || rayon::join(
                         || {
                             let started = profile.then(std::time::Instant::now);
+                            let packed_dwa_dense_masks = &self.packed_dwa_token_dense_masks;
                             let bytes = bincode::serialize(&ConstraintArtifactCurrentRuntimeRef {
                                 terminal_live_states: &self.terminal_live_states,
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
+                                packed_dwa_dense_mask_words_per_row: u32::try_from(
+                                    packed_dwa_dense_masks.words_per_row(),
+                                )
+                                .expect("packed DWA dense-mask row width must fit u32"),
+                                packed_dwa_dense_mask_token_set_count: u32::try_from(
+                                    packed_dwa_dense_masks.token_set_count(),
+                                )
+                                .expect("packed DWA token-set count must fit u32"),
+                                packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
+                                packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
                             })
                             .expect("Constraint runtime metadata serialization should succeed");
                             if let Some(started) = started {
@@ -2824,7 +2956,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V20_SECTION_HEADER_LEN
+            + V21_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -2851,7 +2983,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V20_SECTION_HEADER_LEN
+            + V21_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -2871,7 +3003,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V20_SECTION_HEADER_LEN
+        let payload_len = V21_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -2903,7 +3035,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V20_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V21_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -2912,8 +3044,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V20_SECTION_MAGIC.len()].copy_from_slice(&V20_SECTION_MAGIC);
-            pos += V20_SECTION_MAGIC.len();
+            header[pos..pos + V21_SECTION_MAGIC.len()].copy_from_slice(&V21_SECTION_MAGIC);
+            pos += V21_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -3112,7 +3244,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V20_SECTION_MAGIC);
+        bytes.extend_from_slice(&V21_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -3189,7 +3321,13 @@ impl Constraint {
     /// current-format bytes for a later unchanged [`Constraint::save`].
     pub fn load_owned(bytes: Vec<u8>) -> crate::Result<Self> {
         let backing = std::sync::Arc::new(bytes);
-        Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
+        if backing.len() >= PARALLEL_LOAD_POOL_MIN_BYTES {
+            constraint_load_pool().install(|| {
+                Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
+            })
+        } else {
+            Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
+        }
     }
 
     fn load_impl(
@@ -3219,6 +3357,7 @@ impl Constraint {
                 | PREVIOUS_VOCAB_SECTION_CONSTRAINT_VERSION
                 | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
                 | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
+                | PREVIOUS_COMBINED_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -3322,6 +3461,7 @@ impl Constraint {
         };
         let deserialize_started = profile.then(std::time::Instant::now);
         let mut packed_dwa_inventory = None;
+        let mut loaded_packed_dwa_dense_masks = false;
         let mut constraint = if uses_external_runtime_sections(version)
             || version == PREVIOUS_VOCAB_SECTION_CONSTRAINT_VERSION
             || version == PREVIOUS_FAST_RUNTIME_CONSTRAINT_VERSION
@@ -3342,6 +3482,22 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v21_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_COMBINED_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v20_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -3518,9 +3674,45 @@ impl Constraint {
                                         bincode::deserialize::<ConstraintArtifactCurrentRuntime>(
                                             runtime_section,
                                         )
+                                        .and_then(|runtime| {
+                                            let packed_dwa_dense_masks = if runtime
+                                                .packed_dwa_dense_mask_ids
+                                                .is_empty()
+                                            {
+                                                if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                                    return Err(bincode::Error::new(
+                                                        bincode::ErrorKind::Custom(
+                                                            "packed DWA dense-mask slab has rows but no ids"
+                                                                .to_owned(),
+                                                        ),
+                                                    ));
+                                                }
+                                                None
+                                            } else {
+                                                Some(
+                                                    crate::runtime::artifact::PackedDwaDenseWeightMaskCache::from_flat(
+                                                        runtime.packed_dwa_dense_mask_token_set_count as usize,
+                                                        runtime.packed_dwa_dense_mask_words_per_row as usize,
+                                                        runtime.packed_dwa_dense_mask_ids,
+                                                        runtime.packed_dwa_dense_mask_rows,
+                                                    )
+                                                    .map_err(|err| bincode::Error::new(bincode::ErrorKind::Custom(err)))?,
+                                                )
+                                            };
+                                            Ok(DecodedConstraintRuntime {
+                                                terminal_live_states: runtime.terminal_live_states,
+                                                segmented_runtime: runtime.segmented_runtime,
+                                                packed_dwa_dense_masks,
+                                            })
+                                        })
+                                    } else if version == PREVIOUS_COMBINED_CONSTRAINT_VERSION {
+                                        bincode::deserialize::<ConstraintArtifactV20Runtime>(
+                                            runtime_section,
+                                        )
                                         .map(|runtime| DecodedConstraintRuntime {
                                             terminal_live_states: runtime.terminal_live_states,
                                             segmented_runtime: runtime.segmented_runtime,
+                                            packed_dwa_dense_masks: None,
                                         })
                                     } else {
                                         bincode::deserialize::<ConstraintArtifactV15Runtime>(
@@ -3529,6 +3721,7 @@ impl Constraint {
                                         .map(|runtime| DecodedConstraintRuntime {
                                             terminal_live_states: runtime.terminal_live_states,
                                             segmented_runtime: None,
+                                            packed_dwa_dense_masks: None,
                                         })
                                     }
                                     .map(Some)
@@ -4032,6 +4225,27 @@ impl Constraint {
             }
             if let Some(runtime) = runtime {
                 constraint.terminal_live_states = runtime.terminal_live_states;
+                if let Some(cache) = runtime.packed_dwa_dense_masks {
+                    let expected_words = constraint.internal_token_count().div_ceil(64);
+                    let token_set_count = constraint
+                        .packed_parser_dwa
+                        .as_ref()
+                        .map_or(0, |dwa| dwa.token_set_count());
+                    if cache.words_per_row() != expected_words {
+                        return Err(crate::GlrMaskError::Serialization(format!(
+                            "packed DWA dense-mask cache has row width {}; expected {expected_words}",
+                            cache.words_per_row(),
+                        )));
+                    }
+                    if cache.token_set_count() != token_set_count {
+                        return Err(crate::GlrMaskError::Serialization(format!(
+                            "packed DWA dense-mask cache indexes {} token sets; expected {token_set_count}",
+                            cache.token_set_count(),
+                        )));
+                    }
+                    constraint.packed_dwa_token_dense_masks = cache;
+                    loaded_packed_dwa_dense_masks = true;
+                }
                 if let Some(segmented_runtime) = runtime.segmented_runtime {
                     restore_segmented_runtime_v20(&mut constraint, segmented_runtime)?;
                 }
@@ -4137,7 +4351,11 @@ impl Constraint {
                         inventory,
                     );
                 }
-                constraint.rebuild_runtime_caches();
+                if loaded_packed_dwa_dense_masks {
+                    constraint.rebuild_runtime_caches_preserving_packed_dwa_dense_masks();
+                } else {
+                    constraint.rebuild_runtime_caches();
+                }
             }
         }
         if let Some(total_started) = total_started {
