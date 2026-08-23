@@ -75,12 +75,14 @@ mod error;
 mod public_api;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
+pub mod programmatic_js;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
+pub use programmatic_js::ProgrammaticJsCompiler;
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
@@ -225,6 +227,11 @@ pub mod __private {
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
+        fn compose_compiled_subgrammars_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
     }
 
     pub trait DynamicConstraintExt: Sized {
@@ -323,6 +330,47 @@ pub mod __private {
                 });
             }
             compose_constraints_owned_parent(self, &inputs, vocab)
+                .map(|composition| composition.constraint)
+                .map_err(Error::Compilation)
+        }
+
+        fn compose_compiled_subgrammars_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, compose_constraints_owned_parent_shared,
+            };
+            use std::collections::BTreeSet;
+            use std::sync::Arc;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut shared = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for (name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| {
+                        Error::Compilation(format!(
+                            "parent has no subgrammar placeholder terminal {name:?}",
+                        ))
+                    })? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child.as_ref(),
+                });
+                shared.push(Arc::clone(child));
+            }
+            compose_constraints_owned_parent_shared(self, &inputs, &shared, vocab)
                 .map(|composition| composition.constraint)
                 .map_err(Error::Compilation)
         }
@@ -560,6 +608,7 @@ pub mod __private {
         fn parser_root_count(&self) -> usize {
             ConstraintState::parser_root_count(self)
         }
+
     }
 
     pub trait VocabExt {

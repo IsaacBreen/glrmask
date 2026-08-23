@@ -9,9 +9,10 @@ mod serde;
 mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
+#[allow(unused_imports)]
 pub(crate) use artifact::{
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
-    FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedParserComponent,
+    BoundaryTerminalTrieNode, FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedBoundaryTerminalTrie, SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
 #[allow(unused_imports)]
@@ -19,7 +20,7 @@ pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]
 pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use constraint::Constraint;
-pub(crate) use constraint::TokenMaskCachePrebuild;
+pub(crate) use constraint::{InternalTokenMaskPrebuild, TokenMaskCachePrebuild};
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;
 pub use state::ConstraintState;

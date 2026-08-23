@@ -2,6 +2,7 @@ use crate::runtime::artifact::ConstraintSerde;
 use crate::runtime::Constraint;
 use crate::automata::regex::Expr;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::io::{BufWriter, Read, Write};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
@@ -13,7 +14,8 @@ const PREVIOUS_PARSER_DOMAINS_CONSTRAINT_VERSION: u16 = 12;
 const PREVIOUS_COMPOSITION_RESET_CONSTRAINT_VERSION: u16 = 13;
 const PREVIOUS_COMPOSITION_TEMPLATE_CONSTRAINT_VERSION: u16 = 14;
 const PREVIOUS_COMPOSITION_CHARACTERIZATION_CONSTRAINT_VERSION: u16 = 15;
-const CONSTRAINT_VERSION: u16 = 16;
+const PREVIOUS_COMPOSITION_GRAMMAR_SUMMARY_CONSTRAINT_VERSION: u16 = 16;
+const CONSTRAINT_VERSION: u16 = 17;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -207,6 +209,136 @@ struct ConstraintArtifactV16 {
         Option<crate::runtime::artifact::CompositionGrammarSummary>,
 }
 
+#[derive(Serialize)]
+struct SegmentedBoundaryParserV17Ref<'a> {
+    parser_dwa: Cow<'a, crate::automata::weighted_u32::dwa::DWA>,
+    tokenizer_state_to_tsid: &'a [u32],
+    internal_token_to_originals: &'a [Vec<u32>],
+}
+
+#[derive(Serialize)]
+struct SegmentedRuntimeArtifactV17Ref<'a> {
+    materialized_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_parser_state_domain_labels: Vec<i32>,
+    boundary_parser: Option<SegmentedBoundaryParserV17Ref<'a>>,
+    boundary_terminal_trie: Option<&'a crate::runtime::artifact::SegmentedBoundaryTerminalTrie>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedRuntimeArtifactV17 {
+    materialized_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_parser_state_domain_labels: Vec<i32>,
+    boundary_parser: Option<crate::runtime::artifact::SegmentedBoundaryParser>,
+    boundary_terminal_trie: Option<crate::runtime::artifact::SegmentedBoundaryTerminalTrie>,
+}
+
+#[derive(Serialize)]
+struct ConstraintArtifactV17Ref<'a> {
+    base: ConstraintArtifactV16Ref<'a>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV17Ref<'a>>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV17 {
+    base: ConstraintArtifactV16,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV17>,
+}
+
+fn constraint_artifact_v16_ref(constraint: &Constraint) -> ConstraintArtifactV16Ref<'_> {
+    ConstraintArtifactV16Ref {
+        constraint,
+        ignore_expr: &constraint.ignore_expr,
+        terminal_exprs: constraint.tokenizer.terminal_exprs(),
+        parser_state_domain_labels: &constraint.parser_state_domain_labels,
+        composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
+        composition_parser_templates_by_terminal: &constraint.composition_parser_templates_by_terminal,
+        composition_parser_characterizations_by_terminal:
+            &constraint.composition_parser_characterizations_by_terminal,
+        composition_grammar_summary: &constraint.composition_grammar_summary,
+    }
+}
+
+fn segmented_runtime_artifact_ref(
+    constraint: &Constraint,
+) -> Option<SegmentedRuntimeArtifactV17Ref<'_>> {
+    let overlay = constraint.static_dynamic_overlay.as_ref()?;
+    if overlay.segmented_parser_components.is_empty()
+        && overlay.segmented_boundary_parser.is_none()
+        && overlay.segmented_boundary_terminal_trie.is_none()
+    {
+        return None;
+    }
+    let (materialized_component_parser, materialized_parser_state_domain_labels) =
+        if overlay.segmented_parser_components.is_empty() {
+            (None, Vec::new())
+        } else {
+            match crate::compiler::constraint_compose::materialize_segmented_component_parser_for_serialization(
+                constraint,
+            )
+            .expect("segmented component parser should materialize for serialization")
+            {
+                Some((parser, labels)) => (Some(parser), labels),
+                None => (None, Vec::new()),
+            }
+        };
+    let boundary_parser = overlay.segmented_boundary_parser.as_deref().map(|boundary| {
+        let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+            Cow::Owned(compact.to_generic_dwa())
+        } else {
+            Cow::Borrowed(&boundary.parser_dwa)
+        };
+        SegmentedBoundaryParserV17Ref {
+            parser_dwa,
+            tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+            internal_token_to_originals: &boundary.internal_token_to_originals,
+        }
+    });
+    Some(SegmentedRuntimeArtifactV17Ref {
+        materialized_component_parser,
+        materialized_parser_state_domain_labels,
+        boundary_parser,
+        boundary_terminal_trie: overlay.segmented_boundary_terminal_trie.as_deref(),
+    })
+}
+
+fn restore_v16_artifact(artifact: ConstraintArtifactV16) -> crate::Result<Constraint> {
+    let mut constraint = artifact.constraint;
+    constraint.ignore_expr = artifact.ignore_expr;
+    constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
+    constraint.composition_reset_tokens_by_terminal = artifact.composition_reset_tokens_by_terminal;
+    constraint.composition_parser_templates_by_terminal = artifact.composition_parser_templates_by_terminal;
+    constraint.composition_parser_characterizations_by_terminal =
+        artifact.composition_parser_characterizations_by_terminal;
+    constraint.composition_grammar_summary = artifact.composition_grammar_summary;
+    constraint
+        .tokenizer
+        .restore_terminal_exprs(artifact.terminal_exprs)
+        .map_err(crate::GlrMaskError::Serialization)?;
+    Ok(constraint)
+}
+
+fn restore_segmented_runtime_v17(
+    constraint: &mut Constraint,
+    runtime: SegmentedRuntimeArtifactV17,
+) -> crate::Result<()> {
+    if let Some(parser_dwa) = runtime.materialized_component_parser {
+        constraint.parser_dwa = parser_dwa;
+        constraint.parser_state_domain_labels = runtime.materialized_parser_state_domain_labels;
+    }
+    let overlay = constraint
+        .static_dynamic_overlay
+        .get_or_insert_with(Default::default);
+    // V17 publishes segmented A as one ordinary deterministic parser DWA for
+    // persistence. The in-memory zero-copy component representation remains a
+    // compile/runtime optimization only and does not recursively embed source
+    // constraints in the artifact.
+    overlay.segmented_parser_components.clear();
+    overlay.segmented_component_union_root_dispatch.clear();
+    overlay.segmented_boundary_parser = runtime.boundary_parser.map(Box::new);
+    overlay.segmented_boundary_terminal_trie = runtime.boundary_terminal_trie.map(Box::new);
+    Ok(())
+}
+
 struct CountingWriter<W> {
     inner: W,
     written: u64,
@@ -255,6 +387,7 @@ impl Constraint {
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
 
+        let segmented_runtime = segmented_runtime_artifact_ref(self);
         let raw_len = {
             let mut encoder = zstd::stream::write::Encoder::new(
                 &mut bytes,
@@ -269,17 +402,9 @@ impl Constraint {
                 );
                 bincode::serialize_into(
                     &mut buffered,
-                    &ConstraintArtifactV16Ref {
-                        constraint: self,
-                        ignore_expr: &self.ignore_expr,
-                        terminal_exprs: self.tokenizer.terminal_exprs(),
-                        parser_state_domain_labels: &self.parser_state_domain_labels,
-                        composition_reset_tokens_by_terminal: &self.composition_reset_tokens_by_terminal,
-                        composition_parser_templates_by_terminal:
-                            &self.composition_parser_templates_by_terminal,
-                        composition_parser_characterizations_by_terminal:
-                            &self.composition_parser_characterizations_by_terminal,
-                        composition_grammar_summary: &self.composition_grammar_summary,
+                    &ConstraintArtifactV17Ref {
+                        base: constraint_artifact_v16_ref(self),
+                        segmented_runtime,
                     },
                 )
                     .expect("Constraint serialization should succeed");
@@ -319,6 +444,7 @@ impl Constraint {
                 | PREVIOUS_COMPOSITION_RESET_CONSTRAINT_VERSION
                 | PREVIOUS_COMPOSITION_TEMPLATE_CONSTRAINT_VERSION
                 | PREVIOUS_COMPOSITION_CHARACTERIZATION_CONSTRAINT_VERSION
+                | PREVIOUS_COMPOSITION_GRAMMAR_SUMMARY_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -351,6 +477,7 @@ impl Constraint {
                 | PREVIOUS_COMPOSITION_RESET_CONSTRAINT_VERSION
                 | PREVIOUS_COMPOSITION_TEMPLATE_CONSTRAINT_VERSION
                 | PREVIOUS_COMPOSITION_CHARACTERIZATION_CONSTRAINT_VERSION
+                | PREVIOUS_COMPOSITION_GRAMMAR_SUMMARY_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
@@ -403,23 +530,17 @@ impl Constraint {
             payload
         };
         let mut constraint = if version == CONSTRAINT_VERSION {
+            let artifact: ConstraintArtifactV17 = bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            let mut constraint = restore_v16_artifact(artifact.base)?;
+            if let Some(runtime) = artifact.segmented_runtime {
+                restore_segmented_runtime_v17(&mut constraint, runtime)?;
+            }
+            constraint
+        } else if version == PREVIOUS_COMPOSITION_GRAMMAR_SUMMARY_CONSTRAINT_VERSION {
             let artifact: ConstraintArtifactV16 = bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-            let mut constraint = artifact.constraint;
-            constraint.ignore_expr = artifact.ignore_expr;
-            constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
-            constraint.composition_reset_tokens_by_terminal =
-                artifact.composition_reset_tokens_by_terminal;
-            constraint.composition_parser_templates_by_terminal =
-                artifact.composition_parser_templates_by_terminal;
-            constraint.composition_parser_characterizations_by_terminal =
-                artifact.composition_parser_characterizations_by_terminal;
-            constraint.composition_grammar_summary = artifact.composition_grammar_summary;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
-                .map_err(crate::GlrMaskError::Serialization)?;
-            constraint
+            restore_v16_artifact(artifact)?
         } else if version == PREVIOUS_COMPOSITION_CHARACTERIZATION_CONSTRAINT_VERSION {
             let artifact: ConstraintArtifactV15 = bincode::deserialize(serialized)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;

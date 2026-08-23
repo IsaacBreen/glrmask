@@ -146,6 +146,32 @@ nt value = NUMBER | "null";
 
 GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
+### Programmatic JavaScript tool calling
+
+`ProgrammaticJsCompiler` compiles a reusable JavaScript parent plus shared
+expression grammars, then compiles each tool's JSON Schema and links the named
+tools into `tools.<name>(...)` call sites:
+
+```python
+ptc = glrmask.ProgrammaticJsCompiler(vocab)
+lookup = ptc.compile_schema(lookup_schema, vocab)
+update = ptc.compile_schema(update_schema, vocab)
+constraint = ptc.compose_tools({"lookup": lookup, "update": update}, vocab)
+```
+
+The top-level arguments value remains schema-shaped. Explicit literals are
+validated normally, while nested opaque runtime values such as `customer.id`
+may satisfy a value position because their runtime value is unknowable during
+generation. Conditional values are schema-aware on both result arms, so an enum
+can accept `ready ? "open" : "closed"` but rejects a branch containing an
+invalid literal. Arbitrary arithmetic/string construction is not treated as an
+opaque escape. The `tools` namespace is reserved: nested `tools.*` calls inside
+a tool argument expression are rejected rather than bypassing schema dispatch.
+
+For build accounting or persistent caches, the shared components can be built
+separately with `compile_parent`, `compile_dynamic_value`, and
+`compile_condition`, then assembled with `from_components`.
+
 ### Reusing compiled subgrammars
 
 Declare an external grammar with `extern g name;`, then bind an independently compiled constraint by name. Hidden call terminals and cross-boundary token paths are handled automatically:

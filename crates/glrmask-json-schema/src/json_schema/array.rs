@@ -16,7 +16,7 @@ impl<'a> Lowerer<'a> {
         // lexical unit with its enclosing array punctuation. This path is
         // deliberately restricted to explicit string-only items: an untyped
         // `pattern` or `format` schema still permits non-string JSON values.
-        if schema.prefix_items.is_empty() {
+        if !self.dynamic_value_enabled() && schema.prefix_items.is_empty() {
             let isolated = self.with_terminal_partition_class(
                 JsonTerminalPartitionClass::Pattern,
                 |lowerer| -> ImportResult<Option<GrammarExpr>> {
@@ -56,7 +56,8 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        if schema.prefix_items.is_empty()
+        if !self.dynamic_value_enabled()
+            && schema.prefix_items.is_empty()
             && let Some(max) = schema.max_items
             && max >= 2
         {
@@ -69,7 +70,8 @@ impl<'a> Lowerer<'a> {
                 }));
             }
         }
-        if schema.prefix_items.is_empty()
+        if !self.dynamic_value_enabled()
+            && schema.prefix_items.is_empty()
             && schema.min_items == 0
             && schema.max_items.is_none()
             && let Some((item, partition_class)) =
@@ -81,7 +83,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let body = if schema.prefix_items.is_empty() {
-            let item = self.lower_schema(&schema.items)?;
+            let item = self.lower_value_schema(&schema.items)?;
             self.array_body(item, schema.min_items, schema.max_items)
         } else {
             self.lower_tuple_array_body(schema)?
@@ -313,11 +315,11 @@ impl<'a> Lowerer<'a> {
         if tail_allowed {
             let tail_max = schema.max_items.map(|max| max.saturating_sub(prefix_len));
             let tail_min = schema.min_items.saturating_sub(prefix_len).max(1);
-            let tail = self.lower_schema(&schema.items)?;
+            let tail = self.lower_value_schema(&schema.items)?;
             if tail_max != Some(0) {
                 let mut items = Vec::new();
                 for prefix in &schema.prefix_items {
-                    items.push((self.lower_schema(prefix)?, None));
+                    items.push((self.lower_value_schema(prefix)?, None));
                 }
                 items.extend(self.tuple_tail_items(tail, tail_min, tail_max));
                 alternatives.push(GrammarExpr::SeparatedSequence {
@@ -342,7 +344,7 @@ impl<'a> Lowerer<'a> {
         Ok(GrammarExpr::SeparatedSequence {
             items: items
                 .iter()
-                .map(|schema| self.lower_schema(schema).map(|expr| (expr, None)))
+                .map(|schema| self.lower_value_schema(schema).map(|expr| (expr, None)))
                 .collect::<ImportResult<Vec<_>>>()?,
             separator: Box::new(self.item_separator_expr()),
             allow_empty: false,

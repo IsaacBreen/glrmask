@@ -1091,6 +1091,47 @@ pub fn characterize_terminal_action_state_seeds(
 /// size the terminal-indexed seed rows. Keeping that dependency explicit lets
 /// compiled-subgrammar composition avoid recomputing nullable/FIRST/FOLLOW
 /// solely to characterize a small additive splice delta.
+fn build_seeded_characterization_index_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    action_states_by_terminal: &[Vec<u32>],
+) -> CharacterizationIndex {
+    let mut wanted_targets = vec![false; table.num_states as usize];
+    for states in action_states_by_terminal {
+        for &state in states {
+            if let Some(wanted) = wanted_targets.get_mut(state as usize) {
+                *wanted = true;
+            }
+        }
+    }
+
+    let mut goto_predecessors_by_target = vec![Vec::new(); table.num_states as usize];
+    for (revealed_state, row) in table.goto.iter().enumerate() {
+        for (&nonterminal, &(goto_state, goto_replace)) in row.iter() {
+            if wanted_targets
+                .get(goto_state as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                goto_predecessors_by_target[goto_state as usize].push((
+                    revealed_state as u32,
+                    nonterminal,
+                    goto_replace,
+                ));
+            }
+        }
+    }
+
+    CharacterizationIndex {
+        action_states_by_terminal: action_states_by_terminal.to_vec(),
+        // `characterize_terminal` reads forwarded-shift membership directly
+        // from the table. This field is needed only by action-signature
+        // grouping, which seeded characterization does not perform.
+        forwarded_only_states_by_terminal: vec![Vec::new(); num_terminals as usize],
+        goto_predecessors_by_target,
+    }
+}
+
 pub fn characterize_terminal_action_state_seeds_for_terminal_count(
     table: &GLRTable,
     num_terminals: u32,
@@ -1101,9 +1142,20 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
         num_terminals as usize,
         "seeded template action-state rows must cover the terminal domain",
     );
-    let mut index = build_characterization_index_for_terminal_count(table, num_terminals);
-    index.action_states_by_terminal = action_states_by_terminal.to_vec();
-    action_states_by_terminal
+    let sparse_seeded =
+        std::env::var_os("GLRMASK_EXPERIMENT_SPARSE_SEEDED_CHARACTERIZATION_INDEX").is_some();
+    let index = if sparse_seeded {
+        build_seeded_characterization_index_for_terminal_count(
+            table,
+            num_terminals,
+            action_states_by_terminal,
+        )
+    } else {
+        let mut index = build_characterization_index_for_terminal_count(table, num_terminals);
+        index.action_states_by_terminal = action_states_by_terminal.to_vec();
+        index
+    };
+    let result = action_states_by_terminal
         .par_iter()
         .enumerate()
         .filter(|(_, states)| !states.is_empty())
@@ -1111,7 +1163,35 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
             let terminal = terminal as TerminalID;
             (terminal, characterize_terminal(table, &index, terminal))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    if sparse_seeded
+        && std::env::var_os("GLRMASK_VALIDATE_SPARSE_SEEDED_CHARACTERIZATION_INDEX").is_some()
+    {
+        let mut reference_index =
+            build_characterization_index_for_terminal_count(table, num_terminals);
+        reference_index.action_states_by_terminal = action_states_by_terminal.to_vec();
+        let reference = action_states_by_terminal
+            .par_iter()
+            .enumerate()
+            .filter(|(_, states)| !states.is_empty())
+            .map(|(terminal, _)| {
+                let terminal = terminal as TerminalID;
+                (
+                    terminal,
+                    characterize_terminal(table, &reference_index, terminal),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            result, reference,
+            "sparse seeded characterization index differs from full index",
+        );
+        eprintln!(
+            "[glrmask/validate][sparse_seeded_characterization_index] exact=true terminals={}",
+            result.len(),
+        );
+    }
+    result
 }
 
 /// Characterize terminal behavior introduced by caller-supplied goto

@@ -301,6 +301,27 @@ fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u3
     Ok(expected)
 }
 
+pub(crate) fn external_placeholder_token_id_avoiding(
+    vocab: &crate::Vocab,
+    reserved: impl IntoIterator<Item = u32>,
+) -> crate::Result<u32> {
+    let reserved = reserved.into_iter().collect::<BTreeSet<_>>();
+    let mut candidate = first_external_placeholder_token_id(vocab)?;
+    loop {
+        if !reserved.contains(&candidate)
+            && !vocab.iter().any(|(token_id, _)| token_id == candidate)
+        {
+            return Ok(candidate);
+        }
+        candidate = candidate.checked_add(1).ok_or_else(|| {
+            crate::GlrMaskError::Compilation(
+                "every u32 token ID is occupied; no external-subgrammar placeholder is available"
+                    .to_string(),
+            )
+        })?;
+    }
+}
+
 fn dynamic_named_alternatives(
     source: &str,
     parse: NamedGrammarParser,
@@ -578,6 +599,175 @@ impl Constraint {
                     end_token_ids,
                 )
             })
+        })
+    }
+
+    /// Compile a JSON Schema whose nested property/array value positions may
+    /// also be satisfied by an already-compiled dynamic-value subgrammar.
+    ///
+    /// The schema root itself remains schema-controlled. For an object schema,
+    /// for example, `customer` cannot replace the whole arguments object, but
+    /// `{"customer_id": customer.id}` may use the dynamic child for the
+    /// `customer_id` value. Literal values continue through the ordinary schema
+    /// branch and therefore retain enum/range/pattern/object-shape validation.
+    pub fn from_json_schema_with_dynamic_value(
+        schema: &str,
+        dynamic_value: &Constraint,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        Self::from_json_schema_with_dynamic_value_and_end_tokens(
+            schema,
+            dynamic_value,
+            vocab,
+            &[],
+        )
+    }
+
+    /// Compile a JSON Schema with a nested dynamic-value subgrammar and model
+    /// end-token IDs.
+    pub fn from_json_schema_with_dynamic_value_and_end_tokens(
+        schema: &str,
+        dynamic_value: &Constraint,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        with_large_import_stack(schema.len(), || {
+            let placeholder_token_id = external_placeholder_token_id_avoiding(
+                vocab,
+                end_token_ids.iter().copied().chain(
+                    dynamic_value
+                        .special_token_terminals
+                        .iter()
+                        .map(|special| special.token_id),
+                ),
+            )?;
+            let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
+                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+            })?;
+            let mut named =
+                json_schema::schema_to_named_grammar_with_dynamic_value_token(
+                    &schema_value,
+                    placeholder_token_id,
+                )?;
+            prepare_json_schema_named(&mut named)?;
+            let parent = compile_from_named_grammar(
+                named,
+                vocab,
+                "json_schema_dynamic_value",
+                GlrTableConstruction::LegacyRowBisim,
+                end_token_ids,
+            )?;
+            let placeholder_terminal = parent
+                .special_token_terminals
+                .iter()
+                .find(|special| special.token_id == placeholder_token_id)
+                .map(|special| special.terminal_id)
+                .ok_or_else(|| {
+                    crate::GlrMaskError::Compilation(
+                        "dynamic-value JSON Schema lost its linker terminal".to_string(),
+                    )
+                })?;
+            crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                parent,
+                &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: dynamic_value,
+                }],
+                vocab,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
+        })
+    }
+
+    /// Compile JSON Schema for programmatic JavaScript object/array values.
+    /// Opaque runtime values are accepted at nested value positions, while
+    /// conditional expressions keep both result branches recursively constrained
+    /// by the same schema.
+    pub fn from_json_schema_with_programmatic_values(
+        schema: &str,
+        dynamic_value: &Constraint,
+        condition: &Constraint,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        with_large_import_stack(schema.len(), || {
+            let child_reserved = dynamic_value
+                .special_token_terminals
+                .iter()
+                .chain(condition.special_token_terminals.iter())
+                .map(|special| special.token_id)
+                .collect::<BTreeSet<_>>();
+            let value_token_id = external_placeholder_token_id_avoiding(
+                vocab,
+                child_reserved.iter().copied(),
+            )?;
+            let condition_token_id = external_placeholder_token_id_avoiding(
+                vocab,
+                child_reserved.iter().copied().chain(std::iter::once(value_token_id)),
+            )?;
+            let schema_value: serde_json::Value = serde_json::from_str(schema).map_err(|error| {
+                crate::GlrMaskError::GrammarParse(format!("invalid JSON: {error}"))
+            })?;
+            let mut named = json_schema::schema_to_named_grammar_with_programmatic_value_tokens(
+                &schema_value,
+                value_token_id,
+                condition_token_id,
+            )?;
+            prepare_json_schema_named(&mut named)?;
+            let parent = compile_from_named_grammar(
+                named,
+                vocab,
+                "json_schema_programmatic_value",
+                GlrTableConstruction::LegacyRowBisim,
+                &[],
+            )?;
+            let terminal_for = |token_id: u32| -> crate::Result<u32> {
+                parent
+                    .special_token_terminals
+                    .iter()
+                    .find(|special| special.token_id == token_id)
+                    .map(|special| special.terminal_id)
+                    .ok_or_else(|| crate::GlrMaskError::Compilation(format!(
+                        "programmatic JSON Schema lost linker token {token_id}"
+                    )))
+            };
+            let value_terminal = terminal_for(value_token_id)?;
+            // Link one child at a time. The generic multi-child linker attempts
+            // an expensive structural-sharing quotient when there are multiple
+            // children; these two distinct JS children have no sibling regions
+            // worth sharing, and sequential exact composition preserves the
+            // same language while avoiding that unnecessary pass.
+            let with_value = crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                parent,
+                &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                    placeholder_terminal: value_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: dynamic_value,
+                }],
+                vocab,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)?;
+            let condition_terminal = with_value
+                .special_token_terminals
+                .iter()
+                .find(|special| special.token_id == condition_token_id)
+                .map(|special| special.terminal_id)
+                .ok_or_else(|| crate::GlrMaskError::Compilation(
+                    "programmatic JSON Schema lost its condition linker terminal after value composition".to_string(),
+                ))?;
+            crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                with_value,
+                &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                    placeholder_terminal: condition_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: condition,
+                }],
+                vocab,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
         })
     }
 
@@ -1023,6 +1213,97 @@ mod tests {
                 .enumerate()
                 .map(|(id, text)| (id as u32, text.as_bytes().to_vec()))
                 .collect())
+    }
+
+    fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
+        let mut state = constraint.start();
+        state.commit_bytes(bytes).is_ok() && state.is_accepting()
+    }
+
+    #[test]
+    fn json_schema_dynamic_value_is_nested_but_not_root_escape() {
+        let vocab = vocab(&["x", "{", "}", "\"name\"", ": ", "123"]);
+        let dynamic = Constraint::from_glrm_grammar(
+            "start dynamic; t IDENT ::= /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic ::= IDENT;",
+            &vocab,
+        )
+        .unwrap();
+        let schema = r#"{
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": false
+        }"#;
+        let constraint =
+            Constraint::from_json_schema_with_dynamic_value(schema, &dynamic, &vocab).unwrap();
+
+        assert!(accepts_bytes(&constraint, br#"{"name": "literal"}"#));
+        assert!(accepts_bytes(&constraint, br#"{"name": x}"#));
+        assert!(!accepts_bytes(&constraint, b"x"));
+        assert!(!accepts_bytes(&constraint, br#"{"name": 123}"#));
+        assert!(!accepts_bytes(&constraint, br#"{"wrong": x}"#));
+    }
+
+    #[test]
+    fn json_schema_dynamic_value_applies_to_array_items() {
+        let vocab = vocab(&["x", "[", "]", ", ", "1"]);
+        let dynamic = Constraint::from_glrm_grammar(
+            "start dynamic; t IDENT ::= /[A-Za-z_$][A-Za-z0-9_$]*/; nt dynamic ::= IDENT;",
+            &vocab,
+        )
+        .unwrap();
+        let schema = r#"{"type":"array","items":{"type":"integer"}}"#;
+        let constraint =
+            Constraint::from_json_schema_with_dynamic_value(schema, &dynamic, &vocab).unwrap();
+
+        assert!(accepts_bytes(&constraint, b"[1, x]"));
+        assert!(!accepts_bytes(&constraint, b"x"));
+        assert!(!accepts_bytes(&constraint, br#"["wrong"]"#));
+    }
+
+    #[test]
+    fn json_schema_dynamic_value_allows_runtime_enum_but_rejects_bad_literal() {
+        let vocab = vocab(&[
+            "{", "}", "\"status\"", ": ", "\"open\"", "\"closed\"", "\"bogus\"",
+            "result", ".status",
+        ]);
+        let dynamic = Constraint::from_glrm_grammar(
+            "start expr; nt expr ::= 'result' '.status';",
+            &vocab,
+        )
+        .unwrap();
+        let schema = r#"{
+          "type":"object",
+          "properties":{"status":{"enum":["open","closed"]}},
+          "required":["status"],
+          "additionalProperties":false
+        }"#;
+        let constraint = Constraint::from_json_schema_with_dynamic_value(schema, &dynamic, &vocab).unwrap();
+        assert!(accepts_bytes(&constraint, br#"{"status": "open"}"#));
+        assert!(!accepts_bytes(&constraint, br#"{"status": "bogus"}"#));
+        assert!(accepts_bytes(&constraint, br#"{"status": result.status}"#));
+    }
+
+    #[test]
+    fn json_schema_dynamic_value_allows_runtime_const_but_rejects_bad_literal() {
+        let vocab = vocab(&[
+            "{", "}", "\"kind\"", ": ", "\"fixed\"", "\"wrong\"", "result", ".kind",
+        ]);
+        let dynamic = Constraint::from_glrm_grammar(
+            "start expr; nt expr ::= 'result' '.kind';",
+            &vocab,
+        )
+        .unwrap();
+        let schema = r#"{
+          "type":"object",
+          "properties":{"kind":{"const":"fixed"}},
+          "required":["kind"],
+          "additionalProperties":false
+        }"#;
+        let constraint = Constraint::from_json_schema_with_dynamic_value(schema, &dynamic, &vocab).unwrap();
+        assert!(accepts_bytes(&constraint, br#"{"kind": "fixed"}"#));
+        assert!(!accepts_bytes(&constraint, br#"{"kind": "wrong"}"#));
+        assert!(accepts_bytes(&constraint, br#"{"kind": result.kind}"#));
     }
 
     #[test]

@@ -18,6 +18,18 @@ pub struct JsonSchemaConfig {
     pub value_merging: MergeFamily,
     pub key_merging: MergeFamily,
     pub object_merging: ObjectMergeConfig,
+    /// Optional non-vocabulary sentinel used as an external dynamic-value
+    /// subgrammar at nested JSON value positions (object property values and
+    /// array items). The schema root itself never gains this alternative.
+    ///
+    /// This is intentionally not environment-configurable: callers must bind
+    /// the sentinel to an actual compiled child constraint through the facade
+    /// API, so an unbound placeholder can never leak into a user grammar.
+    pub dynamic_value_token_id: Option<u32>,
+    /// Optional non-vocabulary sentinel for an unrestricted JavaScript
+    /// condition expression used by schema-aware conditional values. This is
+    /// meaningful only when `dynamic_value_token_id` is also configured.
+    pub dynamic_condition_token_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +96,8 @@ impl Default for JsonSchemaConfig {
                 pattern: split_open_merge_close,
             },
             object_merging: ObjectMergeConfig { closed_objects: false, open_objects: false },
+            dynamic_value_token_id: None,
+            dynamic_condition_token_id: None,
         }
     }
 }

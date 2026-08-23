@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::row::{ActionRow, GotoRow};
+use super::row::{ActionRow, GotoRow, SparseRow};
 use super::{
     Action, AdmissionPolicy, GLRTable, GlrTableConstruction, GuardedStackShift, StackShift,
     StackShiftGuard,
@@ -69,6 +69,13 @@ pub struct ComposedTable {
     /// have table actions but no lexer language and must never be exposed as
     /// model special tokens.
     pub control_terminals: BTreeSet<TerminalID>,
+    /// Parent-domain terminals that the optimized linker installs into newly
+    /// appended child-owned LR states. Ordinary child terminals are rebased
+    /// above the parent terminal range, so these arise exactly from internal
+    /// child EOF actions expanded over the parent continuation set. Keeping
+    /// this tiny set avoids rescanning every appended action cell when deciding
+    /// which cached parent parser templates may have changed.
+    pub appended_parent_action_terminals: BTreeSet<TerminalID>,
 }
 
 fn remap_rule(rule: &Rule, terminal_offset: TerminalID, nonterminal_offset: NonterminalID) -> Rule {
@@ -490,6 +497,7 @@ pub fn compose_subgrammar_tables(
     let mut forwarded_shifts = parent.forwarded_shifts.clone();
     let mut direct_regular_wide_frontiers = parent.direct_regular_wide_frontiers.clone();
     let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
+    let mut appended_parent_action_terminals = BTreeSet::<TerminalID>::new();
     let mut rows_needing_compress = BTreeSet::<usize>::new();
     let mut skip_terminals = parent.skip_terminals.clone();
     if let Some(ignore) = parent_scoped_ignore_terminal {
@@ -595,6 +603,17 @@ pub fn compose_subgrammar_tables(
                 continuation_terminals.insert(terminal);
             }
         }
+        // Every parent-domain action installed in an appended ordinary child
+        // row comes from mapping an internal child EOF action onto this exact
+        // continuation set. Non-EOF child terminals are shifted by
+        // `terminal_offset` and therefore cannot lie in the parent domain.
+        if (0..child.num_states).any(|state| {
+            state != child_start
+                && state != child_accept
+                && child.action[state as usize].get(&EOF).is_some()
+        }) {
+            appended_parent_action_terminals.extend(continuation_terminals.iter().copied());
+        }
         // A placeholder lookahead may first trigger one or more parent
         // reductions before reaching the actual shift call site. Once the
         // placeholder is replaced, those precursor reductions must be keyed
@@ -672,6 +691,102 @@ pub fn compose_subgrammar_tables(
             skip_terminals.insert(local_ignore + terminal_offset);
         }
         let row_transport_started_at = profile.then(Instant::now);
+        if profile {
+            let mut default_rows = 0usize;
+            let mut default_exception_entries = 0usize;
+            let mut default_null_exceptions = 0usize;
+            let mut sparse_rows = 0usize;
+            let mut sparse_entries = 0usize;
+            let mut logical_entries = 0usize;
+            for (state_id, row) in child.action.iter().enumerate() {
+                if state_id == child_start as usize || state_id == child_accept as usize {
+                    continue;
+                }
+                logical_entries += row.len();
+                match row {
+                    ActionRow::Sparse(entries) => {
+                        sparse_rows += 1;
+                        sparse_entries += entries.len();
+                    }
+                    ActionRow::Default { exceptions, .. } => {
+                        default_rows += 1;
+                        default_exception_entries += exceptions.len();
+                        default_null_exceptions += exceptions.values().filter(|value| value.is_none()).count();
+                    }
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][subgrammar_table_row_shape] child={} default_rows={} default_exception_entries={} default_null_exceptions={} sparse_rows={} sparse_entries={} logical_entries={}",
+                child_index,
+                default_rows,
+                default_exception_entries,
+                default_null_exceptions,
+                sparse_rows,
+                sparse_entries,
+                logical_entries,
+            );
+            if std::env::var_os("GLRMASK_PROFILE_SUBGRAMMAR_ACTION_REUSE").is_some() {
+                use rustc_hash::FxHashSet;
+                let mut unique = FxHashSet::<Action>::default();
+                let mut shifts = 0usize;
+                let mut reduces = 0usize;
+                let mut splits = 0usize;
+                let mut stack_shifts = 0usize;
+                let mut guarded = 0usize;
+                let mut replacements = 0usize;
+                let mut accepts = 0usize;
+                let mut skips = 0usize;
+                let mut stack_single = 0usize;
+                let mut stack_single_push = 0usize;
+                let mut stack_pop0_push1 = 0usize;
+                let mut stack_pop1_push1 = 0usize;
+                let mut stack_total_alternatives = 0usize;
+                for row in &child.action {
+                    for (_, action) in row.iter() {
+                        unique.insert(action.clone());
+                        match action {
+                            Action::Shift(..) => shifts += 1,
+                            Action::Reduce(..) => reduces += 1,
+                            Action::Split { .. } => splits += 1,
+                            Action::StackShifts(shifts) => {
+                                stack_shifts += 1;
+                                stack_total_alternatives += shifts.len();
+                                if shifts.len() == 1 {
+                                    stack_single += 1;
+                                    if shifts[0].pushes.len() == 1 {
+                                        stack_single_push += 1;
+                                        if shifts[0].pop == 0 { stack_pop0_push1 += 1; }
+                                        if shifts[0].pop == 1 { stack_pop1_push1 += 1; }
+                                    }
+                                }
+                            },
+                            Action::GuardedStackShifts(..) => guarded += 1,
+                            Action::ReplaceShifts(..) => replacements += 1,
+                            Action::Accept => accepts += 1,
+                            Action::Skip => skips += 1,
+                        }
+                    }
+                }
+                eprintln!(
+                    "[glrmask/profile][subgrammar_action_reuse] child={} cells={} unique={} reuse={:.2} shifts={} reduces={} splits={} stack_shifts={} stack_single={} stack_single_push={} stack_pop0_push1={} stack_pop1_push1={} stack_alts={} guarded={} replacements={} accepts={} skips={}",
+                    child_index,
+                    logical_entries,
+                    unique.len(),
+                    logical_entries as f64 / unique.len().max(1) as f64,
+                    shifts, reduces, splits, stack_shifts, stack_single, stack_single_push,
+                    stack_pop0_push1, stack_pop1_push1, stack_total_alternatives,
+                    guarded, replacements, accepts, skips,
+                );
+            }
+        }
+        let fast_sparse_row_transport =
+            std::env::var_os("GLRMASK_EXPERIMENT_FAST_SPARSE_ROW_TRANSPORT").is_some();
+        let fast_unique_row_insert =
+            std::env::var_os("GLRMASK_EXPERIMENT_FAST_UNIQUE_ROW_INSERT").is_some();
+        let skip_impossible_row_compression = std::env::var_os(
+            "GLRMASK_EXPERIMENT_SKIP_IMPOSSIBLE_ROW_COMPRESSION",
+        )
+        .is_some();
         let mapped_child_rows = (0..child.num_states)
             .into_par_iter()
             .filter(|&child_state| child_state != child_start && child_state != child_accept)
@@ -679,6 +794,10 @@ pub fn compose_subgrammar_tables(
             let merged_state = child_state_map[child_state as usize] as usize;
             let mut mapped_action_row = ActionRow::default();
             let mut mapped_goto_row = GotoRow::default();
+            let mut mapped_eof_action = None::<Action>;
+            let mut direct_entries = fast_sparse_row_transport.then(|| {
+                Vec::<(TerminalID, Action)>::with_capacity(child.action[child_state as usize].len())
+            });
             for (terminal, child_action) in child.action[child_state as usize].iter() {
                 let mapped_action = remap_action(
                     child_action,
@@ -691,6 +810,38 @@ pub fn compose_subgrammar_tables(
                     child_accept,
                 )?;
                 if terminal == EOF {
+                    if fast_sparse_row_transport {
+                        mapped_eof_action = Some(mapped_action);
+                    } else {
+                        for &continuation in &continuation_terminals {
+                            merge_action_cell(
+                                &mut mapped_action_row,
+                                continuation,
+                                mapped_action.clone(),
+                            )?;
+                        }
+                    }
+                } else if let Some(entries) = direct_entries.as_mut() {
+                    entries.push((terminal + terminal_offset, mapped_action));
+                } else if fast_unique_row_insert {
+                    let previous = mapped_action_row.insert(terminal + terminal_offset, mapped_action);
+                    debug_assert!(
+                        previous.is_none(),
+                        "injective child terminal rebasing unexpectedly collided",
+                    );
+                } else {
+                    merge_action_cell(
+                        &mut mapped_action_row,
+                        terminal + terminal_offset,
+                        mapped_action,
+                    )?;
+                }
+            }
+            if let Some(mut entries) = direct_entries {
+                entries.sort_unstable_by_key(|(terminal, _)| *terminal);
+                debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+                mapped_action_row = ActionRow::Sparse(SparseRow::from_sorted_unique(entries));
+                if let Some(mapped_action) = mapped_eof_action {
                     for &continuation in &continuation_terminals {
                         merge_action_cell(
                             &mut mapped_action_row,
@@ -698,12 +849,6 @@ pub fn compose_subgrammar_tables(
                             mapped_action.clone(),
                         )?;
                     }
-                } else {
-                    merge_action_cell(
-                        &mut mapped_action_row,
-                        terminal + terminal_offset,
-                        mapped_action,
-                    )?;
                 }
             }
             if let Some(local_ignore) = child_input.ignore_terminal {
@@ -713,7 +858,56 @@ pub fn compose_subgrammar_tables(
                     identity_skip_action(),
                 )?;
             }
-            mapped_action_row.compress_default(next_terminal);
+            if (fast_sparse_row_transport || fast_unique_row_insert)
+                && std::env::var_os("GLRMASK_VALIDATE_FAST_SPARSE_ROW_TRANSPORT").is_some()
+            {
+                let mut reference = ActionRow::default();
+                for (terminal, child_action) in child.action[child_state as usize].iter() {
+                    let mapped_action = remap_action(
+                        child_action,
+                        &child_state_map,
+                        terminal_offset,
+                        nonterminal_offset,
+                        None,
+                        None,
+                        child_start,
+                        child_accept,
+                    )?;
+                    if terminal == EOF {
+                        for &continuation in &continuation_terminals {
+                            merge_action_cell(&mut reference, continuation, mapped_action.clone())?;
+                        }
+                    } else {
+                        merge_action_cell(
+                            &mut reference,
+                            terminal + terminal_offset,
+                            mapped_action,
+                        )?;
+                    }
+                }
+                if let Some(local_ignore) = child_input.ignore_terminal {
+                    merge_action_cell(
+                        &mut reference,
+                        local_ignore + terminal_offset,
+                        identity_skip_action(),
+                    )?;
+                }
+                reference.compress_default(next_terminal);
+                assert_eq!(
+                    mapped_action_row, reference,
+                    "fast sparse child-row transport differs at child state {child_state}",
+                );
+            }
+            // A default row can only be smaller if some present action occurs
+            // more often than the absent cells plus one. Since its frequency
+            // is at most the number of present cells, 2*p <= N+1 proves that
+            // compression cannot win and avoids a full action-counting pass.
+            let present = mapped_action_row.len();
+            if !skip_impossible_row_compression
+                || present.saturating_mul(2) > next_terminal as usize + 1
+            {
+                mapped_action_row.compress_default(next_terminal);
+            }
             for (nonterminal, &(target, replace)) in child.goto[child_state as usize].iter() {
                 let target = remap_state(
                     target,
@@ -1017,6 +1211,7 @@ pub fn compose_subgrammar_tables(
         state_relations,
         boundary_nonterminals,
         control_terminals: BTreeSet::new(),
+        appended_parent_action_terminals,
     })
 }
 
@@ -1339,6 +1534,15 @@ pub fn compose_subgrammar_tables_explicit(
     table.compress_default_action_rows();
     table.set_embedded_start_nullable(result_start_nullable);
 
+    let parent_terminal_end = parent.num_terminals;
+    let appended_parent_action_terminals = table
+        .action
+        .iter()
+        .skip(parent.num_states as usize)
+        .flat_map(|row| row.keys())
+        .filter(|&terminal| terminal < parent_terminal_end)
+        .collect::<BTreeSet<_>>();
+
     Ok(ComposedTable {
         table,
         terminal_offsets,
@@ -1356,6 +1560,7 @@ pub fn compose_subgrammar_tables_explicit(
         state_relations,
         boundary_nonterminals,
         control_terminals,
+        appended_parent_action_terminals,
     })
 }
 

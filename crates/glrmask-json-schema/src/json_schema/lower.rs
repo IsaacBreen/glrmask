@@ -237,6 +237,52 @@ impl<'a> Lowerer<'a> {
         self.config.llguidance_compat
     }
 
+    pub fn dynamic_value_enabled(&self) -> bool {
+        self.config.dynamic_value_token_id.is_some()
+    }
+
+    pub(super) fn wrap_programmatic_value_expr(&mut self, static_expr: GrammarExpr) -> GrammarExpr {
+        let Some(value_token_id) = self.config.dynamic_value_token_id else {
+            return static_expr;
+        };
+
+        let rule_name = self.fresh_rule_name("programmatic_schema_value");
+        let mut alternatives = vec![static_expr, GrammarExpr::SpecialToken(value_token_id)];
+        if let Some(condition_token_id) = self.config.dynamic_condition_token_id {
+            // A conditional's test is ordinary JavaScript and does not become
+            // the property's value. Both result branches recursively remain
+            // schema-aware, so e.g. an enum cannot be bypassed by putting an
+            // invalid literal in one arm. Parenthesized schema values are also
+            // useful inside larger JavaScript expressions.
+            alternatives.push(seq(vec![
+                GrammarExpr::SpecialToken(condition_token_id),
+                GrammarExpr::RawRegex(r"[ \t\n\r]*\?[ \t\n\r]*".to_string()),
+                r(&rule_name),
+                GrammarExpr::RawRegex(r"[ \t\n\r]*:[ \t\n\r]*".to_string()),
+                r(&rule_name),
+            ]));
+            alternatives.push(seq(vec![
+                GrammarExpr::RawRegex(r"\([ \t\n\r]*".to_string()),
+                r(&rule_name),
+                GrammarExpr::RawRegex(r"[ \t\n\r]*\)".to_string()),
+            ]));
+        }
+        self.add_nonterminal_rule(&rule_name, choice(alternatives));
+        r(&rule_name)
+    }
+
+    /// Lower a schema used as a nested JSON value. In programmatic-value mode
+    /// the ordinary schema-valid literal language remains one branch, while a
+    /// bound external subgrammar may supply an opaque runtime value. A second
+    /// optional child parses JavaScript conditional tests; both result arms are
+    /// recursively constrained by this same schema. The schema root itself is
+    /// lowered through `lower_schema` directly, so neither escape can replace
+    /// the entire tool-arguments object.
+    pub fn lower_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        let static_expr = self.lower_schema(schema)?;
+        Ok(self.wrap_programmatic_value_expr(static_expr))
+    }
+
     fn new(document: &'a SchemaDocument, config: JsonSchemaConfig) -> Self {
         let (shared_ap_literal_keys, shared_ap_patterns) = collect_shared_ap_exclusion_plan(document);
         let mut definition_by_pointer = BTreeMap::new();

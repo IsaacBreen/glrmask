@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use smallvec::SmallVec;
 
@@ -46,12 +46,23 @@ use crate::compiler::stages::parser_dwa::{
     LazyBooleanParserDomains, SharedBooleanParserDomains, build_boolean_terminal_bundle_nwa,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
+    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table,
+    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache,
+    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles,
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
     build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled,
+    prebuild_parser_bundle_cache_excluding_terminals, PrebuiltParserBundleCache,
     build_terminal_bundle_preimage_domain_nwa,
     universal_parser_stack_domain_dwa,
     normalize_parser_stack_domain_nwa_preserving_explicit,
     normalize_weighted_parser_stack_nwa,
+    normalize_weighted_parser_stack_nwa_small_boundary,
+    normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count,
+    normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
+    normalize_weighted_parser_stack_nwa_small_boundary_with_tsid_map, SmallBoundaryDwa,
+    normalize_signed_weighted_parser_stack_nwa_small_boundary,
+    normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
+    resolve_negative_codes_small_boundary,
 };
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::characterize::{
@@ -222,9 +233,21 @@ fn build_parser_default_domain_plan(
     components: &[ParserDwaComponent<'_>],
     num_parser_states: u32,
 ) -> ParserDefaultDomainPlan {
+    build_parser_default_domain_plan_with_policy(
+        components,
+        num_parser_states,
+        symbolic_child_defaults_env_override(),
+        std::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some(),
+    )
+}
+
+fn build_parser_default_domain_plan_with_policy(
+    components: &[ParserDwaComponent<'_>],
+    num_parser_states: u32,
+    force: Option<bool>,
+    force_parent_defaults: bool,
+) -> ParserDefaultDomainPlan {
     let n = num_parser_states as usize;
-    let force_parent_defaults =
-        std::env::var_os("GLRMASK_EXPERIMENT_SYMBOLIC_PARENT_DEFAULTS").is_some();
     let mut preimage_count = vec![0u32; n];
     let mut owner_component = vec![u32::MAX; n];
     let mut owner_local = vec![u32::MAX; n];
@@ -268,7 +291,6 @@ fn build_parser_default_domain_plan(
         }
     }
 
-    let force = symbolic_child_defaults_env_override();
     let min_saved = symbolic_child_default_min_saved_edges();
     let mut component_predicted = vec![0usize; components.len()];
     for component_index in 0..components.len() {
@@ -486,12 +508,329 @@ fn invert_singleton_parser_state_relation(
 }
 
 #[inline]
+fn weight_survives_component_coordinate_maps(
+    weight: &Weight,
+    maps: &DirectComponentCoordinateMaps,
+) -> bool {
+    if weight.is_empty() {
+        return false;
+    }
+    if weight.is_full() {
+        return maps.local_to_global_tsids.iter().any(|targets| !targets.is_empty())
+            && maps.local_to_global_tokens.iter().any(|targets| !targets.is_empty());
+    }
+    for (start_tsid, end_tsid, tokens) in weight.range_entries() {
+        let has_tsid = (start_tsid..=end_tsid).any(|tsid| {
+            maps.local_to_global_tsids
+                .get(tsid as usize)
+                .is_some_and(|targets| !targets.is_empty())
+        });
+        if !has_tsid {
+            continue;
+        }
+        for mut range in tokens.ranges() {
+            if range.any(|token| {
+                maps.local_to_global_tokens
+                    .get(token as usize)
+                    .is_some_and(|targets| !targets.is_empty())
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn deterministic_component_union_root_dispatch_direct(
+    components: &[crate::runtime::SegmentedParserComponent],
+    component_maps: &[DirectComponentCoordinateMaps],
+    global_state_count: usize,
+) -> Option<Vec<u32>> {
+    let started_at = Instant::now();
+    if components.len() != component_maps.len()
+        || components
+            .iter()
+            .any(|component| component.global_to_local_parser_state.len() < global_state_count)
+    {
+        return None;
+    }
+    let mut dispatch = vec![u32::MAX; global_state_count];
+    let mut selected_counts = vec![0usize; components.len()];
+    let mut dead = 0usize;
+    let mut syntactic_overlaps = 0usize;
+    for global_state in 0..global_state_count {
+        let mut candidates = SmallVec::<[(u32, &Weight); 4]>::new();
+        for (component_index, component) in components.iter().enumerate() {
+            let local_state = component.global_to_local_parser_state[global_state];
+            if local_state == u32::MAX {
+                continue;
+            }
+            let source = component.constraint.as_ref();
+            let root = source
+                .parser_dwa
+                .states()
+                .get(source.parser_dwa.start_state() as usize)?;
+            let positive = encode_positive_label(local_state);
+            let transition = root
+                .transitions
+                .get(&positive)
+                .or_else(|| {
+                    source
+                        .parser_state_domain_label(local_state)
+                        .and_then(|label| root.transitions.get(&label))
+                })
+                .or_else(|| root.transitions.get(&DEFAULT_LABEL));
+            let Some((_, weight)) = transition else {
+                continue;
+            };
+            if !weight.is_empty() {
+                candidates.push((component_index as u32, weight));
+            }
+        }
+        let selected = match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0].0),
+            _ => {
+                syntactic_overlaps += 1;
+                let mut live = SmallVec::<[u32; 4]>::new();
+                for (component_index, weight) in candidates {
+                    if weight_survives_component_coordinate_maps(
+                        weight,
+                        &component_maps[component_index as usize],
+                    ) {
+                        live.push(component_index);
+                    }
+                }
+                match live.as_slice() {
+                    [] => None,
+                    [component] => Some(*component),
+                    _ => return None,
+                }
+            }
+        };
+        if let Some(component) = selected {
+            dispatch[global_state] = component;
+            selected_counts[component as usize] += 1;
+        } else {
+            dead += 1;
+        }
+    }
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_component_union_root_dispatch_direct] deterministic=true global_states={} dead={} selected_counts={selected_counts:?} syntactic_overlaps={syntactic_overlaps} total_ms={:.3}",
+            global_state_count,
+            dead,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(dispatch)
+}
+
+/// Certify the compressed deterministic union of cached component parser DWAs.
+///
+/// The materialized selected10 component union has exactly one synthetic state:
+/// its start subset.  The equivalent zero-copy representation is therefore a
+/// synthetic deterministic root whose first parser-state read selects one
+/// cached component DWA body.  This helper proves the required property rather
+/// than assuming it: for every composed LR state, at most one component start
+/// row may have a live transition after projection to that component's local LR
+/// coordinate.  Any overlap declines the fast representation and lets the
+/// ordinary materialized deterministic union remain the fallback.
+fn build_segmented_runtime_metadata(
+    source_constraints: Vec<(Arc<Constraint>, Option<u32>)>,
+    parser_state_relations: &[Vec<Vec<u32>>],
+    tokenizer_state_offsets: &[u32],
+    terminal_offsets: &[u32],
+    automata_maps: &[DirectComponentCoordinateMaps],
+    global_state_count: usize,
+    two_dwa_runtime_requested: bool,
+    parser_default_domains: &ParserDefaultDomainPlan,
+    id_num_tsids: u32,
+) -> Result<(Vec<crate::runtime::SegmentedParserComponent>, Option<Vec<u32>>, f64), String> {
+    let started_at = Instant::now();
+    let mut segmented_components = Vec::with_capacity(source_constraints.len());
+    for (component_index, (source, root_disallowed_terminal)) in source_constraints.into_iter().enumerate() {
+        let global_to_local_parser_state = invert_singleton_parser_state_relation(
+            &parser_state_relations[component_index],
+            global_state_count,
+        ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
+        segmented_components.push(crate::runtime::SegmentedParserComponent {
+            constraint: source,
+            tokenizer_state_offset: tokenizer_state_offsets[component_index],
+            terminal_offset: terminal_offsets[component_index],
+            root_disallowed_terminal,
+            global_to_local_parser_state,
+        });
+    }
+    let deterministic_root_dispatch = if two_dwa_runtime_requested {
+        Some({
+            let direct = deterministic_component_union_root_dispatch_direct(
+                &segmented_components, automata_maps, global_state_count,
+            ).ok_or_else(|| "two-DWA runtime requires a deterministic root-only component parser union".to_string())?;
+            if std::env::var_os("GLRMASK_VALIDATE_DIRECT_COMPONENT_ROOT_DISPATCH").is_some() {
+                let reference = deterministic_component_union_root_dispatch(
+                    &segmented_components, parser_state_relations,
+                    &parser_default_domains.component_domains,
+                    &parser_default_domains.parser_state_labels,
+                    automata_maps, id_num_tsids as usize, global_state_count,
+                ).ok_or_else(|| "reference component root dispatch failed during direct validation".to_string())?;
+                assert_eq!(direct, reference, "direct component root dispatch differs from transported-root reference");
+                eprintln!("[glrmask/validate][direct_component_root_dispatch] exact=true states={global_state_count}");
+            }
+            direct
+        })
+    } else { None };
+    Ok((segmented_components, deterministic_root_dispatch, started_at.elapsed().as_secs_f64() * 1000.0))
+}
+
+fn deterministic_component_union_root_dispatch(
+    components: &[crate::runtime::SegmentedParserComponent],
+    parser_state_relations: &[Vec<Vec<u32>>],
+    default_domains: &[Option<ParserDefaultDomain>],
+    global_domain_labels: &[i32],
+    component_maps: &[DirectComponentCoordinateMaps],
+    global_tsid_count: usize,
+    global_state_count: usize,
+) -> Option<Vec<u32>> {
+    let total_started_at = Instant::now();
+    if components.len() != parser_state_relations.len()
+        || components.len() != default_domains.len()
+        || components.len() != component_maps.len()
+        || (!global_domain_labels.is_empty() && global_domain_labels.len() < global_state_count)
+    {
+        return None;
+    }
+    // Transport only each component's start row using the exact same linker
+    // semantics as `component_parser_nwa`. Targets may refer to body state IDs
+    // not present in this one-state scratch NWA; they are opaque here because
+    // certification needs only the root label relation.
+    let transport_started_at = Instant::now();
+    let mut transported_roots = Vec::with_capacity(components.len());
+    for (component_index, component) in components.iter().enumerate() {
+        let source = component.constraint.as_ref();
+        let source_root = source
+            .parser_dwa
+            .states()
+            .get(source.parser_dwa.start_state() as usize)?;
+        let mut transported = NWA::new(0, 0);
+        transported.add_state();
+        add_component_parser_state_transitions(
+            &mut transported,
+            0,
+            source_root,
+            &parser_state_relations[component_index],
+            &source.parser_state_domain_labels,
+            source.table.num_states,
+            default_domains[component_index].as_ref(),
+        )
+        .ok()?;
+        transported_roots.push(transported);
+    }
+    let transport_ms = transport_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut dispatch = vec![u32::MAX; global_state_count];
+    let mut selected_counts = vec![0usize; components.len()];
+    let mut dead = 0usize;
+    let mut syntactic_overlaps = 0usize;
+    let mut overlap_weight_remap_ms = 0.0f64;
+    for global_state in 0..global_state_count {
+        let mut candidates = SmallVec::<[(u32, Weight); 4]>::new();
+        for (component_index, root) in transported_roots.iter().enumerate() {
+            let row = &root.states().first()?.transitions;
+            let positive = encode_positive_label(global_state as u32);
+            let targets = row
+                .get(&positive)
+                .or_else(|| {
+                    let domain = global_domain_labels
+                        .get(global_state)
+                        .copied()
+                        .unwrap_or(NO_PARSER_DOMAIN_LABEL);
+                    (domain != NO_PARSER_DOMAIN_LABEL)
+                        .then(|| row.get(&domain))
+                        .flatten()
+                })
+                .or_else(|| row.get(&DEFAULT_LABEL));
+            let Some(targets) = targets else {
+                continue;
+            };
+            let live_targets = targets
+                .iter()
+                .filter(|(_, weight)| !weight.is_empty())
+                .count();
+            if live_targets == 0 {
+                continue;
+            }
+            if live_targets != 1 {
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=false component={} global_state={} component_targets={live_targets}",
+                        component_index,
+                        global_state,
+                    );
+                }
+                return None;
+            }
+            let weight = targets
+                .iter()
+                .find_map(|(_, weight)| (!weight.is_empty()).then(|| weight.clone()))?;
+            candidates.push((component_index as u32, weight));
+        }
+        let selected = match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0].0),
+            _ => {
+                syntactic_overlaps += 1;
+                // Only syntactically overlapping root labels need common
+                // weight coordinates. Unique labels are deterministic already;
+                // remapping all ~8k root edges was pure certification overhead.
+                let started_at = Instant::now();
+                let mut live = SmallVec::<[u32; 4]>::new();
+                for (component_index, weight) in candidates {
+                    let maps = &component_maps[component_index as usize];
+                    if weight_survives_component_coordinate_maps(&weight, maps) {
+                        live.push(component_index);
+                    }
+                }
+                overlap_weight_remap_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                match live.as_slice() {
+                    [] => None,
+                    [component] => Some(*component),
+                    _ => {
+                        if compose_profile_enabled() {
+                            eprintln!(
+                                "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=false overlap_global_state={global_state} live_components={live:?}"
+                            );
+                        }
+                        return None;
+                    }
+                }
+            }
+        };
+        if let Some(component) = selected {
+            dispatch[global_state] = component;
+            selected_counts[component as usize] += 1;
+        } else {
+            dead += 1;
+        }
+    }
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_component_union_root_dispatch] deterministic=true global_states={} dead={} selected_counts={selected_counts:?} syntactic_overlaps={syntactic_overlaps} transport_ms={transport_ms:.3} overlap_weight_remap_ms={overlap_weight_remap_ms:.3} total_ms={:.3}",
+            global_state_count,
+            dead,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(dispatch)
+}
+
+#[inline]
 fn tokenizer_tsid_relation_is_singleton(constraint: &Constraint) -> bool {
     constraint.state_internal_tsid_offsets.as_slice() == [u32::MAX]
 }
 
-fn build_direct_component_state_coordinates(
-    components: &[ParserDwaComponent<'_>],
+fn build_direct_component_state_coordinates_from_constraints(
+    components: &[(&Constraint, u32)],
     merged_tokenizer_state_count: usize,
 ) -> Result<DirectComponentStateCoordinates, String> {
     let mut state_to_global = vec![u32::MAX; merged_tokenizer_state_count];
@@ -502,8 +841,7 @@ fn build_direct_component_state_coordinates(
     }
 
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
-    for (component_index, component) in components.iter().enumerate() {
-        let constraint = component.constraint;
+    for (component_index, &(constraint, tokenizer_state_offset)) in components.iter().enumerate() {
         if constraint.state_to_internal_tsid.len() != constraint.tokenizer.num_states() as usize {
             return Err("component tokenizer-state map does not cover its runtime tokenizer".into());
         }
@@ -520,9 +858,7 @@ fn build_direct_component_state_coordinates(
                 }
                 let mut merged_states = Vec::with_capacity(local_states.len());
                 for &local_state in local_states {
-                    let merged_state = component
-                        .tokenizer_state_offset
-                        .checked_add(local_state)
+                    let merged_state = tokenizer_state_offset.checked_add(local_state)
                         .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
                     if merged_state == 0 {
                         local_map[local_tsid].push(0);
@@ -592,9 +928,7 @@ fn build_direct_component_state_coordinates(
                     "component {component_index} tokenizer state {local_state} references out-of-range internal TSID {bad}"
                 ));
             }
-            let merged_state = component
-                .tokenizer_state_offset
-                .checked_add(local_state)
+            let merged_state = tokenizer_state_offset.checked_add(local_state)
                 .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
             if merged_state as usize >= merged_tokenizer_state_count {
                 return Err(format!(
@@ -666,6 +1000,91 @@ fn build_direct_component_state_coordinates(
         },
         local_to_global_tsids,
     })
+
+}
+
+fn build_direct_component_state_coordinates_from_precomputed_map(
+    components: &[ParserDwaComponent<'_>],
+    tokenizer_states: &ManyToOneIdMap,
+    merged_tokenizer_state_count: usize,
+) -> Result<DirectComponentStateCoordinates, String> {
+    if tokenizer_states.original_to_internal.len() != merged_tokenizer_state_count {
+        return Err("precomputed component state map does not cover merged tokenizer".into());
+    }
+    let mut local_to_global_tsids = Vec::with_capacity(components.len());
+    for (component_index, component) in components.iter().enumerate() {
+        let constraint = component.constraint;
+        let local_tsid_count = constraint.internal_tsid_to_states.len();
+        if local_tsid_count == 0 {
+            return Err(format!("component {component_index} has no internal TSIDs"));
+        }
+        let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
+        for local_state in 0..constraint.tokenizer.num_states() {
+            let merged_state = component
+                .tokenizer_state_offset
+                .checked_add(local_state)
+                .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
+            let global_tsid = tokenizer_states
+                .original_to_internal
+                .get(merged_state as usize)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "component {component_index} tokenizer state {local_state} maps outside precomputed state coordinate"
+                    )
+                })?;
+            if global_tsid == u32::MAX {
+                return Err(format!(
+                    "component {component_index} tokenizer state {local_state} is unmapped in precomputed state coordinate"
+                ));
+            }
+            let local_tsids = constraint.internal_tsids_for_state(local_state);
+            if local_tsids.is_empty() {
+                return Err(format!(
+                    "component {component_index} tokenizer state {local_state} has no local TSID"
+                ));
+            }
+            for &local_tsid in local_tsids {
+                let Some(targets) = local_map.get_mut(local_tsid as usize) else {
+                    return Err(format!(
+                        "component {component_index} tokenizer state {local_state} references out-of-range local TSID {local_tsid}"
+                    ));
+                };
+                targets.push(global_tsid);
+            }
+        }
+        // Global raw state zero epsilon-dispatches to every component start.
+        // Preserve the same reset membership added by the full coordinate builder.
+        let local_start = constraint.tokenizer.initial_state();
+        for &local_tsid in constraint.internal_tsids_for_state(local_start) {
+            let Some(targets) = local_map.get_mut(local_tsid as usize) else {
+                return Err(format!(
+                    "component {component_index} start state references out-of-range local TSID {local_tsid}"
+                ));
+            };
+            targets.push(0);
+        }
+        for targets in &mut local_map {
+            targets.sort_unstable();
+            targets.dedup();
+        }
+        local_to_global_tsids.push(local_map);
+    }
+    Ok(DirectComponentStateCoordinates {
+        tokenizer_states: tokenizer_states.clone(),
+        local_to_global_tsids,
+    })
+}
+
+fn build_direct_component_state_coordinates(
+    components: &[ParserDwaComponent<'_>],
+    merged_tokenizer_state_count: usize,
+) -> Result<DirectComponentStateCoordinates, String> {
+    let inputs = components
+        .iter()
+        .map(|component| (component.constraint, component.tokenizer_state_offset))
+        .collect::<Vec<_>>();
+    build_direct_component_state_coordinates_from_constraints(&inputs, merged_tokenizer_state_count)
 }
 
 fn build_direct_component_token_coordinates(
@@ -726,14 +1145,70 @@ fn build_direct_component_token_coordinates(
                 Ok(())
             };
 
-        for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
-            let mut groups = BTreeMap::<u32, Vec<u32>>::new();
-            for &original in originals {
-                if !selected_original
+        let singleton_fast = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
+        let dense_child_buckets = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
+        if dense_child_buckets {
+            let child_class_count = child.internal_token_to_tokens.len();
+            let mut buckets = (0..child_class_count)
+                .map(|_| Vec::<u32>::new())
+                .collect::<Vec<_>>();
+            let mut touched = Vec::<usize>::new();
+            let mut touched_flags = vec![false; child_class_count];
+            let mut unmapped = Vec::<u32>::new();
+            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+                if singleton_fast && originals.len() == 1 {
+                    let original = originals[0];
+                    if selected_original.get(original as usize).copied().unwrap_or(false) {
+                        let child_local = child
+                            .original_token_to_internal
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        add_pair_class(vec![original], parent_local as u32, child_local)?;
+                    }
+                    continue;
+                }
+                for &original in originals {
+                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let child_local = child
+                        .original_token_to_internal
+                        .get(original as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    if child_local == u32::MAX {
+                        unmapped.push(original);
+                        continue;
+                    }
+                    let child_index = child_local as usize;
+                    if child_index >= child_class_count {
+                        return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
+                    }
+                    if !touched_flags[child_index] {
+                        touched_flags[child_index] = true;
+                        touched.push(child_index);
+                    }
+                    buckets[child_index].push(original);
+                }
+                touched.sort_unstable();
+                for child_index in touched.drain(..) {
+                    touched_flags[child_index] = false;
+                    let originals = std::mem::take(&mut buckets[child_index]);
+                    add_pair_class(originals, parent_local as u32, child_index as u32)?;
+                }
+                if !unmapped.is_empty() {
+                    add_pair_class(std::mem::take(&mut unmapped), parent_local as u32, u32::MAX)?;
+                }
+            }
+
+            for &original in original_token_ids {
+                let parent_local = parent
+                    .original_token_to_internal
                     .get(original as usize)
                     .copied()
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(u32::MAX);
+                if parent_local != u32::MAX {
                     continue;
                 }
                 let child_local = child
@@ -741,32 +1216,80 @@ fn build_direct_component_token_coordinates(
                     .get(original as usize)
                     .copied()
                     .unwrap_or(u32::MAX);
-                groups.entry(child_local).or_default().push(original);
+                if child_local == u32::MAX {
+                    unmapped.push(original);
+                    continue;
+                }
+                let child_index = child_local as usize;
+                if child_index >= child_class_count {
+                    return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
+                }
+                if !touched_flags[child_index] {
+                    touched_flags[child_index] = true;
+                    touched.push(child_index);
+                }
+                buckets[child_index].push(original);
             }
-            for (child_local, originals) in groups {
-                add_pair_class(originals, parent_local as u32, child_local)?;
+            touched.sort_unstable();
+            for child_index in touched.drain(..) {
+                touched_flags[child_index] = false;
+                let originals = std::mem::take(&mut buckets[child_index]);
+                add_pair_class(originals, u32::MAX, child_index as u32)?;
             }
-        }
+            if !unmapped.is_empty() {
+                add_pair_class(std::mem::take(&mut unmapped), u32::MAX, u32::MAX)?;
+            }
+        } else {
+            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+                if singleton_fast && originals.len() == 1 {
+                    let original = originals[0];
+                    if selected_original.get(original as usize).copied().unwrap_or(false) {
+                        let child_local = child
+                            .original_token_to_internal
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        add_pair_class(vec![original], parent_local as u32, child_local)?;
+                    }
+                    continue;
+                }
+                let mut groups = BTreeMap::<u32, Vec<u32>>::new();
+                for &original in originals {
+                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let child_local = child
+                        .original_token_to_internal
+                        .get(original as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    groups.entry(child_local).or_default().push(original);
+                }
+                for (child_local, originals) in groups {
+                    add_pair_class(originals, parent_local as u32, child_local)?;
+                }
+            }
 
-        let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
-        for &original in original_token_ids {
-            let parent_local = parent
-                .original_token_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if parent_local != u32::MAX {
-                continue;
+            let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
+            for &original in original_token_ids {
+                let parent_local = parent
+                    .original_token_to_internal
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if parent_local != u32::MAX {
+                    continue;
+                }
+                let child_local = child
+                    .original_token_to_internal
+                    .get(original as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                parent_unmapped.entry(child_local).or_default().push(original);
             }
-            let child_local = child
-                .original_token_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            parent_unmapped.entry(child_local).or_default().push(original);
-        }
-        for (child_local, originals) in parent_unmapped {
-            add_pair_class(originals, u32::MAX, child_local)?;
+            for (child_local, originals) in parent_unmapped {
+                add_pair_class(originals, u32::MAX, child_local)?;
+            }
         }
 
         return Ok((
@@ -1408,26 +1931,806 @@ enum BoundaryParserWork {
         id_map: InternalIdMap,
         num_terminals: u32,
         templates: Templates,
+        prebuilt_bundle_cache: Option<PrebuiltParserBundleCache>,
     },
 }
 
-impl BoundaryParserWork {
-    fn materialize_positive_nwa(
+enum PositiveBoundaryParser {
+    Dwa(DWA),
+    Nwa(NWA),
+}
+
+
+struct BoundaryTerminalTrieWork {
+    nodes: Vec<crate::runtime::BoundaryTerminalTrieNode>,
+    root_by_tsid: Vec<u32>,
+}
+
+enum BoundaryRuntimeCandidate {
+    Parser {
+        positive: PositiveBoundaryParser,
+        id_map: InternalIdMap,
+        template_cache: Option<Vec<Option<UnweightedDfa>>>,
+        build_ms: f64,
+    },
+    TerminalTrie {
+        trie: BoundaryTerminalTrieWork,
+        id_map: InternalIdMap,
+        template_cache: Option<Vec<Option<UnweightedDfa>>>,
+        build_ms: f64,
+    },
+}
+
+enum PublishedBoundaryRuntime {
+    Parser {
+        parser_dwa: DWA,
+        id_map: InternalIdMap,
+        template_cache: Option<Vec<Option<UnweightedDfa>>>,
+        positive_build_ms: f64,
+        normalize_ms: f64,
+        tsid_quotient: Option<Vec<u32>>,
+    },
+    CompactParser {
+        parser_dwa: SmallBoundaryDwa,
+        id_map: InternalIdMap,
+        template_cache: Option<Vec<Option<UnweightedDfa>>>,
+        positive_build_ms: f64,
+        normalize_ms: f64,
+        tsid_quotient: Option<Vec<u32>>,
+    },
+    TerminalTrie {
+        trie: BoundaryTerminalTrieWork,
+        id_map: InternalIdMap,
+        template_cache: Option<Vec<Option<UnweightedDfa>>>,
+        build_ms: f64,
+    },
+}
+
+
+fn publish_real_boundary_parser_work(
+    work: BoundaryParserWork,
+    table: &crate::compiler::glr::table::GLRTable,
+) -> Result<PublishedBoundaryRuntime, String> {
+    let positive_started_at = Instant::now();
+    let (mut positive, mut boundary_id_map, template_cache) =
+        work.materialize_positive_parser(table)?;
+    positive.ensure_positive()?;
+    let positive_build_ms = positive_started_at.elapsed().as_secs_f64() * 1000.0;
+    let tsid_quotient = positive.quotient_boundary_tsids(&mut boundary_id_map);
+    let normalize_started_at = Instant::now();
+    let parser_dwa = if std::env::var_os(
+        "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
+    )
+    .is_some()
+        && boundary_id_map.num_tsids() as usize <= 16
+        && boundary_id_map.num_internal_tokens() as usize <= 64
+    {
+        positive.into_runtime_dwa_small_boundary(
+            table,
+            boundary_id_map.num_tsids() as usize,
+            boundary_id_map.num_internal_tokens() as usize,
+            tsid_quotient.as_deref(),
+        )
+    } else {
+        positive.into_runtime_dwa(table)
+    };
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    Ok(PublishedBoundaryRuntime::Parser {
+        parser_dwa,
+        id_map: boundary_id_map,
+        template_cache,
+        positive_build_ms,
+        normalize_ms,
+        tsid_quotient,
+    })
+}
+
+
+fn publish_boundary_parser_candidate_for_state_count(
+    candidate: BoundaryRuntimeCandidate,
+    num_parser_states: u32,
+) -> Result<PublishedBoundaryRuntime, String> {
+    let BoundaryRuntimeCandidate::Parser {
+        mut positive,
+        id_map: mut boundary_id_map,
+        template_cache,
+        build_ms: positive_build_ms,
+    } = candidate
+    else {
+        return Err("real boundary parser publication received non-parser candidate".into());
+    };
+    positive.ensure_positive()?;
+    let tsid_quotient = positive.quotient_boundary_tsids(&mut boundary_id_map);
+    let normalize_started_at = Instant::now();
+    let small_coordinate = std::env::var_os(
+        "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
+    )
+    .is_some()
+        && boundary_id_map.num_tsids() as usize <= 16
+        && boundary_id_map.num_internal_tokens() as usize <= 64;
+    if !small_coordinate {
+        // The early fully-published path is intended for the compact boundary
+        // coordinate. Leave other representations on the established table-
+        // based publication path rather than silently changing their policy.
+        return Err("state-count-only boundary publication requires small-boundary determinizer".into());
+    }
+
+    if std::env::var_os("GLRMASK_EXPERIMENT_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
+        let parser_dwa = positive
+            .compact_runtime_dwa_for_parser_state_count(
+                num_parser_states,
+                boundary_id_map.num_tsids() as usize,
+                boundary_id_map.num_internal_tokens() as usize,
+                tsid_quotient.as_deref(),
+            )
+            .ok_or_else(|| "compact boundary runtime DWA rejected small coordinate".to_string())?;
+        if std::env::var_os("GLRMASK_VALIDATE_COMPACT_BOUNDARY_RUNTIME_DWA").is_some() {
+            let materialized = parser_dwa.to_generic_dwa();
+            ensure_positive_runtime_parser_dwa(&materialized)?;
+            let reference = match &positive {
+                PositiveBoundaryParser::Dwa(dwa) => dwa.clone(),
+                PositiveBoundaryParser::Nwa(nwa) => {
+                    normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+                        num_parser_states,
+                        nwa,
+                        boundary_id_map.num_tsids() as usize,
+                        boundary_id_map.num_internal_tokens() as usize,
+                        tsid_quotient.as_deref(),
+                    )
+                }
+            };
+            let forward = find_difference(&materialized, &reference)
+                .map_err(|error| format!("compact boundary DWA forward validation failed: {error}"))?;
+            let reverse = find_difference(&reference, &materialized)
+                .map_err(|error| format!("compact boundary DWA reverse validation failed: {error}"))?;
+            assert!(forward.is_none() && reverse.is_none(), "compact boundary runtime DWA changed weighted language");
+            eprintln!(
+                "[glrmask/validate][compact_boundary_runtime_dwa] exact=true states={} transitions={} weights={}",
+                parser_dwa.num_states(),
+                parser_dwa.num_transitions(),
+                parser_dwa.weights.len(),
+            );
+        }
+        let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        return Ok(PublishedBoundaryRuntime::CompactParser {
+            parser_dwa,
+            id_map: boundary_id_map,
+            template_cache,
+            positive_build_ms,
+            normalize_ms,
+            tsid_quotient,
+        });
+    }
+
+    let parser_dwa = positive.into_runtime_dwa_small_boundary_for_parser_state_count(
+        num_parser_states,
+        boundary_id_map.num_tsids() as usize,
+        boundary_id_map.num_internal_tokens() as usize,
+        tsid_quotient.as_deref(),
+    );
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    Ok(PublishedBoundaryRuntime::Parser {
+        parser_dwa,
+        id_map: boundary_id_map,
+        template_cache,
+        positive_build_ms,
+        normalize_ms,
+        tsid_quotient,
+    })
+}
+
+fn compute_boundary_tsid_behavior_quotient(
+    nwa: &NWA,
+    old_tsid_count: usize,
+    token_classes: usize,
+) -> Option<(Vec<u32>, usize)> {
+    if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
+        return None;
+    }
+    let mut unique_ids = FxHashMap::<usize, u16>::default();
+    let mut unique_weights = Vec::<Weight>::new();
+    let mut register = |weight: &Weight| {
+        if weight.is_full() || weight.is_empty() {
+            return;
+        }
+        let key = weight.ptr_key();
+        if unique_ids.contains_key(&key) {
+            return;
+        }
+        let Ok(index) = u16::try_from(unique_weights.len()) else {
+            return;
+        };
+        unique_ids.insert(key, index);
+        unique_weights.push(weight.clone());
+    };
+    for state in nwa.states() {
+        if let Some(weight) = state.final_weight.as_ref() {
+            register(weight);
+        }
+        for (_, weight) in &state.epsilons {
+            register(weight);
+        }
+        for branches in state.transitions.values() {
+            for (_, weight) in branches {
+                register(weight);
+            }
+        }
+    }
+    if unique_weights.len() > u16::MAX as usize {
+        return None;
+    }
+    type Signature = SmallVec<[(u16, u64); 4]>;
+    let mut signatures = vec![Signature::new(); old_tsid_count];
+    for (weight_index, weight) in unique_weights.iter().enumerate() {
+        for (start, end, tokens) in weight.range_entries() {
+            if end as usize >= old_tsid_count {
+                return None;
+            }
+            let mut mask = 0u64;
+            for range in tokens.ranges() {
+                for token in range {
+                    if token as usize >= token_classes || token >= 64 {
+                        return None;
+                    }
+                    mask |= 1u64 << token;
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+            for tsid in start..=end {
+                signatures[tsid as usize].push((weight_index as u16, mask));
+            }
+        }
+    }
+    let mut classes = FxHashMap::<Signature, u32>::default();
+    let mut old_to_new = vec![0u32; old_tsid_count];
+    for (old_tsid, signature) in signatures.into_iter().enumerate() {
+        let next = classes.len() as u32;
+        let class = *classes.entry(signature).or_insert(next);
+        old_to_new[old_tsid] = class;
+    }
+    Some((old_to_new, unique_weights.len()))
+}
+
+
+
+fn compute_boundary_dwa_tsid_behavior_quotient(
+    dwa: &DWA,
+    old_tsid_count: usize,
+    token_classes: usize,
+) -> Option<(Vec<u32>, usize)> {
+    if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
+        return None;
+    }
+    let mut unique_ids = FxHashMap::<usize, u16>::default();
+    let mut unique_weights = Vec::<Weight>::new();
+    for weight in dwa.weight_refs() {
+        if weight.is_full() || weight.is_empty() {
+            continue;
+        }
+        let key = weight.ptr_key();
+        if unique_ids.contains_key(&key) {
+            continue;
+        }
+        let Ok(index) = u16::try_from(unique_weights.len()) else {
+            return None;
+        };
+        unique_ids.insert(key, index);
+        unique_weights.push(weight.clone());
+    }
+    type Signature = SmallVec<[(u16, u64); 4]>;
+    let mut signatures = vec![Signature::new(); old_tsid_count];
+    for (weight_index, weight) in unique_weights.iter().enumerate() {
+        for (start, end, tokens) in weight.range_entries() {
+            if end as usize >= old_tsid_count {
+                return None;
+            }
+            let mut mask = 0u64;
+            for range in tokens.ranges() {
+                for token in range {
+                    if token as usize >= token_classes || token >= 64 {
+                        return None;
+                    }
+                    mask |= 1u64 << token;
+                }
+            }
+            if mask == 0 {
+                continue;
+            }
+            for tsid in start..=end {
+                signatures[tsid as usize].push((weight_index as u16, mask));
+            }
+        }
+    }
+    let mut classes = FxHashMap::<Signature, u32>::default();
+    let mut old_to_new = vec![0u32; old_tsid_count];
+    for (old_tsid, signature) in signatures.into_iter().enumerate() {
+        let next = classes.len() as u32;
+        let class = *classes.entry(signature).or_insert(next);
+        old_to_new[old_tsid] = class;
+    }
+    Some((old_to_new, unique_weights.len()))
+}
+
+fn apply_boundary_tsid_quotient_to_dwa_and_id_map(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+    old_to_new: &[u32],
+) -> Option<()> {
+    let old_tsid_count = id_map.num_tsids() as usize;
+    if old_to_new.len() != old_tsid_count {
+        return None;
+    }
+    let new_tsid_count = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
+    if new_tsid_count == 0 || new_tsid_count >= old_tsid_count {
+        return None;
+    }
+    let token_count = id_map.num_internal_tokens() as usize;
+    let tsid_map = old_to_new.iter().map(|&class| vec![class]).collect::<Vec<_>>();
+    let token_map = (0..token_count as u32).map(|token| vec![token]).collect::<Vec<_>>();
+    {
+        let mut weights = dwa.weight_refs_mut();
+        remap_weights_with_maps(&mut weights, &tsid_map, &token_map, new_tsid_count);
+    }
+    let old_groups = std::mem::take(&mut id_map.tokenizer_states.internal_to_originals);
+    let old_representatives = std::mem::take(&mut id_map.tokenizer_states.representative_original_ids);
+    let mut new_groups = vec![Vec::<u32>::new(); new_tsid_count];
+    let mut new_representatives = vec![u32::MAX; new_tsid_count];
+    for old_tsid in 0..old_tsid_count {
+        let class = old_to_new[old_tsid] as usize;
+        if let Some(group) = old_groups.get(old_tsid) {
+            new_groups[class].extend(group.iter().copied());
+        }
+        if new_representatives[class] == u32::MAX {
+            new_representatives[class] = old_representatives
+                .get(old_tsid)
+                .copied()
+                .or_else(|| new_groups[class].first().copied())
+                .unwrap_or(old_tsid as u32);
+        }
+    }
+    for group in &mut new_groups {
+        group.sort_unstable();
+        group.dedup();
+    }
+    for internal in &mut id_map.tokenizer_states.original_to_internal {
+        if *internal != u32::MAX {
+            *internal = *old_to_new.get(*internal as usize)?;
+        }
+    }
+    id_map.tokenizer_states.internal_to_originals = new_groups;
+    id_map.tokenizer_states.representative_original_ids = new_representatives;
+    Some(())
+}
+
+fn apply_boundary_tsid_quotient_to_nwa_and_id_map(
+    nwa: &mut NWA,
+    id_map: &mut InternalIdMap,
+    old_to_new: &[u32],
+) -> Option<()> {
+    let old_tsid_count = id_map.num_tsids() as usize;
+    if old_to_new.len() != old_tsid_count {
+        return None;
+    }
+    let new_tsid_count = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
+    if new_tsid_count == 0 || new_tsid_count >= old_tsid_count {
+        return None;
+    }
+    let token_count = id_map.num_internal_tokens() as usize;
+    let tsid_map = old_to_new.iter().map(|&class| vec![class]).collect::<Vec<_>>();
+    let token_map = (0..token_count as u32).map(|token| vec![token]).collect::<Vec<_>>();
+    {
+        let mut weights = nwa.weight_refs_mut();
+        remap_weights_with_maps(&mut weights, &tsid_map, &token_map, new_tsid_count);
+    }
+
+    // This quotient runs before component/boundary coordinate reconciliation,
+    // so retain every raw representative belonging to the merged class. The
+    // later refinement planner needs them to map every common TSID back to the
+    // compact boundary class.
+    let old_groups = std::mem::take(&mut id_map.tokenizer_states.internal_to_originals);
+    let old_representatives =
+        std::mem::take(&mut id_map.tokenizer_states.representative_original_ids);
+    let mut new_groups = vec![Vec::<u32>::new(); new_tsid_count];
+    let mut new_representatives = vec![u32::MAX; new_tsid_count];
+    for old_tsid in 0..old_tsid_count {
+        let class = old_to_new[old_tsid] as usize;
+        if let Some(group) = old_groups.get(old_tsid) {
+            new_groups[class].extend(group.iter().copied());
+        }
+        if new_representatives[class] == u32::MAX {
+            new_representatives[class] = old_representatives
+                .get(old_tsid)
+                .copied()
+                .or_else(|| new_groups[class].first().copied())
+                .unwrap_or(old_tsid as u32);
+        }
+    }
+    for group in &mut new_groups {
+        group.sort_unstable();
+        group.dedup();
+    }
+    for internal in &mut id_map.tokenizer_states.original_to_internal {
+        if *internal != u32::MAX {
+            *internal = *old_to_new.get(*internal as usize)?;
+        }
+    }
+    id_map.tokenizer_states.internal_to_originals = new_groups;
+    id_map.tokenizer_states.representative_original_ids = new_representatives;
+    Some(())
+}
+
+impl PositiveBoundaryParser {
+    fn into_runtime_dwa(self, table: &crate::compiler::glr::table::GLRTable) -> DWA {
+        match self {
+            Self::Dwa(dwa) => dwa,
+            Self::Nwa(nwa) => normalize_weighted_parser_stack_nwa(table, &nwa),
+        }
+    }
+
+    /// Quotient the private boundary TSID coordinate by its exact
+    /// behavior on every weight in the already-positive boundary NWA.
+    ///
+    /// Two TSIDs are equivalent iff every source weight assigns them the same
+    /// boundary-token set. All subsequent parser-DWA normalization operations
+    /// are pointwise union/intersection/difference over weights, so this is a
+    /// congruence: normalizing after the quotient is exactly the quotient of
+    /// normalizing before it.
+    fn quotient_boundary_tsids(
+        &mut self,
+        id_map: &mut InternalIdMap,
+    ) -> Option<Vec<u32>> {
+        if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TSID_QUOTIENT").is_none() {
+            return None;
+        }
+        let Self::Nwa(nwa) = self else {
+            return None;
+        };
+        let old_tsid_count = id_map.num_tsids() as usize;
+        let token_classes = id_map.num_internal_tokens() as usize;
+        if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
+            return None;
+        }
+        let started_at = Instant::now();
+
+        let signature_started_at = Instant::now();
+        let (old_to_new, unique_source_weight_count) =
+            compute_boundary_tsid_behavior_quotient(nwa, old_tsid_count, token_classes)?;
+        let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
+        let grouping_ms = 0.0;
+        let new_tsid_count = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
+        if new_tsid_count >= old_tsid_count {
+            return None;
+        }
+
+        let remap_started_at = Instant::now();
+        let defer_weight_remap = std::env::var_os(
+            "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
+        )
+        .is_some();
+        if !defer_weight_remap {
+            let tsid_map = old_to_new
+                .iter()
+                .map(|&class| vec![class])
+                .collect::<Vec<_>>();
+            let token_map = (0..token_classes as u32)
+                .map(|token| vec![token])
+                .collect::<Vec<_>>();
+            let mut weights = nwa.weight_refs_mut();
+            remap_weights_with_maps(
+                &mut weights,
+                &tsid_map,
+                &token_map,
+                new_tsid_count,
+            );
+        }
+        let remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        // The segmented runtime carries the exact raw-state -> private-TSID map
+        // separately. The boundary InternalIdMap therefore needs only one raw
+        // representative per quotient class here, not the union of all 16k
+        // source representatives.
+        let old_representatives =
+            std::mem::take(&mut id_map.tokenizer_states.representative_original_ids);
+        let mut new_representatives = vec![u32::MAX; new_tsid_count];
+        for old_tsid in 0..old_tsid_count {
+            let class = old_to_new[old_tsid] as usize;
+            if new_representatives[class] == u32::MAX {
+                new_representatives[class] = old_representatives
+                    .get(old_tsid)
+                    .copied()
+                    .unwrap_or(old_tsid as u32);
+            }
+        }
+        for internal in &mut id_map.tokenizer_states.original_to_internal {
+            if *internal != u32::MAX {
+                let Some(&class) = old_to_new.get(*internal as usize) else {
+                    return None;
+                };
+                *internal = class;
+            }
+        }
+        id_map.tokenizer_states.internal_to_originals = new_representatives
+            .iter()
+            .map(|&representative| vec![representative])
+            .collect();
+        id_map.tokenizer_states.representative_original_ids = new_representatives;
+
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_tsid_quotient] old_tsids={} new_tsids={} unique_source_weights={} signature_ms={signature_ms:.3} grouping_ms={grouping_ms:.3} remap_ms={remap_ms:.3} total_ms={:.3}",
+                old_tsid_count,
+                new_tsid_count,
+                unique_source_weight_count,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Some(old_to_new)
+    }
+
+    fn into_runtime_dwa_small_boundary(
         self,
         table: &crate::compiler::glr::table::GLRTable,
-    ) -> Result<
-        (
-            NWA,
-            InternalIdMap,
-            Option<Vec<Option<UnweightedDfa>>>,
-            bool,
-        ),
-        String,
-    > {
+        num_tsids: usize,
+        num_tokens: usize,
+        source_tsid_map: Option<&[u32]>,
+    ) -> DWA {
+        match self {
+            Self::Dwa(dwa) => dwa,
+            Self::Nwa(nwa) => {
+                if let Some(source_tsid_map) = source_tsid_map {
+                    normalize_weighted_parser_stack_nwa_small_boundary_with_tsid_map(
+                        table,
+                        &nwa,
+                        num_tsids,
+                        num_tokens,
+                        source_tsid_map,
+                    )
+                } else {
+                    normalize_weighted_parser_stack_nwa_small_boundary(
+                        table,
+                        &nwa,
+                        num_tsids,
+                        num_tokens,
+                    )
+                }
+            }
+        }
+    }
+
+    fn into_runtime_dwa_small_boundary_for_parser_state_count(
+        self,
+        num_parser_states: u32,
+        num_tsids: usize,
+        num_tokens: usize,
+        source_tsid_map: Option<&[u32]>,
+    ) -> DWA {
+        match self {
+            Self::Dwa(dwa) => dwa,
+            Self::Nwa(nwa) => normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+                num_parser_states,
+                &nwa,
+                num_tsids,
+                num_tokens,
+                source_tsid_map,
+            ),
+        }
+    }
+
+    fn compact_runtime_dwa_for_parser_state_count(
+        &self,
+        num_parser_states: u32,
+        num_tsids: usize,
+        num_tokens: usize,
+        source_tsid_map: Option<&[u32]>,
+    ) -> Option<SmallBoundaryDwa> {
+        let Self::Nwa(nwa) = self else {
+            return None;
+        };
+        normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count(
+            nwa,
+            num_parser_states,
+            num_tsids,
+            num_tokens,
+            source_tsid_map,
+        )
+    }
+
+    fn ensure_positive(&self) -> Result<(), String> {
+        match self {
+            Self::Dwa(dwa) => ensure_positive_runtime_parser_dwa(dwa),
+            Self::Nwa(nwa) => {
+                for (source, state) in nwa.states().iter().enumerate() {
+                    if let Some(&label) = state
+                        .transitions
+                        .keys()
+                        .find(|&&label| is_negative_label(label))
+                    {
+                        return Err(format!(
+                            "runtime boundary parser NWA contains negative/PUSH label {label} at state {source}"
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+}
+
+
+fn boundary_weight_contains_coordinate(weight: &Weight, tsid: u32, token: u32) -> bool {
+    weight.is_full()
+        || weight
+            .token_set_for_tsid_ref(tsid)
+            .is_some_and(|tokens| tokens.contains(token))
+}
+
+fn build_boundary_terminal_trie_work(
+    terminal_automaton: &TerminalAutomaton,
+    id_map: &InternalIdMap,
+) -> Result<BoundaryTerminalTrieWork, String> {
+    let TerminalAutomaton::Dwa(dwa) = terminal_automaton else {
+        return Err(
+            "runtime boundary terminal trie currently requires a deterministic terminal DWA"
+                .into(),
+        );
+    };
+    if id_map.num_internal_tokens() == 0 || id_map.num_internal_tokens() > 64 {
+        return Err(
+            "runtime boundary terminal trie supports between 1 and 64 private token classes"
+                .into(),
+        );
+    }
+
+    let start = dwa.start_state();
+    let mut start_coordinates = BTreeSet::<(u32, u32)>::new();
+    let mut add_weight_coordinates = |weight: &Weight| {
+        if weight.is_full() {
+            for tsid in 0..id_map.num_tsids() {
+                for token in 0..id_map.num_internal_tokens() {
+                    start_coordinates.insert((tsid, token));
+                }
+            }
+        } else {
+            for (lo, hi, tokens) in weight.range_entries() {
+                for tsid in lo..=hi {
+                    for range in tokens.ranges() {
+                        for token in range {
+                            start_coordinates.insert((tsid, token));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    if let Some(weight) = dwa.states()[start as usize].final_weight.as_ref() {
+        add_weight_coordinates(weight);
+    }
+    for (_, weight) in dwa.states()[start as usize].transitions.values() {
+        add_weight_coordinates(weight);
+    }
+
+    let mut nodes = Vec::<crate::runtime::BoundaryTerminalTrieNode>::new();
+    let mut root_by_tsid = vec![u32::MAX; id_map.num_tsids() as usize];
+    let insert_sequence = |nodes: &mut Vec<crate::runtime::BoundaryTerminalTrieNode>,
+                           roots: &mut [u32],
+                           tsid: u32,
+                           path: &[u32],
+                           token: u32| {
+        let mut node_id = roots[tsid as usize];
+        if node_id == u32::MAX {
+            node_id = nodes.len() as u32;
+            roots[tsid as usize] = node_id;
+            nodes.push(crate::runtime::BoundaryTerminalTrieNode {
+                children: Vec::new(),
+                outputs: 0,
+            });
+        }
+        for &terminal in path {
+            let existing = nodes[node_id as usize]
+                .children
+                .iter()
+                .find_map(|&(label, child)| (label == terminal).then_some(child));
+            node_id = if let Some(child) = existing {
+                child
+            } else {
+                let child = nodes.len() as u32;
+                nodes.push(crate::runtime::BoundaryTerminalTrieNode {
+                    children: Vec::new(),
+                    outputs: 0,
+                });
+                nodes[node_id as usize].children.push((terminal, child));
+                child
+            };
+        }
+        nodes[node_id as usize].outputs |= 1u64 << token;
+    };
+
+    for (tsid, token) in start_coordinates {
+        let mut stack = vec![(start, Vec::<u32>::new())];
+        let mut visits = 0usize;
+        while let Some((state_id, path)) = stack.pop() {
+            visits += 1;
+            if visits > 10_000 {
+                return Err("boundary terminal trie source exceeded acyclic visit bound".into());
+            }
+            let state = &dwa.states()[state_id as usize];
+            if state
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| boundary_weight_contains_coordinate(weight, tsid, token))
+            {
+                insert_sequence(&mut nodes, &mut root_by_tsid, tsid, &path, token);
+            }
+            for (&label, (target, weight)) in &state.transitions {
+                if label < 0 {
+                    return Err(format!(
+                        "boundary terminal trie encountered non-terminal label {label}"
+                    ));
+                }
+                if boundary_weight_contains_coordinate(weight, tsid, token) {
+                    let mut next_path = path.clone();
+                    next_path.push(label as u32);
+                    stack.push((*target, next_path));
+                }
+            }
+        }
+    }
+    for node in &mut nodes {
+        node.children.sort_unstable_by_key(|(terminal, _)| *terminal);
+        node.children.dedup();
+    }
+    Ok(BoundaryTerminalTrieWork {
+        nodes,
+        root_by_tsid,
+    })
+}
+
+impl BoundaryParserWork {
+    fn materialize_terminal_trie(
+        self,
+    ) -> Result<(
+        BoundaryTerminalTrieWork,
+        InternalIdMap,
+        Option<Vec<Option<UnweightedDfa>>>,
+    ), String> {
+        match self {
+            Self::DeferredTerminalCount {
+                terminal_automaton,
+                id_map,
+                num_terminals,
+                templates,
+                prebuilt_bundle_cache: _,
+            } => {
+                let trie = build_boundary_terminal_trie_work(&terminal_automaton, &id_map)?;
+                let mut template_cache = vec![None; num_terminals as usize];
+                for (terminal, dfa) in templates.by_terminal {
+                    if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                        *slot = Some(dfa);
+                    }
+                }
+                Ok((trie, id_map, Some(template_cache)))
+            }
+            _ => Err("runtime boundary terminal trie requires deferred count-only boundary work".into()),
+        }
+    }
+
+    fn materialize_positive_parser(
+        self,
+        table: &crate::compiler::glr::table::GLRTable,
+    ) -> Result<(
+        PositiveBoundaryParser,
+        InternalIdMap,
+        Option<Vec<Option<UnweightedDfa>>>,
+    ), String> {
         match self {
             Self::Materialized(parser) => {
                 let (dwa, id_map) = parser.into_parts();
-                Ok((parser_nwa_preserve_defaults(&dwa), id_map, None, false))
+                Ok((PositiveBoundaryParser::Dwa(dwa), id_map, None))
             }
             Self::Deferred {
                 terminal_automaton,
@@ -1447,42 +2750,153 @@ impl BoundaryParserWork {
                     table.construction
                         == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
                 );
-                Ok((parser_nwa, id_map, None, false))
+                let parser_dwa = normalize_weighted_parser_stack_nwa(table, &parser_nwa);
+                Ok((PositiveBoundaryParser::Dwa(parser_dwa), id_map, None))
             }
             Self::DeferredTerminalCount {
-                terminal_automaton,
-                id_map,
+                mut terminal_automaton,
+                mut id_map,
                 num_terminals,
                 templates,
+                prebuilt_bundle_cache: _,
             } => {
+                if std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
+                    && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
+                {
+                    let old_tsids = id_map.num_tsids() as usize;
+                    let token_classes = id_map.num_internal_tokens() as usize;
+                    let started_at = Instant::now();
+                    if let Some((old_to_new, unique_weights)) =
+                        compute_boundary_dwa_tsid_behavior_quotient(dwa, old_tsids, token_classes)
+                    {
+                        let new_tsids = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
+                        if new_tsids < old_tsids {
+                            apply_boundary_tsid_quotient_to_dwa_and_id_map(dwa, &mut id_map, &old_to_new)
+                                .expect("early boundary TSID quotient must apply to matching DWA/id-map coordinate");
+                            if compose_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][constraint_boundary_early_tsid_quotient] old_tsids={} new_tsids={} unique_terminal_weights={} total_ms={:.3}",
+                                    old_tsids, new_tsids, unique_weights, started_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                            }
+                        }
+                    }
+                }
                 let build_started_at = Instant::now();
-                let mut parser_nwa =
+                let nondeterministic_bundles_requested = std::env::var_os(
+                    "GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES",
+                )
+                .is_some();
+                // Preserving bundle nondeterminism avoids repeated local DFA
+                // union work on wide boundary alphabets, but on small boundary
+                // coordinates it creates more NWA support for the final
+                // publication pass than it saves during bundle construction.
+                // Key this on the boundary token coordinate itself: it is a
+                // representation-size policy, not a grammar/layout heuristic.
+                let nondeterministic_bundle_min_tokens = std::env::var(
+                    "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS",
+                )
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(64);
+                let compile_nondeterministic_bundles = nondeterministic_bundles_requested
+                    && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
+                let mut parser_nwa = if compile_nondeterministic_bundles {
+                    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
+                        &terminal_automaton,
+                        num_terminals,
+                        &templates,
+                        table,
+                    )
+                } else {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
                         &terminal_automaton,
                         num_terminals,
                         &templates,
                         table,
                     )
-                    .ok_or_else(|| {
-                        "count-only boundary terminal automaton induced no parser NWA".to_string()
-                    })?;
-                let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
-                let resolve_started_at = Instant::now();
-                let signed_stack_effects = std::env::var_os(
-                    "GLRMASK_EXPERIMENT_SEGMENTED_UNRESOLVED_BOUNDARY",
-                )
-                .is_some();
-                if !signed_stack_effects {
-                    resolve_negative_codes_in_nwa(
-                        &mut parser_nwa,
-                        table.construction
-                            == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
-                    );
                 }
+                .ok_or_else(|| {
+                    "count-only boundary terminal automaton induced no parser NWA".to_string()
+                })?;
+                let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
+                if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some()
+                    && id_map.num_tsids() as usize <= 16
+                    && id_map.num_internal_tokens() as usize <= 64
+                {
+                    let fused_started_at = Instant::now();
+                    let parser_dwa = normalize_signed_weighted_parser_stack_nwa_small_boundary(
+                        table,
+                        &parser_nwa,
+                        id_map.num_tsids() as usize,
+                        id_map.num_internal_tokens() as usize,
+                    )
+                    .ok_or_else(|| "small-boundary fused signed publication rejected boundary coordinate".to_string())?;
+                    let fused_ms = fused_started_at.elapsed().as_secs_f64() * 1000.0;
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} fused_signed_publish_ms={fused_ms:.3} deterministic_runtime=true compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
+                        );
+                    }
+                    let mut template_cache = vec![None; num_terminals as usize];
+                    for (terminal, dfa) in templates.by_terminal {
+                        if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                            *slot = Some(dfa);
+                        }
+                    }
+                    return Ok((
+                        PositiveBoundaryParser::Dwa(parser_dwa),
+                        id_map,
+                        Some(template_cache),
+                    ));
+                }
+                let resolve_started_at = Instant::now();
+                let allow_grouped_cancellation = table.construction
+                    == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged;
+                let resolved_reverse_topo = if std::env::var_os(
+                    "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_RESOLUTION",
+                )
+                .is_some()
+                    && id_map.num_tsids() as usize <= 16
+                    && id_map.num_internal_tokens() as usize <= 64
+                {
+                    parser_nwa = resolve_negative_codes_small_boundary(
+                        &parser_nwa,
+                        id_map.num_tsids() as usize,
+                        id_map.num_internal_tokens() as usize,
+                    )
+                    .ok_or_else(|| {
+                        "small-boundary signed resolver rejected boundary coordinate".to_string()
+                    })?;
+                    None
+                } else {
+                    resolve_negative_codes_in_nwa(&mut parser_nwa, allow_grouped_cancellation)
+                };
+                let resolve_negative_ms =
+                    resolve_started_at.elapsed().as_secs_f64() * 1000.0;
+                let hashcons_started_at = Instant::now();
+                let before_hashcons_states = parser_nwa.num_states();
+                let before_hashcons_transitions = parser_nwa.num_transitions();
+                if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                    .is_some()
+                {
+                    parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+                        parser_nwa,
+                        resolved_reverse_topo,
+                    );
+                } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA")
+                    .is_some()
+                {
+                    parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
+                }
+                let hashcons_ms = hashcons_started_at.elapsed().as_secs_f64() * 1000.0;
                 if compose_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={:.3} signed_stack_effects={signed_stack_effects}",
-                        resolve_started_at.elapsed().as_secs_f64() * 1000.0,
+                        "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} resolve_negative_ms={resolve_negative_ms:.3} hashcons_ms={hashcons_ms:.3} hashcons_states={}=>{} hashcons_transitions={}=>{} determinize_dwa_ms=deferred deterministic_runtime=false positive_nwa=true compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
+                        before_hashcons_states,
+                        parser_nwa.num_states(),
+                        before_hashcons_transitions,
+                        parser_nwa.num_transitions(),
                     );
                 }
                 let mut template_cache = vec![None; num_terminals as usize];
@@ -1492,13 +2906,168 @@ impl BoundaryParserWork {
                     }
                 }
                 Ok((
-                    parser_nwa,
+                    PositiveBoundaryParser::Nwa(parser_nwa),
                     id_map,
                     Some(template_cache),
-                    signed_stack_effects,
                 ))
             }
         }
+    }
+
+    fn materialize_positive_parser_without_table(
+        self,
+        allow_grouped_cancellation: bool,
+        num_parser_states: u32,
+    ) -> Result<BoundaryRuntimeCandidate, String> {
+        let Self::DeferredTerminalCount {
+            mut terminal_automaton,
+            mut id_map,
+            num_terminals,
+            templates,
+            prebuilt_bundle_cache,
+        } = self
+        else {
+            return Err(
+                "table-free boundary parser construction requires deferred count-only work".into(),
+            );
+        };
+        let started_at = Instant::now();
+        let fused_signed_requested =
+            std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some();
+        if fused_signed_requested
+            && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
+            && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
+        {
+            let old_tsids = id_map.num_tsids() as usize;
+            let token_classes = id_map.num_internal_tokens() as usize;
+            let quotient_started = Instant::now();
+            if let Some((old_to_new, unique_weights)) =
+                compute_boundary_dwa_tsid_behavior_quotient(dwa, old_tsids, token_classes)
+            {
+                let new_tsids = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
+                if new_tsids < old_tsids {
+                    apply_boundary_tsid_quotient_to_dwa_and_id_map(
+                        dwa,
+                        &mut id_map,
+                        &old_to_new,
+                    )
+                    .ok_or_else(|| "early table-free boundary TSID quotient failed".to_string())?;
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_boundary_early_tsid_quotient_no_table] old_tsids={} new_tsids={} unique_terminal_weights={} total_ms={:.3}",
+                            old_tsids,
+                            new_tsids,
+                            unique_weights,
+                            quotient_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+            }
+        }
+        let nondeterministic_bundles_requested = std::env::var_os(
+            "GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES",
+        )
+        .is_some();
+        let nondeterministic_bundle_min_tokens = std::env::var(
+            "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS",
+        )
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(64);
+        let compile_nondeterministic_bundles = nondeterministic_bundles_requested
+            && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
+        let mut parser_nwa = if !compile_nondeterministic_bundles
+            && let Some(cache) = prebuilt_bundle_cache.as_ref()
+        {
+            build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache(
+                &terminal_automaton,
+                num_terminals,
+                &templates,
+                cache,
+            )
+        } else {
+            build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table(
+                &terminal_automaton,
+                num_terminals,
+                &templates,
+                compile_nondeterministic_bundles,
+            )
+        }
+        .ok_or_else(|| {
+            "count-only boundary terminal automaton induced no parser NWA".to_string()
+        })?;
+        if fused_signed_requested
+            && id_map.num_tsids() as usize <= 16
+            && id_map.num_internal_tokens() as usize <= 64
+        {
+            let fused_started = Instant::now();
+            let parser_dwa =
+                normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+                    num_parser_states,
+                    &parser_nwa,
+                    id_map.num_tsids() as usize,
+                    id_map.num_internal_tokens() as usize,
+                )
+                .ok_or_else(|| {
+                    "table-free small-boundary fused signed publication rejected coordinate"
+                        .to_string()
+                })?;
+            let mut template_cache = vec![None; num_terminals as usize];
+            for (terminal, dfa) in templates.by_terminal {
+                if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                    *slot = Some(dfa);
+                }
+            }
+            let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_boundary_fused_signed_no_table] signed_states={} output_states={} output_transitions={} fused_ms={:.3} total_ms={build_ms:.3}",
+                    parser_nwa.num_states(),
+                    parser_dwa.num_states(),
+                    parser_dwa.num_transitions(),
+                    fused_started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return Ok(BoundaryRuntimeCandidate::Parser {
+                positive: PositiveBoundaryParser::Dwa(parser_dwa),
+                id_map,
+                template_cache: Some(template_cache),
+                build_ms,
+            });
+        }
+        if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_SIGNED_BOUNDARY_NWA").is_some() {
+            parser_nwa = reverse_hashcons_signed_acyclic_nwa_fast(parser_nwa);
+        }
+        let resolved_reverse_topo =
+            resolve_negative_codes_in_nwa(&mut parser_nwa, allow_grouped_cancellation);
+        if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
+            parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+                parser_nwa,
+                resolved_reverse_topo,
+            );
+        } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
+            parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
+        }
+        let mut template_cache = vec![None; num_terminals as usize];
+        for (terminal, dfa) in templates.by_terminal {
+            if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                *slot = Some(dfa);
+            }
+        }
+        let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_positive_no_table] states={} transitions={} build_ms={build_ms:.3} compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
+                parser_nwa.num_states(),
+                parser_nwa.num_transitions(),
+            );
+        }
+        Ok(BoundaryRuntimeCandidate::Parser {
+            positive: PositiveBoundaryParser::Nwa(parser_nwa),
+            id_map,
+            template_cache: Some(template_cache),
+            build_ms,
+        })
     }
 
     fn materialize_unminimized(
@@ -1564,6 +3133,22 @@ impl BoundaryParserWork {
             ),
         }
     }
+}
+
+/// Runtime parser segments are allowed to remain nondeterministic, but their
+/// alphabet is strictly the positive parser-stack read alphabet (plus DEFAULT).
+/// Negative labels encode compile-time PUSH effects and must never cross this
+/// boundary. Keep this as a release-mode check so future compiler fast paths
+/// cannot accidentally reintroduce runtime signed-stack interpretation.
+fn ensure_positive_runtime_parser_dwa(dwa: &DWA) -> Result<(), String> {
+    for (source, state) in dwa.states().iter().enumerate() {
+        if let Some(&label) = state.transitions.keys().find(|&&label| is_negative_label(label)) {
+            return Err(format!(
+                "runtime boundary parser DWA contains negative/PUSH label {label} at state {source}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Load the small terminal-DWA capture format used by the exact composition
@@ -1687,6 +3272,20 @@ struct ResidualScanResult {
     future_terminals: Vec<u32>,
 }
 
+impl ResidualScanResult {
+    fn union_from(&mut self, other: &Self) {
+        self.matches.extend_from_slice(&other.matches);
+        self.future_terminals.extend_from_slice(&other.future_terminals);
+    }
+
+    fn canonicalize(&mut self) {
+        self.matches.sort_unstable();
+        self.matches.dedup();
+        self.future_terminals.sort_unstable();
+        self.future_terminals.dedup();
+    }
+}
+
 #[derive(Clone)]
 struct BoundaryTokenWitness {
     token_id: u32,
@@ -1701,6 +3300,42 @@ struct BoundaryTokenDiscovery {
     terminals: BitSet,
     token_ids: Vec<u32>,
     witnesses: Vec<BoundaryTokenWitness>,
+}
+
+#[derive(Clone)]
+struct PreTableBoundaryBaseDiscovery {
+    terminal_offsets: Vec<u32>,
+    tokenizer_state_offsets: Vec<u32>,
+    summary: CompositionGrammarSummary,
+    base_interface_pairs: BTreeSet<(u32, u32)>,
+    discovery_interface_pairs: BTreeSet<(u32, u32)>,
+    discovery: BoundaryTokenDiscovery,
+    component_state_map: Option<ManyToOneIdMap>,
+    terminal_artifact: Option<MappedArtifact<TerminalAutomaton>>,
+    elapsed_ms: f64,
+}
+
+fn replace_boundary_discovery_tokens(
+    mut base: BoundaryTokenDiscovery,
+    replacement: BoundaryTokenDiscovery,
+) -> BoundaryTokenDiscovery {
+    if replacement.token_ids.is_empty() {
+        return base;
+    }
+    let replaced = replacement
+        .token_ids
+        .iter()
+        .copied()
+        .collect::<FxHashSet<_>>();
+    base.token_ids.retain(|token| !replaced.contains(token));
+    base.witnesses
+        .retain(|witness| !replaced.contains(&witness.token_id));
+    base.terminals.union_with(&replacement.terminals);
+    base.token_ids.extend(replacement.token_ids);
+    base.token_ids.sort_unstable();
+    base.token_ids.dedup();
+    base.witnesses.extend(replacement.witnesses);
+    base
 }
 
 fn scan_residual_starts(
@@ -2475,6 +4110,97 @@ fn transition_boundary_key(
     })
 }
 
+fn boundary_token_graph_has_accepting_path(
+    bytes: &[u8],
+    arbitrary_scan: &ResidualScanResult,
+    reset_scans: &[&ResidualScanResult],
+    seed_terminals: &[bool],
+    globally_erased_terminals: &BitSet,
+    interface_pairs: &BTreeSet<(u32, u32)>,
+    initial_interface_witnessed: bool,
+    allow_seed_only: bool,
+    disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    follow_transparent_terminals: &BitSet,
+) -> bool {
+    let accept_complete_cross_candidates =
+        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_COMPLETE_PATH_DISCOVERY").is_some();
+    let start = BoundaryTokenNodeKey {
+        offset: 0,
+        last_terminal: u32::MAX,
+        seeded: false,
+        interface_witnessed: initial_interface_witnessed,
+        erased_seen: false,
+        started: false,
+    };
+    let mut seen = FxHashSet::<BoundaryTokenNodeKey>::default();
+    let mut queue = VecDeque::<BoundaryTokenNodeKey>::new();
+    seen.insert(start);
+    queue.push_back(start);
+
+    while let Some(key) = queue.pop_front() {
+        if key.offset == bytes.len() {
+            continue;
+        }
+        let scan = if key.started {
+            reset_scans
+                .get(key.offset - 1)
+                .copied()
+                .expect("reset scan must exist for every positive token offset")
+        } else {
+            arbitrary_scan
+        };
+        let accepting = |target: BoundaryTokenNodeKey| {
+            target.offset == bytes.len()
+                && (accept_complete_cross_candidates
+                    || target.interface_witnessed
+                    || (allow_seed_only && target.seeded))
+        };
+
+        for &(terminal, width) in &scan.matches {
+            let next_offset = key.offset.saturating_add(width);
+            if next_offset > bytes.len() {
+                continue;
+            }
+            let Some(target) = transition_boundary_key(
+                key,
+                terminal,
+                next_offset,
+                seed_terminals,
+                globally_erased_terminals,
+                interface_pairs,
+                disallowed_follows,
+                follow_transparent_terminals,
+            ) else {
+                continue;
+            };
+            if accepting(target) {
+                return true;
+            }
+            if seen.insert(target) {
+                queue.push_back(target);
+            }
+        }
+        for &terminal in &scan.future_terminals {
+            let Some(target) = transition_boundary_key(
+                key,
+                terminal,
+                bytes.len(),
+                seed_terminals,
+                globally_erased_terminals,
+                interface_pairs,
+                disallowed_follows,
+                follow_transparent_terminals,
+            ) else {
+                continue;
+            };
+            if accepting(target) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn build_boundary_token_graph(
     bytes: &[u8],
     arbitrary_scan: &ResidualScanResult,
@@ -3219,10 +4945,27 @@ fn boundary_interface_adjacent_pair_candidates(
         .max()
         .unwrap_or(0) as usize;
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
+    let sparse_summaries = std::env::var_os(
+        "GLRMASK_DISABLE_SPARSE_INTERFACE_BYTE_SUMMARIES",
+    )
+    .is_none();
+    let needed_terminals = sparse_summaries.then(|| {
+        interface_pairs
+            .iter()
+            .flat_map(|&(left, right)| [left, right])
+            .collect::<BTreeSet<_>>()
+    });
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-            summaries[terminal_offset + local_terminal] = Some(
+            let global_terminal = terminal_offset + local_terminal;
+            if needed_terminals
+                .as_ref()
+                .is_some_and(|needed| !needed.contains(&(global_terminal as u32)))
+            {
+                continue;
+            }
+            summaries[global_terminal] = Some(
                 component
                     .tokenizer
                     .terminal_expr(local_terminal as u32)
@@ -3403,7 +5146,9 @@ fn discover_boundary_token_paths(
     context_terminals: &BitSet,
     follow_transparent_terminals: &BitSet,
     disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    candidate_limit: Option<&BTreeSet<u32>>,
 ) -> BoundaryTokenDiscovery {
+    let discovery_total_started_at = Instant::now();
     let num_terminals = components
         .iter()
         .zip(terminal_offsets.iter().copied())
@@ -3462,9 +5207,18 @@ fn discover_boundary_token_paths(
     // case a seed-only boundary starts at byte zero; later boundaries inside a
     // token are supplied by exact grammar/LR interface byte pairs. Only a
     // globally erased terminal requires the conservative old suffix-seed rule.
+    let discovery_prelude_ms = discovery_total_started_at.elapsed().as_secs_f64() * 1000.0;
     let prefilter_started_at = Instant::now();
     let allow_suffix_seed = !ignore_terminals.is_empty();
-    let mut prefilter = if use_prefilter {
+    let cross_interface_only = use_prefilter
+        && ignore_terminals.is_empty()
+        && std::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some();
+    // In the exact cross-interface factor, seed-only tokens are component-local
+    // language and are deliberately excluded from boundary repair. Avoid the
+    // full-vocabulary seed-DFA scan whose result would be discarded below.
+    let mut prefilter = if cross_interface_only {
+        BTreeSet::new()
+    } else if use_prefilter {
         boundary_token_prefilter(
             vocab,
             components,
@@ -3478,9 +5232,6 @@ fn discover_boundary_token_paths(
             .map(|&(token_id, _)| token_id)
             .collect::<BTreeSet<_>>()
     };
-    let cross_interface_only = use_prefilter
-        && ignore_terminals.is_empty()
-        && std::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some();
     let interface_pairs_for_prefilter = if cross_interface_only {
         let owner = |terminal: u32| {
             terminal_offsets
@@ -3529,6 +5280,9 @@ fn discover_boundary_token_paths(
         Vec::new()
     };
     prefilter.extend(context_residual_candidates.iter().copied());
+    if let Some(limit) = candidate_limit {
+        prefilter.retain(|token| limit.contains(token));
+    }
     if let Some(path) = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_ALLOWLIST") {
         let allowed = std::fs::read_to_string(path)
             .expect("read experimental boundary token allowlist")
@@ -3647,6 +5401,17 @@ fn discover_boundary_token_paths(
     let candidate_start_visits = AtomicUsize::new(0);
     let distinct_scan_groups = AtomicUsize::new(0);
     let max_candidate_starts = AtomicUsize::new(0);
+    let candidate_group_ns = AtomicU64::new(0);
+    let residual_scan_ns = AtomicU64::new(0);
+    let graph_ns = AtomicU64::new(0);
+    let full_graph_groups = AtomicUsize::new(0);
+    let token_union_survivors = AtomicUsize::new(0);
+    let profile_discovery_detail = compose_profile_enabled();
+    let boolean_graph_prefilter =
+        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_BOOLEAN_PREFILTER").is_some();
+    let token_union_prefilter =
+        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_UNION_PREFILTER").is_some();
+    let exact_scan_started_at = Instant::now();
     let results = multi_byte_entries
         .par_iter()
         .filter_map(|&(token_id, bytes)| {
@@ -3674,6 +5439,7 @@ fn discover_boundary_token_paths(
                     .collect::<Vec<_>>();
                 owned_reset_scans.iter().collect::<Vec<_>>()
             };
+            let candidate_group_started_at = Instant::now();
             let candidate_groups = candidate_start_state_groups_for_token(
                 token_id,
                 &candidate_ranges,
@@ -3683,6 +5449,13 @@ fn discover_boundary_token_paths(
             );
             candidate_start_visits.fetch_add(candidate_groups.len(), Ordering::Relaxed);
             max_candidate_starts.fetch_max(candidate_groups.len(), Ordering::Relaxed);
+            if profile_discovery_detail {
+                candidate_group_ns.fetch_add(
+                    candidate_group_started_at.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            let residual_scan_started_at = Instant::now();
             let starts_by_scan = scan_component_residual_start_groups(
                 components,
                 tokenizer_state_offsets,
@@ -3692,8 +5465,101 @@ fn discover_boundary_token_paths(
                 &candidate_groups,
             );
             distinct_scan_groups.fetch_add(starts_by_scan.len(), Ordering::Relaxed);
+            if profile_discovery_detail {
+                residual_scan_ns.fetch_add(
+                    residual_scan_started_at.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            let graph_started_at = Instant::now();
             let mut scan_groups = starts_by_scan.into_iter().collect::<Vec<_>>();
             scan_groups.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            if token_union_prefilter {
+                let mut residual_union = ResidualScanResult::default();
+                let mut reset_union = ResidualScanResult::default();
+                let mut contextual_union = ResidualScanResult::default();
+                let mut has_residual = false;
+                let mut has_reset = false;
+                let mut has_contextual = false;
+                for (scan, start_states) in &scan_groups {
+                    let mut group_residual = false;
+                    let mut group_reset = false;
+                    let mut group_contextual = false;
+                    for &start_state in start_states {
+                        if boundary_context_states.contains(&start_state) {
+                            group_contextual = true;
+                        } else if reset_state_set.contains(&start_state) {
+                            group_reset = true;
+                        } else {
+                            group_residual = true;
+                        }
+                    }
+                    if group_residual {
+                        residual_union.union_from(scan);
+                        has_residual = true;
+                    }
+                    if group_reset {
+                        reset_union.union_from(scan);
+                        has_reset = true;
+                    }
+                    if group_contextual {
+                        contextual_union.union_from(scan);
+                        has_contextual = true;
+                    }
+                }
+                residual_union.canonicalize();
+                reset_union.canonicalize();
+                contextual_union.canonicalize();
+                let residual_accepts = has_residual
+                    && boundary_token_graph_has_accepting_path(
+                        bytes,
+                        &residual_union,
+                        &reset_scans,
+                        seed_terminals,
+                        ignore_terminals,
+                        interface_pairs,
+                        false,
+                        false,
+                        disallowed_follows,
+                        follow_transparent_terminals,
+                    );
+                let reset_accepts = has_reset
+                    && boundary_token_graph_has_accepting_path(
+                        bytes,
+                        &reset_union,
+                        &reset_scans,
+                        seed_terminals,
+                        ignore_terminals,
+                        interface_pairs,
+                        false,
+                        !ignore_terminals.is_empty(),
+                        disallowed_follows,
+                        follow_transparent_terminals,
+                    );
+                let contextual_accepts = has_contextual
+                    && boundary_token_graph_has_accepting_path(
+                        bytes,
+                        &contextual_union,
+                        &reset_scans,
+                        seed_terminals,
+                        ignore_terminals,
+                        interface_pairs,
+                        true,
+                        false,
+                        disallowed_follows,
+                        follow_transparent_terminals,
+                    );
+                if !(residual_accepts || reset_accepts || contextual_accepts) {
+                    if profile_discovery_detail {
+                        graph_ns.fetch_add(
+                            graph_started_at.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                    }
+                    return None;
+                }
+                token_union_survivors.fetch_add(1, Ordering::Relaxed);
+            }
             let mut local_terminals = FxHashSet::<u32>::default();
             let mut local_witnesses = Vec::new();
             for (arbitrary_scan, start_states) in scan_groups {
@@ -3717,6 +5583,23 @@ fn discover_boundary_token_paths(
                     if start_states.is_empty() {
                         continue;
                     }
+                    if boolean_graph_prefilter
+                        && !boundary_token_graph_has_accepting_path(
+                            bytes,
+                            &arbitrary_scan,
+                            &reset_scans,
+                            seed_terminals,
+                            ignore_terminals,
+                            interface_pairs,
+                            initial_interface_witnessed,
+                            allow_seed_only,
+                            disallowed_follows,
+                            follow_transparent_terminals,
+                        )
+                    {
+                        continue;
+                    }
+                    full_graph_groups.fetch_add(1, Ordering::Relaxed);
                     let Some((nodes, good, accepting)) = build_boundary_token_graph(
                         bytes,
                         &arbitrary_scan,
@@ -3750,11 +5633,19 @@ fn discover_boundary_token_paths(
                     });
                 }
             }
+            if profile_discovery_detail {
+                graph_ns.fetch_add(
+                    graph_started_at.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+            }
             (!local_witnesses.is_empty())
                 .then_some((token_id, local_terminals, local_witnesses))
         })
         .collect::<Vec<_>>();
+    let exact_scan_ms = exact_scan_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let merge_started_at = Instant::now();
     let mut discovered = BitSet::new(num_terminals);
     let mut boundary_token_ids = Vec::with_capacity(results.len());
     let mut witnesses = Vec::new();
@@ -3764,6 +5655,20 @@ fn discover_boundary_token_paths(
             discovered.set(terminal as usize);
         }
         witnesses.append(&mut token_witnesses);
+    }
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_discovery_phases] prelude_ms={discovery_prelude_ms:.3} prefilter_ms={prefilter_ms:.3} suffix_cache_ms={suffix_cache_ms:.3} candidate_ranges_ms={candidate_ranges_ms:.3} exact_scan_ms={exact_scan_ms:.3} merge_ms={merge_ms:.3} candidate_group_cpu_ms={:.3} residual_scan_cpu_ms={:.3} graph_cpu_ms={:.3} full_graph_groups={} boolean_prefilter={} token_union_prefilter={} token_union_survivors={} total_ms={:.3}",
+            candidate_group_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            residual_scan_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            graph_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            full_graph_groups.load(Ordering::Relaxed),
+            boolean_graph_prefilter,
+            token_union_prefilter,
+            token_union_survivors.load(Ordering::Relaxed),
+            discovery_total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
     if std::env::var_os("GLRMASK_DUMP_COMPOSE_BOUNDARY_TOKENS").is_some() {
         eprintln!(
@@ -4254,6 +6159,128 @@ fn boundary_id_map_for_selected_tokens(
     })
 }
 
+
+
+fn deterministic_weighted_prefix_dwa_from_small_acyclic_nwa(
+    nwa: &NWA,
+    max_visits: usize,
+    max_words: usize,
+    max_word_len: usize,
+) -> Option<DWA> {
+    if !nwa.is_acyclic() || nwa.start_states().is_empty() {
+        return None;
+    }
+
+    let mut words = BTreeMap::<Vec<i32>, Weight>::new();
+    let mut stack = nwa
+        .start_states()
+        .iter()
+        .copied()
+        .map(|state| (state, Vec::<i32>::new(), Weight::all()))
+        .collect::<Vec<_>>();
+    let mut visits = 0usize;
+    while let Some((state_id, word, support)) = stack.pop() {
+        visits += 1;
+        if visits > max_visits || word.len() > max_word_len {
+            return None;
+        }
+        let state = nwa.states().get(state_id as usize)?;
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            let accepted = support.intersection(final_weight);
+            if !accepted.is_empty() {
+                match words.entry(word.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(accepted);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let merged = entry.get().union(&accepted);
+                        *entry.get_mut() = merged;
+                    }
+                }
+                if words.len() > max_words {
+                    return None;
+                }
+            }
+        }
+        for (target, edge_weight) in &state.epsilons {
+            let next_support = support.intersection(edge_weight);
+            if !next_support.is_empty() {
+                stack.push((*target, word.clone(), next_support));
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            for (target, edge_weight) in targets {
+                let next_support = support.intersection(edge_weight);
+                if next_support.is_empty() {
+                    continue;
+                }
+                let mut next_word = word.clone();
+                next_word.push(label);
+                if next_word.len() > max_word_len {
+                    return None;
+                }
+                stack.push((*target, next_word, next_support));
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct PrefixNode {
+        children: BTreeMap<i32, usize>,
+        final_weight: Option<Weight>,
+    }
+    let mut nodes = vec![PrefixNode::default()];
+    for (word, support) in words {
+        let mut node = 0usize;
+        for label in word {
+            let next = if let Some(&next) = nodes[node].children.get(&label) {
+                next
+            } else {
+                let next = nodes.len();
+                nodes.push(PrefixNode::default());
+                nodes[node].children.insert(label, next);
+                next
+            };
+            node = next;
+        }
+        nodes[node].final_weight = Some(match nodes[node].final_weight.take() {
+            Some(existing) => existing.union(&support),
+            None => support,
+        });
+    }
+
+    // Every child is allocated after its parent, so reverse numeric order is
+    // a reverse topological order for this trie. `live[node]` is the exact
+    // support of all accepted words in the subtree rooted at `node`.
+    let mut live = vec![Weight::empty(); nodes.len()];
+    for node_id in (0..nodes.len()).rev() {
+        let mut support = nodes[node_id]
+            .final_weight
+            .clone()
+            .unwrap_or_else(Weight::empty);
+        for &child in nodes[node_id].children.values() {
+            support = support.union(&live[child]);
+        }
+        live[node_id] = support;
+    }
+
+    let mut states = Vec::<DWAState>::with_capacity(nodes.len());
+    for node in nodes {
+        let transitions = node
+            .children
+            .into_iter()
+            .filter_map(|(label, child)| {
+                let weight = live[child].clone();
+                (!weight.is_empty()).then_some((label, (child as u32, weight)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        states.push(DWAState {
+            transitions,
+            final_weight: node.final_weight.filter(|weight| !weight.is_empty()),
+        });
+    }
+    Some(DWA::from_parts(states, 0))
+}
 
 fn direct_boundary_terminal_automaton(
     num_states: usize,
@@ -4846,6 +6873,20 @@ fn direct_boundary_terminal_automaton(
         }
     }
 
+    if let Some(plan) = delta_plan
+        && plan.by_global_terminal.is_empty()
+        && plan.unsafe_terminals.is_empty()
+    {
+        assert_eq!(
+            delta_complex_lane_starts, 0,
+            "empty boundary delta plan must not produce a productive local-complex repair lane",
+        );
+        assert_eq!(
+            delta_single_lane_starts, 0,
+            "empty boundary delta plan must not produce a productive local-delta repair lane",
+        );
+    }
+
     let start_weights_by_canonical = start_tokens_by_canonical
         .into_iter()
         .map(|(canonical, tokens_by_tsid)| {
@@ -4948,10 +6989,45 @@ fn direct_boundary_terminal_automaton(
     let canonical_state_count = raw_states.saturating_sub(canonical_state_offset);
     let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
-    let dwa = determinize(&nwa).map_err(|error| error.to_string())?;
+    let prefix_dwa_requested =
+        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PREFIX_DWA").is_some();
+    let mut prefix_dwa_states = 0u32;
+    let dwa = if prefix_dwa_requested {
+        let candidate = deterministic_weighted_prefix_dwa_from_small_acyclic_nwa(
+            &nwa,
+            50_000,
+            4_096,
+            16,
+        )
+        .ok_or_else(|| "small boundary terminal prefix-DWA construction exceeded exact caps".to_string())?;
+        prefix_dwa_states = candidate.num_states();
+        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TERMINAL_PREFIX_DWA").is_some() {
+            let reference = determinize(&nwa).map_err(|error| error.to_string())?;
+            let difference = find_difference(&candidate, &reference)
+                .map_err(|error| error.to_string())?;
+            assert!(
+                difference.is_none(),
+                "boundary terminal prefix DWA differs from generic determinization on {difference:?}",
+            );
+            eprintln!(
+                "[glrmask/validate][boundary_terminal_prefix_dwa] exact=true candidate_states={} reference_states={} candidate_transitions={} reference_transitions={}",
+                candidate.num_states(),
+                reference.num_states(),
+                candidate.num_transitions(),
+                reference.num_transitions(),
+            );
+        }
+        candidate
+    } else {
+        determinize(&nwa).map_err(|error| error.to_string())?
+    };
     let determinize_ms = started.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
-    let mut dwa = minimize_owned(dwa);
+    let mut dwa = if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_HASHCONS_ONLY").is_some() {
+        reverse_hashcons_owned(dwa)
+    } else {
+        minimize_owned(dwa)
+    };
     let minimize_ms = started.elapsed().as_secs_f64() * 1000.0;
     for state in 0..dwa.num_states() {
         for &control in control_terminals {
@@ -4964,7 +7040,7 @@ fn direct_boundary_terminal_automaton(
 
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_direct_terminal] witnesses={} selected_tokens={} raw_lexer_states={} boundary_tsids={} canonical_states={} raw_states={} raw_transitions={} final_states={} final_transitions={} controls={} delta_cross_lane_starts={} delta_cross_tokens={} delta_complex_lane_starts={} delta_single_lane_starts={} delta_start_groups={} one_byte_ms={one_byte_ms:.3} quotient_ms={quotient_ms:.3} build_ms={build_ms:.3} determinize_ms={determinize_ms:.3} minimize_ms={minimize_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_boundary_direct_terminal] witnesses={} selected_tokens={} raw_lexer_states={} boundary_tsids={} canonical_states={} raw_states={} raw_transitions={} prefix_dwa_states={} final_states={} final_transitions={} controls={} delta_cross_lane_starts={} delta_cross_tokens={} delta_complex_lane_starts={} delta_single_lane_starts={} delta_start_groups={} one_byte_ms={one_byte_ms:.3} quotient_ms={quotient_ms:.3} build_ms={build_ms:.3} determinize_ms={determinize_ms:.3} minimize_ms={minimize_ms:.3} total_ms={:.3}",
             discovery.witnesses.len(),
             selected_original_tokens.len(),
             num_states,
@@ -4972,6 +7048,7 @@ fn direct_boundary_terminal_automaton(
             canonical_state_count,
             raw_states,
             raw_transitions,
+            prefix_dwa_states,
             final_states,
             final_transitions,
             control_terminals.len(),
@@ -5117,6 +7194,41 @@ fn add_boundary_special_token_paths(
         TerminalAutomaton::EpsilonNwa(nwa),
         id_map,
     ))
+}
+
+fn boundary_discovery_good_signature(
+    discovery: &BoundaryTokenDiscovery,
+) -> BTreeSet<(u32, Vec<u32>, Vec<(BoundaryTokenNodeKey, bool, Vec<(u32, BoundaryTokenNodeKey)>)>)> {
+    discovery
+        .witnesses
+        .iter()
+        .map(|witness| {
+            let mut rows = witness
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(node_id, node)| {
+                    witness.good[node_id].then(|| {
+                        let mut outgoing = node
+                            .outgoing
+                            .iter()
+                            .filter(|edge| witness.good[edge.target])
+                            .map(|edge| (edge.terminal, witness.nodes[edge.target].key))
+                            .collect::<Vec<_>>();
+                        outgoing.sort_unstable();
+                        outgoing.dedup();
+                        (node.key, witness.accepting[node_id], outgoing)
+                    })
+                })
+                .collect::<Vec<_>>();
+            rows.sort_unstable();
+            (
+                witness.token_id,
+                witness.start_states.clone(),
+                rows,
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -6860,7 +8972,8 @@ impl<'a> DeferredComponentParserUnionView<'a> {
             || constraints.len() != tokenizer_state_offsets.len()
             || constraints.len() != terminal_offsets.len()
             || constraints.len() != default_domains.len()
-            || std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
+            || (std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_SCOPED_IGNORE_TOP_ACCEPT").is_some()
+                && std::env::var_os("GLRMASK_EXPERIMENT_EXTERNALIZE_COMPONENT_TOP_ACCEPT").is_none())
         {
             return None;
         }
@@ -6927,6 +9040,251 @@ impl<'a> DeferredComponentParserUnionView<'a> {
     }
 }
 
+/// Materialize only the deterministic component-union parser A retained by the
+/// segmented runtime, directly into this already-composed constraint's final
+/// TSID/token/LR coordinates. This is intentionally a serialization-time path:
+/// hot composition keeps the zero-copy segmented representation, while saved
+/// artifacts can carry one ordinary parser DWA without recursively embedding
+/// the source constraints.
+pub(crate) fn materialize_segmented_component_parser_for_serialization(
+    constraint: &Constraint,
+) -> Result<Option<(DWA, Vec<i32>)>, String> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_SERIALIZE_SEGMENTED_A").is_some();
+    let total_started = profile.then(Instant::now);
+    let Some(overlay) = constraint.static_dynamic_overlay.as_ref() else {
+        return Ok(None);
+    };
+    if overlay.segmented_parser_components.is_empty() {
+        return Ok(None);
+    }
+
+    let global_state_count = constraint.table.num_states as usize;
+    let mut relations = Vec::<Vec<Vec<u32>>>::with_capacity(
+        overlay.segmented_parser_components.len(),
+    );
+    for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
+        let local_state_count = component.constraint.table.num_states as usize;
+        let mut relation = vec![Vec::<u32>::new(); local_state_count];
+        for (global, &local) in component.global_to_local_parser_state.iter().enumerate() {
+            if local == u32::MAX {
+                continue;
+            }
+            let Some(targets) = relation.get_mut(local as usize) else {
+                return Err(format!(
+                    "segmented component {component_index} maps global LR state {global} to out-of-range local state {local}"
+                ));
+            };
+            targets.push(global as u32);
+        }
+        for targets in &mut relation {
+            targets.sort_unstable();
+            targets.dedup();
+        }
+        if relation.iter().any(Vec::is_empty) {
+            return Err(format!(
+                "segmented component {component_index} serialization relation omits a local LR state"
+            ));
+        }
+        relations.push(relation);
+    }
+
+    let relation_ms = total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let components = overlay
+        .segmented_parser_components
+        .iter()
+        .zip(relations.iter())
+        .map(|(component, relation)| ParserDwaComponent {
+            constraint: component.constraint.as_ref(),
+            parser_state_relation: relation,
+            tokenizer_state_offset: component.tokenizer_state_offset,
+            terminal_offset: component.terminal_offset,
+            composed_table: None,
+        })
+        .collect::<Vec<_>>();
+
+    // Persistence may choose a different exact representation than the hot
+    // zero-copy runtime. Force symbolic DEFAULT domains for every uniquely
+    // owned parent/child LR region so the single serialized A does not expand
+    // component DEFAULT rows across thousands of concrete labels.
+    let default_plan = build_parser_default_domain_plan_with_policy(
+        &components,
+        constraint.table.num_states,
+        Some(true),
+        true,
+    );
+    let build_started = profile.then(Instant::now);
+    let mut automata = components
+        .iter()
+        .enumerate()
+        .map(|(component_index, parser_component)| {
+            let mut automaton = component_parser_nwa(
+                parser_component,
+                default_plan.component_domains[component_index].as_ref(),
+            )?;
+            if let Some(local_ignore) = overlay.segmented_parser_components[component_index]
+                .root_disallowed_terminal
+            {
+                let ignore_weight = parser_component
+                    .constraint
+                    .possible_matches
+                    .get(&local_ignore);
+                strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
+            }
+            Ok::<_, String>(automaton)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let build_ms = build_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let input_shapes = automata
+        .iter()
+        .map(|a| (a.num_states(), a.num_transitions()))
+        .collect::<Vec<_>>();
+    let remap_started = profile.then(Instant::now);
+
+    // Map every source coordinate directly into the final outer coordinate.
+    // This avoids reconstructing the intermediate component-only partition.
+    for (component_index, (automaton, component)) in automata
+        .iter_mut()
+        .zip(overlay.segmented_parser_components.iter())
+        .enumerate()
+    {
+        let source = component.constraint.as_ref();
+        let local_tsid_count = source.internal_tsid_to_states.len();
+        let mut tsid_map = vec![Vec::<u32>::new(); local_tsid_count];
+        for local_tsid in 0..local_tsid_count {
+            let Some(local_states) = source.internal_tsid_to_states.get(local_tsid) else {
+                continue;
+            };
+            for &local_state in local_states {
+                let global_state = component
+                    .tokenizer_state_offset
+                    .checked_add(local_state)
+                    .ok_or_else(|| "segmented tokenizer-state offset overflow".to_string())?;
+                if global_state < constraint.tokenizer.num_states() {
+                    tsid_map[local_tsid]
+                        .extend_from_slice(constraint.internal_tsids_for_state(global_state));
+                }
+            }
+            if source
+                .internal_tsids_for_state(source.tokenizer.initial_state())
+                .contains(&(local_tsid as u32))
+            {
+                tsid_map[local_tsid].extend_from_slice(
+                    constraint.internal_tsids_for_state(constraint.runtime_commit_initial_state()),
+                );
+            }
+            tsid_map[local_tsid].sort_unstable();
+            tsid_map[local_tsid].dedup();
+        }
+
+        let local_token_count = if !source.internal_token_to_tokens.is_empty() {
+            source.internal_token_to_tokens.len()
+        } else {
+            source
+                .original_token_to_internal
+                .iter()
+                .copied()
+                .filter(|&token| token != u32::MAX)
+                .max()
+                .map_or(0, |token| token as usize + 1)
+        };
+        let mut token_map = vec![Vec::<u32>::new(); local_token_count];
+        if !source.internal_token_to_tokens.is_empty() {
+            for (local, originals) in source.internal_token_to_tokens.iter().enumerate() {
+                for &original in originals {
+                    let global = constraint
+                        .original_token_to_internal
+                        .get(original as usize)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    if global != u32::MAX {
+                        token_map[local].push(global);
+                    }
+                }
+            }
+        } else {
+            for (original, &local) in source.original_token_to_internal.iter().enumerate() {
+                if local == u32::MAX || local as usize >= token_map.len() {
+                    continue;
+                }
+                let global = constraint
+                    .original_token_to_internal
+                    .get(original)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if global != u32::MAX {
+                    token_map[local as usize].push(global);
+                }
+            }
+        }
+        for destinations in &mut token_map {
+            destinations.sort_unstable();
+            destinations.dedup();
+        }
+
+        if tsid_map.iter().any(Vec::is_empty) {
+            return Err(format!(
+                "segmented component {component_index} has an unmapped TSID during serialization"
+            ));
+        }
+        let mut weights = automaton.weight_refs_mut();
+        remap_weights_with_maps(
+            &mut weights,
+            &tsid_map,
+            &token_map,
+            constraint.internal_tsid_to_states.len(),
+        );
+    }
+
+    let remap_ms = remap_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let union_started = profile.then(Instant::now);
+    let parser_dwa = if supports_overlap_local_union(&automata) {
+        determinize_epsilon_free_component_union(automata, None)
+            .expect("component union support was prechecked")
+            .0
+    } else {
+        let mut union = NWA::new(
+            constraint.internal_tsid_to_states.len() as u32,
+            constraint.internal_token_to_tokens.len().saturating_sub(1) as u32,
+        );
+        let mut starts = Vec::new();
+        for automaton in &automata {
+            let body = union.append_with_body(automaton);
+            starts.extend(body.start_states);
+        }
+        union.set_start_states(starts);
+        determinize(&union).map_err(|error| error.to_string())?
+    };
+
+    let union_ms = union_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][serialize_segmented_a] relation_ms={relation_ms:.3} build_ms={build_ms:.3} remap_ms={remap_ms:.3} union_ms={union_ms:.3} domain_labels={} input_shapes={input_shapes:?} output_states={} output_transitions={} total_ms={:.3}",
+            default_plan.parser_state_labels.iter().filter(|&&v| v != NO_PARSER_DOMAIN_LABEL).collect::<BTreeSet<_>>().len(),
+            parser_dwa.num_states(),
+            parser_dwa.num_transitions(),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let allowed_domains = default_plan
+        .parser_state_labels
+        .iter()
+        .copied()
+        .filter(|&label| label != NO_PARSER_DOMAIN_LABEL)
+        .collect::<BTreeSet<_>>();
+    if parser_dwa.states().iter().any(|state| {
+        state.transitions.keys().any(|&label| {
+            label >= 0
+                && label as usize >= global_state_count
+                && label != DEFAULT_LABEL
+                && !allowed_domains.contains(&label)
+        })
+    }) {
+        return Err("serialized component parser contains an unknown synthetic LR label".into());
+    }
+    Ok(Some((parser_dwa, default_plan.parser_state_labels)))
+}
+
 fn prepare_unmapped_component_possible_matches(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
@@ -6960,7 +9318,23 @@ struct PreparedOwnedComponentArtifacts {
     id_map: InternalIdMap,
     boundary_tsid_map: Option<Vec<Vec<u32>>>,
     boundary_token_map: Option<Vec<Vec<u32>>>,
+    token_mask_caches: Option<crate::runtime::InternalTokenMaskPrebuild>,
+    token_mask_cache_ms: f64,
     remap_ms: f64,
+}
+
+fn prebuild_segmented_token_mask_caches(
+    id_map: &InternalIdMap,
+) -> (Option<crate::runtime::InternalTokenMaskPrebuild>, f64) {
+    if std::env::var_os("GLRMASK_EXPERIMENT_PREBUILD_SEGMENTED_TOKEN_MASK_CACHES").is_none() {
+        return (None, 0.0);
+    }
+    let started_at = Instant::now();
+    let caches = crate::runtime::InternalTokenMaskPrebuild::build(
+        &id_map.vocab_tokens.original_to_internal,
+        &id_map.vocab_tokens.internal_to_originals,
+    );
+    (Some(caches), started_at.elapsed().as_secs_f64() * 1000.0)
 }
 
 fn prepare_deferred_component_artifacts(
@@ -7167,6 +9541,353 @@ fn segmented_boundary_state_to_private_tsid(
         raw_to_boundary.push(boundary_tsid);
     }
     Ok(raw_to_boundary)
+}
+
+fn full_nwa_topological_order(nwa: &NWA) -> Option<Vec<u32>> {
+    let state_count = nwa.num_states() as usize;
+    let mut indegree = vec![0usize; state_count];
+    for state in nwa.states() {
+        for (target, _) in &state.epsilons {
+            *indegree.get_mut(*target as usize)? += 1;
+        }
+        for targets in state.transitions.values() {
+            for (target, _) in targets {
+                *indegree.get_mut(*target as usize)? += 1;
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state as u32);
+        }
+    }
+    let mut order = Vec::with_capacity(state_count);
+    while let Some(source) = queue.pop_front() {
+        order.push(source);
+        let state = &nwa.states()[source as usize];
+        for target in state
+            .epsilons
+            .iter()
+            .map(|(target, _)| *target)
+            .chain(
+                state
+                    .transitions
+                    .values()
+                    .flat_map(|targets| targets.iter().map(|(target, _)| *target)),
+            )
+        {
+            let degree = &mut indegree[target as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    (order.len() == state_count).then_some(order)
+}
+
+
+fn reverse_hashcons_positive_acyclic_nwa_fast(nwa: NWA) -> NWA {
+    reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(nwa, None, false)
+}
+
+fn reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+    nwa: NWA,
+    precomputed_reverse_topo: Option<Vec<u32>>,
+) -> NWA {
+    reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(nwa, precomputed_reverse_topo, false)
+}
+
+fn reverse_hashcons_signed_acyclic_nwa_fast(nwa: NWA) -> NWA {
+    reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(nwa, None, true)
+}
+
+fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
+    nwa: NWA,
+    precomputed_reverse_topo: Option<Vec<u32>>,
+    allow_signed_labels: bool,
+) -> NWA {
+    use rayon::prelude::*;
+    use rustc_hash::FxHasher;
+    use smallvec::SmallVec;
+    use std::hash::{Hash, Hasher};
+
+    fn fingerprint_state(source: &NWAState, old_to_new: &[u32]) -> u64 {
+        let mut hasher = FxHasher::default();
+        source
+            .final_weight
+            .as_ref()
+            .map(Weight::ptr_key)
+            .hash(&mut hasher);
+        source.transitions.len().hash(&mut hasher);
+        for (&label, targets) in &source.transitions {
+            label.hash(&mut hasher);
+            targets.len().hash(&mut hasher);
+            for (target, weight) in targets {
+                old_to_new[*target as usize].hash(&mut hasher);
+                weight.ptr_key().hash(&mut hasher);
+            }
+        }
+        source.epsilons.len().hash(&mut hasher);
+        for (target, weight) in &source.epsilons {
+            old_to_new[*target as usize].hash(&mut hasher);
+            weight.ptr_key().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    // Fingerprints are only a candidate index. Exact structural comparison is
+    // the equivalence proof, so hash collisions cannot merge distinct states.
+    fn equivalent_old_states(
+        source: &NWAState,
+        representative: &NWAState,
+        old_to_new: &[u32],
+    ) -> bool {
+        if source.final_weight.as_ref().map(Weight::ptr_key)
+            != representative.final_weight.as_ref().map(Weight::ptr_key)
+            || source.transitions.len() != representative.transitions.len()
+            || source.epsilons.len() != representative.epsilons.len()
+        {
+            return false;
+        }
+        for ((&source_label, source_targets), (&rep_label, rep_targets)) in
+            source.transitions.iter().zip(representative.transitions.iter())
+        {
+            if source_label != rep_label || source_targets.len() != rep_targets.len() {
+                return false;
+            }
+            for ((source_target, source_weight), (rep_target, rep_weight)) in
+                source_targets.iter().zip(rep_targets.iter())
+            {
+                if old_to_new[*source_target as usize] != old_to_new[*rep_target as usize]
+                    || source_weight.ptr_key() != rep_weight.ptr_key()
+                {
+                    return false;
+                }
+            }
+        }
+        source
+            .epsilons
+            .iter()
+            .zip(representative.epsilons.iter())
+            .all(
+                |((source_target, source_weight), (rep_target, rep_weight))| {
+                    old_to_new[*source_target as usize] == old_to_new[*rep_target as usize]
+                        && source_weight.ptr_key() == rep_weight.ptr_key()
+                },
+            )
+    }
+
+    let profile = compose_profile_enabled();
+    let total_started = profile.then(Instant::now);
+    let topo_started = profile.then(Instant::now);
+    let old_state_count = nwa.num_states() as usize;
+    let reverse_order = if let Some(order) = precomputed_reverse_topo
+        && order.len() == old_state_count
+        && order.iter().all(|&state| (state as usize) < old_state_count)
+    {
+        order
+    } else {
+        let Some(order) = full_nwa_topological_order(&nwa) else {
+            return nwa;
+        };
+        order.into_iter().rev().collect()
+    };
+    let topo_ms = topo_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+    let (old_states, old_starts) = nwa.into_parts();
+    let mut old_to_new = vec![u32::MAX; old_state_count];
+    let mut representatives = Vec::<u32>::new();
+    let mut buckets = FxHashMap::<u64, SmallVec<[u32; 2]>>::default();
+    let classify_started = profile.then(Instant::now);
+
+    for old_id in reverse_order {
+        let source = &old_states[old_id as usize];
+        debug_assert!(allow_signed_labels
+            || source
+                .transitions
+                .keys()
+                .all(|&label| !is_negative_label(label)));
+        let fingerprint = fingerprint_state(source, &old_to_new);
+        let existing = buckets.get(&fingerprint).and_then(|candidates| {
+            candidates.iter().copied().find(|&candidate| {
+                equivalent_old_states(
+                    source,
+                    &old_states[representatives[candidate as usize] as usize],
+                    &old_to_new,
+                )
+            })
+        });
+        let new_id = if let Some(existing) = existing {
+            existing
+        } else {
+            let created = representatives.len() as u32;
+            representatives.push(old_id);
+            buckets.entry(fingerprint).or_default().push(created);
+            created
+        };
+        old_to_new[old_id as usize] = new_id;
+    }
+    let classify_ms = classify_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let renumber_by_old_id = std::env::var_os(
+        "GLRMASK_EXPERIMENT_HASHCONS_RENUMBER_SKIP_SORT",
+    )
+    .is_some();
+    if renumber_by_old_id {
+        let mut class_by_old_id = representatives
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(class_id, old_id)| (old_id, class_id as u32))
+            .collect::<Vec<_>>();
+        class_by_old_id.sort_unstable_by_key(|(old_id, _)| *old_id);
+        let mut class_to_sorted = vec![u32::MAX; representatives.len()];
+        for (sorted_id, &(_, class_id)) in class_by_old_id.iter().enumerate() {
+            class_to_sorted[class_id as usize] = sorted_id as u32;
+        }
+        for mapped in &mut old_to_new {
+            *mapped = class_to_sorted[*mapped as usize];
+        }
+        representatives = class_by_old_id
+            .into_iter()
+            .map(|(old_id, _)| old_id)
+            .collect();
+    }
+
+    // Move the representative states into the quotient and drop all duplicate
+    // states on the Rayon workers. This avoids paying the discarded graph's
+    // large serial destructor tail on the composition critical path.
+    let move_started = profile.then(Instant::now);
+    let mut representative_new_id = vec![u32::MAX; old_state_count];
+    for (new_id, &old_id) in representatives.iter().enumerate() {
+        representative_new_id[old_id as usize] = new_id as u32;
+    }
+    let mut moved = old_states
+        .into_par_iter()
+        .enumerate()
+        .filter_map(|(old_id, mut state)| {
+            let new_id = representative_new_id[old_id];
+            if new_id == u32::MAX {
+                return None;
+            }
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target = old_to_new[*target as usize];
+                }
+            }
+            for (target, _) in &mut state.epsilons {
+                *target = old_to_new[*target as usize];
+            }
+            Some((new_id, state))
+        })
+        .collect::<Vec<_>>();
+    if !renumber_by_old_id
+        || moved.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+    {
+        moved.par_sort_unstable_by_key(|(new_id, _)| *new_id);
+    }
+    let states = moved.into_iter().map(|(_, state)| state).collect::<Vec<_>>();
+    let move_ms = move_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let mut starts = old_starts
+        .into_iter()
+        .map(|state| old_to_new[state as usize])
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    if let (Some(topo_ms), Some(classify_ms), Some(move_ms), Some(total_started)) =
+        (topo_ms, classify_ms, move_ms, total_started)
+    {
+        eprintln!(
+            "[glrmask/profile][fast_reverse_hashcons_nwa] signed={} input_states={} output_states={} topo_ms={topo_ms:.3} classify_ms={classify_ms:.3} move_drop_ms={move_ms:.3} total_ms={:.3}",
+            allow_signed_labels,
+            old_state_count,
+            states.len(),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    NWA::from_parts(states, starts)
+}
+
+fn reverse_hashcons_positive_acyclic_nwa(nwa: NWA) -> NWA {
+    #[derive(Hash, PartialEq, Eq)]
+    struct Key {
+        final_weight: Option<usize>,
+        transitions: Vec<(i32, Vec<(u32, usize)>)>,
+        epsilons: Vec<(u32, usize)>,
+    }
+
+    let Some(order) = full_nwa_topological_order(&nwa) else {
+        return nwa;
+    };
+    let old_state_count = nwa.num_states() as usize;
+    let (old_states, old_starts) = nwa.into_parts();
+    let mut old_to_new = vec![u32::MAX; old_state_count];
+    let mut states = Vec::new();
+    let mut ids = FxHashMap::<Key, u32>::default();
+
+    for old_id in order.into_iter().rev() {
+        let source = &old_states[old_id as usize];
+        debug_assert!(source.transitions.keys().all(|&label| !is_negative_label(label)));
+        let transitions = source
+            .transitions
+            .iter()
+            .map(|(&label, targets)| {
+                (
+                    label,
+                    targets
+                        .iter()
+                        .map(|(target, weight)| {
+                            let mapped = old_to_new[*target as usize];
+                            debug_assert_ne!(mapped, u32::MAX);
+                            (mapped, weight.ptr_key())
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let epsilons = source
+            .epsilons
+            .iter()
+            .map(|(target, weight)| {
+                let mapped = old_to_new[*target as usize];
+                debug_assert_ne!(mapped, u32::MAX);
+                (mapped, weight.ptr_key())
+            })
+            .collect::<Vec<_>>();
+        let key = Key {
+            final_weight: source.final_weight.as_ref().map(Weight::ptr_key),
+            transitions,
+            epsilons,
+        };
+        let new_id = if let Some(&existing) = ids.get(&key) {
+            existing
+        } else {
+            let created = states.len() as u32;
+            let mut state = source.clone();
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target = old_to_new[*target as usize];
+                }
+            }
+            for (target, _) in &mut state.epsilons {
+                *target = old_to_new[*target as usize];
+            }
+            states.push(state);
+            ids.insert(key, created);
+            created
+        };
+        old_to_new[old_id as usize] = new_id;
+    }
+
+    let mut starts = old_starts
+        .into_iter()
+        .map(|state| old_to_new[state as usize])
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    NWA::from_parts(states, starts)
 }
 
 fn compose_local_id_map(
@@ -8185,6 +10906,100 @@ fn transport_composition_template_dfa(
     Some(dfa)
 }
 
+/// Transport a cached composition-template DFA and construct its NWA skeleton
+/// in the same transition traversal.  The eager composition fast path needs
+/// both representations immediately, so rebuilding the skeleton afterward
+/// would just walk and allocate every transported transition a second time.
+fn transport_composition_template_dfa_with_skeleton(
+    mut dfa: UnweightedDfa,
+    state_relation: &[Vec<u32>],
+) -> Option<(UnweightedDfa, NWA)> {
+    let mut nwa_states = Vec::with_capacity(dfa.states.len());
+    for state in &mut dfa.states {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::new();
+        let mut nwa_transitions = BTreeMap::new();
+        for (label, target) in old {
+            let mapped_label = remap_composition_template_label(label, state_relation)?;
+            if let Some(previous) = mapped.insert(mapped_label, target)
+                && previous != target
+            {
+                return None;
+            }
+            if let Some(previous) = nwa_transitions.insert(
+                mapped_label,
+                vec![(target, Weight::empty())],
+            ) && previous[0].0 != target
+            {
+                return None;
+            }
+        }
+        state.transitions = mapped;
+        nwa_states.push(NWAState {
+            final_weight: state.is_accepting.then(Weight::empty),
+            transitions: nwa_transitions,
+            epsilons: Vec::new(),
+        });
+    }
+    let start_state = dfa.start_state;
+    let nwa = NWA::from_parts(nwa_states, vec![start_state]);
+    Some((dfa, nwa))
+}
+
+/// Cached-only transport used by the eager changed-parent-template finish path.
+/// That path already requires every selected unchanged terminal to have a
+/// transportable cache entry; returning `None` preserves its existing fallback
+/// behavior while avoiding a second DFA->NWA traversal on the all-hit path.
+fn try_rebuild_cached_transported_component_templates(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    active_terminals: &[bool],
+) -> Option<Templates> {
+    let mut per_component = Vec::with_capacity(components.len());
+    for (component_index, component) in components.iter().copied().enumerate() {
+        let terminal_offset = composed_table.terminal_offsets[component_index];
+        let relation = &composed_table.state_relations[component_index];
+        let selected = (0..component.table.num_terminals as usize)
+            .filter_map(|local_terminal| {
+                let global_terminal = terminal_offset as usize + local_terminal;
+                active_terminals
+                    .get(global_terminal)
+                    .copied()
+                    .unwrap_or(false)
+                    .then_some(local_terminal)
+            })
+            .collect::<Vec<_>>();
+        let transported = selected
+            .par_iter()
+            .map(|&local_terminal| {
+                let dfa = component
+                    .composition_parser_templates_by_terminal
+                    .get(local_terminal)
+                    .and_then(Option::as_ref)
+                    .cloned()?;
+                let (dfa, nwa) =
+                    transport_composition_template_dfa_with_skeleton(dfa, relation)?;
+                Some((terminal_offset + local_terminal as u32, dfa, nwa))
+            })
+            .collect::<Vec<_>>();
+        if transported.iter().any(Option::is_none) {
+            return None;
+        }
+        per_component.extend(transported.into_iter().flatten());
+    }
+
+    let mut by_terminal = BTreeMap::new();
+    let mut by_terminal_nwa = BTreeMap::new();
+    for (terminal, dfa, nwa) in per_component {
+        by_terminal.insert(terminal, dfa);
+        by_terminal_nwa.insert(terminal, nwa);
+    }
+    Some(Templates {
+        by_terminal,
+        by_terminal_nwa,
+    })
+}
+
 fn unweighted_dfa_difference(left: &UnweightedDfa, right: &UnweightedDfa) -> UnweightedDfa {
     type Pair = (u32, Option<u32>);
     let start: Pair = (left.start_state, Some(right.start_state));
@@ -8597,6 +11412,61 @@ fn prepare_concrete_boundary_delta_plan(
         );
     }
 
+    ConcreteBoundaryDeltaPlan {
+        original_num_terminals,
+        synthetic_num_terminals: next_terminal,
+        by_global_terminal,
+        compared_terminals,
+        unsafe_terminals,
+    }
+}
+
+fn finish_eager_concrete_boundary_delta_plan(
+    precomputed: EagerConcreteDeltaPrecompute,
+    active_terminals: &[bool],
+    original_num_terminals: u32,
+) -> ConcreteBoundaryDeltaPlan {
+    let mut by_global_terminal = BTreeMap::new();
+    let mut next_terminal = original_num_terminals;
+    for (terminal, (old_template, delta_template)) in precomputed.delta_templates {
+        if !active_terminals
+            .get(terminal as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let old_terminal = next_terminal;
+        let delta_terminal = next_terminal + 1;
+        next_terminal += 2;
+        by_global_terminal.insert(
+            terminal,
+            ConcreteBoundaryDeltaEntry {
+                old_terminal,
+                old_template,
+                delta_terminal,
+                delta_template,
+            },
+        );
+    }
+    let unsafe_terminals = precomputed
+        .unsafe_terminals
+        .into_iter()
+        .filter(|&terminal| {
+            active_terminals
+                .get(terminal as usize)
+                .copied()
+                .unwrap_or(false)
+        })
+        .collect::<BTreeSet<_>>();
+    let compared_terminals = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| {
+            (active && !unsafe_terminals.contains(&(terminal as u32)))
+                .then_some(terminal as u32)
+        })
+        .collect();
     ConcreteBoundaryDeltaPlan {
         original_num_terminals,
         synthetic_num_terminals: next_terminal,
@@ -9197,6 +12067,19 @@ struct CachedCompositionTemplatePlan {
     num_terminals: usize,
 }
 
+struct EagerChangedParentTemplates {
+    templates: Templates,
+    changed_parent: Vec<bool>,
+    delta_templates: BTreeMap<u32, (UnweightedDfa, UnweightedDfa)>,
+    unsafe_parent: BTreeSet<u32>,
+    build_ms: f64,
+}
+
+struct EagerConcreteDeltaPrecompute {
+    delta_templates: BTreeMap<u32, (UnweightedDfa, UnweightedDfa)>,
+    unsafe_terminals: BTreeSet<u32>,
+}
+
 impl CachedCompositionTemplatePlan {
     fn materialize(self, parent: &Constraint) -> Templates {
         let total_started_at = Instant::now();
@@ -9256,6 +12139,362 @@ impl CachedCompositionTemplatePlan {
         }
         raw
     }
+}
+
+fn changed_parent_template_candidate_terminals(
+    composed_table: &ComposedTable,
+    parent: &Constraint,
+    num_terminals: u32,
+) -> BitSet {
+    let parent_terminal_end = composed_table
+        .terminal_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(num_terminals)
+        .min(num_terminals) as usize;
+    let mut candidates = BitSet::new(num_terminals as usize);
+    if std::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some() {
+        for &terminal in &composed_table.appended_parent_action_terminals {
+            if (terminal as usize) < parent_terminal_end {
+                candidates.set(terminal as usize);
+            }
+        }
+    } else {
+        for row in composed_table
+            .table
+            .action
+            .iter()
+            .skip(parent.table.num_states as usize)
+        {
+            for (terminal, _) in row.iter() {
+                if (terminal as usize) < parent_terminal_end {
+                    candidates.set(terminal as usize);
+                }
+            }
+        }
+    }
+    for row in &composed_table.table.goto {
+        for &boundary_nonterminal in &composed_table.boundary_nonterminals {
+            let Some(&(top_state, _)) = row.get(&boundary_nonterminal) else {
+                continue;
+            };
+            if let Some(action_row) = composed_table.table.action.get(top_state as usize) {
+                for (terminal, _) in action_row.iter() {
+                    if (terminal as usize) < parent_terminal_end {
+                        candidates.set(terminal as usize);
+                    }
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn try_build_changed_parent_templates_for_terminal_count(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    num_terminals: u32,
+    scoped_ignore_terminals: &BitSet,
+    need_concrete_delta: bool,
+) -> Option<EagerChangedParentTemplates> {
+    let started_at = Instant::now();
+    let parent = *components.first()?;
+    let parent_terminal_end = composed_table
+        .terminal_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(num_terminals)
+        .min(num_terminals) as usize;
+    // A cached parent template can change only if the splice introduces a new
+    // action for that terminal in an appended state, or if a new boundary
+    // nonterminal goto exposes a predecessor whose top state admits it.
+    let candidate_started_at = Instant::now();
+    let candidates = changed_parent_template_candidate_terminals(
+        composed_table,
+        parent,
+        num_terminals,
+    );
+    if std::env::var_os("GLRMASK_VALIDATE_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
+        && std::env::var_os("GLRMASK_EXPERIMENT_LINKER_PARENT_TEMPLATE_CANDIDATES").is_some()
+    {
+        let mut reference = BTreeSet::new();
+        for row in composed_table
+            .table
+            .action
+            .iter()
+            .skip(parent.table.num_states as usize)
+        {
+            for (terminal, _) in row.iter() {
+                if (terminal as usize) < parent_terminal_end {
+                    reference.insert(terminal);
+                }
+            }
+        }
+        assert!(
+            composed_table
+                .appended_parent_action_terminals
+                .iter()
+                .all(|terminal| reference.contains(terminal)),
+            "linker-published appended parent action terminals differ from completed-table scan",
+        );
+    }
+    let candidate_ms = candidate_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut selected = vec![false; num_terminals as usize];
+    for terminal in candidates.iter() {
+        if terminal >= parent_terminal_end {
+            continue;
+        }
+        let terminal_u32 = terminal as u32;
+        let cached = parent
+            .composition_parser_characterizations_by_terminal
+            .get(terminal)
+            .is_some_and(Option::is_some);
+        if !cached
+            || scoped_ignore_terminals.contains(terminal)
+            || composed_table.control_terminals.contains(&terminal_u32)
+        {
+            continue;
+        }
+        let existing_rows_unchanged = (0..parent.table.num_states).all(|state| {
+            composed_table.table.action(state, terminal_u32)
+                == parent.table.action(state, terminal_u32)
+                && composed_table
+                    .table
+                    .forwarded_shifts
+                    .contains(&(state, terminal_u32))
+                    == parent
+                        .table
+                        .forwarded_shifts
+                        .contains(&(state, terminal_u32))
+        });
+        selected[terminal] = existing_rows_unchanged;
+    }
+    let plan = try_prepare_cached_composition_template_plan_for_terminal_count(
+        composed_table,
+        components,
+        num_terminals,
+        None,
+        &selected,
+        scoped_ignore_terminals,
+    )?;
+    if !plan.fresh_characterizations.is_empty() {
+        return None;
+    }
+
+    let mut changed_parent = vec![false; num_terminals as usize];
+    let mut patched_characterizations = BTreeMap::new();
+    for (terminal, delta) in plan.characterization_deltas {
+        let mut patched = parent
+            .composition_parser_characterizations_by_terminal
+            .get(terminal as usize)
+            .and_then(Option::as_ref)?
+            .clone();
+        patched.escapes.extend(delta.escapes);
+        patched.reduces.extend(delta.reduces);
+        patched.nt_escapes.extend(delta.nt_escapes);
+        patched.nt_rereduces.extend(delta.nt_rereduces);
+        patched.all_nts.extend(delta.all_nts);
+        patched.escapes.sort();
+        patched.escapes.dedup();
+        patched.reduces.sort();
+        patched.reduces.dedup();
+        patched.nt_escapes.sort();
+        patched.nt_escapes.dedup();
+        patched.nt_rereduces.sort();
+        patched.nt_rereduces.dedup();
+        changed_parent[terminal as usize] = true;
+        patched_characterizations.insert(terminal, patched);
+    }
+    let template_compile_started_at = Instant::now();
+    let templates = Templates::from_characterizations(&patched_characterizations);
+    let template_compile_ms = template_compile_started_at.elapsed().as_secs_f64() * 1000.0;
+    // The exact New\Old template delta is independent of lexical boundary
+    // discovery. Compute it in this eager worker while discovery runs, rather
+    // than serializing another full DFA-difference pass after the 140 boundary
+    // tokens are known.
+    let delta_started_at = Instant::now();
+    let delta_results = if need_concrete_delta {
+        changed_parent
+            .par_iter()
+            .enumerate()
+            .filter_map(|(terminal, &changed)| {
+                if !changed {
+                    return None;
+                }
+                let terminal = terminal as u32;
+                let old = parent
+                    .composition_parser_templates_by_terminal
+                    .get(terminal as usize)
+                    .and_then(Option::as_ref);
+                let new = templates.by_terminal.get(&terminal);
+                let (Some(old), Some(new)) = (old, new) else {
+                    return Some((terminal, None, true));
+                };
+                let removed = unweighted_dfa_difference(old, new);
+                if !unweighted_dfa_language_is_empty(&removed) {
+                    return Some((terminal, None, true));
+                }
+                let delta = trim_unweighted_dfa_productive(unweighted_dfa_difference(new, old));
+                let delta = (!unweighted_dfa_language_is_empty(&delta))
+                    .then(|| (old.clone(), delta));
+                Some((terminal, delta, false))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let delta_ms = delta_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut delta_templates = BTreeMap::new();
+    let mut unsafe_parent = BTreeSet::new();
+    for (terminal, delta, unsafe_terminal) in delta_results {
+        if unsafe_terminal {
+            unsafe_parent.insert(terminal);
+        } else if let Some(delta) = delta {
+            delta_templates.insert(terminal, delta);
+        }
+    }
+    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_eager_changed_parent_templates] candidates={} selected_parent={} changed_parent={} changed_ids={:?} states={} candidate_ms={candidate_ms:.3} template_compile_ms={template_compile_ms:.3} delta_ms={delta_ms:.3} build_ms={build_ms:.3}",
+            candidates.count_ones(),
+            selected.iter().filter(|&&active| active).count(),
+            changed_parent.iter().filter(|&&changed| changed).count(),
+            changed_parent.iter().enumerate().filter_map(|(terminal, &changed)| changed.then_some(terminal)).collect::<Vec<_>>(),
+            templates
+                .by_terminal
+                .values()
+                .map(|dfa| dfa.num_states())
+                .sum::<usize>(),
+        );
+    }
+    Some(EagerChangedParentTemplates {
+        templates,
+        changed_parent,
+        delta_templates,
+        unsafe_parent,
+        build_ms,
+    })
+}
+
+fn finish_eager_changed_parent_templates(
+    mut eager: EagerChangedParentTemplates,
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    active_terminals: &[bool],
+    pretransported: Option<Templates>,
+) -> Option<(
+    Templates,
+    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    f64,
+    EagerConcreteDeltaPrecompute,
+)> {
+    let finish_started_at = Instant::now();
+    if eager.changed_parent.len() != active_terminals.len() {
+        return None;
+    }
+    eager
+        .templates
+        .by_terminal
+        .retain(|terminal, _| active_terminals[*terminal as usize]);
+    eager
+        .templates
+        .by_terminal_nwa
+        .retain(|terminal, _| active_terminals[*terminal as usize]);
+
+    let mut transport_selected = active_terminals.to_vec();
+    for (terminal, &changed) in eager.changed_parent.iter().enumerate() {
+        if changed {
+            transport_selected[terminal] = false;
+        }
+    }
+    let expected_transport = transport_selected.iter().filter(|&&selected| selected).count();
+    let transported = if let Some(mut transported) = pretransported {
+        transported
+            .by_terminal
+            .retain(|terminal, _| transport_selected.get(*terminal as usize).copied().unwrap_or(false));
+        transported
+            .by_terminal_nwa
+            .retain(|terminal, _| transport_selected.get(*terminal as usize).copied().unwrap_or(false));
+        transported
+    } else {
+        try_rebuild_cached_transported_component_templates(
+            composed_table,
+            components,
+            &transport_selected,
+        )?
+    };
+    if transported.by_terminal.len() != expected_transport {
+        return None;
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_PAIRED_TEMPLATE_TRANSPORT").is_some() {
+        let reference = Templates::from_terminal_dfas(transported.by_terminal.clone());
+        assert_eq!(
+            transported.by_terminal_nwa.len(),
+            reference.by_terminal_nwa.len(),
+            "paired cached-template transport changed NWA template count",
+        );
+        for (&terminal, nwa) in &transported.by_terminal_nwa {
+            let reference_nwa = reference
+                .by_terminal_nwa
+                .get(&terminal)
+                .expect("reference NWA skeleton missing transported terminal");
+            assert_eq!(
+                nwa.start_states(),
+                reference_nwa.start_states(),
+                "paired cached-template transport changed NWA starts for terminal {terminal}",
+            );
+            assert_eq!(
+                nwa.states(),
+                reference_nwa.states(),
+                "paired cached-template transport changed NWA states for terminal {terminal}",
+            );
+        }
+    }
+    eager.templates.by_terminal.extend(transported.by_terminal);
+    eager
+        .templates
+        .by_terminal_nwa
+        .extend(transported.by_terminal_nwa);
+    if eager.templates.by_terminal.len()
+        != active_terminals.iter().filter(|&&active| active).count()
+    {
+        return None;
+    }
+
+    let template_dfas_by_terminal = if defer_boundary_commit_templates() {
+        vec![None; active_terminals.len()]
+    } else {
+        let raw_templates = CachedCompositionTemplatePlan::raw_template_cache(
+            &eager.templates,
+            active_terminals.len(),
+        );
+        build_commit_templates_from_raw_templates(&raw_templates)
+    };
+    let finish_ms = finish_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_eager_changed_parent_finish] active={} changed_active={} transported={} finish_ms={finish_ms:.3} eager_cpu_ms={:.3}",
+            active_terminals.iter().filter(|&&active| active).count(),
+            eager
+                .changed_parent
+                .iter()
+                .zip(active_terminals)
+                .filter(|(changed, active)| **changed && **active)
+                .count(),
+            expected_transport,
+            eager.build_ms,
+        );
+    }
+    Some((
+        eager.templates,
+        template_dfas_by_terminal,
+        eager.build_ms + finish_ms,
+        EagerConcreteDeltaPrecompute {
+            delta_templates: eager.delta_templates,
+            unsafe_terminals: eager.unsafe_parent,
+        },
+    ))
 }
 
 fn try_prepare_cached_composition_template_plan(
@@ -10613,6 +13852,195 @@ fn validate_lazy_boundary_terminal_dwa_preimages(
     );
 }
 
+
+fn build_boundary_parser_from_weighted_terminal_paths(
+    table: &crate::compiler::glr::table::GLRTable,
+    templates: &Templates,
+    terminal_dwa: &DWA,
+) -> Option<DWA> {
+    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_none()
+        || !terminal_dwa.is_acyclic()
+    {
+        return None;
+    }
+    let total_started_at = Instant::now();
+    let enumerate_started_at = Instant::now();
+    let mut weight_ops = ScopedWeightOpCache::default();
+    let mut stack = vec![(terminal_dwa.start_state(), Vec::<u32>::new(), Weight::all())];
+    let mut sequences = BTreeMap::<Vec<u32>, Weight>::new();
+    let mut visits = 0usize;
+    while let Some((state_id, path, support)) = stack.pop() {
+        visits += 1;
+        if visits >= 1_000_000 {
+            return None;
+        }
+        let state = &terminal_dwa.states()[state_id as usize];
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            let accepted = weight_ops.intersection(&support, final_weight);
+            if !accepted.is_empty() {
+                sequences
+                    .entry(path.clone())
+                    .and_modify(|existing| *existing = weight_ops.union(existing, &accepted))
+                    .or_insert(accepted);
+            }
+        }
+        for (&label, (target, weight)) in &state.transitions {
+            if label < 0 {
+                return None;
+            }
+            let next_support = weight_ops.intersection(&support, weight);
+            if next_support.is_empty() {
+                continue;
+            }
+            let mut next_path = path.clone();
+            next_path.push(label as u32);
+            stack.push((*target, next_path, next_support));
+        }
+    }
+    let enumerate_ms = enumerate_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let bundle_started_at = Instant::now();
+    let terminals = sequences
+        .keys()
+        .flat_map(|sequence| sequence.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let bundles = terminals
+        .par_iter()
+        .filter_map(|&terminal| {
+            build_boolean_terminal_bundle_nwa(templates, &[terminal])
+                .map(|bundle| (terminal, Arc::new(bundle)))
+        })
+        .collect::<FxHashMap<_, _>>();
+    if bundles.len() != terminals.len() {
+        return None;
+    }
+    let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PARALLEL_LOCAL").is_some() {
+        let local_started_at = Instant::now();
+        let local_domains = sequences
+            .par_iter()
+            .filter_map(|(sequence, support)| {
+                let mut arena = SharedBooleanParserDomains::new();
+                let mut root = SharedBooleanParserDomains::UNIVERSAL;
+                for &terminal in sequence.iter().rev() {
+                    let bundle = bundles.get(&terminal)?;
+                    root = arena.preimage_bundle(bundle, root)?;
+                    if root == SharedBooleanParserDomains::EMPTY {
+                        return None;
+                    }
+                }
+                Some((arena.to_dwa(root), support.clone()))
+            })
+            .collect::<Vec<_>>();
+        let local_ms = local_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let append_started_at = Instant::now();
+        let mut combined = NWA::new(0, 0);
+        let start = combined.add_state();
+        combined.set_start_states(vec![start]);
+        let mut domain_states = 0usize;
+        let mut domain_transitions = 0usize;
+        for (domain, support) in &local_domains {
+            domain_states += domain.num_states() as usize;
+            domain_transitions += domain.num_transitions();
+            let body = combined.append_with_body(&domain.to_nwa());
+            for target in body.start_states {
+                combined.add_epsilon(start, target, support.clone());
+            }
+        }
+        let append_ms = append_started_at.elapsed().as_secs_f64() * 1000.0;
+        let normalize_started_at = Instant::now();
+        let candidate = normalize_weighted_parser_stack_nwa(table, &combined);
+        let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_terminal_path_parallel_local] sequences={} domains={} domain_states={} domain_transitions={} combined_states={} combined_transitions={} output_states={} output_transitions={} local_ms={local_ms:.3} append_ms={append_ms:.3} normalize_ms={normalize_ms:.3} total_ms={:.3}",
+                sequences.len(), local_domains.len(), domain_states, domain_transitions,
+                combined.num_states(), combined.num_transitions(), candidate.num_states(),
+                candidate.num_transitions(), local_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Some(candidate);
+    }
+
+    let preimage_started_at = Instant::now();
+    let mut arena = SharedBooleanParserDomains::new();
+    let mut preimage_cache = FxHashMap::<(u32, u32), u32>::default();
+    let mut preimage_calls = 0usize;
+    let mut preimage_hits = 0usize;
+    let mut weighted_roots = BTreeMap::<u32, Weight>::new();
+    for (sequence, support) in &sequences {
+        let mut root = SharedBooleanParserDomains::UNIVERSAL;
+        for &terminal in sequence.iter().rev() {
+            let key = (terminal, root);
+            root = if let Some(&cached) = preimage_cache.get(&key) {
+                preimage_hits += 1;
+                cached
+            } else {
+                let bundle = bundles.get(&terminal)?;
+                let computed = arena.preimage_bundle(bundle, root)?;
+                preimage_cache.insert(key, computed);
+                computed
+            };
+            preimage_calls += 1;
+            if root == SharedBooleanParserDomains::EMPTY {
+                break;
+            }
+        }
+        if root == SharedBooleanParserDomains::EMPTY {
+            continue;
+        }
+        weighted_roots
+            .entry(root)
+            .and_modify(|existing| *existing = weight_ops.union(existing, support))
+            .or_insert_with(|| support.clone());
+    }
+    let preimage_ms = preimage_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        let (explicit_total, defaults, zero, one, two, max_explicit) = arena.row_shape_stats();
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_terminal_path_domain_rows] nodes={} explicit_total={} avg_explicit={:.3} defaults={} zero={} one={} two={} max_explicit={}",
+            arena.node_count(), explicit_total, explicit_total as f64 / arena.node_count().max(1) as f64,
+            defaults, zero, one, two, max_explicit,
+        );
+    }
+
+    let combine_started_at = Instant::now();
+    let mut roots = weighted_roots.into_iter().collect::<Vec<_>>();
+    let use_atoms = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_ATOMS").is_some();
+    let atomize_started_at = Instant::now();
+    if use_atoms {
+        roots = atomize_weighted_parser_roots(&mut arena, &roots);
+    }
+    let atomize_ms = atomize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let candidate = if use_atoms {
+        combine_disjoint_weighted_shared_parser_atoms(&mut arena, &roots)
+    } else {
+        combine_weighted_shared_parser_roots(&mut arena, &roots)
+    };
+    let combine_ms = combine_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_terminal_path_preimage] terminal_states={} terminal_transitions={} visits={} sequences={} terminals={} graph_nodes={} weighted_roots={} preimage_calls={} preimage_hits={} cache_entries={} output_states={} output_transitions={} enumerate_ms={enumerate_ms:.3} bundle_ms={bundle_ms:.3} preimage_ms={preimage_ms:.3} atomize_ms={atomize_ms:.3} combine_ms={combine_ms:.3} total_ms={:.3}",
+            terminal_dwa.num_states(),
+            terminal_dwa.num_transitions(),
+            visits,
+            sequences.len(),
+            terminals.len(),
+            arena.node_count(),
+            roots.len(),
+            preimage_calls,
+            preimage_hits,
+            preimage_cache.len(),
+            candidate.num_states(),
+            candidate.num_transitions(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(candidate)
+}
+
 fn build_boundary_parser_from_weighted_terminal_dwa(
     table: &crate::compiler::glr::table::GLRTable,
     templates: &Templates,
@@ -11271,6 +14699,215 @@ fn build_full_boundary_lazy_direct_parser(
     Some(candidate)
 }
 
+fn try_prepare_pre_table_boundary_base_discovery(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    global_ignores: bool,
+    vocab: &Vocab,
+) -> Option<PreTableBoundaryBaseDiscovery> {
+    if std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_BASE_DISCOVERY").is_none()
+        || std::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_none()
+        || std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_none()
+        || std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_none()
+        || std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some()
+        || std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
+        || children
+            .iter()
+            .any(|child| child.constraint.table.embedded_start_nullable())
+    {
+        return None;
+    }
+
+    let started_at = Instant::now();
+    let components = std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    let mut terminal_offsets = Vec::with_capacity(components.len());
+    let mut next_terminal = 0u32;
+    for component in &components {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal.checked_add(component.table.num_terminals)?;
+    }
+    let mut placeholder_terminals = Vec::new();
+    let mut placeholder_component_indices = Vec::new();
+    for (child_index, child) in children.iter().enumerate() {
+        for terminal in child.placeholder_terminals() {
+            placeholder_terminals.push(terminal);
+            placeholder_component_indices.push(child_index + 1);
+        }
+    }
+    let (summary, base_interface_pairs) = compose_nonnullable_grammar_adjacency_summaries(
+        &components,
+        &terminal_offsets,
+        &placeholder_terminals,
+        &placeholder_component_indices,
+    )
+    .ok()?;
+    let (tokenizer_state_offsets, merged_tokenizer_state_count) =
+        component_tokenizer_state_layout_owned_parent(&components);
+    let merged_ignores = merged_ignore_terminals(
+        parent,
+        children,
+        &terminal_offsets,
+        global_ignores,
+    );
+    let mut discovery_interface_pairs = base_interface_pairs.clone();
+    if std::env::var_os(
+        "GLRMASK_EXPERIMENT_PRETABLE_CONSERVATIVE_NEUTRAL_INTERFACES",
+    )
+    .is_some()
+    {
+        let mut neutral_terminals = BTreeSet::<u32>::new();
+        for (component_index, component) in components.iter().enumerate() {
+            let offset = terminal_offsets[component_index];
+            neutral_terminals.extend(
+                component
+                    .table
+                    .skip_terminals
+                    .iter()
+                    .map(|terminal| offset + terminal),
+            );
+            if !global_ignores
+                && let Some(ignore) = component.ignore_terminal
+            {
+                neutral_terminals.insert(offset + ignore);
+            }
+        }
+        for &(left, right) in &base_interface_pairs {
+            for &neutral in &neutral_terminals {
+                discovery_interface_pairs.insert((left, neutral));
+                discovery_interface_pairs.insert((neutral, right));
+            }
+        }
+    }
+    let seed_terminals = vec![false; next_terminal as usize];
+    let context_terminals = BitSet::new(next_terminal as usize);
+    let mut follow_transparent_terminals = BitSet::new(next_terminal as usize);
+    if std::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
+        for (component_index, component) in components.iter().enumerate() {
+            let offset = terminal_offsets[component_index];
+            for &terminal in &component.table.skip_terminals {
+                follow_transparent_terminals.set((offset + terminal) as usize);
+            }
+        }
+    }
+    let disallowed_follows = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_GRAMMAR_FOLLOWS")
+        .is_some()
+        .then(|| {
+            disallowed_follows_from_allowed_rows(
+                &summary.allowed_follows,
+                next_terminal as usize,
+            )
+        });
+    let prebuild_terminal = std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_TERMINAL_DWA").is_some();
+    let (discovery, discovery_ms, state_map_ms, component_state_map, terminal_artifact, terminal_ms) = if prebuild_terminal {
+        let ((discovery, discovery_ms), (component_state_map, state_map_ms)) = rayon::join(
+            || {
+                let phase = Instant::now();
+                let discovery = discover_boundary_token_paths(
+                    vocab,
+                    &components,
+                    &tokenizer_state_offsets,
+                    &terminal_offsets,
+                    &seed_terminals,
+                    &merged_ignores.global,
+                    &discovery_interface_pairs,
+                    &context_terminals,
+                    &follow_transparent_terminals,
+                    disallowed_follows.as_ref(),
+                    None,
+                );
+                (discovery, phase.elapsed().as_secs_f64() * 1000.0)
+            },
+            || {
+                let phase = Instant::now();
+                let map = component_state_coordinate_map(
+                    &components,
+                    &tokenizer_state_offsets,
+                    merged_tokenizer_state_count,
+                );
+                (map, phase.elapsed().as_secs_f64() * 1000.0)
+            },
+        );
+        let component_state_map = component_state_map.ok()?;
+        let terminal_started_at = Instant::now();
+        let terminal_artifact = if !discovery.token_ids.is_empty() {
+            let plan = ConcreteBoundaryDeltaPlan {
+                original_num_terminals: next_terminal,
+                synthetic_num_terminals: next_terminal,
+                by_global_terminal: BTreeMap::new(),
+                compared_terminals: BTreeSet::new(),
+                unsafe_terminals: BTreeSet::new(),
+            };
+            direct_boundary_terminal_automaton(
+                merged_tokenizer_state_count,
+                Some(&component_state_map),
+                vocab,
+                &discovery.token_ids,
+                BTreeMap::new(),
+                0.0,
+                &discovery,
+                &merged_ignores.global,
+                &BTreeSet::new(),
+                &terminal_offsets,
+                &tokenizer_state_offsets,
+                Some(&plan),
+            )
+            .ok()
+        } else {
+            None
+        };
+        let terminal_ms = terminal_started_at.elapsed().as_secs_f64() * 1000.0;
+        (
+            discovery,
+            discovery_ms,
+            state_map_ms,
+            Some(component_state_map),
+            terminal_artifact,
+            terminal_ms,
+        )
+    } else {
+        let phase = Instant::now();
+        let discovery = discover_boundary_token_paths(
+            vocab,
+            &components,
+            &tokenizer_state_offsets,
+            &terminal_offsets,
+            &seed_terminals,
+            &merged_ignores.global,
+            &discovery_interface_pairs,
+            &context_terminals,
+            &follow_transparent_terminals,
+            disallowed_follows.as_ref(),
+            None,
+        );
+        let discovery_ms = phase.elapsed().as_secs_f64() * 1000.0;
+        (discovery, discovery_ms, 0.0, None, None, 0.0)
+    };
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_pre_table_base_discovery] base_interfaces={} discovery_interfaces={} tokens={} witnesses={} discovery_ms={discovery_ms:.3} state_map_ms={state_map_ms:.3} terminal_ms={terminal_ms:.3} terminal_prebuilt={} total_ms={elapsed_ms:.3}",
+            base_interface_pairs.len(),
+            discovery_interface_pairs.len(),
+            discovery.token_ids.len(),
+            discovery.witnesses.len(),
+            terminal_artifact.is_some(),
+        );
+    }
+    Some(PreTableBoundaryBaseDiscovery {
+        terminal_offsets,
+        tokenizer_state_offsets,
+        summary,
+        base_interface_pairs,
+        discovery_interface_pairs,
+        discovery,
+        component_state_map,
+        terminal_artifact,
+        elapsed_ms,
+    })
+}
+
 fn build_boundary_repair(
     composed_table: &ComposedTable,
     merged_tokenizer: Option<&Tokenizer>,
@@ -11283,6 +14920,7 @@ fn build_boundary_repair(
     tokenizer_state_offsets: &[u32],
     precomputed_component_state_map: Option<&ManyToOneIdMap>,
     deferred_component_state_map: Option<&OnceLock<Result<ManyToOneIdMap, String>>>,
+    pre_table_base_discovery: Option<&PreTableBoundaryBaseDiscovery>,
     selected_boundary_tokens: Option<&OnceLock<Result<Option<Vec<u32>>, String>>>,
 ) -> Result<Option<BoundaryRepair>, String> {
     let total_started_at = Instant::now();
@@ -11379,6 +15017,7 @@ fn build_boundary_repair(
                 id_map,
                 num_terminals,
                 templates,
+                prebuilt_bundle_cache: None,
             },
             template_dfas_by_terminal,
             commit_templates_deferred: defer_boundary_commit_templates(),
@@ -11394,15 +15033,35 @@ fn build_boundary_repair(
         && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()
         && std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+    // In the cross-only factor every accepted repair word has a parser-visible
+    // component ownership switch.  The transported component union A contains
+    // only component-local words, so no per-terminal `New \ Old` factor is
+    // required for B.  Keep an explicit *empty* delta plan (rather than omitting
+    // the plan) so the terminal-factor builder mechanically retains only its
+    // `CrossedFull` lane; with no changed/unsafe terminals both local lanes are
+    // unproductive by construction.
+    let cross_only_trivial_delta = fast_component_grammar_splice;
     let analyzed_started_at = Instant::now();
     let (analyzed, spliced_allowed_follows, spliced_base_interface_pairs) =
         if fast_component_grammar_splice {
-            let (summary, pairs) = compose_nonnullable_grammar_adjacency_summaries(
-                components,
-                &composed_table.terminal_offsets,
-                &composed_table.placeholder_terminals,
-                &composed_table.placeholder_component_indices,
-            )?;
+            let (summary, pairs) = if let Some(precomputed) = pre_table_base_discovery
+                .filter(|precomputed| {
+                    precomputed.terminal_offsets == composed_table.terminal_offsets
+                        && precomputed.tokenizer_state_offsets == tokenizer_state_offsets
+                })
+            {
+                (
+                    precomputed.summary.clone(),
+                    precomputed.base_interface_pairs.clone(),
+                )
+            } else {
+                compose_nonnullable_grammar_adjacency_summaries(
+                    components,
+                    &composed_table.terminal_offsets,
+                    &composed_table.placeholder_terminals,
+                    &composed_table.placeholder_component_indices,
+                )?
+            };
             // Downstream fast-path code needs only terminal-domain metadata.
             // FIRST/FOLLOW/rule analysis has been replaced exactly by the
             // algebraic component splice above; parser construction is returned
@@ -11670,33 +15329,237 @@ fn build_boundary_repair(
     let eager_all_templates = !fast_component_grammar_splice
         && std::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
     let all_terminals = vec![true; analyzed.num_terminals as usize];
-    let (eager_templates, ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms))) =
-        rayon::join(
-            || {
-                eager_all_templates.then(|| {
-                    build_composition_templates(
-                        &composed_table.table,
-                        &analyzed,
-                        &all_terminals,
-                    )
+    let eager_changed_parent_enabled = fast_component_grammar_splice
+        && std::env::var_os("GLRMASK_EXPERIMENT_EAGER_CHANGED_PARENT_TEMPLATES").is_some();
+    let pretransport_active = if std::env::var_os(
+        "GLRMASK_EXPERIMENT_EAGER_PRETRANSPORT_TEMPLATES",
+    )
+    .is_some()
+    {
+        pre_table_base_discovery
+            .filter(|precomputed| {
+                fast_component_grammar_splice
+                    && precomputed.terminal_offsets == composed_table.terminal_offsets
+                    && precomputed.tokenizer_state_offsets == tokenizer_state_offsets
+                    && precomputed.discovery_interface_pairs == interface_pairs
+            })
+            .map(|precomputed| {
+                let mut active = one_terminal_support_terminals.clone();
+                for terminal in precomputed.discovery.terminals.iter() {
+                    if let Some(slot) = active.get_mut(terminal) {
+                        *slot = true;
+                    }
+                }
+                for &terminal in &composed_table.control_terminals {
+                    if let Some(slot) = active.get_mut(terminal as usize) {
+                        *slot = true;
+                    }
+                }
+                active
+            })
+    } else {
+        None
+    };
+    let (
+        (pretransported_templates, prebuilt_bundle_cache, pretransport_ms),
+        (
+            (eager_templates, eager_changed_parent),
+            ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms), (early_posttable_terminal, early_posttable_terminal_ms)),
+        ),
+    ) = rayon::join(
+        || {
+            let started_at = Instant::now();
+            let transported = pretransport_active.as_ref().and_then(|active| {
+                try_rebuild_cached_transported_component_templates(
+                    composed_table,
+                    components,
+                    active,
+                )
+            });
+            let prebuilt_bundle_cache = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_EAGER_PREBUILD_UNCHANGED_BUNDLES",
+            )
+            .is_some()
+            {
+                transported.as_ref().and_then(|templates| {
+                    let terminal_automaton = pre_table_base_discovery
+                        .and_then(|precomputed| precomputed.terminal_artifact.as_ref())
+                        .map(|artifact| artifact.artifact())?;
+                    let candidates = changed_parent_template_candidate_terminals(
+                        composed_table,
+                        components[0],
+                        analyzed.num_terminals,
+                    );
+                    let mut excluded = vec![false; analyzed.num_terminals as usize];
+                    for terminal in candidates.iter() {
+                        if let Some(slot) = excluded.get_mut(terminal) {
+                            *slot = true;
+                        }
+                    }
+                    Some(prebuild_parser_bundle_cache_excluding_terminals(
+                        terminal_automaton,
+                        analyzed.num_terminals,
+                        templates,
+                        &excluded,
+                    ))
                 })
+            } else {
+                None
+            };
+            (
+                transported,
+                prebuilt_bundle_cache,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            )
+        },
+        || rayon::join(
+            || {
+                (
+                    eager_all_templates.then(|| {
+                        build_composition_templates(
+                            &composed_table.table,
+                            &analyzed,
+                            &all_terminals,
+                        )
+                    }),
+                    eager_changed_parent_enabled.then(|| {
+                        try_build_changed_parent_templates_for_terminal_count(
+                            composed_table,
+                            components,
+                            analyzed.num_terminals,
+                            &ignore_terminals.scoped,
+                            !cross_only_trivial_delta,
+                        )
+                    }).flatten(),
+                )
             },
             || {
-                rayon::join(
+                let (boundary_result, seed_result) = rayon::join(
                     || {
                         let started_at = Instant::now();
-                        let boundary_paths = discover_boundary_token_paths(
-                            vocab,
-                            components,
-                            tokenizer_state_offsets,
-                            &composed_table.terminal_offsets,
-                            &seed_terminals,
-                            &ignore_terminals.global,
-                            &interface_pairs,
-                            &boundary_context_terminals,
-                            &follow_transparent_terminals,
-                            boundary_disallowed_follows.as_ref(),
-                        );
+                        let usable_precomputed = pre_table_base_discovery.filter(|precomputed| {
+                            fast_component_grammar_splice
+                                && precomputed.terminal_offsets == composed_table.terminal_offsets
+                                && precomputed.tokenizer_state_offsets == tokenizer_state_offsets
+                                && precomputed.base_interface_pairs == base_interface_pairs
+                        });
+                        let boundary_paths = if let Some(precomputed) = usable_precomputed {
+                            let new_interface_pairs = interface_pairs
+                                .difference(&base_interface_pairs)
+                                .copied()
+                                .collect::<BTreeSet<_>>();
+                            let mut combined = precomputed.discovery.clone();
+                            let precomputed_interfaces_exact =
+                                precomputed.discovery_interface_pairs == interface_pairs;
+                            if !precomputed_interfaces_exact && !new_interface_pairs.is_empty() {
+                                // Any path that becomes accepting only after LR bridge
+                                // interfaces are added contains at least one newly-added
+                                // adjacent terminal pair. Since lexer terminals are
+                                // non-nullable, the split contributes the adjacent byte
+                                // pair (last(left), first(right)) inside the same model
+                                // token. Restrict the incremental exact scan to those
+                                // tokens, then replace their base witnesses with the full
+                                // extended-interface witnesses.
+                                let incremental_candidates =
+                                    boundary_interface_adjacent_pair_candidates(
+                                        vocab,
+                                        components,
+                                        &composed_table.terminal_offsets,
+                                        &new_interface_pairs,
+                                    )
+                                    .into_iter()
+                                    .collect::<BTreeSet<_>>();
+                                if !incremental_candidates.is_empty() {
+                                    let replacement = discover_boundary_token_paths(
+                                        vocab,
+                                        components,
+                                        tokenizer_state_offsets,
+                                        &composed_table.terminal_offsets,
+                                        &seed_terminals,
+                                        &ignore_terminals.global,
+                                        &interface_pairs,
+                                        &boundary_context_terminals,
+                                        &follow_transparent_terminals,
+                                        boundary_disallowed_follows.as_ref(),
+                                        Some(&incremental_candidates),
+                                    );
+                                    combined = replace_boundary_discovery_tokens(
+                                        combined,
+                                        replacement,
+                                    );
+                                }
+                                if compose_profile_enabled() {
+                                    eprintln!(
+                                        "[glrmask/profile][constraint_boundary_incremental_discovery] base_tokens={} new_pairs={} incremental_candidates={} combined_tokens={}",
+                                        precomputed.discovery.token_ids.len(),
+                                        new_interface_pairs.len(),
+                                        incremental_candidates.len(),
+                                        combined.token_ids.len(),
+                                    );
+                                }
+                            } else if compose_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][constraint_boundary_incremental_discovery] base_tokens={} new_pairs={} incremental_candidates=0 combined_tokens={} precomputed_interfaces_exact={}",
+                                    precomputed.discovery.token_ids.len(),
+                                    new_interface_pairs.len(),
+                                    combined.token_ids.len(),
+                                    precomputed_interfaces_exact,
+                                );
+                            }
+
+                            if std::env::var_os(
+                                "GLRMASK_VALIDATE_PRETABLE_BOUNDARY_DISCOVERY",
+                            )
+                            .is_some()
+                            {
+                                let reference = discover_boundary_token_paths(
+                                    vocab,
+                                    components,
+                                    tokenizer_state_offsets,
+                                    &composed_table.terminal_offsets,
+                                    &seed_terminals,
+                                    &ignore_terminals.global,
+                                    &interface_pairs,
+                                    &boundary_context_terminals,
+                                    &follow_transparent_terminals,
+                                    boundary_disallowed_follows.as_ref(),
+                                    None,
+                                );
+                                assert_eq!(
+                                    combined.token_ids, reference.token_ids,
+                                    "pre-table incremental boundary token set differs from full discovery",
+                                );
+                                assert_eq!(
+                                    combined.terminals, reference.terminals,
+                                    "pre-table incremental boundary terminal set differs from full discovery",
+                                );
+                                assert_eq!(
+                                    boundary_discovery_good_signature(&combined),
+                                    boundary_discovery_good_signature(&reference),
+                                    "pre-table incremental boundary witnesses differ from full discovery",
+                                );
+                                eprintln!(
+                                    "[glrmask/validate][pretable_boundary_discovery] exact=true tokens={} witnesses={}",
+                                    combined.token_ids.len(),
+                                    combined.witnesses.len(),
+                                );
+                            }
+                            combined
+                        } else {
+                            discover_boundary_token_paths(
+                                vocab,
+                                components,
+                                tokenizer_state_offsets,
+                                &composed_table.terminal_offsets,
+                                &seed_terminals,
+                                &ignore_terminals.global,
+                                &interface_pairs,
+                                &boundary_context_terminals,
+                                &follow_transparent_terminals,
+                                boundary_disallowed_follows.as_ref(),
+                                None,
+                            )
+                        };
                         (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
                     },
                     || {
@@ -11743,9 +15606,79 @@ fn build_boundary_repair(
                         }
                         (relations, started_at.elapsed().as_secs_f64() * 1000.0)
                     },
+                );
+                let early_started_at = Instant::now();
+                let early_terminal = if std::env::var_os(
+                    "GLRMASK_EXPERIMENT_POSTTABLE_TERMINAL_OVERLAP",
                 )
+                .is_some()
+                    && cross_only_trivial_delta
+                    && composed_table.control_terminals.is_empty()
+                    && !special_token_terminals.iter().any(|special| {
+                        boundary_result
+                            .0
+                            .terminals
+                            .contains(special.terminal_id as usize)
+                    })
+                    && !boundary_result.0.token_ids.is_empty()
+                {
+                    let component_state_map = if let Some(map) = precomputed_component_state_map {
+                        Some(map)
+                    } else if let Some(deferred) = deferred_component_state_map {
+                        loop {
+                            if let Some(result) = deferred.get() {
+                                break result.as_ref().ok();
+                            }
+                            std::thread::yield_now();
+                        }
+                    } else {
+                        None
+                    };
+                    component_state_map.and_then(|component_state_map| {
+                        let plan = ConcreteBoundaryDeltaPlan {
+                            original_num_terminals: analyzed.num_terminals,
+                            synthetic_num_terminals: analyzed.num_terminals,
+                            by_global_terminal: BTreeMap::new(),
+                            compared_terminals: BTreeSet::new(),
+                            unsafe_terminals: BTreeSet::new(),
+                        };
+                        direct_boundary_terminal_automaton(
+                            merged_tokenizer_state_count,
+                            Some(component_state_map),
+                            vocab,
+                            &boundary_result.0.token_ids,
+                            BTreeMap::new(),
+                            0.0,
+                            &boundary_result.0,
+                            &ignore_terminals.global,
+                            &composed_table.control_terminals,
+                            &composed_table.terminal_offsets,
+                            tokenizer_state_offsets,
+                            Some(&plan),
+                        )
+                        .ok()
+                    })
+                } else {
+                    None
+                };
+                let early_ms = early_started_at.elapsed().as_secs_f64() * 1000.0;
+                if compose_profile_enabled() && early_terminal.is_some() {
+                    eprintln!(
+                        "[glrmask/profile][constraint_boundary_posttable_terminal_overlap] states={} transitions={} ms={early_ms:.3}",
+                        early_terminal.as_ref().unwrap().artifact().num_states(),
+                        early_terminal.as_ref().unwrap().artifact().stats().transitions,
+                    );
+                }
+                (boundary_result, seed_result, (early_terminal, early_ms))
             },
+        ));
+    if compose_profile_enabled() && pretransported_templates.is_some() {
+        eprintln!(
+            "[glrmask/profile][constraint_eager_pretransport] templates={} prebuilt_bundles={} ms={pretransport_ms:.3}",
+            pretransported_templates.as_ref().map_or(0, |templates| templates.by_terminal.len()),
+            prebuilt_bundle_cache.as_ref().map_or(0, PrebuiltParserBundleCache::len),
         );
+    }
     let discovered_boundary_terminals = boundary_paths.terminals.clone();
     let mut active_terminals = one_terminal_support_terminals.clone();
     for terminal in discovered_boundary_terminals.iter() {
@@ -11840,6 +15773,51 @@ fn build_boundary_repair(
         let _ = selected_boundary_tokens.set(Ok(Some(selected_original_tokens.clone())));
     }
 
+    let prebuilt_terminal_artifact = pre_table_base_discovery
+        .filter(|precomputed| {
+            fast_component_grammar_splice
+                && cross_only_trivial_delta
+                && precomputed.terminal_offsets == composed_table.terminal_offsets
+                && precomputed.tokenizer_state_offsets == tokenizer_state_offsets
+                && precomputed.discovery_interface_pairs == interface_pairs
+                && precomputed.discovery.token_ids == selected_original_tokens
+                && boundary_special_token_terminals.is_empty()
+                && composed_table.control_terminals.is_empty()
+        })
+        .and_then(|precomputed| precomputed.terminal_artifact.as_ref())
+        .cloned();
+    let prebuilt_terminal_artifact = early_posttable_terminal
+        .filter(|_| {
+            cross_only_trivial_delta
+                && boundary_special_token_terminals.is_empty()
+                && composed_table.control_terminals.is_empty()
+                && boundary_paths.token_ids == selected_original_tokens
+        })
+        .or(prebuilt_terminal_artifact);
+    let _ = early_posttable_terminal_ms;
+
+    let post_discovery_started_at = Instant::now();
+    let mut eager_delta_precompute = None;
+    let eager_templates = if let Some(templates) = eager_templates {
+        Some(templates)
+    } else if let Some(eager) = eager_changed_parent {
+        finish_eager_changed_parent_templates(
+            eager,
+            composed_table,
+            components,
+            &active_terminals,
+            pretransported_templates,
+        )
+        .map(|(templates, commit_templates, ms, delta)| {
+            eager_delta_precompute = Some(delta);
+            (templates, commit_templates, ms)
+        })
+    } else {
+        None
+    };
+    let eager_finish_wall_ms = post_discovery_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let state_map_started_at = Instant::now();
     let owned_component_state_map = if precomputed_component_state_map.is_none()
         && deferred_component_state_map.is_none()
     {
@@ -11866,6 +15844,7 @@ fn build_boundary_repair(
         .or(deferred_component_state_map)
         .or(owned_component_state_map.as_ref())
         .expect("component state map must be available");
+    let state_map_ms = state_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let use_concrete_delta =
         std::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none()
@@ -11915,14 +15894,36 @@ fn build_boundary_repair(
                     }
                 }
             }
-            let plan = prepare_concrete_boundary_delta_plan(
-                composed_table,
-                components,
-                &active_terminals,
-                &templates,
-                analyzed.num_terminals,
-            );
-            install_concrete_boundary_delta_templates(&mut templates, &plan);
+            let delta_plan_started_at = Instant::now();
+            let plan = if cross_only_trivial_delta {
+                ConcreteBoundaryDeltaPlan {
+                    original_num_terminals: analyzed.num_terminals,
+                    synthetic_num_terminals: analyzed.num_terminals,
+                    by_global_terminal: BTreeMap::new(),
+                    compared_terminals: BTreeSet::new(),
+                    unsafe_terminals: BTreeSet::new(),
+                }
+            } else if let Some(precomputed) = eager_delta_precompute.take() {
+                finish_eager_concrete_boundary_delta_plan(
+                    precomputed,
+                    &active_terminals,
+                    analyzed.num_terminals,
+                )
+            } else {
+                prepare_concrete_boundary_delta_plan(
+                    composed_table,
+                    components,
+                    &active_terminals,
+                    &templates,
+                    analyzed.num_terminals,
+                )
+            };
+            let delta_plan_ms = delta_plan_started_at.elapsed().as_secs_f64() * 1000.0;
+            let delta_install_started_at = Instant::now();
+            if !cross_only_trivial_delta {
+                install_concrete_boundary_delta_templates(&mut templates, &plan);
+            }
+            let delta_install_ms = delta_install_started_at.elapsed().as_secs_f64() * 1000.0;
             let seed_relations = if std::env::var_os(
                 "GLRMASK_DISABLE_FACTOR_ONE_TERMINAL_SEEDS",
             )
@@ -11944,20 +15945,36 @@ fn build_boundary_repair(
                 seed_relations
             };
             let started_at = Instant::now();
-            let result = direct_boundary_terminal_automaton(
-                merged_tokenizer_state_count,
-                Some(component_state_map),
-                vocab,
-                &selected_original_tokens,
-                seed_relations,
-                one_byte_ms,
-                &boundary_paths,
-                &ignore_terminals.global,
-                &composed_table.control_terminals,
-                &composed_table.terminal_offsets,
-                tokenizer_state_offsets,
-                Some(&plan),
-            );
+            let result = if let Some(prebuilt) = prebuilt_terminal_artifact.clone() {
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][constraint_boundary_terminal_prebuilt] reused=true states={} transitions={}",
+                        prebuilt.artifact().num_states(),
+                        prebuilt.artifact().stats().transitions,
+                    );
+                }
+                Ok(prebuilt)
+            } else {
+                direct_boundary_terminal_automaton(
+                    merged_tokenizer_state_count,
+                    Some(component_state_map),
+                    vocab,
+                    &selected_original_tokens,
+                    seed_relations,
+                    one_byte_ms,
+                    &boundary_paths,
+                    &ignore_terminals.global,
+                    &composed_table.control_terminals,
+                    &composed_table.terminal_offsets,
+                    tokenizer_state_offsets,
+                    Some(&plan),
+                )
+            };
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_boundary_delta_phases] plan_ms={delta_plan_ms:.3} install_ms={delta_install_ms:.3}"
+                );
+            }
             (
                 (templates, template_dfas_by_terminal, templates_ms),
                 (result, started_at.elapsed().as_secs_f64() * 1000.0),
@@ -12095,6 +16112,7 @@ fn build_boundary_repair(
         &boundary_paths,
         tokenizer_state_offsets,
     );
+    let template_publish_started_at = Instant::now();
     let mut composition_parser_templates_by_terminal =
         vec![None; analyzed.num_terminals as usize];
     for (&terminal, dfa) in &templates.by_terminal {
@@ -12107,6 +16125,7 @@ fn build_boundary_repair(
             composition_parser_templates_by_terminal[terminal as usize] = Some(dfa.clone());
         }
     }
+    let template_publish_ms = template_publish_started_at.elapsed().as_secs_f64() * 1000.0;
     if std::env::var_os("GLRMASK_COMPOSE_BUILD_FULL_TEMPLATE_CACHE").is_some() {
         let cache_started_at = Instant::now();
         composition_parser_templates_by_terminal = build_complete_composed_parser_template_cache(
@@ -12138,6 +16157,7 @@ fn build_boundary_repair(
     let special_source_state = merged_tokenizer
         .map(Tokenizer::initial_state_id)
         .unwrap_or(0);
+    let special_paths_started_at = Instant::now();
     let terminal_dwa = add_boundary_special_token_paths(
         terminal_dwa,
         &boundary_special_token_terminals,
@@ -12145,10 +16165,51 @@ fn build_boundary_repair(
         Some(component_state_map),
         &composed_table.control_terminals,
     )?;
+    let special_paths_ms = special_paths_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let parser_started_at = Instant::now();
     let (terminal_automaton, id_map) = terminal_dwa.into_parts();
     if let TerminalAutomaton::Dwa(dwa) = &terminal_automaton {
+        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_WEIGHTED_TERMINAL_PATHS").is_some() {
+            let started_at = Instant::now();
+            let mut stack = vec![(dwa.start_state(), Vec::<i32>::new(), Weight::all())];
+            let mut accepted_paths = 0usize;
+            let mut unique_sequences = BTreeSet::<Vec<i32>>::new();
+            let mut max_len = 0usize;
+            let mut total_len = 0usize;
+            let mut final_support_outer_ranges = 0usize;
+            let mut visits = 0usize;
+            while let Some((state_id, path, support)) = stack.pop() {
+                visits += 1;
+                assert!(visits < 1_000_000, "boundary terminal path profiler exceeded acyclic visit bound");
+                let state = &dwa.states()[state_id as usize];
+                if let Some(final_weight) = state.final_weight.as_ref() {
+                    let accepted = support.intersection(final_weight);
+                    if !accepted.is_empty() {
+                        accepted_paths += 1;
+                        max_len = max_len.max(path.len());
+                        total_len += path.len();
+                        final_support_outer_ranges += accepted.outer_range_count();
+                        unique_sequences.insert(path.clone());
+                    }
+                }
+                for (&label, (target, weight)) in &state.transitions {
+                    let next_support = support.intersection(weight);
+                    if next_support.is_empty() {
+                        continue;
+                    }
+                    let mut next_path = path.clone();
+                    next_path.push(label);
+                    stack.push((*target, next_path, next_support));
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][boundary_weighted_terminal_paths] states={} transitions={} visits={} accepted_paths={} unique_sequences={} avg_len={:.2} max_len={} support_outer_ranges={} total_ms={:.3}",
+                dwa.num_states(), dwa.num_transitions(), visits, accepted_paths, unique_sequences.len(),
+                if accepted_paths == 0 { 0.0 } else { total_len as f64 / accepted_paths as f64 },
+                max_len, final_support_outer_ranges, started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         profile_direct_boundary_terminal_dwa_domain_dp(
             &composed_table.table,
             &templates,
@@ -12169,7 +16230,8 @@ fn build_boundary_repair(
             .resize(plan.synthetic_num_terminals as usize, "<boundary-delta>".to_string());
     }
     let use_direct_parser =
-        std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
+        std::env::var_os("GLRMASK_EXPERIMENT_USE_BOUNDARY_LAZY_DIRECT_PARSER").is_some()
+            || std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TERMINAL_PATH_PREIMAGE").is_some();
     let validate_direct_parser =
         std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_LAZY_DIRECT_PARSER").is_some();
     if std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
@@ -12177,6 +16239,9 @@ fn build_boundary_repair(
         && !validate_direct_parser
     {
         if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_hidden_phases] eager_finish_wall_ms={eager_finish_wall_ms:.3} state_map_ms={state_map_ms:.3} template_publish_ms={template_publish_ms:.3} special_paths_ms={special_paths_ms:.3}"
+            );
             eprintln!(
                 "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_deferred=true parser_ms={:.3} total_ms={:.3}",
                 active_terminals.iter().filter(|&&active| active).count(),
@@ -12194,6 +16259,7 @@ fn build_boundary_repair(
                 id_map,
                 num_terminals: parser_analyzed.num_terminals,
                 templates,
+                prebuilt_bundle_cache,
             }
         } else {
             BoundaryParserWork::Deferred {
@@ -12211,6 +16277,12 @@ fn build_boundary_repair(
             active_terminals,
         }));
     }
+    let terminal_path_candidate = match &terminal_automaton {
+        TerminalAutomaton::Dwa(dwa) => {
+            build_boundary_parser_from_weighted_terminal_paths(&composed_table.table, &templates, dwa)
+        }
+        _ => None,
+    };
     let terminal_domain_candidate = match &terminal_automaton {
         TerminalAutomaton::Dwa(dwa) => build_boundary_parser_from_weighted_terminal_dwa(
             &composed_table.table,
@@ -12237,7 +16309,9 @@ fn build_boundary_repair(
     } else {
         None
     };
-    let direct_parser_candidate = terminal_domain_candidate.or(lazy_parser_candidate);
+    let direct_parser_candidate = terminal_path_candidate
+        .or(terminal_domain_candidate)
+        .or(lazy_parser_candidate);
     let mut generic_parser_dwa = if !use_direct_parser
         || validate_direct_parser
         || direct_parser_candidate.is_none()
@@ -12585,7 +16659,9 @@ fn build_static_dynamic_overlay_metadata(
             repair_terminals,
             non_parent_only_parser_states,
             segmented_parser_components: Vec::new(),
+            segmented_component_union_root_dispatch: Vec::new(),
             segmented_boundary_parser: None,
+            segmented_boundary_terminal_trie: None,
         },
         template_dfas_by_terminal,
     ))
@@ -13136,6 +17212,59 @@ fn finalize_composed_constraint(
     }
     composition.constraint.rebuild_runtime_caches();
     composition
+}
+
+fn finalize_owned_composed_constraint_runtime(
+    constraint: &mut Constraint,
+    structural_terminal_aliases: usize,
+    components_have_no_runtime_product: bool,
+) -> f64 {
+    let finalize_started_at = Instant::now();
+    let lexer_product_started_at = Instant::now();
+    let lexer_product_report = maybe_install_runtime_lexer_product(
+        constraint,
+        structural_terminal_aliases,
+        components_have_no_runtime_product,
+    );
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_runtime_lexer_product] attempted={} selected={} parser_overlap={} terminal_aliases={} source_states={} product_states={} source_transitions={} product_transitions={} multi_tsid_product_states={} total_ms={:.3}",
+            lexer_product_report.attempted,
+            lexer_product_report.selected,
+            lexer_product_report.parser_overlap,
+            structural_terminal_aliases,
+            lexer_product_report.source_states,
+            lexer_product_report.product_states,
+            lexer_product_report.source_transitions,
+            lexer_product_report.product_transitions,
+            lexer_product_report.multi_tsid_product_states,
+            lexer_product_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    constraint.rebuild_runtime_caches();
+    finalize_started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn finalize_owned_composed_constraint_runtime_single_thread(
+    constraint: &mut Constraint,
+    structural_terminal_aliases: usize,
+    components_have_no_runtime_product: bool,
+) -> f64 {
+    static FINALIZE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    let pool = FINALIZE_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .thread_name(|index| format!("glrmask-finalize-{index}"))
+            .build()
+            .expect("build single-thread composition finalizer pool")
+    });
+    pool.install(|| {
+        finalize_owned_composed_constraint_runtime(
+            constraint,
+            structural_terminal_aliases,
+            components_have_no_runtime_product,
+        )
+    })
 }
 
 /// Compose already-compiled parent and child constraints. The component
@@ -13738,6 +17867,7 @@ pub(crate) fn compose_constraints(
                     None,
                     None,
                     None,
+                    None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
@@ -13787,6 +17917,7 @@ pub(crate) fn compose_constraints(
                                 special_token_terminals.as_slice(),
                                 &component_constraints,
                                 &expected_tokenizer_state_offsets,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -13920,8 +18051,34 @@ pub(crate) fn compose_constraints(
 /// base of the returned ordinary `Constraint`; child tokenizer states are
 /// appended to it, so the million-state parent is neither cloned nor rebased.
 pub(crate) fn compose_constraints_owned_parent(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    vocab: &Vocab,
+) -> Result<ConstraintComposition, String> {
+    compose_constraints_owned_parent_impl(parent, children, None, vocab)
+}
+
+pub(crate) fn compose_constraints_owned_parent_shared(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: &[Arc<Constraint>],
+    vocab: &Vocab,
+) -> Result<ConstraintComposition, String> {
+    if shared_children.len() != children.len() {
+        return Err("shared child/component count mismatch".into());
+    }
+    for (index, (input, shared)) in children.iter().zip(shared_children).enumerate() {
+        if !std::ptr::eq(input.constraint, shared.as_ref()) {
+            return Err(format!("shared child {index} does not match borrowed composition input"));
+        }
+    }
+    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), vocab)
+}
+
+fn compose_constraints_owned_parent_impl(
     mut parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
+    shared_children: Option<&[Arc<Constraint>]>,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
     if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
@@ -13932,10 +18089,13 @@ pub(crate) fn compose_constraints_owned_parent(
     let total_started_at = Instant::now();
     let segmented_runtime_requested =
         std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
+    let two_dwa_runtime_requested = segmented_runtime_requested
+        && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
     let segmented_skip_requested = segmented_runtime_requested
+        && !two_dwa_runtime_requested
         && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some();
     let mut segmented_source_constraints =
-        if segmented_runtime_requested && !segmented_skip_requested {
+        if segmented_runtime_requested && !segmented_skip_requested && !two_dwa_runtime_requested {
             let started = Instant::now();
             let mut sources = Vec::with_capacity(children.len() + 1);
             sources.push(parent.clone());
@@ -14050,21 +18210,34 @@ pub(crate) fn compose_constraints_owned_parent(
         && (all_children_nonnullable
             || legacy_splice_has_only_byte_terminal_continuations(&parent, children));
     let table_started_at = Instant::now();
-    let mut composed_table = if use_legacy_splice {
-        compose_subgrammar_tables(
-            &parent.table,
-            (!global_ignores).then_some(parent.ignore_terminal).flatten(),
-            &table_inputs,
-        )?
-    } else {
-        compose_subgrammar_tables_explicit(
-            &parent.table,
-            (!global_ignores)
-                .then_some(parent.ignore_terminal)
-                .flatten(),
-            &table_inputs,
-        )?
-    };
+    let (composed_table_result, mut pre_table_base_discovery) = rayon::join(
+        || {
+            if use_legacy_splice {
+                compose_subgrammar_tables(
+                    &parent.table,
+                    (!global_ignores).then_some(parent.ignore_terminal).flatten(),
+                    &table_inputs,
+                )
+            } else {
+                compose_subgrammar_tables_explicit(
+                    &parent.table,
+                    (!global_ignores)
+                        .then_some(parent.ignore_terminal)
+                        .flatten(),
+                    &table_inputs,
+                )
+            }
+        },
+        || {
+            try_prepare_pre_table_boundary_base_discovery(
+                &parent,
+                children,
+                global_ignores,
+                vocab,
+            )
+        },
+    );
+    let mut composed_table = composed_table_result?;
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
     let attempt_structural_sharing = structural_sharing_enabled() && children.len() > 1;
@@ -14277,7 +18450,12 @@ pub(crate) fn compose_constraints_owned_parent(
     // Publish state coordinates and the exact boundary-token coordinate as
     // soon as each becomes available. Component weight remapping then overlaps
     // boundary template/terminal/parser construction instead of sitting on the
-    // serial parser-union path.
+    // serial parser-union path. When pre-table terminal construction already
+    // built the exact raw-state partition, reuse it instead of reconstructing
+    // the same partition in the coordinate lane.
+    let pre_table_component_state_map = pre_table_base_discovery
+        .as_mut()
+        .and_then(|precomputed| precomputed.component_state_map.take());
     let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
@@ -14312,10 +18490,52 @@ pub(crate) fn compose_constraints_owned_parent(
                     rayon::join(
                         || {
                             let started_at = Instant::now();
-                            let result = build_direct_component_state_coordinates(
-                                &parser_components,
-                                merged_tokenizer_state_count,
-                            );
+                            let result = if let Some(precomputed) =
+                                pre_table_component_state_map.as_ref()
+                            {
+                                let reused = build_direct_component_state_coordinates_from_precomputed_map(
+                                    &parser_components,
+                                    precomputed,
+                                    merged_tokenizer_state_count,
+                                );
+                                if std::env::var_os(
+                                    "GLRMASK_VALIDATE_PRETABLE_STATE_MAP_REUSE",
+                                )
+                                .is_some()
+                                {
+                                    let reference = build_direct_component_state_coordinates(
+                                        &parser_components,
+                                        merged_tokenizer_state_count,
+                                    );
+                                    match (&reused, &reference) {
+                                        (Ok(actual), Ok(expected)) => {
+                                            assert_eq!(
+                                                actual.tokenizer_states.original_to_internal,
+                                                expected.tokenizer_states.original_to_internal,
+                                                "pre-table raw-state coordinate differs from full builder",
+                                            );
+                                            assert_eq!(
+                                                actual.local_to_global_tsids,
+                                                expected.local_to_global_tsids,
+                                                "pre-table local TSID coordinate differs from full builder",
+                                            );
+                                            eprintln!(
+                                                "[glrmask/validate][pretable_state_map_reuse] exact=true raw_states={}",
+                                                merged_tokenizer_state_count,
+                                            );
+                                        }
+                                        _ => panic!(
+                                            "pre-table state-map reuse/reference success mismatch"
+                                        ),
+                                    }
+                                }
+                                reused
+                            } else {
+                                build_direct_component_state_coordinates(
+                                    &parser_components,
+                                    merged_tokenizer_state_count,
+                                )
+                            };
                             let published_state_map = result
                                 .as_ref()
                                 .map(|coordinates| coordinates.tokenizer_states.clone())
@@ -14390,12 +18610,16 @@ pub(crate) fn compose_constraints_owned_parent(
                             Some(&plan.component_token_map),
                             plan.common_map.num_tsids() as usize,
                         )?;
+                    let (token_mask_caches, token_mask_cache_ms) =
+                        prebuild_segmented_token_mask_caches(&plan.common_map);
                     PreparedOwnedComponentArtifacts {
                         automata_maps,
                         possible_matches,
                         id_map: plan.common_map,
                         boundary_tsid_map: Some(plan.boundary_tsid_map),
                         boundary_token_map: Some(plan.boundary_token_map),
+                        token_mask_caches,
+                        token_mask_cache_ms,
                         remap_ms,
                     }
                 } else {
@@ -14406,12 +18630,16 @@ pub(crate) fn compose_constraints_owned_parent(
                             None,
                             component_id_map.num_tsids() as usize,
                         )?;
+                    let (token_mask_caches, token_mask_cache_ms) =
+                        prebuild_segmented_token_mask_caches(&component_id_map);
                     PreparedOwnedComponentArtifacts {
                         automata_maps,
                         possible_matches,
                         id_map: component_id_map,
                         boundary_tsid_map: None,
                         boundary_token_map: None,
+                        token_mask_caches,
+                        token_mask_cache_ms,
                         remap_ms,
                     }
                 };
@@ -14439,6 +18667,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     &expected_tokenizer_state_offsets,
                     None,
                     Some(&state_map_cell),
+                    pre_table_base_discovery.as_ref(),
                     Some(&selected_boundary_tokens_cell),
                 );
                 if selected_boundary_tokens_cell.get().is_none() {
@@ -14458,6 +18687,58 @@ pub(crate) fn compose_constraints_owned_parent(
     let (prepared_components, coordinate_ms, possible_matches_extract_ms) = prepared_components_result?;
     let boundary_repair = boundary_result?;
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
+    let num_parser_states = composed_table.table.num_states;
+    let num_terminals = composed_table.table.num_terminals as usize;
+    let (
+        mut boundary_work,
+        mut template_dfas_by_terminal,
+        composition_parser_templates_by_terminal,
+        commit_templates_deferred,
+    ) = match boundary_repair {
+        Some(boundary) => {
+            debug_assert!(boundary.active_terminals.iter().any(|&active| active));
+            (
+                Some(boundary.parser),
+                boundary.template_dfas_by_terminal,
+                boundary.composition_parser_templates_by_terminal,
+                boundary.commit_templates_deferred,
+            )
+        }
+        None => (None, vec![None; num_terminals], Vec::new(), false),
+    };
+
+    // Build the signed/resolved/hash-consed positive boundary parser as soon as
+    // boundary repair has produced its terminal automaton and templates.  This
+    // half of B does not depend on the LR table itself; only the table-construction
+    // mode controls grouped cancellation.  Starting here lets it overlap terminal
+    // live-state merging, tokenizer assembly, coordinate canonicalization, and
+    // unfinalized constraint construction.
+    let early_boundary_positive_requested =
+        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
+            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
+            && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
+    let mut early_boundary_positive = None;
+    if (segmented_skip_requested || two_dwa_runtime_requested)
+        && early_boundary_positive_requested
+        && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
+        && let Some(work) = boundary_work.take()
+    {
+        let allow_grouped_cancellation = composed_table.table.construction
+            == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged;
+        early_boundary_positive = Some(std::thread::spawn(move || {
+            let candidate = work.materialize_positive_parser_without_table(
+                allow_grouped_cancellation,
+                num_parser_states,
+            )?;
+            publish_boundary_parser_candidate_for_state_count(candidate, num_parser_states)
+        }));
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_early_boundary_positive] started=true table_clone_ms=0.000"
+            );
+        }
+    }
+
     // Coordinate/boundary publication is complete. Release the immutable
     // parent borrows before consuming the owned-parent tokenizer below;
     // parser automata are intentionally materialized later, inside the final
@@ -14504,14 +18785,14 @@ pub(crate) fn compose_constraints_owned_parent(
     );
 
 
-    let num_parser_states = composed_table.table.num_states;
-    let num_terminals = composed_table.table.num_terminals as usize;
     let PreparedOwnedComponentArtifacts {
         automata_maps,
         mut possible_matches,
         id_map,
         boundary_tsid_map,
         boundary_token_map,
+        token_mask_caches,
+        token_mask_cache_ms,
         remap_ms: component_remap_ms,
     } = prepared_components;
     canonicalize_possible_matches(
@@ -14529,31 +18810,15 @@ pub(crate) fn compose_constraints_owned_parent(
     };
     let id_num_tsids = id_map.num_tsids();
     let id_max_internal_token = id_map.max_internal_token_id();
-    let (
-        boundary_work,
-        mut template_dfas_by_terminal,
-        composition_parser_templates_by_terminal,
-        commit_templates_deferred,
-    ) = match boundary_repair {
-        Some(boundary) => {
-            debug_assert!(boundary.active_terminals.iter().any(|&active| active));
-            (
-                Some(boundary.parser),
-                boundary.template_dfas_by_terminal,
-                boundary.composition_parser_templates_by_terminal,
-                boundary.commit_templates_deferred,
-            )
-        }
-        None => {
-            if boundary_tsid_map.is_some() || boundary_token_map.is_some() {
-                return Err(
-                    "prepared component artifacts retained boundary maps without a boundary repair"
-                        .to_string(),
-                );
-            }
-            (None, vec![None; num_terminals], Vec::new(), false)
-        }
-    };
+    if boundary_work.is_none()
+        && early_boundary_positive.is_none()
+        && (boundary_tsid_map.is_some() || boundary_token_map.is_some())
+    {
+        return Err(
+            "prepared component artifacts retained boundary maps without a boundary repair"
+                .to_string(),
+        );
+    }
 
     let union_started_at = Instant::now();
     let runtime_template_advance_requested =
@@ -14577,11 +18842,36 @@ pub(crate) fn compose_constraints_owned_parent(
         );
     }
 
+    // The complete boundary parser depends only on already-owned boundary
+    // work plus the composed LR table.  Start it before the remaining runtime
+    // artifact assembly so deterministic B publication can overlap that work.
+    let early_boundary_publish_requested =
+        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
+            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
+            && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
+    let mut early_boundary_publish = None;
+    if (segmented_skip_requested || two_dwa_runtime_requested)
+        && early_boundary_publish_requested
+        && let Some(work) = boundary_work.take()
+    {
+        let clone_started_at = Instant::now();
+        let table = composed_table.table.clone();
+        let clone_ms = clone_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_early_boundary_publish] started=true table_clone_ms={clone_ms:.3}"
+            );
+        }
+        early_boundary_publish = Some(std::thread::spawn(move || {
+            publish_real_boundary_parser_work(work, &table)
+        }));
+    }
+
     // Segmented runtime fast path: there is intentionally no flattened
     // component parser union to borrow from `parent`. Finishing in this branch
     // lets us move the already-owned parent directly into runtime segment zero
     // instead of cloning a multi-megabyte parser artifact just to keep it alive.
-    if segmented_skip_requested {
+    if segmented_skip_requested || two_dwa_runtime_requested {
         if !global_ignores
             && let Some(ignore_terminal) = parent.ignore_terminal
             && let Some(ignore_weight) = parent.possible_matches.get(&ignore_terminal).cloned()
@@ -14620,84 +18910,142 @@ pub(crate) fn compose_constraints_owned_parent(
         result.constraint.composition_parser_templates_by_terminal =
             composition_parser_templates_by_terminal;
         result.constraint.composition_grammar_summary = composed_grammar_summary.clone();
+        if let Some(caches) = token_mask_caches {
+            caches.install(&mut result.constraint);
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_segmented_token_mask_prebuild] installed=true build_ms={token_mask_cache_ms:.3}"
+                );
+            }
+        }
 
-        // Child preservation and boundary-parser construction are independent.
-        // Clone the borrowed children while the boundary NWA is being built so
-        // segment ownership adds no serial cost to the linker critical path.
-        let (child_clone_result, boundary_runtime_result) = rayon::join(
+        // Child preservation and positive boundary-parser construction are
+        // independent.  Keep B as a positive NWA at this boundary: standalone
+        // determinization is a publication/final-union concern, not part of
+        // constructing B's parser language.
+        let (child_clone_result, boundary_positive_result) = rayon::join(
             || {
                 let started_at = Instant::now();
-                let mut sources = children
-                    .iter()
-                    .map(|child| child.constraint.clone())
-                    .collect::<Vec<_>>();
-                if !global_ignores {
-                    sources.par_iter_mut().for_each(|source| {
-                        let Some(ignore_terminal) = source.ignore_terminal else {
-                            return;
-                        };
-                        let Some(ignore_weight) =
-                            source.possible_matches.get(&ignore_terminal).cloned()
-                        else {
-                            return;
-                        };
-                        let start = source.parser_dwa.start_state() as usize;
-                        let Some(final_weight) = source
-                            .parser_dwa
-                            .states()
-                            .get(start)
-                            .and_then(|state| state.final_weight.as_ref())
-                            .cloned()
-                        else {
-                            return;
-                        };
-                        let retained = final_weight.difference(&ignore_weight);
-                        source.parser_dwa.states_mut()[start].final_weight =
-                            (!retained.is_empty()).then_some(retained);
-                    });
-                }
+                let sources = if let Some(shared_children) = shared_children {
+                    shared_children
+                        .iter()
+                        .map(|source| {
+                            (
+                                Arc::clone(source),
+                                (!global_ignores).then_some(source.ignore_terminal).flatten(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    let mut cloned = children
+                        .iter()
+                        .map(|child| child.constraint.clone())
+                        .collect::<Vec<_>>();
+                    if !global_ignores {
+                        cloned.par_iter_mut().for_each(|source| {
+                            let Some(ignore_terminal) = source.ignore_terminal else {
+                                return;
+                            };
+                            let Some(ignore_weight) =
+                                source.possible_matches.get(&ignore_terminal).cloned()
+                            else {
+                                return;
+                            };
+                            let start = source.parser_dwa.start_state() as usize;
+                            let Some(final_weight) = source
+                                .parser_dwa
+                                .states()
+                                .get(start)
+                                .and_then(|state| state.final_weight.as_ref())
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            let retained = final_weight.difference(&ignore_weight);
+                            source.parser_dwa.states_mut()[start].final_weight =
+                                (!retained.is_empty()).then_some(retained);
+                        });
+                    }
+                    cloned
+                        .into_iter()
+                        .map(|source| (Arc::new(source), None))
+                        .collect::<Vec<_>>()
+                };
                 let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                 (sources, elapsed_ms)
             },
-            || -> Result<
-                Option<(
-                    NWA,
-                    InternalIdMap,
-                    Option<Vec<Option<UnweightedDfa>>>,
-                    bool,
-                    f64,
-                )>,
-                String,
-            > {
+            || -> Result<Option<BoundaryRuntimeCandidate>, String> {
+                if early_boundary_positive.is_some() || early_boundary_publish.is_some() {
+                    return Ok(None);
+                }
+                if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_some() {
+                    return Ok(None);
+                }
                 let Some(work) = boundary_work else {
                     return Ok(None);
                 };
                 let started_at = Instant::now();
-                let (parser_nwa, boundary_id_map, template_cache, signed_stack_effects) =
-                    work.materialize_positive_nwa(&result.constraint.table)?;
-                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                Ok(Some((
-                    parser_nwa,
-                    boundary_id_map,
-                    template_cache,
-                    signed_stack_effects,
-                    elapsed_ms,
-                )))
+                if std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE")
+                    .is_some()
+                {
+                    let (trie, boundary_id_map, template_cache) =
+                        work.materialize_terminal_trie()?;
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=terminal_trie nodes={} live_tsids={} token_classes={} build_ms={elapsed_ms:.3}",
+                            trie.nodes.len(),
+                            trie.root_by_tsid.iter().filter(|&&root| root != u32::MAX).count(),
+                            boundary_id_map.num_internal_tokens(),
+                        );
+                    }
+                    Ok(Some(BoundaryRuntimeCandidate::TerminalTrie {
+                        trie,
+                        id_map: boundary_id_map,
+                        template_cache,
+                        build_ms: elapsed_ms,
+                    }))
+                } else {
+                    let (positive, boundary_id_map, template_cache) =
+                        work.materialize_positive_parser(&result.constraint.table)?;
+                    positive.ensure_positive()?;
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    if compose_profile_enabled() {
+                        match &positive {
+                            PositiveBoundaryParser::Nwa(nwa) => eprintln!(
+                                "[glrmask/profile][constraint_segmented_boundary_positive] representation=nwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                                nwa.num_states(),
+                                nwa.num_transitions(),
+                            ),
+                            PositiveBoundaryParser::Dwa(dwa) => eprintln!(
+                                "[glrmask/profile][constraint_segmented_boundary_positive] representation=dwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                                dwa.num_states(),
+                                dwa.num_transitions(),
+                            ),
+                        }
+                    }
+                    Ok(Some(BoundaryRuntimeCandidate::Parser {
+                        positive,
+                        id_map: boundary_id_map,
+                        template_cache,
+                        build_ms: elapsed_ms,
+                    }))
+                }
             },
         );
         let (mut source_constraints, child_clone_ms) = child_clone_result;
-        let boundary_runtime = boundary_runtime_result?;
+        let boundary_candidate = boundary_positive_result?;
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_segment_clone] cloned_children={} parser_states={} overlapped=true total_ms={child_clone_ms:.3}",
                 source_constraints.len(),
                 source_constraints
                     .iter()
-                    .map(|constraint| constraint.parser_dwa.num_states() as usize)
+                    .map(|(constraint, _)| constraint.parser_dwa.num_states() as usize)
                     .sum::<usize>(),
             );
         }
-        source_constraints.insert(0, parent);
+        source_constraints.insert(0, (Arc::new(parent), None));
 
         let global_state_count = result.constraint.table.num_states as usize;
         if source_constraints.len() != result.parser_state_relations.len()
@@ -14706,24 +19054,142 @@ pub(crate) fn compose_constraints_owned_parent(
         {
             return Err("segmented parser source/relation count mismatch".into());
         }
-        let mut segmented_components = Vec::with_capacity(source_constraints.len());
-        for (component_index, source) in source_constraints.into_iter().enumerate() {
-            let global_to_local_parser_state = invert_singleton_parser_state_relation(
-                &result.parser_state_relations[component_index],
+
+        // Runtime DWA publication and component-union certification are
+        // independent.  In the table-free early-B path, ordinary constraint
+        // finalization is independent as well: it never reads segmented A/B
+        // metadata. Overlap that cache rebuild with the remaining deterministic
+        // B work, then attach the overlay only after both complete.
+        let overlap_finalize_with_boundary = std::env::var_os(
+            "GLRMASK_EXPERIMENT_OVERLAP_FINALIZE_WITH_BOUNDARY",
+        )
+        .is_some()
+            && early_boundary_positive.is_some();
+        let mut overlapped_finalize_ms = None::<f64>;
+        let (boundary_runtime_result, segmented_result) = if overlap_finalize_with_boundary {
+            let segmented_result = build_segmented_runtime_metadata(
+                source_constraints,
+                &result.parser_state_relations,
+                &result.tokenizer_state_offsets,
+                &result.terminal_offsets,
+                &automata_maps,
                 global_state_count,
-            )
-            .ok_or_else(|| {
-                format!(
-                    "segmented parser component {component_index} has a non-functional LR-state relation"
-                )
+                two_dwa_runtime_requested,
+                &parser_default_domains,
+                id_num_tsids,
+            );
+            let handle = early_boundary_positive
+                .take()
+                .expect("overlapped finalization requires early deterministic B handle");
+            let (boundary_runtime_result, finalize_ms) = std::thread::scope(|scope| {
+                let finalize_handle = scope.spawn(|| {
+                    finalize_owned_composed_constraint_runtime_single_thread(
+                        &mut result.constraint,
+                        structural_report.terminal_aliases,
+                        components_have_no_runtime_product,
+                    )
+                });
+                let boundary_runtime_result = handle
+                    .join()
+                    .map_err(|_| "early deterministic boundary parser thread panicked".to_string())?
+                    .map(Some);
+                let finalize_ms = finalize_handle
+                    .join()
+                    .expect("single-thread composition finalizer panicked");
+                Ok::<_, String>((boundary_runtime_result, finalize_ms))
             })?;
-            segmented_components.push(crate::runtime::SegmentedParserComponent {
-                constraint: Box::new(source),
-                tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
-                terminal_offset: result.terminal_offsets[component_index],
-                global_to_local_parser_state,
-            });
-        }
+            overlapped_finalize_ms = Some(finalize_ms);
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_finalize_overlap] enabled=true finalize_ms={finalize_ms:.3}"
+                );
+            }
+            (boundary_runtime_result, segmented_result)
+        } else {
+            rayon::join(
+            || -> Result<Option<PublishedBoundaryRuntime>, String> {
+                if let Some(handle) = early_boundary_positive.take() {
+                    let joined = handle
+                        .join()
+                        .map_err(|_| "early deterministic boundary parser thread panicked".to_string())??;
+                    return Ok(Some(joined));
+                }
+                if let Some(handle) = early_boundary_publish.take() {
+                    let joined = handle
+                        .join()
+                        .map_err(|_| "early boundary parser publication thread panicked".to_string())??;
+                    return Ok(Some(joined));
+                }
+                let Some(candidate) = boundary_candidate else {
+                    return Ok(None);
+                };
+                match candidate {
+                    BoundaryRuntimeCandidate::Parser {
+                        mut positive,
+                        id_map: mut boundary_id_map,
+                        template_cache,
+                        build_ms: positive_build_ms,
+                    } => {
+                        let tsid_quotient =
+                            positive.quotient_boundary_tsids(&mut boundary_id_map);
+                        let normalize_started_at = Instant::now();
+                        let parser_dwa = if std::env::var_os(
+                            "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_WEIGHT_DETERMINIZER",
+                        )
+                        .is_some()
+                            && boundary_id_map.num_tsids() as usize <= 16
+                            && boundary_id_map.num_internal_tokens() as usize <= 64
+                        {
+                            positive.into_runtime_dwa_small_boundary(
+                                &result.constraint.table,
+                                boundary_id_map.num_tsids() as usize,
+                                boundary_id_map.num_internal_tokens() as usize,
+                                tsid_quotient.as_deref(),
+                            )
+                        } else {
+                            positive.into_runtime_dwa(&result.constraint.table)
+                        };
+                        ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+                        let normalize_ms =
+                            normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                        Ok(Some(PublishedBoundaryRuntime::Parser {
+                            parser_dwa,
+                            id_map: boundary_id_map,
+                            template_cache,
+                            positive_build_ms,
+                            normalize_ms,
+                            tsid_quotient,
+                        }))
+                    }
+                    BoundaryRuntimeCandidate::TerminalTrie {
+                        trie,
+                        id_map,
+                        template_cache,
+                        build_ms,
+                    } => Ok(Some(PublishedBoundaryRuntime::TerminalTrie {
+                        trie,
+                        id_map,
+                        template_cache,
+                        build_ms,
+                    })),
+                }
+            },
+            || build_segmented_runtime_metadata(
+                source_constraints,
+                &result.parser_state_relations,
+                &result.tokenizer_state_offsets,
+                &result.terminal_offsets,
+                &automata_maps,
+                global_state_count,
+                two_dwa_runtime_requested,
+                &parser_default_domains,
+                id_num_tsids,
+            ),
+            )
+        };
+        let boundary_runtime = boundary_runtime_result?;
+        let (segmented_components, deterministic_root_dispatch, segment_publish_ms) = segmented_result?;
+
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
             crate::runtime::StaticDynamicOverlayMetadata {
                 terminal_offsets: result.terminal_offsets.clone(),
@@ -14731,64 +19197,202 @@ pub(crate) fn compose_constraints_owned_parent(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
+                segmented_component_union_root_dispatch: Vec::new(),
                 segmented_boundary_parser: None,
+            segmented_boundary_terminal_trie: None,
             }
         });
         overlay.segmented_parser_components = segmented_components;
+        if let Some(dispatch) = deterministic_root_dispatch {
+            overlay.segmented_component_union_root_dispatch = dispatch;
+        }
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true parent_moved=true",
+                "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true parent_moved=true deterministic_union_view={} publish_ms={segment_publish_ms:.3}",
                 overlay.segmented_parser_components.len(),
+                !overlay.segmented_component_union_root_dispatch.is_empty(),
             );
         }
 
-        if let Some((
-            parser_nwa,
-            boundary_id_map,
-            template_cache,
-            signed_stack_effects,
-            boundary_build_ms,
-        )) =
-            boundary_runtime
-        {
-            if let Some(template_cache) = template_cache {
-                result.constraint.composition_parser_templates_by_terminal = template_cache;
+        if let Some(boundary_runtime) = boundary_runtime {
+            match boundary_runtime {
+                PublishedBoundaryRuntime::Parser {
+                    parser_dwa,
+                    id_map: boundary_id_map,
+                    template_cache,
+                    positive_build_ms,
+                    normalize_ms: final_union_normalize_ms,
+                    tsid_quotient,
+                } => {
+                    if let Some(template_cache) = template_cache {
+                        result.constraint.composition_parser_templates_by_terminal =
+                            template_cache;
+                    }
+                    let boundary_num_tsids = boundary_id_map.num_tsids() as usize;
+                    let mut tokenizer_state_to_tsid = if std::env::var_os(
+                        "GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT",
+                    )
+                    .is_some()
+                    {
+                        boundary_id_map.tokenizer_states.original_to_internal.clone()
+                    } else {
+                        segmented_boundary_state_to_tsid
+                            .clone()
+                            .unwrap_or_else(|| boundary_id_map.tokenizer_states.original_to_internal.clone())
+                    };
+                    if let Some(old_to_new) = tsid_quotient.as_ref() {
+                        for tsid in &mut tokenizer_state_to_tsid {
+                            if *tsid == u32::MAX {
+                                continue;
+                            }
+                            *tsid = old_to_new
+                                .get(*tsid as usize)
+                                .copied()
+                                .unwrap_or(u32::MAX);
+                        }
+                    }
+                    debug_assert_eq!(
+                        tokenizer_state_to_tsid
+                            .iter()
+                            .copied()
+                            .filter(|&value| value != u32::MAX)
+                            .max()
+                            .map_or(0, |value| value as usize + 1),
+                        boundary_num_tsids,
+                        "segmented boundary raw-state map must cover the private TSID coordinate",
+                    );
+                    let internal_token_to_originals =
+                        boundary_id_map.vocab_tokens.internal_to_originals;
+                    let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
+                        "segmented component metadata must exist before boundary metadata",
+                    );
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} deterministic=true tsids={} token_classes={} positive_only=true positive_build_ms={positive_build_ms:.3} final_union_normalize_ms={final_union_normalize_ms:.3}",
+                            parser_dwa.num_states(),
+                            parser_dwa.num_transitions(),
+                            tokenizer_state_to_tsid
+                                .iter()
+                                .copied()
+                                .filter(|&v| v != u32::MAX)
+                                .max()
+                                .map_or(0, |v| v as usize + 1),
+                            internal_token_to_originals.len(),
+                        );
+                    }
+                    overlay.segmented_boundary_parser =
+                        Some(Box::new(crate::runtime::SegmentedBoundaryParser {
+                            parser_dwa,
+                            compact_parser_dwa: None,
+                            tokenizer_state_to_tsid,
+                            internal_token_to_originals,
+                        }));
+                }
+                PublishedBoundaryRuntime::CompactParser {
+                    parser_dwa,
+                    id_map: boundary_id_map,
+                    template_cache,
+                    positive_build_ms,
+                    normalize_ms: final_union_normalize_ms,
+                    tsid_quotient,
+                } => {
+                    if let Some(template_cache) = template_cache {
+                        result.constraint.composition_parser_templates_by_terminal = template_cache;
+                    }
+                    let boundary_num_tsids = boundary_id_map.num_tsids() as usize;
+                    let mut tokenizer_state_to_tsid = if std::env::var_os(
+                        "GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT",
+                    )
+                    .is_some()
+                    {
+                        boundary_id_map.tokenizer_states.original_to_internal.clone()
+                    } else {
+                        segmented_boundary_state_to_tsid
+                            .clone()
+                            .unwrap_or_else(|| boundary_id_map.tokenizer_states.original_to_internal.clone())
+                    };
+                    if let Some(old_to_new) = tsid_quotient.as_ref() {
+                        for tsid in &mut tokenizer_state_to_tsid {
+                            if *tsid == u32::MAX {
+                                continue;
+                            }
+                            *tsid = old_to_new
+                                .get(*tsid as usize)
+                                .copied()
+                                .unwrap_or(u32::MAX);
+                        }
+                    }
+                    debug_assert_eq!(
+                        tokenizer_state_to_tsid
+                            .iter()
+                            .copied()
+                            .filter(|&value| value != u32::MAX)
+                            .max()
+                            .map_or(0, |value| value as usize + 1),
+                        boundary_num_tsids,
+                        "segmented compact boundary raw-state map must cover the private TSID coordinate",
+                    );
+                    let internal_token_to_originals = boundary_id_map.vocab_tokens.internal_to_originals;
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} deterministic=true compact_weights={} tsids={} token_classes={} positive_only=true positive_build_ms={positive_build_ms:.3} final_union_normalize_ms={final_union_normalize_ms:.3}",
+                            parser_dwa.num_states(),
+                            parser_dwa.num_transitions(),
+                            parser_dwa.weights.len(),
+                            boundary_num_tsids,
+                            internal_token_to_originals.len(),
+                        );
+                    }
+                    let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
+                        "segmented component metadata must exist before compact boundary metadata",
+                    );
+                    overlay.segmented_boundary_parser =
+                        Some(Box::new(crate::runtime::SegmentedBoundaryParser {
+                            parser_dwa: DWA::new(0, 0),
+                            compact_parser_dwa: Some(parser_dwa),
+                            tokenizer_state_to_tsid,
+                            internal_token_to_originals,
+                        }));
+                }
+                PublishedBoundaryRuntime::TerminalTrie {
+                    trie,
+                    id_map: boundary_id_map,
+                    template_cache,
+                    build_ms,
+                } => {
+                    if let Some(template_cache) = template_cache {
+                        result.constraint.composition_parser_templates_by_terminal =
+                            template_cache;
+                    }
+                    let tokenizer_state_to_tsid = segmented_boundary_state_to_tsid
+                        .clone()
+                        .unwrap_or(boundary_id_map.tokenizer_states.original_to_internal);
+                    let internal_token_to_originals =
+                        boundary_id_map.vocab_tokens.internal_to_originals;
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_terminal_trie] nodes={} live_tsids={} token_classes={} build_ms={build_ms:.3}",
+                            trie.nodes.len(),
+                            trie.root_by_tsid
+                                .iter()
+                                .filter(|&&root| root != u32::MAX)
+                                .count(),
+                            internal_token_to_originals.len(),
+                        );
+                    }
+                    let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
+                        "segmented component metadata must exist before boundary metadata",
+                    );
+                    overlay.segmented_boundary_terminal_trie = Some(Box::new(
+                        crate::runtime::SegmentedBoundaryTerminalTrie {
+                            nodes: trie.nodes,
+                            root_by_tsid: trie.root_by_tsid,
+                            tokenizer_state_to_tsid,
+                            internal_token_to_originals,
+                        },
+                    ));
+                }
             }
-            let boundary_num_tsids = boundary_id_map.num_tsids() as usize;
-            let tokenizer_state_to_tsid = segmented_boundary_state_to_tsid
-                .clone()
-                .unwrap_or(boundary_id_map.tokenizer_states.original_to_internal);
-            debug_assert_eq!(
-                tokenizer_state_to_tsid
-                    .iter()
-                    .copied()
-                    .max()
-                    .map_or(0, |value| value as usize + 1),
-                boundary_num_tsids,
-                "segmented boundary raw-state map must cover the private TSID coordinate",
-            );
-            let internal_token_to_originals = boundary_id_map.vocab_tokens.internal_to_originals;
-            let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
-                "segmented component metadata must exist before boundary metadata",
-            );
-            if compose_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} build_ms={:.3}",
-                    parser_nwa.num_states(),
-                    parser_nwa.num_transitions(),
-                    parser_nwa.start_states().len(),
-                    tokenizer_state_to_tsid.iter().copied().max().map_or(0, |v| v as usize + 1),
-                    internal_token_to_originals.len(),
-                    boundary_build_ms,
-                );
-            }
-            overlay.segmented_boundary_parser =
-                Some(Box::new(crate::runtime::SegmentedBoundaryParser {
-                    parser_nwa,
-                    signed_stack_effects,
-                    tokenizer_state_to_tsid,
-                    internal_token_to_originals,
-                }));
         }
 
         if compose_profile_enabled() {
@@ -14798,32 +19402,15 @@ pub(crate) fn compose_constraints_owned_parent(
         }
         let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
         let parser_runtime_cache_ms = 0.0;
-        let token_cache_prebuild_ms = 0.0;
+        let token_cache_prebuild_ms = token_mask_cache_ms;
 
-        let finalize_started_at = Instant::now();
-        let lexer_product_started_at = Instant::now();
-        let lexer_product_report = maybe_install_runtime_lexer_product(
-            &mut result.constraint,
-            structural_report.terminal_aliases,
-            components_have_no_runtime_product,
-        );
-        if compose_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][constraint_runtime_lexer_product] attempted={} selected={} parser_overlap={} terminal_aliases={} source_states={} product_states={} source_transitions={} product_transitions={} multi_tsid_product_states={} total_ms={:.3}",
-                lexer_product_report.attempted,
-                lexer_product_report.selected,
-                lexer_product_report.parser_overlap,
+        let finalize_ms = overlapped_finalize_ms.unwrap_or_else(|| {
+            finalize_owned_composed_constraint_runtime(
+                &mut result.constraint,
                 structural_report.terminal_aliases,
-                lexer_product_report.source_states,
-                lexer_product_report.product_states,
-                lexer_product_report.source_transitions,
-                lexer_product_report.product_transitions,
-                lexer_product_report.multi_tsid_product_states,
-                lexer_product_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        result.constraint.rebuild_runtime_caches();
-        let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                components_have_no_runtime_product,
+            )
+        });
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms=0.000 boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} parser_runtime_cache_ms={parser_runtime_cache_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
@@ -14926,9 +19513,10 @@ pub(crate) fn compose_constraints_owned_parent(
                     break;
                 };
                 segmented_components.push(crate::runtime::SegmentedParserComponent {
-                    constraint: Box::new(source),
+                    constraint: Arc::new(source),
                     tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
                     terminal_offset: result.terminal_offsets[component_index],
+                    root_disallowed_terminal: None,
                     global_to_local_parser_state,
                 });
             }
@@ -14941,7 +19529,9 @@ pub(crate) fn compose_constraints_owned_parent(
                     repair_terminals: vec![false; num_terminals],
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
+                    segmented_component_union_root_dispatch: Vec::new(),
                     segmented_boundary_parser: None,
+            segmented_boundary_terminal_trie: None,
                 }
             });
             overlay.segmented_parser_components = segmented_components;
@@ -14969,8 +19559,11 @@ pub(crate) fn compose_constraints_owned_parent(
         && let Some(work) = boundary_work.take()
     {
         let started_at = Instant::now();
-        let (parser_nwa, boundary_id_map, template_cache, signed_stack_effects) =
-            work.materialize_positive_nwa(&result.constraint.table)?;
+        let (positive_parser, boundary_id_map, template_cache) =
+            work.materialize_positive_parser(&result.constraint.table)?;
+        positive_parser.ensure_positive()?;
+        let parser_dwa = positive_parser.into_runtime_dwa(&result.constraint.table);
+        ensure_positive_runtime_parser_dwa(&parser_dwa)?;
         if let Some(template_cache) = template_cache {
             result.constraint.composition_parser_templates_by_terminal = template_cache;
         }
@@ -14995,23 +19588,24 @@ pub(crate) fn compose_constraints_owned_parent(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
+                segmented_component_union_root_dispatch: Vec::new(),
                 segmented_boundary_parser: None,
+            segmented_boundary_terminal_trie: None,
             }
         });
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} starts={} tsids={} token_classes={} build_ms={:.3}",
-                parser_nwa.num_states(),
-                parser_nwa.num_transitions(),
-                parser_nwa.start_states().len(),
+                "[glrmask/profile][constraint_segmented_boundary_parser] states={} transitions={} deterministic=true tsids={} token_classes={} positive_only=true build_ms={:.3}",
+                parser_dwa.num_states(),
+                parser_dwa.num_transitions(),
                 tokenizer_state_to_tsid.iter().copied().max().map_or(0, |v| v as usize + 1),
                 internal_token_to_originals.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
         overlay.segmented_boundary_parser = Some(Box::new(crate::runtime::SegmentedBoundaryParser {
-            parser_nwa,
-            signed_stack_effects,
+            parser_dwa,
+            compact_parser_dwa: None,
             tokenizer_state_to_tsid,
             internal_token_to_originals,
         }));
@@ -15834,6 +20428,86 @@ table: &child.constraint.table,
         );
         assert_eq!(expanded[&encode_positive_label(11)][0].0, 2);
         assert_eq!(expanded[&encode_positive_label(20)][0].0, 2);
+    }
+
+    #[test]
+    fn fast_reverse_hashcons_matches_exact_structural_quotient_on_weighted_dags() {
+        fn weight(start: u32, end: u32) -> Weight {
+            Weight::from_token_set_for_tsid(
+                0,
+                RangeSetBlaze::from_iter([start..=end]),
+            )
+        }
+
+        fn generated(seed: u32) -> NWA {
+            // Construct duplicate sub-DAGs deliberately.  Every edge points to
+            // a larger old state id, so the graph is acyclic; paired states use
+            // distinct old targets whose suffixes are nevertheless equivalent.
+            let mut nwa = NWA::new(1, 63);
+            for _ in 0..14 {
+                nwa.add_state();
+            }
+            let full = Weight::all();
+            let narrow = weight(seed % 16, (seed % 16) + 7);
+            nwa.set_final_weight(12, narrow.clone());
+            nwa.set_final_weight(13, narrow.clone());
+            for (left, right, left_target, right_target, label) in [
+                (10, 11, 12, 13, 1),
+                (8, 9, 10, 11, 2),
+                (6, 7, 8, 9, DEFAULT_LABEL),
+                (4, 5, 6, 7, 3),
+                (2, 3, 4, 5, 4),
+                (0, 1, 2, 3, 5),
+            ] {
+                nwa.add_transition(left, label, left_target, narrow.clone());
+                nwa.add_transition(right, label, right_target, narrow.clone());
+                if label != DEFAULT_LABEL {
+                    nwa.add_epsilon(left, left_target, full.clone());
+                    nwa.add_epsilon(right, right_target, full.clone());
+                }
+                if (left + seed) % 3 == 0 {
+                    nwa.set_final_weight(left, full.clone());
+                    nwa.set_final_weight(right, full.clone());
+                }
+            }
+            nwa.set_start_states(vec![0, 1]);
+            nwa
+        }
+
+        for seed in 0..64 {
+            let input = generated(seed);
+            let reference = reverse_hashcons_positive_acyclic_nwa(input.clone());
+            let reverse_topo = full_nwa_topological_order(&input)
+                .expect("generated quotient graph must be acyclic")
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+            let fast = reverse_hashcons_positive_acyclic_nwa_fast(input.clone());
+            let reused = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
+                input,
+                Some(reverse_topo),
+            );
+            assert_eq!(
+                fast.start_states(),
+                reference.start_states(),
+                "fast quotient start states differ for seed {seed}",
+            );
+            assert_eq!(
+                fast.states(),
+                reference.states(),
+                "fast quotient structure differs from exact structural quotient for seed {seed}",
+            );
+            assert_eq!(
+                reused.start_states(),
+                reference.start_states(),
+                "reused-topology quotient start states differ for seed {seed}",
+            );
+            assert_eq!(
+                reused.states(),
+                reference.states(),
+                "reused-topology quotient differs from exact structural quotient for seed {seed}",
+            );
+        }
     }
 
     #[test]
