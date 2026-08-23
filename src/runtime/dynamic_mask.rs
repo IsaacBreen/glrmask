@@ -4651,7 +4651,7 @@ mod tests {
                     continue;
                 }
 
-                for (&token_id, bytes) in constraint.token_bytes.iter() {
+                for (token_id, bytes) in constraint.token_bytes_iter() {
                     let expected = token_allowed(&static_mask, token_id);
                     let mut advanced = state.clone();
                     let accepted = advanced.commit_bytes(bytes).is_ok();

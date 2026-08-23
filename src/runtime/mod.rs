@@ -6,6 +6,7 @@ mod finalize;
 mod mask;
 pub(crate) mod mask_mapping;
 mod serde;
+pub(crate) use serde::compact_large_non_dwa_weight_runtime;
 mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
@@ -17,6 +18,7 @@ pub(crate) use artifact::{
     SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
+pub(crate) use artifact::token_bytes_artifact_serde::PackedTokenBytes;
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]

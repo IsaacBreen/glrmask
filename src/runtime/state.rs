@@ -631,7 +631,7 @@ impl<'a> ConstraintState<'a> {
         let mut saw_token = false;
 
         for_each_set_bit(mask, |token_id| {
-            let Some(token_bytes) = self.constraint.token_bytes.get(&token_id) else {
+            let Some(token_bytes) = self.constraint.token_bytes_for_id(token_id) else {
                 return;
             };
             let Some(byte) = token_bytes.first().copied() else {
@@ -677,7 +677,7 @@ impl<'a> ConstraintState<'a> {
         let mut best_match = None;
         let mut blocked_by_longer_token = false;
 
-        for (&token_id, token_bytes) in self.constraint.token_bytes.iter() {
+        for (token_id, token_bytes) in self.constraint.token_bytes_iter() {
             if token_bytes.is_empty() {
                 continue;
             }

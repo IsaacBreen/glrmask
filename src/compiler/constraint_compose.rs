@@ -79,8 +79,8 @@ use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
-    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput, compose_subgrammar_tables,
-    compose_subgrammar_tables_explicit,
+    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput,
+    compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
 };
 use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
@@ -845,14 +845,15 @@ fn build_direct_component_state_coordinates_from_constraints(
         if constraint.state_to_internal_tsid.len() != constraint.tokenizer.num_states() as usize {
             return Err("component tokenizer-state map does not cover its runtime tokenizer".into());
         }
-        let local_tsid_count = constraint.internal_tsid_to_states.len();
+        let internal_tsid_to_states = constraint.internal_tsid_groups();
+        let local_tsid_count = internal_tsid_to_states.len();
         if local_tsid_count == 0 {
             return Err("component tokenizer-state map contains no internal TSIDs".into());
         }
         let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
 
         if tokenizer_tsid_relation_is_singleton(constraint) {
-            for (local_tsid, local_states) in constraint.internal_tsid_to_states.iter().enumerate() {
+            for (local_tsid, local_states) in internal_tsid_to_states.iter().enumerate() {
                 if local_states.is_empty() {
                     continue;
                 }
@@ -1104,7 +1105,7 @@ fn build_direct_component_token_coordinates(
     let mut local_to_global_tokens = components
         .iter()
         .map(|component| {
-            vec![Vec::<u32>::new(); component.constraint.internal_token_to_tokens.len()]
+            vec![Vec::<u32>::new(); component.constraint.internal_token_count()]
         })
         .collect::<Vec<_>>();
 
@@ -1145,76 +1146,87 @@ fn build_direct_component_token_coordinates(
                 Ok(())
             };
 
-        let singleton_fast = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
-        let dense_child_buckets = std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
+        let singleton_fast =
+            std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_SINGLETON_FAST").is_none();
+        let dense_child_buckets =
+            std::env::var_os("GLRMASK_DISABLE_TOKEN_COORD_DENSE_CHILD_BUCKETS").is_none();
         if dense_child_buckets {
-            let child_class_count = child.internal_token_to_tokens.len();
+            let child_class_count = child.internal_token_count();
             let mut buckets = (0..child_class_count)
                 .map(|_| Vec::<u32>::new())
                 .collect::<Vec<_>>();
             let mut touched = Vec::<usize>::new();
             let mut touched_flags = vec![false; child_class_count];
             let mut unmapped = Vec::<u32>::new();
-            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
-                if singleton_fast && originals.len() == 1 {
-                    let original = originals[0];
-                    if selected_original.get(original as usize).copied().unwrap_or(false) {
-                        let child_local = child
-                            .original_token_to_internal
+
+            if let Some(parent_token_groups) = parent.internal_token_groups() {
+                for (parent_local, originals) in parent_token_groups.iter().enumerate() {
+                    if singleton_fast && originals.len() == 1 {
+                        let original = originals[0];
+                        if selected_original
                             .get(original as usize)
                             .copied()
+                            .unwrap_or(false)
+                        {
+                            let child_local = child
+                                .original_token_internal_at(original)
+                                .unwrap_or(u32::MAX);
+                            add_pair_class(vec![original], parent_local as u32, child_local)?;
+                        }
+                        continue;
+                    }
+                    for &original in originals {
+                        if !selected_original
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        let child_local = child
+                            .original_token_internal_at(original)
                             .unwrap_or(u32::MAX);
-                        add_pair_class(vec![original], parent_local as u32, child_local)?;
+                        if child_local == u32::MAX {
+                            unmapped.push(original);
+                            continue;
+                        }
+                        let child_index = child_local as usize;
+                        if child_index >= child_class_count {
+                            return Err(format!(
+                                "component 1 token class {child_local} lies outside its internal token domain"
+                            ));
+                        }
+                        if !touched_flags[child_index] {
+                            touched_flags[child_index] = true;
+                            touched.push(child_index);
+                        }
+                        buckets[child_index].push(original);
                     }
-                    continue;
-                }
-                for &original in originals {
-                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
-                        continue;
+                    touched.sort_unstable();
+                    for child_index in touched.drain(..) {
+                        touched_flags[child_index] = false;
+                        let originals = std::mem::take(&mut buckets[child_index]);
+                        add_pair_class(originals, parent_local as u32, child_index as u32)?;
                     }
-                    let child_local = child
-                        .original_token_to_internal
-                        .get(original as usize)
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    if child_local == u32::MAX {
-                        unmapped.push(original);
-                        continue;
+                    if !unmapped.is_empty() {
+                        add_pair_class(
+                            std::mem::take(&mut unmapped),
+                            parent_local as u32,
+                            u32::MAX,
+                        )?;
                     }
-                    let child_index = child_local as usize;
-                    if child_index >= child_class_count {
-                        return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
-                    }
-                    if !touched_flags[child_index] {
-                        touched_flags[child_index] = true;
-                        touched.push(child_index);
-                    }
-                    buckets[child_index].push(original);
-                }
-                touched.sort_unstable();
-                for child_index in touched.drain(..) {
-                    touched_flags[child_index] = false;
-                    let originals = std::mem::take(&mut buckets[child_index]);
-                    add_pair_class(originals, parent_local as u32, child_index as u32)?;
-                }
-                if !unmapped.is_empty() {
-                    add_pair_class(std::mem::take(&mut unmapped), parent_local as u32, u32::MAX)?;
                 }
             }
 
             for &original in original_token_ids {
                 let parent_local = parent
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX);
                 if parent_local != u32::MAX {
                     continue;
                 }
                 let child_local = child
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX);
                 if child_local == u32::MAX {
                     unmapped.push(original);
@@ -1222,7 +1234,9 @@ fn build_direct_component_token_coordinates(
                 }
                 let child_index = child_local as usize;
                 if child_index >= child_class_count {
-                    return Err(format!("component 1 token class {child_local} lies outside its internal token domain"));
+                    return Err(format!(
+                        "component 1 token class {child_local} lies outside its internal token domain"
+                    ));
                 }
                 if !touched_flags[child_index] {
                     touched_flags[child_index] = true;
@@ -1240,50 +1254,52 @@ fn build_direct_component_token_coordinates(
                 add_pair_class(std::mem::take(&mut unmapped), u32::MAX, u32::MAX)?;
             }
         } else {
-            for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
-                if singleton_fast && originals.len() == 1 {
-                    let original = originals[0];
-                    if selected_original.get(original as usize).copied().unwrap_or(false) {
-                        let child_local = child
-                            .original_token_to_internal
+            if let Some(parent_token_groups) = parent.internal_token_groups() {
+                for (parent_local, originals) in parent_token_groups.iter().enumerate() {
+                    if singleton_fast && originals.len() == 1 {
+                        let original = originals[0];
+                        if selected_original
                             .get(original as usize)
                             .copied()
-                            .unwrap_or(u32::MAX);
-                        add_pair_class(vec![original], parent_local as u32, child_local)?;
-                    }
-                    continue;
-                }
-                let mut groups = BTreeMap::<u32, Vec<u32>>::new();
-                for &original in originals {
-                    if !selected_original.get(original as usize).copied().unwrap_or(false) {
+                            .unwrap_or(false)
+                        {
+                            let child_local = child
+                                .original_token_internal_at(original)
+                                .unwrap_or(u32::MAX);
+                            add_pair_class(vec![original], parent_local as u32, child_local)?;
+                        }
                         continue;
                     }
-                    let child_local = child
-                        .original_token_to_internal
-                        .get(original as usize)
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    groups.entry(child_local).or_default().push(original);
-                }
-                for (child_local, originals) in groups {
-                    add_pair_class(originals, parent_local as u32, child_local)?;
+                    let mut groups = BTreeMap::<u32, Vec<u32>>::new();
+                    for &original in originals {
+                        if !selected_original
+                            .get(original as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        let child_local = child
+                            .original_token_internal_at(original)
+                            .unwrap_or(u32::MAX);
+                        groups.entry(child_local).or_default().push(original);
+                    }
+                    for (child_local, originals) in groups {
+                        add_pair_class(originals, parent_local as u32, child_local)?;
+                    }
                 }
             }
 
             let mut parent_unmapped = BTreeMap::<u32, Vec<u32>>::new();
             for &original in original_token_ids {
                 let parent_local = parent
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX);
                 if parent_local != u32::MAX {
                     continue;
                 }
                 let child_local = child
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX);
                 parent_unmapped.entry(child_local).or_default().push(original);
             }
@@ -1301,7 +1317,6 @@ fn build_direct_component_token_coordinates(
             local_to_global_tokens,
         ));
     }
-
     let mut add_token_class = |originals: Vec<u32>, tuple: Vec<u32>| -> Result<(), String> {
         if originals.is_empty() || tuple.iter().all(|&local| local == u32::MAX) {
             return Ok(());
@@ -1330,7 +1345,10 @@ fn build_direct_component_token_coordinates(
     };
 
     let parent = components[0].constraint;
-    for (parent_local, originals) in parent.internal_token_to_tokens.iter().enumerate() {
+    let parent_token_groups = parent
+        .internal_token_groups()
+        .ok_or_else(|| "composed parent has no explicit internal-token partition".to_owned())?;
+    for (parent_local, originals) in parent_token_groups.iter().enumerate() {
         let mut groups = BTreeMap::<Vec<u32>, Vec<u32>>::new();
         for &original in originals {
             if !selected_original
@@ -1345,9 +1363,7 @@ fn build_direct_component_token_coordinates(
                 .map(|component| {
                     component
                         .constraint
-                        .original_token_to_internal
-                        .get(original as usize)
-                        .copied()
+                        .original_token_internal_at(original)
                         .unwrap_or(u32::MAX)
                 })
                 .collect::<Vec<_>>();
@@ -1363,11 +1379,7 @@ fn build_direct_component_token_coordinates(
 
     let mut parent_unmapped = BTreeMap::<Vec<u32>, Vec<u32>>::new();
     for &original in original_token_ids {
-        let parent_local = parent
-            .original_token_to_internal
-            .get(original as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
+        let parent_local = parent.original_token_internal_at(original).unwrap_or(u32::MAX);
         if parent_local != u32::MAX {
             continue;
         }
@@ -1376,9 +1388,7 @@ fn build_direct_component_token_coordinates(
             .map(|component| {
                 component
                     .constraint
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX)
             })
             .collect::<Vec<_>>();
@@ -3380,6 +3390,36 @@ fn component_tokenizer_state_layout(components: &[&Constraint]) -> (Vec<u32>, us
     (offsets, next_state as usize)
 }
 
+/// Reconstruct the merged terminal-expression sidecar when one or more loaded
+/// components kept source expressions deferred outside their tokenizers.
+/// Fresh components normally let `Tokenizer` merge these directly, so callers
+/// only need this when the merged tokenizer otherwise has no expression list.
+fn merged_retained_terminal_exprs(
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    total_terminals: u32,
+) -> Option<Vec<crate::automata::regex::Expr>> {
+    if components.len() != terminal_offsets.len() {
+        return None;
+    }
+    let mut merged = vec![None; total_terminals as usize];
+    for (component, &offset) in components.iter().zip(terminal_offsets) {
+        let exprs = component.retained_terminal_exprs()?;
+        if exprs.len() != component.tokenizer.num_terminals() as usize {
+            return None;
+        }
+        for (local_terminal, expr) in exprs.iter().enumerate() {
+            let global = offset as usize + local_terminal;
+            let slot = merged.get_mut(global)?;
+            if slot.is_some() {
+                return None;
+            }
+            *slot = Some(expr.clone());
+        }
+    }
+    merged.into_iter().collect()
+}
+
 fn component_tokenizer_state_layout_owned_parent(
     components: &[&Constraint],
 ) -> (Vec<u32>, usize) {
@@ -4376,14 +4416,12 @@ fn boundary_candidate_state_ranges_by_token(
             {
                 continue;
             }
-            let internal = if constraint.internal_token_to_tokens.is_empty() {
-                original
-            } else {
+            let internal = if constraint.has_original_token_map() {
                 constraint
-                    .original_token_to_internal
-                    .get(original as usize)
-                    .copied()
+                    .original_token_internal_at(original)
                     .unwrap_or(u32::MAX)
+            } else {
+                original
             };
             if internal == u32::MAX {
                 continue;
@@ -4455,10 +4493,11 @@ fn boundary_candidate_state_ranges_by_token_reference(
         } else {
             Box::new(constraint.possible_matches.values())
         };
+        let token_groups = constraint.internal_token_groups();
         for weight in weights {
             for (start_tsid, end_tsid, internal_tokens) in weight.range_entries() {
                 for internal_token in internal_tokens.iter() {
-                    if constraint.internal_token_to_tokens.is_empty() {
+                    let Some(token_groups) = token_groups else {
                         if candidate_tokens.contains(&internal_token)
                             && vocab
                                 .entries_map()
@@ -4472,10 +4511,8 @@ fn boundary_candidate_state_ranges_by_token_reference(
                             ));
                         }
                         continue;
-                    }
-                    let Some(originals) = constraint
-                        .internal_token_to_tokens
-                        .get(internal_token as usize)
+                    };
+                    let Some(originals) = token_groups.get(internal_token as usize)
                     else {
                         continue;
                     };
@@ -4531,7 +4568,7 @@ fn candidate_start_state_groups_for_token(
             let constraint = components[component_index];
             let state_offset = tokenizer_state_offsets[component_index];
             for tsid in start_tsid..=end_tsid {
-                let Some(states) = constraint.internal_tsid_to_states.get(tsid as usize) else {
+                let Some(states) = constraint.internal_tsid_groups().get(tsid as usize) else {
                     continue;
                 };
                 let mut representative = None;
@@ -4684,6 +4721,7 @@ fn boundary_token_prefilter(
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             summaries[terminal_offset + local_terminal] = Some(
                 component
@@ -4712,6 +4750,7 @@ fn boundary_token_prefilter(
     let mut conservative_first = U8Set::empty();
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             let global_terminal = terminal_offset + local_terminal;
             if !seed_terminals
@@ -4721,7 +4760,7 @@ fn boundary_token_prefilter(
             {
                 continue;
             }
-            let Some(expr) = component.tokenizer.terminal_expr(local_terminal as u32) else {
+            let Some(expr) = component.retained_terminal_expr(local_terminal as u32) else {
                 // Missing retained source is rare and cannot justify an unsafe
                 // exclusion. Fall back to the conservative first-byte summary.
                 conservative_first |= summaries[global_terminal]
@@ -4782,6 +4821,7 @@ fn boundary_token_prefilter(
     if allow_suffix_seed {
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
+        let token_groups = component.internal_token_groups();
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             if !seed_terminals
                 .get(terminal_offset + local_terminal)
@@ -4795,7 +4835,16 @@ fn boundary_token_prefilter(
             };
             for (_, _, internal_tokens) in weight.range_entries() {
                 for internal_token in internal_tokens.iter() {
-                    if component.internal_token_to_tokens.is_empty() {
+                    if let Some(token_groups) = token_groups {
+                        if let Some(originals) = token_groups.get(internal_token as usize) {
+                            candidates.extend(originals.iter().copied().filter(|token| {
+                                vocab
+                                    .entries_map()
+                                    .get(token)
+                                    .is_some_and(|bytes| bytes.len() >= 2)
+                            }));
+                        }
+                    } else {
                         if vocab
                             .entries_map()
                             .get(&internal_token)
@@ -4803,15 +4852,6 @@ fn boundary_token_prefilter(
                         {
                             candidates.insert(internal_token);
                         }
-                    } else if let Some(originals) =
-                        component.internal_token_to_tokens.get(internal_token as usize)
-                    {
-                        candidates.extend(originals.iter().copied().filter(|token| {
-                            vocab
-                                .entries_map()
-                                .get(token)
-                                .is_some_and(|bytes| bytes.len() >= 2)
-                        }));
                     }
                 }
             }
@@ -6021,12 +6061,13 @@ fn component_state_coordinate_map(
     }
     for (component_index, component) in components.iter().enumerate() {
         let state_offset = tokenizer_state_offsets[component_index];
-        let local_tsid_count = component.internal_tsid_to_states.len();
+        let internal_tsid_to_states = component.internal_tsid_groups();
+        let local_tsid_count = internal_tsid_to_states.len();
         if local_tsid_count == 0 {
             return Err(format!("component {component_index} has no internal TSIDs"));
         }
         if tokenizer_tsid_relation_is_singleton(component) {
-            for local_states in &component.internal_tsid_to_states {
+            for local_states in internal_tsid_to_states {
                 let mut merged_states = Vec::with_capacity(local_states.len());
                 for &local_state in local_states {
                     let merged_state = state_offset
@@ -6275,7 +6316,7 @@ fn deterministic_weighted_prefix_dwa_from_small_acyclic_nwa(
             })
             .collect::<BTreeMap<_, _>>();
         states.push(DWAState {
-            transitions,
+            transitions: transitions.into(),
             final_weight: node.final_weight.filter(|weight| !weight.is_empty()),
         });
     }
@@ -9149,10 +9190,11 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
         .enumerate()
     {
         let source = component.constraint.as_ref();
-        let local_tsid_count = source.internal_tsid_to_states.len();
+        let source_tsid_groups = source.internal_tsid_groups();
+        let local_tsid_count = source_tsid_groups.len();
         let mut tsid_map = vec![Vec::<u32>::new(); local_tsid_count];
         for local_tsid in 0..local_tsid_count {
-            let Some(local_states) = source.internal_tsid_to_states.get(local_tsid) else {
+            let Some(local_states) = source_tsid_groups.get(local_tsid) else {
                 continue;
             };
             for &local_state in local_states {
@@ -9177,25 +9219,13 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
             tsid_map[local_tsid].dedup();
         }
 
-        let local_token_count = if !source.internal_token_to_tokens.is_empty() {
-            source.internal_token_to_tokens.len()
-        } else {
-            source
-                .original_token_to_internal
-                .iter()
-                .copied()
-                .filter(|&token| token != u32::MAX)
-                .max()
-                .map_or(0, |token| token as usize + 1)
-        };
+        let local_token_count = source.internal_token_count();
         let mut token_map = vec![Vec::<u32>::new(); local_token_count];
-        if !source.internal_token_to_tokens.is_empty() {
-            for (local, originals) in source.internal_token_to_tokens.iter().enumerate() {
+        if let Some(source_token_groups) = source.internal_token_groups() {
+            for (local, originals) in source_token_groups.iter().enumerate() {
                 for &original in originals {
                     let global = constraint
-                        .original_token_to_internal
-                        .get(original as usize)
-                        .copied()
+                        .original_token_internal_at(original)
                         .unwrap_or(u32::MAX);
                     if global != u32::MAX {
                         token_map[local].push(global);
@@ -9203,14 +9233,12 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
                 }
             }
         } else {
-            for (original, &local) in source.original_token_to_internal.iter().enumerate() {
+            for (original, &local) in source.original_token_map().iter().enumerate() {
                 if local == u32::MAX || local as usize >= token_map.len() {
                     continue;
                 }
                 let global = constraint
-                    .original_token_to_internal
-                    .get(original)
-                    .copied()
+                    .original_token_internal_at(original as u32)
                     .unwrap_or(u32::MAX);
                 if global != u32::MAX {
                     token_map[local as usize].push(global);
@@ -9232,7 +9260,7 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
             &mut weights,
             &tsid_map,
             &token_map,
-            constraint.internal_tsid_to_states.len(),
+            constraint.internal_tsid_groups().len(),
         );
     }
 
@@ -9244,8 +9272,8 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
             .0
     } else {
         let mut union = NWA::new(
-            constraint.internal_tsid_to_states.len() as u32,
-            constraint.internal_token_to_tokens.len().saturating_sub(1) as u32,
+            constraint.internal_tsid_groups().len() as u32,
+            constraint.internal_token_count().saturating_sub(1) as u32,
         );
         let mut starts = Vec::new();
         for automaton in &automata {
@@ -11666,10 +11694,7 @@ fn factor_one_terminal_seed_relations(
                 let local = raw_state.checked_sub(state_offset)?;
                 (local < component.tokenizer.num_states()).then_some(local)?
             };
-            let internal_token = component
-                .original_token_to_internal
-                .get(original_token as usize)
-                .copied()?;
+            let internal_token = component.original_token_internal_at(original_token)?;
             if internal_token == u32::MAX {
                 return None;
             }
@@ -16671,7 +16696,7 @@ fn constraint_ignore_expr(constraint: &Constraint) -> Option<&crate::automata::r
     constraint.ignore_expr.as_ref().or_else(|| {
         constraint
             .ignore_terminal
-            .and_then(|terminal| constraint.tokenizer.terminal_expr(terminal))
+            .and_then(|terminal| constraint.retained_terminal_expr(terminal))
     })
 }
 
@@ -16761,6 +16786,7 @@ fn components_have_no_compiled_eof_stack_rewrites(
 /// explicit-control linker remains the reference path for those cases.
 fn legacy_splice_has_only_byte_terminal_continuations(
     parent: &Constraint,
+    parent_rules: &[crate::grammar::flat::Rule],
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
     if children.is_empty() {
@@ -16780,11 +16806,11 @@ fn legacy_splice_has_only_byte_terminal_continuations(
                 .map(|special| special.terminal_id),
         )
         .collect::<BTreeSet<_>>();
-    let Some(augmented_start) = parent.table.rules.first().map(|rule| rule.lhs) else {
+    let Some(augmented_start) = parent_rules.first().map(|rule| rule.lhs) else {
         return false;
     };
     let analyzed = AnalyzedGrammar::from_composed_rules(
-        parent.table.rules.clone(),
+        parent_rules.to_vec(),
         parent.table.num_terminals,
         parent.terminal_display_names.clone(),
         parent.table.nonterminal_display_names.clone(),
@@ -17056,9 +17082,11 @@ fn build_composed_constraint_unfinalized(
         scoped_ignore_only_tokens: Vec::new(),
         scoped_ignore_prefix_fusions: Vec::new(),
         parser_dwa,
+        packed_parser_dwa: None,
         parser_top_accept: BTreeMap::new(),
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
+        packed_non_dwa_weights: None,
         direct_regular_wide_frontier_acceptance: Vec::new(),
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
@@ -17079,6 +17107,7 @@ fn build_composed_constraint_unfinalized(
         possible_matches_complete: true,
         state_to_internal_tsid,
         internal_tsid_to_states,
+        deferred_internal_tsid_to_states: Default::default(),
         composition_reset_tokens_by_terminal: Vec::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
@@ -17094,19 +17123,23 @@ fn build_composed_constraint_unfinalized(
         template_dfas_by_terminal,
         fast_template_dfas_by_terminal: Vec::new(),
         original_token_to_internal,
+        packed_original_token_to_internal: None,
+        deferred_original_token_to_internal: OnceLock::new(),
         internal_token_to_tokens,
+        deferred_internal_token_to_tokens: OnceLock::new(),
         token_bytes: vocab.entries_arc(),
+        packed_token_bytes: None,
         internal_token_bytes,
         token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
         word_group_buf_masks: Vec::new(),
-        pair_word_group_buf_masks: Vec::new(),
-        quad_word_group_buf_masks: Vec::new(),
-        super_word_group_buf_masks: Vec::new(),
-        mega_word_group_buf_masks: Vec::new(),
-        giga_word_group_buf_masks: Vec::new(),
+        pair_word_group_buf_masks: Default::default(),
+        quad_word_group_buf_masks: Default::default(),
+        super_word_group_buf_masks: Default::default(),
+        mega_word_group_buf_masks: Default::default(),
+        giga_word_group_buf_masks: Default::default(),
         word_group_sparse_masks: Vec::new(),
-        word_group_prefix_buf_masks: Vec::new(),
+        word_group_prefix_buf_masks: Default::default(),
         word_group_sparse_prefix_entries: Vec::new(),
         quad_group_sparse_masks: Vec::new(),
         quad_group_dense_masks: Vec::new(),
@@ -17117,20 +17150,22 @@ fn build_composed_constraint_unfinalized(
         all_tokens_buf_mask: Box::new([]),
         internal_token_dense_words: 0,
         weight_token_dense_masks: FxHashMap::default(),
+        packed_dwa_token_dense_masks: Default::default(),
         weight_token_buf_masks: FxHashMap::default(),
         weight_token_sparse_buf_masks: FxHashMap::default(),
         direct_sparse_weight_token_sets: FxHashSet::default(),
         seed_terminal_dense: FxHashMap::default(),
         seed_terminal_dense_fallback: Default::default(),
         seed_universe_dense: Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-        dwa_fast_transitions: Vec::new(),
+        dwa_fast_transitions: Default::default(),
         parser_runtime_caches_prebuilt: false,
         indexed_dag_dense_transitions: Vec::new(),
         indexed_dag_dense_finals: Vec::new(),
         tokenizer_fast_transitions,
         heavy_token_dense_masks: Vec::new(),
         heavy_token_indices: Vec::new(),
-        internal_token_buf_flat: Box::new([]),
+            internal_token_buf_flat: Box::new([]),
+            backed_internal_token_buf_flat: None,
         internal_token_buf_offsets: Box::new([]),
         total_internal_buf_cost: 0,
         heavy_total_cost: 0,
@@ -17140,6 +17175,12 @@ fn build_composed_constraint_unfinalized(
         final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
         parser_state_domain_labels,
         ignore_expr,
+        serialized_artifact_cache: None,
+        deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
+            deferred_composition_metadata_blob: None,
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
     };
     ConstraintComposition {
         constraint,
@@ -17267,6 +17308,17 @@ fn finalize_owned_composed_constraint_runtime_single_thread(
     })
 }
 
+fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option<Constraint>, String> {
+    if source.packed_parser_dwa.is_none() && source.deferred_composition_metadata_blob.is_none() {
+        return Ok(None);
+    }
+    let mut materialized = source.clone();
+    materialized.materialize_parser_dwa_for_compilation()?;
+    materialized.materialize_composition_metadata_for_compilation()?;
+    Ok(Some(materialized))
+}
+
+
 /// Compose already-compiled parent and child constraints. The component
 /// lexers, parse tables, parser DWAs, and possible-match tables are transported
 /// and reused; only the restricted cross-component boundary repair is compiled
@@ -17338,10 +17390,34 @@ pub(crate) fn compose_constraints(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    let materialized_parent = materialized_constraint_for_composition(parent)?;
+    let parent = materialized_parent.as_ref().unwrap_or(parent);
+    let materialized_children = children
+        .iter()
+        .map(|child| materialized_constraint_for_composition(child.constraint))
+        .collect::<Result<Vec<_>, _>>()?;
+    let normalized_children = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| CompiledSubgrammarInput {
+            placeholder_terminal: child.placeholder_terminal,
+            additional_placeholder_terminals: child.additional_placeholder_terminals,
+            constraint: materialized_children[index]
+                .as_ref()
+                .unwrap_or(child.constraint),
+        })
+        .collect::<Vec<_>>();
+    let children = normalized_children.as_slice();
+
     let total_started_at = Instant::now();
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let parent_rules = parent.retained_table_rules()?;
+    let child_rules = children
+        .iter()
+        .map(|child| child.constraint.retained_table_rules())
+        .collect::<Result<Vec<_>, String>>()?;
     let components_have_no_runtime_product = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -17349,14 +17425,11 @@ pub(crate) fn compose_constraints(
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
-    let vocab_entries = vocab.entries_arc();
     for (component_index, constraint) in std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if !Arc::ptr_eq(&constraint.token_bytes, &vocab_entries)
-            && constraint.token_bytes.as_ref() != vocab.entries_map()
-        {
+        if !constraint.token_bytes_match_vocab(vocab) {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));
@@ -17376,7 +17449,7 @@ pub(crate) fn compose_constraints(
             children.iter().map(|child| child.constraint.table.control_terminals.len()).collect::<Vec<_>>(),
             components_have_no_compiled_eof_stack_rewrites(parent, children),
             children.iter().all(|child| !child.constraint.table.embedded_start_nullable()),
-            legacy_splice_has_only_byte_terminal_continuations(parent, children),
+            legacy_splice_has_only_byte_terminal_continuations(parent, parent_rules, children),
             children.len());
     }
     let table_inputs = children
@@ -17398,21 +17471,25 @@ pub(crate) fn compose_constraints(
         && components_have_no_explicit_controls(parent, children)
         && components_have_no_compiled_eof_stack_rewrites(parent, children)
         && (all_children_nonnullable
-            || legacy_splice_has_only_byte_terminal_continuations(parent, children));
+            || legacy_splice_has_only_byte_terminal_continuations(parent, parent_rules, children));
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
-        compose_subgrammar_tables(
+        compose_subgrammar_tables_with_rules(
             &parent.table,
+            parent_rules,
             (!global_ignores).then_some(parent.ignore_terminal).flatten(),
             &table_inputs,
+            &child_rules,
         )?
     } else {
-        compose_subgrammar_tables_explicit(
+        compose_subgrammar_tables_explicit_with_rules(
             &parent.table,
+            parent_rules,
             (!global_ignores)
                 .then_some(parent.ignore_terminal)
                 .flatten(),
             &table_inputs,
+            &child_rules,
         )?
     };
     let structural_started_at = Instant::now();
@@ -17938,6 +18015,15 @@ pub(crate) fn compose_constraints(
             (boundary_repair, boundary_ms),
         )
     };
+    if tokenizer.terminal_exprs().is_none()
+        && let Some(exprs) = merged_retained_terminal_exprs(
+            &component_constraints,
+            &composed_table.terminal_offsets,
+            composed_table.table.num_terminals,
+        )
+    {
+        tokenizer.restore_terminal_exprs(Some(exprs))?;
+    }
     let (parser_artifacts, _component_top_accept) = parser_artifacts?;
     let boundary_repair = boundary_repair?;
     let union_started_at = Instant::now();
@@ -18081,6 +18167,34 @@ fn compose_constraints_owned_parent_impl(
     shared_children: Option<&[Arc<Constraint>]>,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    parent.materialize_parser_dwa_for_compilation()?;
+    parent.materialize_composition_metadata_for_compilation()?;
+    let materialized_children = children
+        .iter()
+        .map(|child| materialized_constraint_for_composition(child.constraint))
+        .collect::<Result<Vec<_>, _>>()?;
+    let materialized_any_child = materialized_children.iter().any(Option::is_some);
+    let normalized_children = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| CompiledSubgrammarInput {
+            placeholder_terminal: child.placeholder_terminal,
+            additional_placeholder_terminals: child.additional_placeholder_terminals,
+            constraint: materialized_children[index]
+                .as_ref()
+                .unwrap_or(child.constraint),
+        })
+        .collect::<Vec<_>>();
+    let children = normalized_children.as_slice();
+    // A packed child must be materialized into a compiler-owned clone, so the
+    // shared-Arc optimization can no longer refer to the exact compiler input.
+    let shared_children = if materialized_any_child {
+        None
+    } else {
+        shared_children
+    };
+
+    parent.serialized_artifact_cache = None;
     if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
         || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some()
     {
@@ -18118,6 +18232,11 @@ fn compose_constraints_owned_parent_impl(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
+    let parent_rules = parent.retained_table_rules()?;
+    let child_rules = children
+        .iter()
+        .map(|child| child.constraint.retained_table_rules())
+        .collect::<Result<Vec<_>, String>>()?;
     let components_have_no_runtime_product = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -18125,14 +18244,11 @@ fn compose_constraints_owned_parent_impl(
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
-    let vocab_entries = vocab.entries_arc();
     for (component_index, constraint) in std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if !Arc::ptr_eq(&constraint.token_bytes, &vocab_entries)
-            && constraint.token_bytes.as_ref() != vocab.entries_map()
-        {
+        if !constraint.token_bytes_match_vocab(vocab) {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));
@@ -18186,7 +18302,7 @@ fn compose_constraints_owned_parent_impl(
             children.iter().map(|child| child.constraint.table.control_terminals.len()).collect::<Vec<_>>(),
             components_have_no_compiled_eof_stack_rewrites(&parent, children),
             children.iter().all(|child| !child.constraint.table.embedded_start_nullable()),
-            legacy_splice_has_only_byte_terminal_continuations(&parent, children),
+            legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children),
             children.len());
     }
     let table_inputs = children
@@ -18208,23 +18324,27 @@ fn compose_constraints_owned_parent_impl(
         && components_have_no_explicit_controls(&parent, children)
         && components_have_no_compiled_eof_stack_rewrites(&parent, children)
         && (all_children_nonnullable
-            || legacy_splice_has_only_byte_terminal_continuations(&parent, children));
+            || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
     let table_started_at = Instant::now();
     let (composed_table_result, mut pre_table_base_discovery) = rayon::join(
         || {
             if use_legacy_splice {
-                compose_subgrammar_tables(
+                compose_subgrammar_tables_with_rules(
                     &parent.table,
+                    parent_rules,
                     (!global_ignores).then_some(parent.ignore_terminal).flatten(),
                     &table_inputs,
+                    &child_rules,
                 )
             } else {
-                compose_subgrammar_tables_explicit(
+                compose_subgrammar_tables_explicit_with_rules(
                     &parent.table,
+                    parent_rules,
                     (!global_ignores)
                         .then_some(parent.ignore_terminal)
                         .flatten(),
                     &table_inputs,
+                    &child_rules,
                 )
             }
         },
@@ -18775,7 +18895,27 @@ fn compose_constraints_owned_parent_impl(
     let tokenizer_fast_transitions = parent_fast_transitions
         .append_rebased_children(&child_fast_transitions)
         .unwrap_or_default();
+    let merged_exprs_for_restore = (parent.tokenizer.terminal_exprs().is_none()
+        || children
+            .iter()
+            .any(|child| child.constraint.tokenizer.terminal_exprs().is_none()))
+    .then(|| {
+        let components = std::iter::once(&parent)
+            .chain(children.iter().map(|child| child.constraint))
+            .collect::<Vec<_>>();
+        merged_retained_terminal_exprs(
+            &components,
+            &composed_table.terminal_offsets,
+            composed_table.table.num_terminals,
+        )
+    })
+    .flatten();
     let (mut tokenizer, tokenizer_state_offsets) = tokenizer_result;
+    if tokenizer.terminal_exprs().is_none()
+        && let Some(exprs) = merged_exprs_for_restore
+    {
+        tokenizer.restore_terminal_exprs(Some(exprs))?;
+    }
     if let Some(canonical) = merged_ignores.canonical {
         tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
     }
@@ -20009,8 +20149,9 @@ table: &child.constraint.table,
         let before = composed.table.num_states;
         let terminal_analysis = composition_terminal_classes(&parent, &children, &composed);
         assert!(
-            loaded_child.tokenizer.terminal_exprs().is_some(),
-            "current serialized artifacts should retain terminal proof expressions",
+            loaded_child.tokenizer.terminal_exprs().is_none()
+                && loaded_child.retained_terminal_exprs().is_some(),
+            "current serialized artifacts should retain terminal proof expressions lazily",
         );
         assert!(
             terminal_analysis
@@ -21337,8 +21478,14 @@ table: &child.table,
         let mut prepared_child = child.clone();
         prepared_parent.ensure_composition_reset_tokens_by_terminal();
         prepared_child.ensure_composition_reset_tokens_by_terminal();
-        let prepared_parent = Constraint::load(&prepared_parent.save()).unwrap();
-        let prepared_child = Constraint::load(&prepared_child.save()).unwrap();
+        let mut prepared_parent = Constraint::load(&prepared_parent.save()).unwrap();
+        let mut prepared_child = Constraint::load(&prepared_child.save()).unwrap();
+        prepared_parent
+            .materialize_composition_metadata_for_compilation()
+            .unwrap();
+        prepared_child
+            .materialize_composition_metadata_for_compilation()
+            .unwrap();
         assert_eq!(
             prepared_parent.composition_reset_tokens_by_terminal.len(),
             prepared_parent.tokenizer.num_terminals() as usize,
@@ -23938,14 +24085,14 @@ constraint: &middle,
         ) -> MappedArtifact<DWA> {
             for state in artifact.artifact_mut().states_mut() {
                 let old = std::mem::take(&mut state.transitions);
-                for (label, edge) in old {
+                for (&label, edge) in old.iter() {
                     let mapped = if label == DEFAULT_LABEL {
                         DEFAULT_LABEL
                     } else {
                         assert!(label >= 0, "{name}: unexpected negative terminal label {label}");
                         label + terminal_offset as i32
                     };
-                    assert!(state.transitions.insert(mapped, edge).is_none());
+                    assert!(state.transitions.insert(mapped, edge.clone()).is_none());
                 }
             }
             artifact
@@ -24003,14 +24150,14 @@ constraint: &middle,
                     default_rows += 1;
                 }
                 let old = std::mem::take(&mut state.transitions);
-                for (label, edge) in old {
+                for (&label, edge) in old.iter() {
                     let mapped = if label == DEFAULT_LABEL {
                         DEFAULT_LABEL
                     } else {
                         *mapping.get(&label).unwrap_or_else(|| panic!("{name}: no terminal mapping for explicit label {label}"))
                     };
                     assert!(
-                        state.transitions.insert(mapped, edge).is_none(),
+                        state.transitions.insert(mapped, edge.clone()).is_none(),
                         "{name}: terminal label remap merged distinct transitions onto {mapped}",
                     );
                 }

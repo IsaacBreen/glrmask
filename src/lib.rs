@@ -440,6 +440,7 @@ pub mod __private {
         fn terminal_display_name(&self, terminal_id: u32) -> Option<&str> {
             Constraint::terminal_display_name(self, terminal_id)
         }
+
     }
 
     impl DynamicConstraintExt for DynamicConstraint {

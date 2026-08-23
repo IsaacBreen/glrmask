@@ -382,13 +382,14 @@ pub(super) fn composition_terminal_classes(
     let needs_automata_fallback = automata_fallback_enabled
         && components
             .iter()
-            .any(|component| component.tokenizer.terminal_exprs().is_none());
+            .any(|component| component.retained_terminal_exprs().is_none());
     let token_group_fingerprints = needs_automata_fallback.then(|| {
         components
             .iter()
             .map(|component| {
                 component
-                    .internal_token_to_tokens
+                    .internal_token_groups()
+                    .unwrap_or(&[])
                     .iter()
                     .map(|originals| OriginalTokenSetFingerprint::from_originals(originals))
                     .collect::<Vec<_>>()
@@ -471,7 +472,7 @@ pub(super) fn composition_terminal_classes(
             let artifact_representative = representative_by_artifact_terminal
                 .get(&artifact_key)
                 .copied();
-            let expr = component.tokenizer.terminal_expr(local_terminal);
+            let expr = component.retained_terminal_expr(local_terminal);
             let expr_representative = expr
                 .and_then(|expr| representative_by_expr.get(expr).copied());
             let mut representative = artifact_representative.or(expr_representative);
