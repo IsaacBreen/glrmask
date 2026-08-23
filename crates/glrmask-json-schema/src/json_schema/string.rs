@@ -25,6 +25,20 @@ use super::pattern_splitting::{
     CountedPatternBranch,
 };
 
+
+const PROGRAMMATIC_JS_WS_REGEX: &str = r"[ \t\n\r]*";
+
+fn is_ascii_js_identifier_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || matches!(first, b'_' | b'$')) {
+        return false;
+    }
+    bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+}
+
 fn encoded_json_key_regex(encoded: &str) -> String {
     // Keep literal property spelling exactly as serde_json emits it.
     // This matches llguidance's builder.string(json_dumps(name)) behavior.
@@ -1526,8 +1540,47 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let exact = self.lower_literal_key_colon_exact_with_prefix(prefix, key);
+        if !self.dynamic_value_enabled() || !is_ascii_js_identifier_name(key) {
+            return exact;
+        }
 
-        exact
+        // JavaScript object literals permit both quoted and IdentifierName keys
+        // with arbitrary token whitespace around `:` and after a separating
+        // comma. Keep the ordinary JSON spelling as an alternative so this
+        // mode only broadens key syntax.
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
+        let key_regex = regex_escape(key);
+        let (quoted, unquoted) = if prefix == b", " {
+            (
+                GrammarExpr::RawRegex(format!(
+                    r#",{PROGRAMMATIC_JS_WS_REGEX}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+                GrammarExpr::RawRegex(format!(
+                    r#",{PROGRAMMATIC_JS_WS_REGEX}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+            )
+        } else if prefix.is_empty() {
+            (
+                GrammarExpr::RawRegex(format!(
+                    r#"{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+                GrammarExpr::RawRegex(format!(
+                    r#"{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+            )
+        } else {
+            let prefix_regex = regex_escape(&String::from_utf8_lossy(prefix));
+            (
+                GrammarExpr::RawRegex(format!(
+                    r#"{prefix_regex}{encoded_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+                GrammarExpr::RawRegex(format!(
+                    r#"{prefix_regex}{key_regex}:{PROGRAMMATIC_JS_WS_REGEX}"#
+                )),
+            )
+        };
+        choice(vec![exact, quoted, unquoted])
     }
 
     pub fn lower_literal_key_colon_with_prefix_and_suffix(

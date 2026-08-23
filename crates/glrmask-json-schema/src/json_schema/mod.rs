@@ -292,9 +292,41 @@ mod lexer_partition_policy_tests {
 /// Unsupported schema keywords are rejected while loading so the lowering phase
 /// is not forced to carry partially-understood JSON values.
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
+    schema_to_named_grammar_with_config(schema, JsonSchemaConfig::from_env())
+}
+
+/// Convert JSON Schema while allowing a caller-supplied dynamic-value
+/// subgrammar sentinel at nested property/array value positions. The root
+/// schema remains static and cannot be replaced by the sentinel.
+pub fn schema_to_named_grammar_with_dynamic_value_token(
+    schema: &Value,
+    token_id: u32,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.dynamic_value_token_id = Some(token_id);
+    schema_to_named_grammar_with_config(schema, config)
+}
+
+/// Convert JSON Schema for programmatic JavaScript values. `value_token_id`
+/// supplies opaque runtime values; `condition_token_id` supplies ordinary JS
+/// conditional tests. Conditional result arms remain recursively schema-aware.
+pub fn schema_to_named_grammar_with_programmatic_value_tokens(
+    schema: &Value,
+    value_token_id: u32,
+    condition_token_id: u32,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.dynamic_value_token_id = Some(value_token_id);
+    config.dynamic_condition_token_id = Some(condition_token_id);
+    schema_to_named_grammar_with_config(schema, config)
+}
+
+fn schema_to_named_grammar_with_config(
+    schema: &Value,
+    config: JsonSchemaConfig,
+) -> Result<NamedGrammar, GlrMaskError> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
-    let config = JsonSchemaConfig::from_env();
     // This scan is also reused by typed loading, avoiding separate walks for
     // oneOf coercion, definitions, local aliases, and references.
     let document_features = scan_document_features(schema);

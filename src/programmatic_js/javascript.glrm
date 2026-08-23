@@ -1,0 +1,783 @@
+start program;
+// Instruct the parser to ignore Whitespace and Comments between tokens.
+ignore IGNORE;
+
+
+nt program ::= statement_list?;
+
+// Lexical Grammar: Whitespace and Comments
+t IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | _COMMENT ;
+t _WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+t _COMMENT ::= _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT ;
+t _SINGLE_LINE_COMMENT ::= '//' ( [^\n\r]/utf8 )* ( '\r\n' | '\r' | '\n' ) ;
+t _MULTI_LINE_COMMENT ::= '/*' ( [^*]/utf8 | '*' [^/]/utf8 )* '*/' ;
+
+// Statements
+nt statement_list ::= statement+ ;
+
+nt statement ::= statement_with_else | statement_no_else ;
+
+nt statement_no_else ::= simple_statement | statement_prefix_chain simple_statement ;
+
+nt statement_with_else ::=
+    statement_if_no_else 'else' statement_no_else
+  | statement_with_else 'else' statement_no_else
+  ;
+
+nt statement_if_no_else ::=
+    if_prefix_chain simple_statement
+  | statement_prefix_chain if_prefix_chain simple_statement
+  ;
+
+nt statement_prefix_chain ::= statement_prefix | statement_prefix_chain statement_prefix ;
+nt statement_prefix ::= label_prefix | if_prefix | loop_prefix | with_prefix ;
+nt if_prefix_chain ::= if_prefix | if_prefix_chain if_prefix ;
+
+nt label_prefix ::= IDENTIFIER ':' ;
+nt if_prefix ::= 'if' '(' expression ')' ;
+
+nt loop_prefix ::=
+    'while' '(' expression ')'
+  | 'for' '(' DECLARATION_GAP_HEAD FOR_IN_OF_BINDING_HEAD expression ')'
+  | 'for' 'await' '(' DECLARATION_GAP_HEAD FOR_OF_BINDING_HEAD expression ')'
+  | 'for' '(' declaration_variable_list? ';' expression? ';' expression? ')'
+  | 'for' '(' declaration_variable_list? ';' expression? ';' left_hand_side_expression POSTFIX_FOR_END
+  | 'for' '(' expression? ';' expression? ';' expression? ')'
+  | 'for' '(' expression? ';' expression? ';' left_hand_side_expression POSTFIX_FOR_END
+  ;
+
+nt with_prefix ::= 'with' '(' expression ')' ;
+
+nt simple_statement ::=
+    block
+  | empty_statement
+  | declaration_statement
+  | switch_statement
+  | do_statement
+  | try_statement
+  | function_declaration
+  | return_statement
+  | break_statement
+  | continue_statement
+  | throw_statement
+  | debugger_statement
+  | class_declaration
+  | import_statement
+  | export_statement
+  | expression_statement
+  ;
+
+nt empty_statement ::= ';' ;
+
+// Note: Semicolon is optional to simulate Automatic Semicolon Insertion (ASI).
+// A real parser has complex rules for this.
+nt expression_statement ::=
+    expression ( ';' | ASI_LINE )
+  | postfix_update_statement
+  ;
+nt postfix_update_statement ::= left_hand_side_expression POSTFIX_STATEMENT_END ;
+
+nt block ::= '{' statement_list? '}' ;
+
+nt declaration_statement ::= declaration_variable_list ( ';' | ASI_LINE ) ;
+
+nt declaration_variable_list ::=
+    DECLARATION_GAP_HEAD variable_declaration_list
+  | DECLARATION_COMMENT_HEAD variable_declaration_list
+  | declaration_object_head ( ',' variable_declaration )*
+  | declaration_array_head ( ',' variable_declaration )*
+  ;
+nt declaration_object_head ::= DECLARATION_OBJECT_HEAD object_binding_pattern_tail ( '=' assignment_expression )? ;
+nt declaration_array_head ::= DECLARATION_ARRAY_HEAD array_binding_pattern_tail ( '=' assignment_expression )? ;
+
+nt variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
+
+nt variable_declaration ::=
+    IDENTIFIER_ASSIGNMENT_HEAD initializer_expression
+  | IDENTIFIER
+  | object_binding_pattern ( '=' assignment_expression )?
+  | array_binding_pattern ( '=' assignment_expression )?
+  ;
+
+nt initializer_expression ::= class_expression | assignment_expression ;
+
+nt do_statement ::= 'do' statement 'while' '(' expression ')' ';'? ;
+
+nt switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
+nt case_clauses ::= case_clause+ ;
+nt case_clause ::= 'case' expression ':' statement_list? ;
+nt default_clause ::= 'default' ':' statement_list? ;
+
+nt try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) ;
+nt catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
+nt finally_clause ::= 'finally' block ;
+
+nt function_declaration ::= FUNCTION_HEAD parameter_list? ')' block ;
+
+nt parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ',' '...' binding_pattern )? | '...' binding_pattern ;
+
+nt formal_parameter ::= binding_pattern ( '=' assignment_expression )? ;
+
+nt jump_terminator ::= ';' | ASI_LINE ;
+nt return_statement ::= 'return' expression? jump_terminator ;
+nt break_statement ::= 'break' IDENTIFIER? jump_terminator ;
+nt continue_statement ::= 'continue' IDENTIFIER? jump_terminator ;
+nt throw_statement ::= 'throw' expression jump_terminator ;
+nt debugger_statement ::= 'debugger' ';'? ;
+
+// Binding Patterns (for destructuring)
+nt binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
+nt object_binding_pattern ::= '{' object_binding_pattern_tail ;
+nt object_binding_pattern_tail ::= ( property_binding ( ',' property_binding )* ( ',' '...' IDENTIFIER )? | '...' IDENTIFIER )? ','? '}' ;
+nt property_binding ::= (IDENTIFIER ('=' assignment_expression)?) | (property_name ':' binding_pattern ('=' assignment_expression)?) ;
+nt array_binding_pattern ::= '[' array_binding_pattern_tail ;
+nt array_binding_pattern_tail ::= '...' binding_pattern ','? ELISION? ']' | ( ELISION? binding_element )? ( ',' ELISION? binding_element )* ( ',' '...' binding_pattern )? ','? ELISION? ']' ;
+nt binding_element ::= binding_pattern ('=' assignment_expression)? ;
+
+// ES6 Modules
+nt import_statement ::= 'import' ( import_clause 'from' _STRING_LITERAL | _STRING_LITERAL ) ';'? ;
+nt import_clause ::= default_import | named_imports | namespace_import | default_import ',' ( named_imports | namespace_import ) ;
+nt default_import ::= IDENTIFIER ;
+nt named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
+nt namespace_import ::= '*' 'as' IDENTIFIER ;
+nt import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
+nt export_statement ::=
+    'export' 'default' function_declaration
+  | 'export' 'default' class_expression
+  | 'export' 'default' expression jump_terminator
+  | 'export' '*' ( 'from' _STRING_LITERAL )? ';'?
+  | 'export' named_exports ( 'from' _STRING_LITERAL )? ';'?
+  | 'export' declaration_statement
+  | 'export' class_declaration
+  | 'export' function_declaration
+  ;
+nt named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
+nt export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
+
+// Expressions (Precedence from lowest to highest)
+nt expression ::= assignment_expression ( ',' assignment_expression )* ;
+
+nt assignment_expression ::= assignment_core | assignment_lhs_chain assignment_core ;
+nt assignment_core ::= yield_expression | arrow_function | conditional_expression ;
+nt assignment_non_arrow_expression ::= assignment_non_arrow_core | assignment_lhs_chain assignment_non_arrow_core ;
+nt assignment_non_arrow_core ::= yield_expression | conditional_expression ;
+nt assignment_non_arrow_non_yield_expression ::= conditional_expression | assignment_lhs_chain conditional_expression ;
+nt assignment_lhs_chain ::= assignment_prefix | assignment_lhs_chain assignment_prefix ;
+nt assignment_prefix ::= left_hand_side_expression '**=' | left_hand_side_expression ASSIGNMENT_OPERATOR ;
+
+nt arrow_function ::= arrow_chain ( block | assignment_non_arrow_expression ) ;
+nt arrow_chain ::= arrow_parameters '=>' | arrow_chain arrow_parameters '=>' ;
+nt arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
+
+nt conditional_expression ::= coalesce_expression | conditional_prefix_chain coalesce_expression ;
+nt conditional_prefix_chain ::= conditional_prefix | conditional_prefix_chain conditional_prefix ;
+nt conditional_prefix ::= coalesce_expression '?' assignment_expression ':' ;
+
+nt coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
+
+nt logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+
+nt logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+
+nt bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+
+nt bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+
+nt bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+
+nt equality_expression ::= relational_expression ( EQUALITY_OPERATOR relational_expression )* ;
+
+nt relational_expression ::=
+    shift_expression
+    ( RELATIONAL_OPERATOR shift_expression | RELATIONAL_WORD_OPERATOR shift_expression )*
+  | private_identifier 'in' shift_expression
+  ;
+
+nt shift_expression ::= additive_expression ( SHIFT_OPERATOR additive_expression )* ;
+
+nt additive_expression ::= multiplicative_expression ( ADDITIVE_OPERATOR multiplicative_expression )* ;
+
+nt multiplicative_expression ::= exponentiation_expression ( MULTIPLICATIVE_OPERATOR exponentiation_expression )* ;
+
+nt exponentiation_expression ::= unary_expression ( '**' unary_expression )* ;
+
+nt unary_expression ::=
+    postfix_expression
+  | UNARY_OPERATOR unary_expression
+  | UPDATE_OPERATOR left_hand_side_expression
+  ;
+
+nt postfix_expression ::= left_hand_side_expression ;
+
+nt left_hand_side_expression ::=
+    new_expression
+  | call_expression
+  ;
+
+nt new_expression ::= new_prefix_chain? member_expression ;
+nt new_prefix_chain ::= new_prefix | new_prefix_chain new_prefix ;
+nt new_prefix ::= 'new' ;
+
+nt call_expression ::=
+    member_expression arguments
+  | member_expression '?.' arguments
+  | super_call_expression
+  | call_expression arguments
+  | call_expression '?.' arguments
+  | call_expression '[' expression ']'
+  | call_expression '?.' '[' expression ']'
+  | call_expression '.' IDENTIFIER
+  | call_expression '?.' IDENTIFIER
+  | call_expression '.' private_identifier
+  | call_expression '?.' private_identifier
+  | call_expression TEMPLATE_LITERAL
+  ;
+
+nt super_call_expression ::= SUPER_CALL_HEAD arguments_tail ;
+nt arguments ::= '(' arguments_tail ;
+nt arguments_tail ::= ( assignment_expression ( ',' assignment_expression )* )? ')' ;
+
+nt member_expression ::= NUMERIC_LITERAL | member_expression_with_suffixes ;
+
+nt member_expression_with_suffixes ::=
+    primary_expression
+  | super_member_expression
+  | numeric_member_expression
+  | member_expression_with_suffixes '[' expression ']'
+  | member_expression_with_suffixes '?.' '[' expression ']'
+  | member_expression_with_suffixes '.' IDENTIFIER
+  | member_expression_with_suffixes '?.' IDENTIFIER
+  | member_expression_with_suffixes '.' private_identifier
+  | member_expression_with_suffixes '?.' private_identifier
+  | 'new' member_expression arguments
+  | member_expression_with_suffixes TEMPLATE_LITERAL
+  ;
+
+nt super_member_expression ::= SUPER_BRACKET_HEAD expression ']' | SUPER_DOT_HEAD ;
+
+nt numeric_member_expression ::=
+    NUMERIC_DOT_MEMBER_HEAD
+  | NUMERIC_DOT_PRIVATE_MEMBER_HEAD
+  | NUMERIC_SPACED_DOT_MEMBER_HEAD
+  | NUMERIC_SPACED_DOT_PRIVATE_MEMBER_HEAD
+  | NUMERIC_LITERAL '[' expression ']'
+  | NUMERIC_LITERAL '?.' '[' expression ']'
+  | NUMERIC_LITERAL '?.' IDENTIFIER
+  | NUMERIC_LITERAL TEMPLATE_LITERAL
+  ;
+
+nt primary_expression ::=
+    'this'
+  | 'new' '.' 'target'
+  | 'import' '(' assignment_expression ')'
+  | 'import' '.' 'meta'
+  | IDENTIFIER
+  | literal
+  | array_literal
+  | object_literal
+  | function_expression
+  | '(' expression ')'
+  ;
+
+nt function_expression ::= FUNCTION_HEAD parameter_list? ')' block ;
+
+nt yield_expression ::= yield_prefix_chain assignment_non_arrow_non_yield_expression? ;
+nt yield_prefix_chain ::= yield_prefix | yield_prefix_chain yield_prefix ;
+nt yield_prefix ::= 'yield' '*'? ;
+
+nt array_literal ::= '[' ( ELISION? array_element )? ( ',' ELISION? array_element )* ','? ELISION? ']' ;
+nt array_element ::= assignment_expression | '...' assignment_expression ;
+t ELISION ::= ','+ ;
+
+nt object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
+nt property_assignment ::=
+    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
+  | 'get' property_name '(' ')' block
+  | 'set' property_name '(' formal_parameter ')' block
+  | property_name ':' assignment_expression
+  | '...' assignment_expression
+  | IDENTIFIER // Shorthand property
+  ;
+nt property_name ::= IDENTIFIER | contextual_property_name | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
+nt contextual_property_name ::= 'async' | 'get' | 'set' | 'static' ;
+
+nt class_declaration ::=
+    CLASS_NAMED_BODY_HEAD class_body_tail
+  | CLASS_NAMED_EXTENDS_HEAD left_hand_side_expression class_body
+  ;
+nt class_expression ::=
+    class_declaration
+  | CLASS_ANON_BODY_HEAD class_body_tail
+  | CLASS_ANON_EXTENDS_HEAD left_hand_side_expression class_body
+  ;
+nt class_body ::= '{' class_body_tail ;
+nt class_body_tail ::= class_member* '}' ;
+nt class_member ::= method_definition ';'? | field_definition ';' | private_class_member | 'static' block | ';' ;
+nt field_definition ::= ('static')? property_name ('=' assignment_expression)? ;
+nt method_definition ::=
+    ('static')? property_name '(' parameter_list? ')' block
+  | ('static')? 'get' property_name '(' ')' block
+  | ('static')? 'set' property_name '(' formal_parameter ')' block
+  | ('static')? 'async' property_name '(' parameter_list? ')' block
+  | ('static')? '*' property_name '(' parameter_list? ')' block
+  | ('static')? 'async' '*' property_name '(' parameter_list? ')' block
+  ;
+nt private_class_member ::=
+    ('static')? PRIVATE_FIELD_ASSIGN_HEAD assignment_expression ';'
+  | ('static')? PRIVATE_FIELD_SEMI_HEAD
+  | ('static')? PRIVATE_METHOD_HEAD parameter_list? ')' block
+  | ('static')? 'get' PRIVATE_METHOD_HEAD ')' block
+  | ('static')? 'set' PRIVATE_METHOD_HEAD formal_parameter ')' block
+  | ('static')? 'async' PRIVATE_METHOD_HEAD parameter_list? ')' block
+  | ('static')? '*' PRIVATE_METHOD_HEAD parameter_list? ')' block
+  | ('static')? 'async' '*' PRIVATE_METHOD_HEAD parameter_list? ')' block
+  ;
+nt class_property_name ::= property_name | private_identifier ;
+nt private_identifier ::= '#' IDENTIFIER ;
+
+
+
+t DECLARATION_GAP_HEAD ::= ( 'var' | 'let' | 'const' ) _WS ;
+t DECLARATION_COMMENT_HEAD ::= ( 'var' | 'let' | 'const' ) ( ' ' | '\t' )* ( _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT ) ;
+t DECLARATION_OBJECT_HEAD ::= ( 'var' | 'let' | 'const' ) ( ' ' | '\t' | '\n' | '\r' )* '{' ;
+t DECLARATION_ARRAY_HEAD ::= ( 'var' | 'let' | 'const' ) ( ' ' | '\t' | '\n' | '\r' )* '[' ;
+t FOR_IN_OF_BINDING_HEAD ::= IDENTIFIER _WS ( 'in' | 'of' ) ;
+t FOR_OF_BINDING_HEAD ::= IDENTIFIER _WS 'of' ;
+t IDENTIFIER_ASSIGNMENT_HEAD ::= IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '=' ;
+t ASI_LINE ::= ( ' ' | '\t' )* ( '\r' '\n' | '\n' | '\r' ) ;
+t FUNCTION_HEAD ::=
+    ( 'async' _WS )? 'function' ( ' ' | '\t' | '\n' | '\r' )* '('
+  | ( 'async' _WS )? 'function' _WS IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '('
+  | ( 'async' _WS )? 'function' ( ' ' | '\t' | '\n' | '\r' )* '*' ( ' ' | '\t' | '\n' | '\r' )* '('
+  | ( 'async' _WS )? 'function' ( ' ' | '\t' | '\n' | '\r' )* '*' ( ' ' | '\t' | '\n' | '\r' )* IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '('
+  ;
+t CLASS_NAMED_BODY_HEAD ::= 'class' _WS IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '{' ;
+t CLASS_NAMED_EXTENDS_HEAD ::= 'class' _WS IDENTIFIER _WS 'extends' _WS ;
+t CLASS_ANON_BODY_HEAD ::= 'class' ( ' ' | '\t' | '\n' | '\r' )* '{' ;
+t CLASS_ANON_EXTENDS_HEAD ::= 'class' _WS 'extends' _WS ;
+t SUPER_CALL_HEAD ::= 'super' ( ' ' | '\t' | '\n' | '\r' )* '(' ;
+t SUPER_DOT_HEAD ::= 'super' ( ' ' | '\t' | '\n' | '\r' )* '.' IDENTIFIER ;
+t SUPER_BRACKET_HEAD ::= 'super' ( ' ' | '\t' | '\n' | '\r' )* '[' ;
+t PRIVATE_FIELD_ASSIGN_HEAD ::= '#' IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '=' ;
+t PRIVATE_FIELD_SEMI_HEAD ::= '#' IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* ';' ;
+t PRIVATE_METHOD_HEAD ::= '#' IDENTIFIER ( ' ' | '\t' | '\n' | '\r' )* '(' ;
+t IN_OF_OPERATOR ::= 'in' | 'of' ;
+
+t ASSIGNMENT_OPERATOR ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '&&=' | '||=' | '??=' ;
+t EQUALITY_OPERATOR ::= '==' | '!=' | '===' | '!==' ;
+t RELATIONAL_OPERATOR ::= '<' | '>' | '<=' | '>=' ;
+t RELATIONAL_WORD_OPERATOR ::= ( 'in' | 'instanceof' ) _WS ;
+t SHIFT_OPERATOR ::= '<<' | '>>' | '>>>' ;
+t ADDITIVE_OPERATOR ::= '+' | '-' ;
+t MULTIPLICATIVE_OPERATOR ::= '*' | '/' | '%' ;
+t UNARY_OPERATOR ::= 'delete' | 'void' | 'typeof' | '~' | '!' | 'await' ;
+t UPDATE_OPERATOR ::= '++' | '--' ;
+t POSTFIX_OPERATOR ::= '++' | '--' ;
+t POSTFIX_STATEMENT_END ::= ('++' | '--') ( ';' | ( ' ' | '\t' )* ( '\r' '\n' | '\n' | '\r' ) ) ;
+t POSTFIX_FOR_END ::= ('++' | '--') ( ' ' | '\t' | '\n' | '\r' )* ')' ;
+
+// Literals
+nt literal ::= STRING_LITERAL | OTHER_LITERAL | TEMPLATE_LITERAL ;
+
+t STRING_LITERAL ::= _STRING_LITERAL ;
+t NUMERIC_LITERAL ::= _NUMERIC_LITERAL ;
+t _MEMBER_TRIVIA ::= ( ' ' | '\t' | '\n' | '\r' | _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT )* ;
+t _MEMBER_GAP ::= ( ' ' | '\t' | '\n' | '\r' | _SINGLE_LINE_COMMENT | _MULTI_LINE_COMMENT )+ ;
+t NUMERIC_DOT_MEMBER_HEAD ::=
+    _DECIMAL_INTEGER_LITERAL '.' _DECIMAL_DIGITS? _EXPONENT_PART? '.' _MEMBER_TRIVIA IDENTIFIER
+  | _DECIMAL_INTEGER_LITERAL _EXPONENT_PART '.' _MEMBER_TRIVIA IDENTIFIER
+  | _HEX_LITERAL '.' _MEMBER_TRIVIA IDENTIFIER
+  | _BINARY_LITERAL '.' _MEMBER_TRIVIA IDENTIFIER
+  | _OCTAL_LITERAL '.' _MEMBER_TRIVIA IDENTIFIER
+  ;
+t NUMERIC_DOT_PRIVATE_MEMBER_HEAD ::=
+    _DECIMAL_INTEGER_LITERAL '.' _DECIMAL_DIGITS? _EXPONENT_PART? '.' _MEMBER_TRIVIA '#' IDENTIFIER
+  | _DECIMAL_INTEGER_LITERAL _EXPONENT_PART '.' _MEMBER_TRIVIA '#' IDENTIFIER
+  | _HEX_LITERAL '.' _MEMBER_TRIVIA '#' IDENTIFIER
+  | _BINARY_LITERAL '.' _MEMBER_TRIVIA '#' IDENTIFIER
+  | _OCTAL_LITERAL '.' _MEMBER_TRIVIA '#' IDENTIFIER
+  ;
+t NUMERIC_SPACED_DOT_MEMBER_HEAD ::= _NUMERIC_LITERAL _MEMBER_GAP '.' _MEMBER_TRIVIA IDENTIFIER ;
+t NUMERIC_SPACED_DOT_PRIVATE_MEMBER_HEAD ::= _NUMERIC_LITERAL _MEMBER_GAP '.' _MEMBER_TRIVIA '#' IDENTIFIER ;
+t OTHER_LITERAL ::= _NULL_LITERAL | _BOOLEAN_LITERAL | _BIGINT_LITERAL | _REGULAR_EXPRESSION_LITERAL ;
+
+t _NULL_LITERAL ::= 'null' ;
+t _BOOLEAN_LITERAL ::= 'true' | 'false' ;
+
+t _NUMERIC_LITERAL ::= _HEX_LITERAL | _BINARY_LITERAL | _OCTAL_LITERAL | _DECIMAL_LITERAL ;
+t _DECIMAL_LITERAL ::= _DECIMAL_INTEGER_LITERAL '.' _DECIMAL_DIGITS? _EXPONENT_PART? | _DECIMAL_INTEGER_LITERAL _EXPONENT_PART? ;
+t _DECIMAL_INTEGER_LITERAL ::= '0' | _NON_ZERO_DIGIT ( '_'? _DECIMAL_DIGIT )* ;
+t _DECIMAL_DIGITS ::= _DECIMAL_DIGIT ( '_'? _DECIMAL_DIGIT )* ;
+t _DECIMAL_DIGIT ::= [0-9] ;
+t _NON_ZERO_DIGIT ::= [1-9] ;
+t _EXPONENT_PART ::= ('e'|'E') ('+'|'-')? _DECIMAL_DIGITS ;
+t _HEX_LITERAL ::= '0' ('x'|'X') _HEX_DIGIT ( '_'? _HEX_DIGIT )* ;
+t _BINARY_LITERAL ::= '0' ('b'|'B') ('0'|'1') ( '_'? ('0'|'1') )* ;
+t _OCTAL_LITERAL ::= '0' ('o'|'O') ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7') ( '_'? ('0'|'1'|'2'|'3'|'4'|'5'|'6'|'7') )* ;
+t _BIGINT_LITERAL ::= (_DECIMAL_INTEGER_LITERAL | _HEX_LITERAL | _BINARY_LITERAL | _OCTAL_LITERAL) 'n' ;
+
+t _STRING_LITERAL ::= '"' ( [^"\\\n\r]/utf8 | _ESCAPE_SEQUENCE )* '"' | '\'' ( [^'\\\n\r]/utf8 | _ESCAPE_SEQUENCE )* '\'' ;
+t _ESCAPE_SEQUENCE ::= '\\' ( [\'"\\bfnrtv] | 'x' _HEX_DIGIT _HEX_DIGIT | 'u' _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT _HEX_DIGIT ) ;
+
+t _REGULAR_EXPRESSION_LITERAL ::= '/' _REGEX_BODY '/' _REGEX_FLAGS? ;
+t _REGEX_BODY ::= ( [^/\n\r\\]/utf8 | '\\' [^\n\r]/utf8 )+ ; // Any UTF-8 scalar except /, newline, or backslash, or an escaped non-line-terminator scalar.
+t _REGEX_FLAGS ::= [A-Za-z_$]+ ;
+
+//template_literal ::= '`' ( _TEMPLATE_CHARS | template_substitution )* '`' ;
+//_TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
+//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+//template_substitution ::= '${' expression '}' ;
+
+//template_literal ::= TEMPLATE_START template_middle* TEMPLATE_END ;
+//TEMPLATE_START ::= '`' ;
+//TEMPLATE_END ::= TEMPLATE_FILL '$'? '`' ;
+//TEMPLATE_MIDDLE ::= TEMPLATE_FILL '$' '{' ;
+//template_middle ::= TEMPLATE_MIDDLE expression '}' ;
+//TEMPLATE_FILL ::= (
+//    [^`$\\]
+//  | '\\' .
+//  | '$' (
+//      [^`\\]
+//    | '\\' .
+//    )
+//)* ;
+
+//template_literal ::= '';
+//template_literal ::= '`' 'asdfasdfasdfasdf' '`';
+
+//template_literal ::= TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHAR+ '`' ;
+//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+
+//template_literal ::= TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
+//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
+//_TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
+//_TEMPLATE_CHAR ::= [^`\\] | '\\' . ;
+
+//template_literal ::= TEMPLATE_LITERAL ;
+//TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
+t TEMPLATE_LITERAL ::= '`' _TEMPLATE_CHARS '`' ;
+t _TEMPLATE_CHARS ::= _TEMPLATE_CHAR+ ;
+t _TEMPLATE_CHAR ::= [^`\\]/utf8 | '\\' [^]/utf8 ;
+
+//template_literal ::= 'asdfasdfasdfasdfasdfsaf' ;
+
+// Identifiers
+t IDENTIFIER ::=
+    [ABCDEFGHIJKLMNOPQRSTUVWXYZhjkmpquxz$_] _IDENTIFIER_PART*
+  | 'a'
+  | 'a' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvxyz0123456789$_] _IDENTIFIER_PART*
+  | 'as'
+  | 'as' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'asy'
+  | 'asy' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'asyn'
+  | 'asyn' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'async' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'aw'
+  | 'aw' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'awa'
+  | 'awa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'awai'
+  | 'awai' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'await' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'b'
+  | 'b' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'br'
+  | 'br' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'bre'
+  | 'bre' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'brea'
+  | 'brea' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijlmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'break' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'c'
+  | 'c' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijkmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ca'
+  | 'ca' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cas'
+  | 'cas' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'case' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cat'
+  | 'cat' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'catc'
+  | 'catc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'catch' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cl'
+  | 'cl' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cla'
+  | 'cla' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'clas'
+  | 'clas' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'class' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'co'
+  | 'co' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'con'
+  | 'con' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqruvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cons'
+  | 'cons' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'const' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'cont'
+  | 'cont' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'conti'
+  | 'conti' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'contin'
+  | 'contin' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'continu'
+  | 'continu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'continue' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'd'
+  | 'd' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'de'
+  | 'de' [ABCDEFGHIJKLMNOPQRSTUVWXYZacdeghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'deb'
+  | 'deb' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debu'
+  | 'debu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debug'
+  | 'debug' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefhijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debugg'
+  | 'debugg' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debugge'
+  | 'debugge' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'debugger' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'def'
+  | 'def' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defa'
+  | 'defa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defau'
+  | 'defau' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'defaul'
+  | 'defaul' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'default' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'del'
+  | 'del' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'dele'
+  | 'dele' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'delet'
+  | 'delet' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'delete' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'do' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'e'
+  | 'e' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwyz0123456789$_] _IDENTIFIER_PART*
+  | 'el'
+  | 'el' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'els'
+  | 'els' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'else' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ex'
+  | 'ex' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exp'
+  | 'exp' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'expo'
+  | 'expo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'expor'
+  | 'expor' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'export' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ext'
+  | 'ext' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exte'
+  | 'exte' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'exten'
+  | 'exten' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'extend'
+  | 'extend' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'extends' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'f'
+  | 'f' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghjklmnpqstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fa'
+  | 'fa' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fal'
+  | 'fal' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fals'
+  | 'fals' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'false' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fi'
+  | 'fi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fin'
+  | 'fin' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fina'
+  | 'fina' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'final'
+  | 'final' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'finall'
+  | 'finall' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'finally' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fo'
+  | 'fo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'for' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fr'
+  | 'fr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fro'
+  | 'fro' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'from' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fu'
+  | 'fu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'fun'
+  | 'fun' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'func'
+  | 'func' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'funct'
+  | 'funct' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'functi'
+  | 'functi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'functio'
+  | 'functio' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'function' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'g'
+  | 'g' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ge'
+  | 'ge' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'get' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'i'
+  | 'i' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'if' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'im'
+  | 'im' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'imp'
+  | 'imp' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'impo'
+  | 'impo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'impor'
+  | 'impor' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'import' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'in' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ins'
+  | 'ins' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'inst'
+  | 'inst' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'insta'
+  | 'insta' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instan'
+  | 'instan' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instanc'
+  | 'instanc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instance'
+  | 'instance' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instanceo'
+  | 'instanceo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'instanceof' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'l'
+  | 'l' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'le'
+  | 'le' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'let' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'n'
+  | 'n' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ne'
+  | 'ne' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_] _IDENTIFIER_PART*
+  | 'new' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'nu'
+  | 'nu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'nul'
+  | 'nul' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'null' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'o'
+  | 'o' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'of' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'r'
+  | 'r' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 're'
+  | 're' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ret'
+  | 'ret' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'retu'
+  | 'retu' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'retur'
+  | 'retur' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'return' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 's'
+  | 's' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrsvxyz0123456789$_] _IDENTIFIER_PART*
+  | 'se'
+  | 'se' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'set' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'st'
+  | 'st' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sta'
+  | 'sta' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'stat'
+  | 'stat' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'stati'
+  | 'stati' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'static' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'su'
+  | 'su' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sup'
+  | 'sup' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'supe'
+  | 'supe' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'super' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'sw'
+  | 'sw' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'swi'
+  | 'swi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'swit'
+  | 'swit' [ABCDEFGHIJKLMNOPQRSTUVWXYZabdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'switc'
+  | 'switc' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'switch' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 't'
+  | 't' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqstuvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'th'
+  | 'th' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thi'
+  | 'thi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrtuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'this' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thr'
+  | 'thr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'thro'
+  | 'thro' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvxyz0123456789$_] _IDENTIFIER_PART*
+  | 'throw' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'tr'
+  | 'tr' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstvwxz0123456789$_] _IDENTIFIER_PART*
+  | 'tru'
+  | 'tru' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'true' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'try' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'ty'
+  | 'ty' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'typ'
+  | 'typ' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'type'
+  | 'type' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'typeo'
+  | 'typeo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdeghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'typeof' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'v'
+  | 'v' [ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnpqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'va'
+  | 'va' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'var' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'vo'
+  | 'vo' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'voi'
+  | 'voi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'void' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'w'
+  | 'w' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wh'
+  | 'wh' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'whi'
+  | 'whi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'whil'
+  | 'whil' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'while' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wi'
+  | 'wi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrsuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'wit'
+  | 'wit' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'with' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'y'
+  | 'y' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghjklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yi'
+  | 'yi' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdfghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yie'
+  | 'yie' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yiel'
+  | 'yiel' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  | 'yield' [ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_] _IDENTIFIER_PART*
+  ;
+t _IDENTIFIER_START ::= [a-zA-Z] | '$' | '_' ;
+t _IDENTIFIER_PART ::= _IDENTIFIER_START | _DECIMAL_DIGIT ;
+t _HEX_DIGIT ::= [0-9a-fA-F] ;

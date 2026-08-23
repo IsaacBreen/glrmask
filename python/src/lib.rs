@@ -590,6 +590,150 @@ impl PyVocab {
 }
 
 // ---------------------------------------------------------------------------
+// PyProgrammaticJsCompiler
+// ---------------------------------------------------------------------------
+
+/// Reusable compiler for schema-aware JavaScript programmatic tool calling.
+#[pyclass(name = "ProgrammaticJsCompiler")]
+pub struct PyProgrammaticJsCompiler {
+    inner: glrmask::ProgrammaticJsCompiler,
+}
+
+#[pymethods]
+impl PyProgrammaticJsCompiler {
+    #[new]
+    fn new(vocab: &PyVocab) -> PyResult<Self> {
+        Ok(Self {
+            inner: constraint_result(glrmask::ProgrammaticJsCompiler::new(&vocab.inner))?,
+        })
+    }
+
+    /// Compile the shared full-JavaScript parent independently for timing/cache use.
+    #[staticmethod]
+    fn compile_parent(vocab: &PyVocab) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(
+            glrmask::ProgrammaticJsCompiler::compile_parent(&vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Compile the shared opaque-runtime-value grammar independently.
+    #[staticmethod]
+    fn compile_dynamic_value(vocab: &PyVocab) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(
+            glrmask::ProgrammaticJsCompiler::compile_dynamic_value(&vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Compile the shared JavaScript-condition grammar independently.
+    #[staticmethod]
+    fn compile_condition(vocab: &PyVocab) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(
+            glrmask::ProgrammaticJsCompiler::compile_condition(&vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Assemble a reusable compiler from separately compiled shared parts.
+    #[staticmethod]
+    fn from_components(
+        parent: &PyConstraint,
+        dynamic_value: &PyConstraint,
+        condition: &PyConstraint,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: constraint_result(glrmask::ProgrammaticJsCompiler::from_components(
+                parent.inner.as_ref().clone(),
+                dynamic_value.inner.as_ref().clone(),
+                condition.inner.as_ref().clone(),
+            ))?,
+        })
+    }
+
+    /// Compile one tool-arguments schema against the shared JS value grammars.
+    fn compile_schema(&self, schema: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(self.inner.compile_schema(schema, &vocab.inner), vocab)
+    }
+
+    /// Compile the named tool dispatcher without linking the outer JS parent.
+    fn compile_dispatcher(
+        &self,
+        py: Python<'_>,
+        tools: BTreeMap<String, Py<PyConstraint>>,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        let owned = tools
+            .into_iter()
+            .map(|(name, constraint)| {
+                let constraint = constraint.borrow(py);
+                (name, Arc::clone(&constraint.inner))
+            })
+            .collect::<Vec<_>>();
+        let borrowed = owned
+            .iter()
+            .map(|(name, constraint)| (name.as_str(), constraint.as_ref()))
+            .collect::<Vec<_>>();
+        PyConstraint::from_constraint_result(
+            self.inner.compile_dispatcher(&borrowed, &vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Link a compiled dispatcher into the reusable full-JavaScript parent.
+    fn compose_dispatcher(
+        &self,
+        dispatcher: &PyConstraint,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        PyConstraint::from_constraint_result(
+            self.inner.compose_dispatcher(dispatcher.inner.as_ref(), &vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Compose named, already-compiled tool schemas into the full JS parent.
+    fn compose_tools(
+        &self,
+        py: Python<'_>,
+        tools: BTreeMap<String, Py<PyConstraint>>,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        let owned = tools
+            .into_iter()
+            .map(|(name, constraint)| {
+                let constraint = constraint.borrow(py);
+                (name, Arc::clone(&constraint.inner))
+            })
+            .collect::<Vec<_>>();
+        let borrowed = owned
+            .iter()
+            .map(|(name, constraint)| (name.as_str(), constraint.as_ref()))
+            .collect::<Vec<_>>();
+        PyConstraint::from_constraint_result(
+            self.inner.compose_tools(&borrowed, &vocab.inner),
+            vocab,
+        )
+    }
+
+    /// Convenience path: compile schemas and compose the complete tool set.
+    fn compile_tools(
+        &self,
+        tools: BTreeMap<String, String>,
+        vocab: &PyVocab,
+    ) -> PyResult<PyConstraint> {
+        let borrowed = tools
+            .iter()
+            .map(|(name, schema)| (name.as_str(), schema.as_str()))
+            .collect::<Vec<_>>();
+        PyConstraint::from_constraint_result(
+            self.inner.compile_tools(&borrowed, &vocab.inner),
+            vocab,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PyConstraint
 // ---------------------------------------------------------------------------
 
@@ -727,13 +871,48 @@ impl PyConstraint {
         )
     }
 
+    /// Compose already-compiled child constraints into this compiled parent.
+    ///
+    /// Parent/child compilation is intentionally outside this call so cached
+    /// composition users can measure just the final link step.
+    fn compose_compiled_subgrammars(
+        &self,
+        py: Python<'_>,
+        subgrammars: BTreeMap<String, Py<PyConstraint>>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let owned_children = subgrammars
+            .into_iter()
+            .map(|(name, child)| {
+                let child = child.borrow(py);
+                (name, Arc::clone(&child.inner))
+            })
+            .collect::<Vec<_>>();
+        let shared_children = owned_children
+            .iter()
+            .map(|(name, child)| (name.as_str(), Arc::clone(child)))
+            .collect::<Vec<_>>();
+        let mut parent = self.inner.as_ref().clone();
+        parent
+            .bind_vocab_exact(&vocab.inner)
+            .map_err(PyValueError::new_err)?;
+        Self::from_constraint_result(
+            parent.compose_compiled_subgrammars_shared(&shared_children, &vocab.inner),
+            vocab,
+        )
+    }
+
     fn save(&self) -> Vec<u8> {
         self.inner.save()
     }
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(glrmask::Constraint::load(data), vocab)
+        let mut constraint = constraint_result(glrmask::Constraint::load(data))?;
+        constraint
+            .bind_vocab_exact(&vocab.inner)
+            .map_err(PyValueError::new_err)?;
+        Self::from_constraint_result(Ok::<_, String>(constraint), vocab)
     }
 
     #[pyo3(signature = (max_rollback_tokens=0))]
@@ -1631,6 +1810,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
+    m.add_class::<PyProgrammaticJsCompiler>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
     m.add_class::<PyDynamicConstraint>()?;
@@ -1640,6 +1820,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Vocab",
+            "ProgrammaticJsCompiler",
             "Constraint",
             "ConstraintState",
             "DynamicConstraint",

@@ -1,4 +1,4 @@
-﻿use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -1558,8 +1558,7 @@ impl GLRTable {
                     default,
                     exceptions,
                     num_terminals,
-                } => {
-                    debug_assert_eq!(*num_terminals as usize, terminal_count);
+                } if *num_terminals as usize == terminal_count => {
                     let default_unconditional = match default {
                         Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
                         Action::Split { shift, .. } => shift.is_some(),
@@ -1581,6 +1580,20 @@ impl GLRTable {
                             admitted.set(*terminal as usize);
                         } else {
                             admitted.clear(*terminal as usize);
+                        }
+                    }
+                    admitted
+                }
+                ActionRow::Default { .. } => {
+                    // Composition can retain a default row over a component's
+                    // original terminal domain inside a wider composed table.
+                    // In that case the default applies only to the row's own
+                    // domain; preserve the generic iterator semantics rather
+                    // than extending the default to newly added terminals.
+                    let mut admitted = BitSet::new(terminal_count);
+                    for (terminal, action) in row.iter() {
+                        if (terminal as usize) < terminal_count && unconditional(terminal, action) {
+                            admitted.set(terminal as usize);
                         }
                     }
                     admitted

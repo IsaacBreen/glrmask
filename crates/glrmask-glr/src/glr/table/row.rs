@@ -1027,6 +1027,47 @@ mod tests {
     }
 
     #[test]
+    fn unconditional_advance_narrow_default_row_does_not_extend_into_wider_table() {
+        let narrow = ActionRow::Default {
+            default: shift(10),
+            exceptions: SparseRow::from_iter([(1, None), (4, Some(Action::Skip))]),
+            num_terminals: 6,
+        };
+        let expanded = ActionRow::from_iter(
+            narrow
+                .iter()
+                .map(|(terminal, action)| (terminal, action.clone())),
+        );
+        let make_table = |row: ActionRow| GLRTable {
+            action: vec![row],
+            goto: vec![SparseRow::default()],
+            num_states: 1,
+            num_terminals: 8,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: Default::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+        };
+
+        let mut compressed = make_table(narrow);
+        let mut reference = make_table(expanded);
+        compressed.rebuild_unconditional_advance_rows();
+        reference.rebuild_unconditional_advance_rows();
+
+        assert_eq!(compressed.unconditional_advance, reference.unconditional_advance);
+        assert!(!compressed.unconditional_advance[0].contains(6));
+        assert!(!compressed.unconditional_advance[0].contains(7));
+    }
+
+    #[test]
     fn unconditional_advance_default_rows_match_expanded_sparse_rows() {
         let accept_only_split = Action::Split {
             shift: None,
