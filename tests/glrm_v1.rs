@@ -1,6 +1,4 @@
-use glrmask::{
-    ConstraintSpec, DynamicConstraint, Grammar, Constraint, Vocab,
-};
+use glrmask::{Constraint, ConstraintSpec, DynamicConstraint, Grammar, Vocab};
 
 fn allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
@@ -87,12 +85,65 @@ nt start = CONTROL payload;
         .unwrap()
         .bind_token("payload", [7])
         .is_err());
+    // Grammar-valued externs may remain unresolved in a compiled parent; only
+    // target-specific exact-token externs must be complete at build time.
     assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7])
         .unwrap()
         .build()
-        .is_err());
+        .is_ok());
+}
+
+#[test]
+fn compiled_parent_can_bind_static_child_without_recompiling_source() {
+    let vocab = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"y".to_vec()),
+        (2, b"xy".to_vec()),
+        (3, b"xyz".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let child = Constraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+    let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
+    let bound = parent.bind_grammar("child", &child).unwrap();
+
+    let mut candidate = bound.start();
+    let mut expected = reference.start();
+    assert_eq!(candidate.mask(), expected.mask());
+    assert!(allowed(&candidate.mask(), 2));
+    assert!(!allowed(&candidate.mask(), 3));
+    candidate.commit_token(2).unwrap();
+    expected.commit_token(2).unwrap();
+    assert_eq!(candidate.is_accepting(), expected.is_accepting());
+
+    let mut candidate = bound.start();
+    let mut expected = reference.start();
+    candidate.commit_token(0).unwrap();
+    expected.commit_token(0).unwrap();
+    assert_eq!(candidate.mask(), expected.mask());
+    candidate.commit_token(1).unwrap();
+    expected.commit_token(1).unwrap();
+    assert_eq!(candidate.is_accepting(), expected.is_accepting());
+
+    assert!(parent.bind_grammar("missing", &child).is_err());
+
+    // A cached/open parent must retain its named linker slots across the
+    // ordinary static artifact boundary; no source grammar is needed after load.
+    let loaded_parent = Constraint::load(&parent.save()).unwrap();
+    let loaded_bound = loaded_parent.bind_grammar("child", &child).unwrap();
+    let mut candidate = loaded_bound.start();
+    let mut expected = reference.start();
+    assert_eq!(candidate.mask(), expected.mask());
+    candidate.commit_token(2).unwrap();
+    expected.commit_token(2).unwrap();
+    assert_eq!(candidate.is_accepting(), expected.is_accepting());
 }
 
 #[test]

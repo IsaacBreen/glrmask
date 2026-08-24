@@ -4508,6 +4508,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
+            late_grammar_slots: Vec::new(),
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,

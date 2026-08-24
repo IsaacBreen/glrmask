@@ -17085,6 +17085,7 @@ fn build_composed_constraint_unfinalized(
     let constraint = Constraint {
         runtime_backend: ConstraintRuntimeBackend::Static,
         static_dynamic_overlay: None,
+        late_grammar_slots: Vec::new(),
         scoped_ignore_only_tokens: Vec::new(),
         scoped_ignore_prefix_fusions: Vec::new(),
         parser_dwa,

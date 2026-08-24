@@ -16,7 +16,7 @@ pub(crate) use glrmask_artifact::CommitTemplateDfas;
 pub(crate) use artifact::{
     dynamic_mask_vocab_layout_class, BoundaryTerminalTrieNode, CompositionGrammarSummary,
     ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
-    FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedBoundaryTerminalTrie,
+    FastTokenizerTransitions, LateGrammarSlot, SegmentedBoundaryParser, SegmentedBoundaryTerminalTrie,
     SegmentedParserComponent,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };

@@ -9728,15 +9728,27 @@ impl Constraint {
             .chain(
                 self.special_token_terminals
                     .iter()
+                    .filter(|special| {
+                        !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+                    })
                     .map(|special| special.token_id),
             )
             .max()
     }
 
+    pub(crate) fn is_late_grammar_placeholder_terminal(&self, terminal_id: u32) -> bool {
+        self.late_grammar_slots
+            .iter()
+            .any(|slot| slot.terminal_id == terminal_id)
+    }
+
     pub(crate) fn has_special_token_id(&self, token_id: u32) -> bool {
         self.special_token_terminals
             .iter()
-            .any(|special| special.token_id == token_id)
+            .any(|special| {
+                special.token_id == token_id
+                    && !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+            })
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {

@@ -28,7 +28,8 @@ const PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION: u16 = 18;
 /// current core/runtime payloads, so v19 remains independently loadable.
 const PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION: u16 = 19;
 const PREVIOUS_COMBINED_CONSTRAINT_VERSION: u16 = 20;
-const CONSTRAINT_VERSION: u16 = 21;
+const PREVIOUS_CURRENT_CONSTRAINT_VERSION: u16 = 21;
+const CONSTRAINT_VERSION: u16 = 22;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -48,12 +49,17 @@ const V20_SECTION_MAGIC: [u8; 4] = *b"S20\0";
 const V20_SECTION_HEADER_LEN: usize = V20_SECTION_MAGIC.len() + 11 * 8;
 const V21_SECTION_MAGIC: [u8; 4] = *b"S21\0";
 const V21_SECTION_HEADER_LEN: usize = V21_SECTION_MAGIC.len() + 11 * 8;
-const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
+const V22_SECTION_MAGIC: [u8; 4] = *b"S22\0";
+const V22_SECTION_HEADER_LEN: usize = V22_SECTION_MAGIC.len() + 11 * 8;
+const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
+const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
+    PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
+const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C20\0";
 const PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
-    PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
-const PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C20\0";
+    PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
+const PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
 const PREVIOUS_CURRENT_CORE_HEADER_LEN: usize = PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C22\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
 
@@ -62,6 +68,7 @@ fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_CURRENT_CONSTRAINT_VERSION
             | PREVIOUS_COMBINED_CONSTRAINT_VERSION
             | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
             | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
@@ -279,10 +286,34 @@ struct ConstraintArtifactCurrentCoreBaseRef<'a> {
     ignore_expr: &'a Option<Expr>,
     parser_state_domain_labels: &'a [i32],
     static_dynamic_overlay: &'a Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
+    late_grammar_slots: &'a [crate::runtime::artifact::LateGrammarSlot],
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentCoreBase {
+    #[serde(deserialize_with = "deserialize_constraint")]
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    parser_state_domain_labels: Vec<i32>,
+    static_dynamic_overlay: Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
+    late_grammar_slots: Vec<crate::runtime::artifact::LateGrammarSlot>,
+}
+
+/// Test-only encoder for the previous C21 core layout. Production only emits
+/// C22; retaining this shape in tests guards the backwards-compatible decoder.
+#[cfg(test)]
+#[derive(Serialize)]
+struct ConstraintArtifactPreviousOverlayCoreBaseRef<'a> {
+    #[serde(serialize_with = "serialize_constraint")]
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+    parser_state_domain_labels: &'a [i32],
+    static_dynamic_overlay: &'a Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
+}
+
+/// Core payload used by C21, before unresolved named grammar slots were persisted.
+#[derive(Deserialize)]
+struct ConstraintArtifactPreviousOverlayCoreBase {
     #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
@@ -308,83 +339,115 @@ fn decode_current_core(
     ConstraintArtifactCurrentCoreBase,
     Option<crate::runtime::artifact::DeferredTerminalExprBytes>,
 ), String> {
-    let (header_len, flags, base_len, expr_len, has_current_overlay) =
+    let (header_len, flags, base_len, expr_len, has_current_overlay, has_late_slots) =
         if input.starts_with(&CURRENT_CORE_MAGIC) {
-        if input.len() < CURRENT_CORE_HEADER_LEN {
-            return Err("truncated current constraint core header".to_owned());
-        }
-        let flags = u32::from_le_bytes(
-            input[4..8]
-                .try_into()
-                .expect("current core flags have fixed width"),
-        );
-        if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
-            return Err("unsupported current constraint core flags".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[8..16]
-                .try_into()
-                .expect("current core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[16..24]
-                .try_into()
-                .expect("current core expression length has fixed width"),
-        );
-        (CURRENT_CORE_HEADER_LEN, flags, base_len, expr_len, true)
-    } else if input.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC) {
-        if input.len() < PREVIOUS_CURRENT_CORE_HEADER_LEN {
-            return Err("truncated previous current-core header".to_owned());
-        }
-        let flags = u32::from_le_bytes(
-            input[4..8]
-                .try_into()
-                .expect("previous current-core flags have fixed width"),
-        );
-        if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
-            return Err("unsupported previous current constraint core flags".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[8..16]
-                .try_into()
-                .expect("previous current-core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[16..24]
-                .try_into()
-                .expect("previous current-core expression length has fixed width"),
-        );
-        (
-            PREVIOUS_CURRENT_CORE_HEADER_LEN,
-            flags,
-            base_len,
-            expr_len,
-            false,
-        )
-    } else if input.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
-        if input.len() < PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
-            return Err("truncated previous-previous current-core header".to_owned());
-        }
-        let base_len = u64::from_le_bytes(
-            input[4..12]
-                .try_into()
-                .expect("previous-previous current-core base length has fixed width"),
-        );
-        let expr_len = u64::from_le_bytes(
-            input[12..20]
-                .try_into()
-                .expect("previous-previous current-core expression length has fixed width"),
-        );
-        (
-            PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
-            0,
-            base_len,
-            expr_len,
-            false,
-        )
-    } else {
-        return Err("invalid current constraint core header".to_owned());
-    };
+            if input.len() < CURRENT_CORE_HEADER_LEN {
+                return Err("truncated current constraint core header".to_owned());
+            }
+            let flags = u32::from_le_bytes(
+                input[4..8]
+                    .try_into()
+                    .expect("current core flags have fixed width"),
+            );
+            if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
+                return Err("unsupported current constraint core flags".to_owned());
+            }
+            let base_len = u64::from_le_bytes(
+                input[8..16]
+                    .try_into()
+                    .expect("current core base length has fixed width"),
+            );
+            let expr_len = u64::from_le_bytes(
+                input[16..24]
+                    .try_into()
+                    .expect("current core expression length has fixed width"),
+            );
+            (CURRENT_CORE_HEADER_LEN, flags, base_len, expr_len, true, true)
+        } else if input.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC) {
+            if input.len() < PREVIOUS_CURRENT_CORE_HEADER_LEN {
+                return Err("truncated previous current-core header".to_owned());
+            }
+            let flags = u32::from_le_bytes(
+                input[4..8]
+                    .try_into()
+                    .expect("previous current-core flags have fixed width"),
+            );
+            if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
+                return Err("unsupported previous current constraint core flags".to_owned());
+            }
+            let base_len = u64::from_le_bytes(
+                input[8..16]
+                    .try_into()
+                    .expect("previous current-core base length has fixed width"),
+            );
+            let expr_len = u64::from_le_bytes(
+                input[16..24]
+                    .try_into()
+                    .expect("previous current-core expression length has fixed width"),
+            );
+            (
+                PREVIOUS_CURRENT_CORE_HEADER_LEN,
+                flags,
+                base_len,
+                expr_len,
+                true,
+                false,
+            )
+        } else if input.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
+            if input.len() < PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
+                return Err("truncated previous-previous current-core header".to_owned());
+            }
+            let flags = u32::from_le_bytes(
+                input[4..8]
+                    .try_into()
+                    .expect("previous-previous current-core flags have fixed width"),
+            );
+            if flags & !CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0 {
+                return Err("unsupported previous-previous current constraint core flags".to_owned());
+            }
+            let base_len = u64::from_le_bytes(
+                input[8..16]
+                    .try_into()
+                    .expect("previous-previous current-core base length has fixed width"),
+            );
+            let expr_len = u64::from_le_bytes(
+                input[16..24]
+                    .try_into()
+                    .expect("previous-previous current-core expression length has fixed width"),
+            );
+            (
+                PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
+                flags,
+                base_len,
+                expr_len,
+                false,
+                false,
+            )
+        } else if input.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
+            if input.len() < PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
+                return Err("truncated previous-previous-previous current-core header".to_owned());
+            }
+            let base_len = u64::from_le_bytes(
+                input[4..12]
+                    .try_into()
+                    .expect("previous-previous-previous current-core base length has fixed width"),
+            );
+            let expr_len = u64::from_le_bytes(
+                input[12..20]
+                    .try_into()
+                    .expect("previous-previous-previous current-core expression length has fixed width"),
+            );
+            (
+                PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
+                0,
+                base_len,
+                expr_len,
+                false,
+                false,
+            )
+        } else {
+            return Err("invalid current constraint core header".to_owned());
+        };
     let base_len = usize::try_from(base_len)
         .map_err(|_| "current core base length does not fit platform".to_owned())?;
     let expr_len = usize::try_from(expr_len)
@@ -402,9 +465,21 @@ fn decode_current_core(
         crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
             flags & CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0,
         );
-    let decoded = if has_current_overlay {
+    let decoded = if has_late_slots {
         bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(&input[header_len..base_end])
             .map_err(|err| err.to_string())
+    } else if has_current_overlay {
+        bincode::deserialize::<ConstraintArtifactPreviousOverlayCoreBase>(
+            &input[header_len..base_end],
+        )
+        .map(|base| ConstraintArtifactCurrentCoreBase {
+            constraint: base.constraint,
+            ignore_expr: base.ignore_expr,
+            parser_state_domain_labels: base.parser_state_domain_labels,
+            static_dynamic_overlay: base.static_dynamic_overlay,
+            late_grammar_slots: Vec::new(),
+        })
+        .map_err(|err| err.to_string())
     } else {
         bincode::deserialize::<ConstraintArtifactPreviousCurrentCoreBase>(
             &input[header_len..base_end],
@@ -414,6 +489,7 @@ fn decode_current_core(
             ignore_expr: base.ignore_expr,
             parser_state_domain_labels: base.parser_state_domain_labels,
             static_dynamic_overlay: None,
+            late_grammar_slots: Vec::new(),
         })
         .map_err(|err| err.to_string())
     };
@@ -2130,6 +2206,81 @@ fn v20_sections(
     ))
 }
 
+fn v22_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V22_SECTION_HEADER_LEN || !payload.starts_with(&V22_SECTION_MAGIC) {
+        return Err("invalid v22 constraint section header".to_owned());
+    }
+    let mut pos = V22_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v22 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v22 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V22_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v22 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v22 constraint section lengths".to_owned());
+    }
+    let mut pos = V22_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
+
 fn v21_sections(
     payload: &[u8],
 ) -> Result<
@@ -2726,6 +2877,7 @@ impl Constraint {
                                 ignore_expr: &self.ignore_expr,
                                 parser_state_domain_labels: &self.parser_state_domain_labels,
                                 static_dynamic_overlay: &self.static_dynamic_overlay,
+                                late_grammar_slots: &self.late_grammar_slots,
                             },
                         );
                         crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
@@ -2927,7 +3079,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V21_SECTION_HEADER_LEN
+            + V22_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -2954,7 +3106,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V21_SECTION_HEADER_LEN
+            + V22_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -2974,7 +3126,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V21_SECTION_HEADER_LEN
+        let payload_len = V22_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -3006,7 +3158,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V21_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V22_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -3015,8 +3167,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V21_SECTION_MAGIC.len()].copy_from_slice(&V21_SECTION_MAGIC);
-            pos += V21_SECTION_MAGIC.len();
+            header[pos..pos + V22_SECTION_MAGIC.len()].copy_from_slice(&V22_SECTION_MAGIC);
+            pos += V22_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -3215,7 +3367,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V21_SECTION_MAGIC);
+        bytes.extend_from_slice(&V22_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -3325,6 +3477,7 @@ impl Constraint {
                 | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
                 | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
                 | PREVIOUS_COMBINED_CONSTRAINT_VERSION
+                | PREVIOUS_CURRENT_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -3449,6 +3602,22 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v22_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_CURRENT_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v21_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -3637,7 +3806,9 @@ impl Constraint {
                                         return Ok(None);
                                     };
                                     let started = profile.then(std::time::Instant::now);
-                                    let result = if version == CONSTRAINT_VERSION {
+                                    let result = if version == CONSTRAINT_VERSION
+                                        || version == PREVIOUS_CURRENT_CONSTRAINT_VERSION
+                                    {
                                         bincode::deserialize::<ConstraintArtifactCurrentRuntime>(
                                             runtime_section,
                                         )
@@ -3916,6 +4087,7 @@ impl Constraint {
                             if core_section.starts_with(&CURRENT_CORE_MAGIC)
                                 || core_section.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC)
                                 || core_section.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
+                                || core_section.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
                             {
                                 let core_backing = current_backing.as_ref().and_then(|backing| {
                                     let base = backing.as_ptr() as usize;
@@ -3926,6 +4098,7 @@ impl Constraint {
                                 .map(|(artifact, terminal_exprs_blob)| {
                                     let mut constraint = artifact.constraint;
                                     constraint.static_dynamic_overlay = artifact.static_dynamic_overlay;
+                                    constraint.late_grammar_slots = artifact.late_grammar_slots;
                                     DecodedConstraintCore {
                                         constraint,
                                         ignore_expr: artifact.ignore_expr,
@@ -4648,6 +4821,33 @@ mod tests {
         let loaded = Constraint::load(&constraint.save()).unwrap();
         assert_eq!(
             loaded.parser_state_domain_labels,
+            constraint.parser_state_domain_labels,
+        );
+    }
+
+    #[test]
+    fn previous_c21_core_defaults_late_grammar_slots_empty() {
+        let constraint = tiny_constraint();
+        let base = bincode::serialize(&ConstraintArtifactPreviousOverlayCoreBaseRef {
+            constraint: &constraint,
+            ignore_expr: &constraint.ignore_expr,
+            parser_state_domain_labels: &constraint.parser_state_domain_labels,
+            static_dynamic_overlay: &constraint.static_dynamic_overlay,
+        })
+        .unwrap();
+        let mut core = Vec::with_capacity(PREVIOUS_CURRENT_CORE_HEADER_LEN + base.len());
+        core.extend_from_slice(&PREVIOUS_CURRENT_CORE_MAGIC);
+        core.extend_from_slice(&0u32.to_le_bytes());
+        core.extend_from_slice(&(base.len() as u64).to_le_bytes());
+        core.extend_from_slice(&0u64.to_le_bytes());
+        core.extend_from_slice(&base);
+
+        let (decoded, exprs) = decode_current_core(&core, None).unwrap();
+        assert!(exprs.is_none());
+        assert!(decoded.late_grammar_slots.is_empty());
+        assert_eq!(decoded.ignore_expr, constraint.ignore_expr);
+        assert_eq!(
+            decoded.parser_state_domain_labels,
             constraint.parser_state_domain_labels,
         );
     }

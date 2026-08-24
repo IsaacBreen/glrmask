@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::automata::lexer::Lexer;
 use super::Constraint;
 
 const UNMAPPED_ID: u32 = u32::MAX;

@@ -4305,6 +4305,18 @@ impl DeferredCompositionMetadataBytes {
     }
 }
 
+/// Compact metadata for an unresolved external-grammar slot.
+///
+/// `terminal_id` is the compiler-generated linker terminal in this compiled
+/// constraint's private terminal coordinate. Callers address slots only by
+/// name; the hidden model-token sentinel is never part of the public token
+/// universe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LateGrammarSlot {
+    pub(crate) name: String,
+    pub(crate) terminal_id: TerminalID,
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
@@ -4313,6 +4325,9 @@ impl DeferredCompositionMetadataBytes {
 pub struct Constraint {
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    /// Named linker terminals for `extern grammar` declarations which remain
+    /// unresolved in this compiled artifact.
+    pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore
@@ -4658,6 +4673,8 @@ pub(crate) struct ConstraintSerde {
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(skip, default)]
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    #[serde(skip, default)]
+    pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore

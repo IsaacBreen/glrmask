@@ -1,7 +1,6 @@
 ﻿pub(crate) mod profile;
 pub(crate) mod queue;
 
-use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_positive_label};
@@ -2789,8 +2788,12 @@ impl<'a> ConstraintState<'a> {
                     component.constraint(),
                 )),
             };
-            shadow.fill_mask_uncached(&mut component_buf);
-            shadow.update_control_special_token_mask(&mut component_buf);
+            // Evaluate the retained component through its own public mask
+            // dispatch. Besides preserving static/dynamic/nested-hybrid backend
+            // choice, this also suppresses any private unresolved linker token
+            // IDs owned by that component before its mask enters the outer
+            // composed token space.
+            shadow.fill_mask(&mut component_buf);
             for (output, component_word) in buf.iter_mut().zip(&component_buf) {
                 *output |= *component_word;
             }
@@ -2910,8 +2913,12 @@ impl<'a> ConstraintState<'a> {
                     component.constraint(),
                 )),
             };
-            shadow.fill_mask_uncached(&mut component_buf);
-            shadow.update_control_special_token_mask(&mut component_buf);
+            // Evaluate the retained component through its own public mask
+            // dispatch. Besides preserving static/dynamic/nested-hybrid backend
+            // choice, this also suppresses any private unresolved linker token
+            // IDs owned by that component before its mask enters the outer
+            // composed token space.
+            shadow.fill_mask(&mut component_buf);
             for (output, component_word) in buf.iter_mut().zip(&component_buf) {
                 *output |= *component_word;
             }
@@ -3313,6 +3320,12 @@ impl<'a> ConstraintState<'a> {
         }
         let mut previous_token_id = None;
         for special in &self.constraint.special_token_terminals {
+            if self
+                .constraint
+                .is_late_grammar_placeholder_terminal(special.terminal_id)
+            {
+                continue;
+            }
             if previous_token_id == Some(special.token_id) {
                 continue;
             }
@@ -3325,6 +3338,22 @@ impl<'a> ConstraintState<'a> {
             .is_some_and(|gss| !gss.is_empty())
             {
                 set_original_mask_bit(buf, special.token_id);
+            }
+        }
+    }
+
+    fn clear_late_grammar_placeholder_mask(&self, buf: &mut [u32]) {
+        for special in &self.constraint.special_token_terminals {
+            if !self
+                .constraint
+                .is_late_grammar_placeholder_terminal(special.terminal_id)
+            {
+                continue;
+            }
+            let word = special.token_id as usize / 32;
+            let bit = special.token_id % 32;
+            if let Some(slot) = buf.get_mut(word) {
+                *slot &= !(1u32 << bit);
             }
         }
     }
@@ -5616,6 +5645,7 @@ impl<'a> ConstraintState<'a> {
         if authoritative_segmented {
             if self.try_fill_mask_segmented_single_paths(mask) {
                 self.update_control_special_token_mask(mask);
+                self.clear_late_grammar_placeholder_mask(mask);
                 return;
             }
             // The view evaluator deliberately declines uncommon GSS shapes it
@@ -5623,6 +5653,7 @@ impl<'a> ConstraintState<'a> {
             // table remains an exact fallback and does not require a flattened
             // component parser DWA.
             self.fill_mask_dynamic(mask);
+            self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
         if self.constraint.uses_dynamic_runtime() {
@@ -5630,6 +5661,7 @@ impl<'a> ConstraintState<'a> {
                 self.fill_mask_dynamic(mask);
                 self.store_mask_cache_reuse_dense(mask);
             }
+            self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
         if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
@@ -5670,6 +5702,7 @@ impl<'a> ConstraintState<'a> {
                     }
                 }
                 self.store_mask_cache_reuse_dense(mask);
+                self.clear_late_grammar_placeholder_mask(mask);
                 return;
             }
         }
@@ -5716,6 +5749,7 @@ impl<'a> ConstraintState<'a> {
         if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
             super::dynamic_mask::or_mask_dynamic_additions(self, mask);
         }
+        self.clear_late_grammar_placeholder_mask(mask);
         assert_dynamic_mask_equivalence(self, mask);
     }
 
@@ -5732,6 +5766,7 @@ impl<'a> ConstraintState<'a> {
         tail.fill(0);
         let total_start = Instant::now();
         if self.try_fill_mask_from_cache(buf) {
+            self.clear_late_grammar_placeholder_mask(buf);
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
                 cache_hit: 1,
@@ -5740,6 +5775,7 @@ impl<'a> ConstraintState<'a> {
         }
         if self.constraint.uses_dynamic_runtime() {
             self.fill_mask_dynamic(buf);
+            self.clear_late_grammar_placeholder_mask(buf);
             self.store_mask_cache_reuse_dense(buf);
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
@@ -5754,6 +5790,7 @@ impl<'a> ConstraintState<'a> {
                 ..MaskProfile::default()
             });
         self.update_control_special_token_mask(buf);
+        self.clear_late_grammar_placeholder_mask(buf);
         if !self.constraint.table.control_terminals.is_empty() {
             self.store_mask_cache_reuse_dense(buf);
         }

@@ -190,6 +190,15 @@ impl<'a> ConstraintSpec<'a> {
     fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
+            if let Some(source) = self.grammar.glrm_source() {
+                return RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+                    source,
+                    &[],
+                    self.vocab,
+                    &token_bindings,
+                    &[],
+                );
+            }
             return compile_static_source(&self.grammar, self.vocab, &token_bindings);
         }
 
@@ -336,7 +345,9 @@ impl<'a> ConstraintSpecBuilder<'a> {
         Ok(self)
     }
 
-    /// Check that every extern is bound and finish the specification.
+    /// Check that every target-specific exact-token extern is bound and finish
+    /// the specification. External grammars may remain unresolved in the
+    /// compiled artifact and be linked later.
     pub fn build(self) -> Result<ConstraintSpec<'a>> {
         if let Some(name) = self
             .declared_tokens
@@ -345,15 +356,6 @@ impl<'a> ConstraintSpecBuilder<'a> {
         {
             return Err(Error::Compilation(format!(
                 "GLRM declares external token {name:?}, but no exact-token binding was supplied",
-            )));
-        }
-        if let Some(name) = self
-            .declared_grammars
-            .iter()
-            .find(|name| !self.grammar_bindings.contains_key(*name))
-        {
-            return Err(Error::Compilation(format!(
-                "GLRM declares external grammar {name:?}, but no realization was supplied",
             )));
         }
         Ok(ConstraintSpec {
@@ -559,6 +561,81 @@ impl RuntimeConstraint {
     /// Compile `grammar` into a [`Constraint`](crate::Constraint) for `vocab`.
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
+    }
+}
+
+fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
+    Vocab::new(
+        constraint
+            .token_bytes_iter()
+            .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+            .collect(),
+    )
+}
+
+fn bind_static_compiled_parent<'a, T>(
+    parent: &RuntimeConstraint,
+    name: &str,
+    child: T,
+) -> Result<RuntimeConstraint>
+where
+    T: IntoGrammarBinding<'a>,
+{
+    let slot = parent
+        .late_grammar_slots
+        .iter()
+        .find(|slot| slot.name == name)
+        .cloned()
+        .ok_or_else(|| {
+            Error::Compilation(format!(
+                "compiled constraint has no unresolved external grammar named {name:?}",
+            ))
+        })?;
+    let vocab = constraint_vocab(parent);
+    let mut binding = child.into_grammar_binding();
+    binding.bind_target(&vocab, name)?;
+    let compiled = binding.compile(&vocab)?;
+    let child = compiled.as_ref();
+
+    let mut composition = crate::compiler::constraint_compose::compose_constraints_owned_parent_view(
+        parent.clone(),
+        &[crate::compiler::constraint_compose::CompiledSubgrammarInput {
+            placeholder_terminal: slot.terminal_id,
+            additional_placeholder_terminals: &[],
+            constraint: child,
+        }],
+        &vocab,
+    )
+    .map_err(Error::Compilation)?;
+
+    let mut retained = parent
+        .late_grammar_slots
+        .iter()
+        .filter(|candidate| candidate.name != name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let child_terminal_offset = composition.terminal_offsets[1];
+    retained.extend(child.late_grammar_slots.iter().map(|nested| {
+        crate::runtime::LateGrammarSlot {
+            name: format!("{name}::{}", nested.name),
+            terminal_id: child_terminal_offset + nested.terminal_id,
+        }
+    }));
+    composition.constraint.late_grammar_slots = retained;
+    Ok(composition.constraint)
+}
+
+impl RuntimeConstraint {
+    /// Bind one unresolved `extern grammar` slot in an already-compiled parent.
+    ///
+    /// The parent and child remain intact runtime components; this compiles only
+    /// the composed coordinate maps and cross-component boundary behavior.
+    #[allow(private_bounds)]
+    pub fn bind_grammar<'a, T>(&self, name: impl AsRef<str>, child: T) -> Result<Self>
+    where
+        T: IntoGrammarBinding<'a>,
+    {
+        bind_static_compiled_parent(self, name.as_ref(), child)
     }
 }
 
