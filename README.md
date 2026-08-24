@@ -286,6 +286,8 @@ constraint = glrmask.Constraint.load(blob, vocab)
 
 Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
 
+In Rust, `Constraint::load(bytes)` accepts either owned or borrowed bytes. Passing a `Vec<u8>` transfers the artifact allocation into the constraint without an extra whole-artifact copy; borrowed byte slices remain supported and are copied only when persistent backing is required.
+
 `DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify full compilation.
 
 ## How it works

@@ -214,7 +214,6 @@ pub mod __private {
         fn prepare_composition_grammar_summary(&mut self) -> Result<()>;
 
         fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String>;
-        fn load_owned(bytes: Vec<u8>) -> Result<Self>;
 
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
@@ -303,10 +302,6 @@ pub mod __private {
 
         fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String> {
             Constraint::bind_vocab_exact(self, vocab)
-        }
-
-        fn load_owned(bytes: Vec<u8>) -> Result<Self> {
-            Constraint::load_owned(bytes)
         }
 
         fn compose_compiled_subgrammars(
