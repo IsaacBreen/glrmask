@@ -54,8 +54,10 @@
 //! their IDs with [`ConstraintSpecBuilder::bind_token`].
 //!
 //! GLRM declares child grammars with `extern grammar name;`. Bind a source child
-//! with [`Grammar::bind_grammar`], or bind a source, spec, [`Constraint`], or
-//! [`DynamicConstraint`] with [`ConstraintSpecBuilder::bind_grammar`].
+//! with [`Grammar::bind_grammar`], bind a source/spec/compiled child before
+//! compilation with [`ConstraintSpecBuilder::bind_grammar`], or compile an
+//! unresolved reusable parent and later attach a compiled child with
+//! [`Constraint::bind_grammar`].
 //!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.
@@ -209,6 +211,7 @@ pub mod __private {
         fn prepare_composition_grammar_summary(&mut self) -> Result<()>;
 
         fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String>;
+        fn prepare_for_composition(&mut self, vocab: &Vocab) -> Result<()>;
 
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
@@ -297,6 +300,10 @@ pub mod __private {
 
         fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String> {
             Constraint::bind_vocab_exact(self, vocab)
+        }
+
+        fn prepare_for_composition(&mut self, vocab: &Vocab) -> Result<()> {
+            self.prepare_for_composition_internal(vocab)
         }
 
         fn compose_compiled_subgrammars(

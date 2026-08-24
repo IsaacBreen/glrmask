@@ -82,6 +82,7 @@ pub struct ConstraintSpec<'a> {
     vocab: &'a Vocab,
     token_bindings: BTreeMap<String, Vec<u32>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
+    unbound_grammar_names: Vec<String>,
 }
 
 /// Builder for [`ConstraintSpec`].
@@ -212,6 +213,12 @@ impl<'a> ConstraintSpec<'a> {
 
     /// Compile this specification into a [`DynamicConstraint`].
     pub fn compile_dynamic(&self) -> Result<DynamicConstraint> {
+        if !self.unbound_grammar_names.is_empty() {
+            return Err(Error::Compilation(format!(
+                "dynamic compilation requires bindings for external grammars: {}",
+                self.unbound_grammar_names.join(", "),
+            )));
+        }
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
             return compile_dynamic_source(&self.grammar, self.vocab, &token_bindings);
@@ -347,13 +354,21 @@ impl<'a> ConstraintSpecBuilder<'a> {
                 "GLRM declares external token {name:?}, but no exact-token binding was supplied",
             )));
         }
-        if let Some(name) = self
+        let unbound_grammar_names = self
             .declared_grammars
             .iter()
-            .find(|name| !self.grammar_bindings.contains_key(*name))
-        {
+            .filter(|name| !self.grammar_bindings.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        // A completely unbound grammar manifest is a reusable compiled parent:
+        // each unresolved call remains unreachable until `Constraint::bind_grammar`
+        // supplies its child. Preserve the existing all-at-once builder rule when
+        // the caller has started binding grammars, so accidental partial specs are
+        // still rejected.
+        if !unbound_grammar_names.is_empty() && !self.grammar_bindings.is_empty() {
             return Err(Error::Compilation(format!(
-                "GLRM declares external grammar {name:?}, but no realization was supplied",
+                "GLRM declares external grammar {:?}, but no realization was supplied",
+                unbound_grammar_names[0],
             )));
         }
         Ok(ConstraintSpec {
@@ -361,6 +376,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
             vocab: self.vocab,
             token_bindings: self.token_bindings,
             grammar_bindings: self.grammar_bindings,
+            unbound_grammar_names,
         })
     }
 
@@ -528,7 +544,7 @@ fn compile_static_source(
         GrammarSource::Ebnf(source) => RuntimeConstraint::from_ebnf(source, vocab),
         GrammarSource::Lark(source) => RuntimeConstraint::from_lark(source, vocab),
         GrammarSource::JsonSchema(source) => RuntimeConstraint::from_json_schema(source, vocab),
-        GrammarSource::Glrm(source) => RuntimeConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
+        GrammarSource::Glrm(source) => RuntimeConstraint::from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
             source,
             vocab,
             token_bindings,
@@ -560,11 +576,233 @@ impl RuntimeConstraint {
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
+
+    /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
+    ///
+    /// The parent remains reusable: loaded compiler-side state is prepared in
+    /// place on the first bind, then the linker receives a fork of that prepared
+    /// parent. The supplied child must already be fully bound.
+    pub fn bind_grammar(
+        &mut self,
+        name: impl AsRef<str>,
+        child: &RuntimeConstraint,
+        vocab: &Vocab,
+    ) -> Result<Self> {
+        use crate::compiler::constraint_compose::{
+            CompiledSubgrammarInput, compose_constraints_owned_parent,
+        };
+
+        self.prepare_for_composition_internal(vocab)?;
+        let name = name.as_ref();
+        let placeholder_terminal = self
+            .unbound_grammar_placeholders
+            .get(name)
+            .copied()
+            .ok_or_else(|| {
+                let available = self
+                    .unbound_grammar_placeholders
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Error::Compilation(if available.is_empty() {
+                    format!("constraint has no unresolved external grammar named {name:?}")
+                } else {
+                    format!(
+                        "constraint has no unresolved external grammar named {name:?}; available: {available}"
+                    )
+                })
+            })?;
+
+        let child_has_unbound = if child.deferred_composition_metadata_blob.is_some() {
+            let mut metadata = child.clone();
+            metadata
+                .materialize_composition_metadata_for_compilation()
+                .map_err(Error::Compilation)?;
+            !metadata.unbound_grammar_placeholders.is_empty()
+        } else {
+            !child.unbound_grammar_placeholders.is_empty()
+        };
+        if child_has_unbound {
+            return Err(Error::Compilation(
+                "a compiled child with unresolved external grammars cannot yet be bound; bind the child first"
+                    .to_owned(),
+            ));
+        }
+
+        // Preparation materializes the compiler-side views once on the cached
+        // parent. Cloning here preserves that reusable parent while the fast
+        // linker consumes its fork. Loaded automata retain shared packed row
+        // storage, so this fork is cheap in the cached-parent case.
+        let mut parent = self.clone();
+        parent.unbound_grammar_placeholders.remove(name);
+        let remaining_parent_slots = parent.unbound_grammar_placeholders.clone();
+        let input = CompiledSubgrammarInput {
+            placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: child,
+        };
+        let composition = compose_constraints_owned_parent(parent, &[input], vocab)
+            .map_err(Error::Compilation)?;
+        let parent_offset = composition.terminal_offsets[0];
+        let mut result = composition.constraint;
+        result.unbound_grammar_placeholders = remaining_parent_slots
+            .into_iter()
+            .map(|(slot, terminal)| (slot, parent_offset + terminal))
+            .collect();
+        Ok(result)
+    }
+
+    pub(crate) fn prepare_for_composition_internal(&mut self, vocab: &Vocab) -> Result<()> {
+        self.bind_vocab_exact(vocab).map_err(Error::Compilation)?;
+        self.materialize_parser_dwa_for_compilation()
+            .map_err(Error::Compilation)?;
+        self.materialize_non_dwa_weights_for_compilation()
+            .map_err(Error::Compilation)?;
+        self.materialize_composition_metadata_for_compilation()
+            .map_err(Error::Compilation)?;
+        Ok(())
+    }
+
 }
 
 impl DynamicConstraint {
     /// Compile `grammar` into a [`DynamicConstraint`] for `vocab`.
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vocab() -> Vocab {
+        Vocab::new(vec![
+            (0, b"<".to_vec()),
+            (1, b">".to_vec()),
+            (2, b"[".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"b".to_vec()),
+            (6, b"x".to_vec()),
+            (7, b"<a>".to_vec()),
+            (8, b"<b>".to_vec()),
+            (9, b"<[a]>".to_vec()),
+        ])
+    }
+
+    fn accepts(constraint: &RuntimeConstraint, bytes: &[u8]) -> bool {
+        let mut state = constraint.start();
+        state.commit_bytes(bytes).is_ok() && state.is_accepting()
+    }
+
+    #[test]
+    fn compiled_parent_can_bind_external_grammar_after_compile_and_load() {
+        let vocab = vocab();
+        let mut parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    extern grammar payload;
+                    start document;
+                    nt document = "x" | "<" payload ">";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        assert_eq!(
+            parent.unbound_grammar_placeholders.keys().collect::<Vec<_>>(),
+            vec![&"payload".to_owned()],
+        );
+        assert!(accepts(&parent, b"x"));
+        assert!(!accepts(&parent, b"<a>"));
+
+        let child_a = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start value; nt value = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let child_b = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start value; nt value = \"b\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        let with_a = parent.bind_grammar("payload", &child_a, &vocab).unwrap();
+        let with_b = parent.bind_grammar("payload", &child_b, &vocab).unwrap();
+        assert!(accepts(&with_a, b"x"));
+        assert!(accepts(&with_a, b"<a>"));
+        assert!(!accepts(&with_a, b"<b>"));
+        assert!(accepts(&with_b, b"<b>"));
+        assert!(!accepts(&with_b, b"<a>"));
+        assert!(parent.unbound_grammar_placeholders.contains_key("payload"));
+
+        let saved = parent.save();
+        let mut loaded = RuntimeConstraint::load(&saved).unwrap();
+        let loaded_with_a = loaded.bind_grammar("payload", &child_a, &vocab).unwrap();
+        assert!(accepts(&loaded_with_a, b"<a>"));
+        assert!(!accepts(&loaded_with_a, b"<b>"));
+    }
+
+    #[test]
+    fn compiled_parent_can_fill_multiple_slots_incrementally() {
+        let vocab = vocab();
+        let mut parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    extern grammar left;
+                    extern grammar right;
+                    start document;
+                    nt document = "<" left right ">";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let a = RuntimeConstraint::compile(
+            Grammar::glrm(r#"glrm 1; start value; nt value = "a";"#),
+            &vocab,
+        )
+        .unwrap();
+        let b = RuntimeConstraint::compile(
+            Grammar::glrm(r#"glrm 1; start value; nt value = "b";"#),
+            &vocab,
+        )
+        .unwrap();
+        let mut half = parent.bind_grammar("left", &a, &vocab).unwrap();
+        assert!(half.unbound_grammar_placeholders.contains_key("right"));
+        let full = half.bind_grammar("right", &b, &vocab).unwrap();
+        assert!(full.unbound_grammar_placeholders.is_empty());
+        assert!(accepts(&full, b"<ab>"));
+
+        let unresolved_child = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; extern grammar leaf; start value; nt value = leaf;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let err = parent
+            .bind_grammar("left", &unresolved_child, &vocab)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("a compiled child with unresolved external grammars cannot yet be bound"));
+    }
+
+    #[test]
+    fn dynamic_compile_rejects_unbound_external_grammar() {
+        let vocab = vocab();
+        let err = DynamicConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; extern grammar payload; start document; nt document = payload;",
+            ),
+            &vocab,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("dynamic compilation requires bindings"));
     }
 }

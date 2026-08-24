@@ -799,6 +799,62 @@ impl Constraint {
         })
     }
 
+    /// Compile a GLRM parent shell while retaining unresolved `extern grammar`
+    /// declarations as named hidden linker terminals. Those terminals use
+    /// non-vocabulary token IDs, so an unresolved call site is unreachable at
+    /// runtime until a later compiled-constraint binding replaces it.
+    pub(crate) fn from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        terminal_bindings: &[(&str, &[u32])],
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        with_large_import_stack(glrm.len(), || {
+            let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
+            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+                glrm,
+                first_placeholder_token_id,
+                end_token_ids.iter().copied(),
+                terminal_bindings,
+            )?;
+            let mut parent = compile_from_named_grammar(
+                parsed.grammar,
+                vocab,
+                "glrm",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                end_token_ids,
+            )?;
+            let mut slots = BTreeMap::new();
+            for placeholder in parsed.placeholders {
+                let mut matching = parent
+                    .special_token_terminals
+                    .iter()
+                    .filter(|special| special.token_id == placeholder.token_id)
+                    .map(|special| special.terminal_id);
+                let terminal_id = matching.next().ok_or_else(|| {
+                    crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {:?} lost its hidden linker terminal",
+                        placeholder.binding_name,
+                    ))
+                })?;
+                if matching.next().is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {:?} has multiple hidden linker terminals",
+                        placeholder.binding_name,
+                    )));
+                }
+                if slots.insert(placeholder.binding_name.clone(), terminal_id).is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {:?} was emitted more than once",
+                        placeholder.binding_name,
+                    )));
+                }
+            }
+            parent.unbound_grammar_placeholders = slots;
+            Ok(parent)
+        })
+    }
+
     /// Compile GLRM containing typed `extern grammar name;` declarations and bind
     /// each declaration to an already-compiled child constraint.
     ///

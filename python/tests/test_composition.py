@@ -340,3 +340,53 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
 
 def test_manual_subgrammar_composition_api_is_not_exposed() -> None:
     assert not hasattr(glrmask.Constraint, "compose_subgrammars")
+
+
+def test_compiled_parent_can_be_cached_and_rebound() -> None:
+    vocab = glrmask.Vocab.from_id_to_bytes({
+        0: b"<",
+        1: b">",
+        2: b"a",
+        3: b"b",
+        4: b"x",
+    })
+    parent = glrmask.Constraint.from_glrm_grammar(
+        """
+        glrm 1;
+        extern grammar payload;
+        start document;
+        nt document = "x" | "<" payload ">";
+        """,
+        vocab,
+    )
+    child_a = glrmask.Constraint.from_glrm_grammar(
+        'glrm 1; start value; nt value = "a";',
+        vocab,
+    )
+    child_b = glrmask.Constraint.from_glrm_grammar(
+        'glrm 1; start value; nt value = "b";',
+        vocab,
+    )
+
+    with_a = parent.bind_grammar("payload", child_a, vocab)
+    with_b = parent.bind_grammar("payload", child_b, vocab)
+
+    state = with_a.start()
+    state.commit_token(0)
+    state.commit_token(2)
+    state.commit_token(1)
+    assert state.is_accepting()
+
+    state = with_b.start()
+    state.commit_token(0)
+    state.commit_token(3)
+    state.commit_token(1)
+    assert state.is_accepting()
+
+    loaded_parent = glrmask.Constraint.load(parent.save(), vocab)
+    loaded_with_a = loaded_parent.bind_grammar("payload", child_a, vocab)
+    state = loaded_with_a.start()
+    state.commit_token(0)
+    state.commit_token(2)
+    state.commit_token(1)
+    assert state.is_accepting()

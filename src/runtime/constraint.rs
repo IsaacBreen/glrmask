@@ -6376,6 +6376,52 @@ impl Constraint {
         (tokens, fusions)
     }
 
+    /// Materialize non-DWA weights retained in the compact current-artifact
+    /// pool. Compiler transformations still have a few mutable/map-oriented
+    /// consumers, so one-time composition preparation reconstructs those maps
+    /// rather than mixing packed and materialized sources of truth.
+    pub(crate) fn materialize_non_dwa_weights_for_compilation(&mut self) -> Result<(), String> {
+        let Some(packed) = self.packed_non_dwa_weights.take() else {
+            return Ok(());
+        };
+        let weights = crate::ds::weight::unpack_pooled_weights(packed.pool.packed_bytes())?;
+        let weight = |id: u32| -> Result<Weight, String> {
+            weights
+                .get(id as usize)
+                .cloned()
+                .ok_or_else(|| format!("packed non-DWA Weight id {id} is out of range"))
+        };
+
+        self.parser_top_accept = packed
+            .parser_top_accept
+            .iter()
+            .map(|(&label, &id)| Ok((label, weight(id)?)))
+            .collect::<Result<_, String>>()?;
+        self.parser_top_accept_parts = packed
+            .parser_top_accept_parts
+            .iter()
+            .map(|(&label, ids)| {
+                let parts = ids
+                    .iter()
+                    .map(|&id| weight(id))
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((label, parts))
+            })
+            .collect::<Result<_, String>>()?;
+        self.direct_regular_l1_complete_by_terminal = packed
+            .direct_regular_l1_complete_by_terminal
+            .iter()
+            .map(|(&terminal, &id)| Ok((terminal, weight(id)?)))
+            .collect::<Result<_, String>>()?;
+        self.possible_matches = packed
+            .possible_matches
+            .iter()
+            .map(|(&terminal, &id)| Ok((terminal, weight(id)?)))
+            .collect::<Result<_, String>>()?;
+        self.serialized_artifact_cache = None;
+        Ok(())
+    }
+
     /// Compiler-side escape hatch for a constraint loaded in the packed
     /// runtime representation. Ordinary load/mask/commit paths deliberately
     /// keep `packed_parser_dwa` zero-copy; transformations such as composition

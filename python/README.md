@@ -99,6 +99,25 @@ constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 
 `from_glrm_grammar(...)` accepts compiled child constraints in `subgrammars` and exact token IDs in `bindings`. `DynamicConstraint.from_glrm_grammar(...)` accepts the same arguments.
 
+For an expensive parent whose child grammar changes frequently, leave the external grammar unresolved, cache the compiled parent, and bind children later:
+
+```python
+parent = glrmask.Constraint.from_glrm_grammar(
+    """
+    glrm 1;
+    extern grammar payload;
+    start document;
+    nt document = payload;
+    """,
+    vocab,
+)
+
+child = glrmask.Constraint.from_json_schema(schema, vocab)
+constraint = parent.bind_grammar("payload", child, vocab)
+```
+
+`parent` remains reusable for later children, including after a save/load round trip.
+
 A compiled child is bound by name:
 
 ```python

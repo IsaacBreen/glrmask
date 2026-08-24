@@ -4534,6 +4534,7 @@ fn compile_prepared_with_profile_and_table_construction(
             internal_tsid_to_states: runtime_internal_tsid_to_states,
             deferred_internal_tsid_to_states: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
+            unbound_grammar_placeholders: BTreeMap::new(),
             composition_parser_templates_by_terminal,
             composition_parser_characterizations_by_terminal,
             composition_grammar_summary,

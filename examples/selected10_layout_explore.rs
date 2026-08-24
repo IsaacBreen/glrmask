@@ -178,9 +178,13 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
     );
     assert!(source.contains(needle), "JS grammar shape changed; cannot insert programmatic-tools alternative");
     source = source.replacen(needle, &replacement, 1);
-    source.push_str(&format!(
-        "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX ::= @token({JS_PLACEHOLDER_TOKEN});\n"
-    ));
+    if layout == Layout::ParentClose {
+        source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
+    } else {
+        source.push_str(&format!(
+            "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX ::= @token({JS_PLACEHOLDER_TOKEN});\n"
+        ));
+    }
     source
 }
 
@@ -405,14 +409,16 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
         let load_started = Instant::now();
         let mut core = Constraint::load(&core_bytes).unwrap();
         let mut dispatch = Constraint::load(&dispatch_bytes).unwrap();
-        core.bind_vocab_exact(vocab).unwrap();
-        dispatch.bind_vocab_exact(vocab).unwrap();
+        core.prepare_for_composition(vocab).unwrap();
+        dispatch.prepare_for_composition(vocab).unwrap();
         let load = load_started.elapsed();
         eprintln!("[selected10/debug] run={} after_load ms={:.3}", run + 1, load.as_secs_f64() * 1000.0);
 
         eprintln!("[selected10/debug] run={} before_compose", run + 1);
         let compose_started = Instant::now();
-        let composed = if std::env::var_os("GLRMASK_EXPERIMENT_SHARED_SEGMENTED_COMPONENTS").is_some() {
+        let composed = if layout == Layout::ParentClose {
+            core.bind_grammar("PROGRAMMATIC_TOOL_SUFFIX", &dispatch, vocab).unwrap()
+        } else if std::env::var_os("GLRMASK_EXPERIMENT_SHARED_SEGMENTED_COMPONENTS").is_some() {
             let dispatch = Arc::new(dispatch);
             core.compose_compiled_subgrammars_shared(
                 &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&dispatch))],

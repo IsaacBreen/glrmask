@@ -5,6 +5,7 @@ use crate::runtime::artifact::{
 };
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
+use crate::grammar::flat::TerminalID;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -446,14 +447,17 @@ fn decode_current_core(
     Ok((base, exprs))
 }
 
-const COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP1";
-const COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ1";
+const PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP1";
+const PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ1";
+const COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP2";
+const COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ2";
 const COMPOSITION_METADATA_HEADER_LEN: usize = 12;
 const COMPOSITION_METADATA_COMPRESS_MIN_BYTES: usize = 64 * 1024;
 
 #[derive(Serialize)]
 struct ConstraintCompositionMetadataRef<'a> {
     composition_reset_tokens_by_terminal: &'a [Vec<u32>],
+    unbound_grammar_placeholders: &'a BTreeMap<String, TerminalID>,
     composition_parser_templates_by_terminal:
         &'a [Option<crate::automata::unweighted_u32::dfa::DFA>],
     composition_parser_characterizations_by_terminal:
@@ -462,9 +466,20 @@ struct ConstraintCompositionMetadataRef<'a> {
         &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PreviousConstraintCompositionMetadata {
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    composition_parser_templates_by_terminal:
+        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
+    composition_parser_characterizations_by_terminal:
+        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
+    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+}
+
 #[derive(Deserialize)]
 struct ConstraintCompositionMetadata {
     composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     composition_parser_templates_by_terminal:
         Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
     composition_parser_characterizations_by_terminal:
@@ -474,24 +489,41 @@ struct ConstraintCompositionMetadata {
 
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     if constraint.composition_reset_tokens_by_terminal.is_empty()
+        && constraint.unbound_grammar_placeholders.is_empty()
+        && constraint.composition_parser_templates_by_terminal.is_empty()
+        && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
     {
         return Vec::new();
     }
-    // Parser templates and symbolic characterizations are redundant compiler
-    // caches: loaded composition can rebuild them exactly from the retained
-    // GLR table/rules. Reset-token rows and the compact grammar summary are
-    // cheap linker inputs, so preserve those without serializing megabytes of
-    // duplicate DFA/characterization state.
+    // These parser templates and symbolic characterizations are compiler caches,
+    // but they are also the key inputs to count-only linking of an already-
+    // compiled parent. Rebuilding them during every composition defeats cached-
+    // parent subgrammar use, so persist them with the component artifact.
     let raw = bincode::serialize(&ConstraintCompositionMetadataRef {
         composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
-        composition_parser_templates_by_terminal: &[],
-        composition_parser_characterizations_by_terminal: &[],
+        unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
+        composition_parser_templates_by_terminal:
+            &constraint.composition_parser_templates_by_terminal,
+        composition_parser_characterizations_by_terminal:
+            &constraint.composition_parser_characterizations_by_terminal,
         composition_grammar_summary: &constraint.composition_grammar_summary,
     })
     .expect("composition metadata serialization should succeed");
 
-    let mut out = Vec::with_capacity(COMPOSITION_METADATA_HEADER_LEN + raw.len());
+    let mut out = Vec::new();
+    if raw.len() >= COMPOSITION_METADATA_COMPRESS_MIN_BYTES {
+        let compressed = zstd::bulk::compress(&raw, 1)
+            .expect("composition metadata compression should succeed");
+        if compressed.len() < raw.len() {
+            out.reserve(COMPOSITION_METADATA_HEADER_LEN + compressed.len());
+            out.extend_from_slice(&COMPOSITION_METADATA_ZSTD_MAGIC);
+            out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+            out.extend_from_slice(&compressed);
+            return out;
+        }
+    }
+    out.reserve(COMPOSITION_METADATA_HEADER_LEN + raw.len());
     out.extend_from_slice(&COMPOSITION_METADATA_RAW_MAGIC);
     out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
     out.extend_from_slice(&raw);
@@ -511,12 +543,16 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
             .expect("composition metadata raw length has fixed width"),
     ))
     .map_err(|_| "composition metadata raw length does not fit platform".to_owned())?;
-    if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC) {
+    if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
+    {
         if input.len() != COMPOSITION_METADATA_HEADER_LEN + raw_len {
             return Err("invalid raw composition metadata section length".to_owned());
         }
         Ok(())
-    } else if input.starts_with(&COMPOSITION_METADATA_ZSTD_MAGIC) {
+    } else if input.starts_with(&COMPOSITION_METADATA_ZSTD_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC)
+    {
         if raw_len == 0 || input.len() == COMPOSITION_METADATA_HEADER_LEN {
             return Err("invalid compressed composition metadata section".to_owned());
         }
@@ -531,6 +567,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
     if input.is_empty() {
         return Ok(ConstraintCompositionMetadata {
             composition_reset_tokens_by_terminal: Vec::new(),
+            unbound_grammar_placeholders: BTreeMap::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
@@ -539,14 +576,32 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
     let raw_len = usize::try_from(u64::from_le_bytes(input[4..12].try_into().unwrap()))
         .map_err(|_| "composition metadata raw length does not fit platform".to_owned())?;
     let body = &input[COMPOSITION_METADATA_HEADER_LEN..];
-    if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC) {
-        bincode::deserialize(body).map_err(|err| err.to_string())
+    let previous = input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC);
+    let raw = if input.starts_with(&COMPOSITION_METADATA_RAW_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC)
+    {
+        Cow::Borrowed(body)
     } else {
         let raw = zstd::bulk::decompress(body, raw_len).map_err(|err| err.to_string())?;
         if raw.len() != raw_len {
             return Err("invalid decompressed composition metadata length".to_owned());
         }
-        bincode::deserialize(&raw).map_err(|err| err.to_string())
+        Cow::Owned(raw)
+    };
+    if previous {
+        let old: PreviousConstraintCompositionMetadata =
+            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+        Ok(ConstraintCompositionMetadata {
+            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+            unbound_grammar_placeholders: BTreeMap::new(),
+            composition_parser_templates_by_terminal: old.composition_parser_templates_by_terminal,
+            composition_parser_characterizations_by_terminal:
+                old.composition_parser_characterizations_by_terminal,
+            composition_grammar_summary: old.composition_grammar_summary,
+        })
+    } else {
+        bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())
     }
 }
 
@@ -2432,6 +2487,7 @@ impl Constraint {
         };
         let metadata = decode_composition_metadata(blob.as_slice())?;
         self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
+        self.unbound_grammar_placeholders = metadata.unbound_grammar_placeholders;
         self.composition_parser_templates_by_terminal =
             metadata.composition_parser_templates_by_terminal;
         self.composition_parser_characterizations_by_terminal =
@@ -4683,6 +4739,55 @@ mod tests {
     }
 
     #[test]
+    fn previous_composition_metadata_wire_remains_loadable() {
+        let constraint = tiny_constraint();
+        let previous = PreviousConstraintCompositionMetadata {
+            composition_reset_tokens_by_terminal: constraint
+                .composition_reset_tokens_by_terminal
+                .clone(),
+            composition_parser_templates_by_terminal: constraint
+                .composition_parser_templates_by_terminal
+                .clone(),
+            composition_parser_characterizations_by_terminal: constraint
+                .composition_parser_characterizations_by_terminal
+                .clone(),
+            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
+        };
+        let raw = bincode::serialize(&previous).unwrap();
+
+        for compressed in [false, true] {
+            let body = if compressed {
+                zstd::bulk::compress(&raw, 1).unwrap()
+            } else {
+                raw.clone()
+            };
+            let mut wire = Vec::with_capacity(COMPOSITION_METADATA_HEADER_LEN + body.len());
+            wire.extend_from_slice(if compressed {
+                &PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC
+            } else {
+                &PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC
+            });
+            wire.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+            wire.extend_from_slice(&body);
+
+            let decoded = decode_composition_metadata(&wire).unwrap();
+            assert!(decoded.unbound_grammar_placeholders.is_empty());
+            assert_eq!(
+                decoded.composition_parser_templates_by_terminal,
+                previous.composition_parser_templates_by_terminal,
+            );
+            assert_eq!(
+                decoded.composition_parser_characterizations_by_terminal,
+                previous.composition_parser_characterizations_by_terminal,
+            );
+            assert_eq!(
+                decoded.composition_grammar_summary,
+                previous.composition_grammar_summary,
+            );
+        }
+    }
+
+    #[test]
     fn current_constraint_artifact_preserves_composition_reset_tokens() {
         let mut constraint = tiny_constraint();
         constraint.ensure_composition_reset_tokens_by_terminal();
@@ -4707,7 +4812,7 @@ mod tests {
     }
 
     #[test]
-    fn current_constraint_artifact_omits_rebuildable_composition_parser_templates() {
+    fn current_constraint_artifact_preserves_composition_parser_templates() {
         let constraint = tiny_constraint();
         assert_eq!(
             constraint.composition_parser_templates_by_terminal.len(),
@@ -4724,15 +4829,15 @@ mod tests {
         loaded
             .materialize_composition_metadata_for_compilation()
             .unwrap();
-        // Templates are an acceleration cache, not semantic artifact state.
-        // Composition has exact fallback/rebuild paths when this cache is
-        // absent, so current artifacts deliberately do not persist it.
-        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        assert_eq!(
+            loaded.composition_parser_templates_by_terminal,
+            constraint.composition_parser_templates_by_terminal,
+        );
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 
     #[test]
-    fn current_constraint_artifact_omits_rebuildable_composition_parser_characterizations() {
+    fn current_constraint_artifact_preserves_composition_parser_characterizations() {
         let constraint = tiny_constraint();
         assert_eq!(
             constraint
@@ -4753,9 +4858,10 @@ mod tests {
         loaded
             .materialize_composition_metadata_for_compilation()
             .unwrap();
-        assert!(loaded
-            .composition_parser_characterizations_by_terminal
-            .is_empty());
+        assert_eq!(
+            loaded.composition_parser_characterizations_by_terminal,
+            constraint.composition_parser_characterizations_by_terminal,
+        );
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

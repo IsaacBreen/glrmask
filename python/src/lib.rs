@@ -730,6 +730,21 @@ impl PyConstraint {
         )
     }
 
+    /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
+    /// The parent remains reusable; compiler-side preparation is cached in place.
+    fn bind_grammar(
+        &mut self,
+        name: &str,
+        child: PyRef<'_, PyConstraint>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let parent = Arc::make_mut(&mut self.inner);
+        Self::from_constraint_result(
+            parent.bind_grammar(name, child.inner.as_ref(), &vocab.inner),
+            vocab,
+        )
+    }
+
     fn save(&self) -> Vec<u8> {
         self.inner.save()
     }

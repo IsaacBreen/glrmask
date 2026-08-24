@@ -1015,7 +1015,7 @@ fn build_direct_component_state_coordinates_from_precomputed_map(
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
     for (component_index, component) in components.iter().enumerate() {
         let constraint = component.constraint;
-        let local_tsid_count = constraint.internal_tsid_to_states.len();
+        let local_tsid_count = constraint.internal_tsid_groups().len();
         if local_tsid_count == 0 {
             return Err(format!("component {component_index} has no internal TSIDs"));
         }
@@ -4391,8 +4391,6 @@ fn boundary_candidate_state_ranges_by_token(
     candidate_tokens: &BTreeSet<u32>,
 ) -> BTreeMap<u32, Vec<(usize, u32, u32)>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
-    let union_possible_matches =
-        std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some();
     let mut by_token = BTreeMap::<u32, Vec<(usize, u32, u32)>>::new();
     for (component_index, constraint) in components.iter().enumerate() {
         debug_assert!(constraint.possible_matches_complete);
@@ -4436,19 +4434,17 @@ fn boundary_candidate_state_ranges_by_token(
         }
         let candidate_internal_ids = candidates_by_internal.keys().copied().collect::<Vec<_>>();
 
-        let union;
-        let weights: Box<dyn Iterator<Item = &Weight> + '_> = if union_possible_matches {
-            union = Weight::union_all(constraint.possible_matches.values());
-            Box::new(std::iter::once(&union))
-        } else {
-            Box::new(constraint.possible_matches.values())
-        };
-        for weight in weights {
-            for (start_tsid, end_tsid, internal_tokens) in weight.range_entries() {
-                for token_range in internal_tokens.ranges() {
-                    let start = *token_range.start();
-                    let end = *token_range.end();
-                    let mut index = candidate_internal_ids.partition_point(|&token| token < start);
+        // `possible_matches` may be retained in the compact packed weight pool
+        // after loading a saved constraint. Use the runtime view here rather
+        // than the materialized map so cached components stay directly
+        // composable without unpacking their full weight inventory. Preserve
+        // the old diagnostic union mode by materializing only when explicitly
+        // requested.
+        let mut visit_weight = |weight: crate::runtime::RuntimeWeightRef<'_>| {
+            weight.for_each_entry(|start_tsid, end_tsid, internal_tokens| {
+                internal_tokens.for_each_range(|start, end| {
+                    let mut index =
+                        candidate_internal_ids.partition_point(|&token| token < start);
                     while let Some(&internal_token) = candidate_internal_ids.get(index) {
                         if internal_token > end {
                             break;
@@ -4464,6 +4460,19 @@ fn boundary_candidate_state_ranges_by_token(
                         }
                         index += 1;
                     }
+                });
+            });
+        };
+        if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some() {
+            let mut materialized = (*constraint).clone();
+            if materialized.materialize_non_dwa_weights_for_compilation().is_ok() {
+                let union = Weight::union_all(materialized.possible_matches.values());
+                visit_weight((&union).into());
+            }
+        } else {
+            for terminal in constraint.runtime_possible_match_terminals() {
+                if let Some(weight) = constraint.runtime_possible_match_weight(terminal) {
+                    visit_weight(weight);
                 }
             }
         }
@@ -4725,8 +4734,7 @@ fn boundary_token_prefilter(
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
             summaries[terminal_offset + local_terminal] = Some(
                 component
-                    .tokenizer
-                    .terminal_expr(local_terminal as u32)
+                    .retained_terminal_expr(local_terminal as u32)
                     .map(expr_byte_summary)
                     .unwrap_or(ExprByteSummary {
                         nullable: false,
@@ -4923,7 +4931,6 @@ fn boundary_visible_residual_starts_by_first_byte(
         }
         relevant_states.sort_unstable();
         relevant_states.dedup();
-
         for local_state in relevant_states {
             let Some(global_state) = state_offset.checked_add(local_state) else {
                 continue;
@@ -5007,8 +5014,7 @@ fn boundary_interface_adjacent_pair_candidates(
             }
             summaries[global_terminal] = Some(
                 component
-                    .tokenizer
-                    .terminal_expr(local_terminal as u32)
+                    .retained_terminal_expr(local_terminal as u32)
                     .map(expr_byte_summary)
                     .unwrap_or(ExprByteSummary {
                         nullable: false,
@@ -5051,7 +5057,7 @@ fn boundary_terminal_residual_continuation_candidates(
             if !terminals.contains(global_terminal as usize) {
                 continue;
             }
-            let Some(expr) = component.tokenizer.terminal_expr(local_terminal) else {
+            let Some(expr) = component.retained_terminal_expr(local_terminal) else {
                 // Retained Expr metadata is expected for modern artifacts. If it
                 // is absent, fall back conservatively to the exact component
                 // possible-matches relation rather than dropping support.
@@ -17109,6 +17115,7 @@ fn build_composed_constraint_unfinalized(
         internal_tsid_to_states,
         deferred_internal_tsid_to_states: Default::default(),
         composition_reset_tokens_by_terminal: Vec::new(),
+        unbound_grammar_placeholders: BTreeMap::new(),
         composition_parser_templates_by_terminal: Vec::new(),
         composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,
@@ -17314,6 +17321,7 @@ fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option
     }
     let mut materialized = source.clone();
     materialized.materialize_parser_dwa_for_compilation()?;
+    materialized.materialize_non_dwa_weights_for_compilation()?;
     materialized.materialize_composition_metadata_for_compilation()?;
     Ok(Some(materialized))
 }
@@ -18168,6 +18176,7 @@ fn compose_constraints_owned_parent_impl(
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
     parent.materialize_parser_dwa_for_compilation()?;
+    parent.materialize_non_dwa_weights_for_compilation()?;
     parent.materialize_composition_metadata_for_compilation()?;
     let materialized_children = children
         .iter()
@@ -21134,6 +21143,59 @@ table: &child.table,
                 "transported singleton epsilon closure differs at state {state}",
             );
         }
+    }
+
+    #[test]
+    fn prepared_loaded_components_match_fresh_owned_composition() {
+        let vocab = Vocab::new(vec![
+            (0, b"<ab>".to_vec()),
+            (1, b"<a".to_vec()),
+            (2, b"b>".to_vec()),
+            (3, b"<".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"b".to_vec()),
+            (6, b">".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "<" SUB ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let fresh = parent
+            .clone()
+            .compose_linked_children_for_test_owned(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        let mut loaded_parent = Constraint::load(&parent.save()).unwrap();
+        let mut loaded_child = Constraint::load(&child.save()).unwrap();
+        loaded_parent.prepare_for_composition_internal(&vocab).unwrap();
+        loaded_child.prepare_for_composition_internal(&vocab).unwrap();
+        assert!(loaded_parent.packed_parser_dwa.is_none());
+        assert!(loaded_child.packed_parser_dwa.is_none());
+        assert!(loaded_parent.deferred_composition_metadata_blob.is_none());
+        assert!(loaded_child.deferred_composition_metadata_blob.is_none());
+
+        let prepared = loaded_parent
+            .compose_linked_children_for_test_owned(&[("SUB", &loaded_child)], &vocab)
+            .unwrap();
+        assert_constraints_equivalent_on_reachable_prefixes(
+            &prepared,
+            &fresh,
+            &vocab,
+            4,
+        );
     }
 
     #[test]

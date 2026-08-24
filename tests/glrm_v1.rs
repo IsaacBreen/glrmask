@@ -87,12 +87,15 @@ nt start = CONTROL payload;
         .unwrap()
         .bind_token("payload", [7])
         .is_err());
-    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+    let parent = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7])
         .unwrap()
         .build()
-        .is_err());
+        .expect("an entirely unbound grammar manifest is a reusable compiled parent")
+        .compile()
+        .unwrap();
+    assert!(!parent.start().is_accepting());
 }
 
 #[test]

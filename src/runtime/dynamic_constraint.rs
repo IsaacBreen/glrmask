@@ -540,6 +540,7 @@ impl DynamicConstraint {
             internal_tsid_to_states: Vec::new(),
             deferred_internal_tsid_to_states: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
+            unbound_grammar_placeholders: BTreeMap::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,

@@ -7126,6 +7126,7 @@ fn build_parser_nwa_from_terminal_dwa(
         Some(table),
         false,
         None,
+        true,
     )
 }
 
@@ -7136,6 +7137,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     table: Option<&GLRTable>,
     preserve_bundle_nondeterminism: bool,
     prebuilt_bundle_cache: Option<&PrebuiltParserBundleCache>,
+    allow_parallel: bool,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
@@ -7347,6 +7349,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
             "GLRMASK_EXPERIMENT_PARALLEL_BUNDLE_DETERMINIZE",
         )
         .is_some()
+            && allow_parallel
             && rayon::current_num_threads() > 1
         {
             summaries
@@ -7376,23 +7379,33 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
         let coarse_parallel_bundle_id = coarse_parallel_bundle.as_ref().map(|(id, _)| *id);
         let profile_bundle_prebuild =
             std::env::var_os("GLRMASK_PROFILE_BUNDLE_PREBUILD_DETAIL").is_some();
-        let built_with_timings = summaries
-            .unique_bundles
-            .par_iter()
-            .enumerate()
-            .map(|(bundle_id, bundle)| {
-                if !(used_multi_bundle[bundle_id]
-                    && built_bundle_cache[bundle_id].is_none()
-                    && Some(bundle_id) != coarse_parallel_bundle_id)
-                {
-                    return (None, 0.0f64);
-                }
-                let started = Instant::now();
-                let built = Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache));
-                let ms = elapsed_ms(started);
-                (Some(built), ms)
-            })
-            .collect::<Vec<_>>();
+        let build_bundle = |(bundle_id, bundle): (usize, &BTreeMap<TerminalID, Weight>)| {
+            if !(used_multi_bundle[bundle_id]
+                && built_bundle_cache[bundle_id].is_none()
+                && Some(bundle_id) != coarse_parallel_bundle_id)
+            {
+                return (None, 0.0f64);
+            }
+            let started = Instant::now();
+            let built = Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache));
+            let ms = elapsed_ms(started);
+            (Some(built), ms)
+        };
+        let built_with_timings = if allow_parallel {
+            summaries
+                .unique_bundles
+                .par_iter()
+                .enumerate()
+                .map(build_bundle)
+                .collect::<Vec<_>>()
+        } else {
+            summaries
+                .unique_bundles
+                .iter()
+                .enumerate()
+                .map(build_bundle)
+                .collect::<Vec<_>>()
+        };
         if profile_bundle_prebuild {
             let mut rows = built_with_timings
                 .iter()
@@ -7434,6 +7447,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
         && !compose_detail_enabled
         && !preserve_bundle_nondeterminism
         && hybrid_nondeterministic_min_terminals.is_none()
+        && allow_parallel
         && rayon::current_num_threads() > 1;
 
     let parallel_fragments_done = if parallel_fragment_assembly {
@@ -7798,6 +7812,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         Some(table),
         false,
         None,
+        true,
     )
     .map(|(nwa, _)| nwa)
 }
@@ -7820,6 +7835,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         None,
         preserve_bundle_nondeterminism,
         None,
+        true,
     )
     .map(|(nwa, _)| nwa)
 }
@@ -7837,6 +7853,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         None,
         false,
         Some(prebuilt_bundle_cache),
+        false,
     )
     .map(|(nwa, _)| nwa)
 }
@@ -7854,6 +7871,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         Some(table),
         true,
         None,
+        true,
     )
     .map(|(nwa, _)| nwa)
 }

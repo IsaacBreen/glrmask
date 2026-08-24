@@ -1040,9 +1040,18 @@ pub mod artifact_serde {
     /// `None` only for the uncommon compressed-segment representation, whose
     /// direct writer requires materialized transition rows.
     pub fn fast_layout_for_write(tokenizer: &Tokenizer) -> Option<FastLayout> {
-        (tokenizer.compressed_transition_segments.is_empty()
-            && tokenizer.packed_compressed_transition_segments.is_empty())
-        .then(|| fast_layout(tokenizer, &tokenizer.dfa))
+        if !tokenizer.compressed_transition_segments.is_empty()
+            || !tokenizer.packed_compressed_transition_segments.is_empty()
+        {
+            return None;
+        }
+        if tokenizer.packed_runtime_transitions.is_some()
+            || !tokenizer.packed_runtime_transition_segments.is_empty()
+        {
+            let materialized = tokenizer.materialized_dfa();
+            return Some(fast_layout(tokenizer, &materialized));
+        }
+        Some(fast_layout(tokenizer, &tokenizer.dfa))
     }
 
     pub fn fast_len(tokenizer: &Tokenizer) -> Option<usize> {
@@ -1259,6 +1268,12 @@ pub mod artifact_serde {
         {
             return Err("direct fast tokenizer write requires materialized transitions".to_owned());
         }
+        if tokenizer.packed_runtime_transitions.is_some()
+            || !tokenizer.packed_runtime_transition_segments.is_empty()
+        {
+            let materialized = tokenizer.materialized_dfa();
+            return write_fast_bytes_for_dfa(tokenizer, &materialized, layout, out);
+        }
         write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out)
     }
 
@@ -1269,7 +1284,11 @@ pub mod artifact_serde {
     /// transition sidecar directly.
     pub fn to_fast_bytes(tokenizer: &Tokenizer) -> Vec<u8> {
         let materialized;
-        let dfa = if tokenizer.compressed_transition_segments.is_empty() {
+        let dfa = if tokenizer.compressed_transition_segments.is_empty()
+            && tokenizer.packed_compressed_transition_segments.is_empty()
+            && tokenizer.packed_runtime_transitions.is_none()
+            && tokenizer.packed_runtime_transition_segments.is_empty()
+        {
             &tokenizer.dfa
         } else {
             materialized = tokenizer.materialized_dfa();
@@ -5867,6 +5886,23 @@ impl Tokenizer {
                 dfa.set_transitions_from_sorted_entries(state, segment.expanded_entries(state));
             }
         }
+        for segment in self.packed_compressed_transition_segments.iter() {
+            for local_state in 0..segment.state_count {
+                let state = segment.state_offset + local_state;
+                let mut row = [u32::MAX; 256];
+                segment.fill_transition_row(state, &mut row);
+                dfa.set_transitions_from_sorted_entries(
+                    state,
+                    row.iter()
+                        .copied()
+                        .enumerate()
+                        .filter_map(|(byte, target)| {
+                            (target != u32::MAX).then_some((byte as u8, target))
+                        })
+                        .collect(),
+                );
+            }
+        }
         dfa
     }
 
@@ -8011,6 +8047,52 @@ mod tests {
                 normalized_exec(&merged, input, offset + loaded.initial_state()),
                 expected,
                 "rebased packed execution mismatch on {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn fast_wire_roundtrip_preserves_nested_packed_transition_segments() {
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(2);
+        dfa.add_transition(0, b'a', 1);
+        dfa.add_transition(0, b'b', 2);
+        let mut final_a = BitSet::new(2);
+        final_a.set(0);
+        dfa.overwrite_state_metadata(1, final_a, BitSet::new(2));
+        let mut final_b = BitSet::new(2);
+        final_b.set(1);
+        dfa.overwrite_state_metadata(2, final_b, BitSet::new(2));
+        dfa.recompute_possible_futures();
+
+        let original = Tokenizer::from_parts(dfa, 2, None);
+        let first_wire = artifact_serde::to_fast_bytes(&original);
+        let loaded = artifact_serde::from_fast_bytes(&first_wire).expect("first fast tokenizer roundtrip");
+        let (nested, offsets) = Tokenizer::disjoint_union_with_terminal_offsets(&[(&loaded, 0)]);
+        let offset = offsets[0];
+        assert_eq!(nested.packed_runtime_transition_segments.len(), 1);
+
+        let layout = artifact_serde::fast_layout_for_write(&nested)
+            .expect("ordinary packed segments should still support TKF2");
+        let mut second_wire = vec![0u8; layout.len()];
+        artifact_serde::write_fast_bytes_with_layout(&nested, layout, &mut second_wire)
+            .expect("nested packed tokenizer should serialize");
+        let roundtripped = artifact_serde::from_fast_bytes(&second_wire)
+            .expect("nested fast tokenizer roundtrip");
+
+        for input in [b"a".as_slice(), b"b".as_slice(), b"ab".as_slice()] {
+            let (source_ends, source_matches) = normalized_exec(&loaded, input, loaded.initial_state());
+            let expected = (
+                source_ends.into_iter().map(|state| offset + state).collect::<Vec<_>>(),
+                source_matches
+                    .into_iter()
+                    .map(|(terminal, width, state)| (terminal, width, offset + state))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                normalized_exec(&roundtripped, input, offset + loaded.initial_state()),
+                expected,
+                "nested packed fast-wire mismatch on {input:?}",
             );
         }
     }
