@@ -2874,12 +2874,28 @@ impl<'a> ConstraintState<'a> {
                         }
                         local_top_first.push(local);
                     }
-                    local_top_first.reverse();
-                    let local_disallowed = self.segmented_local_disallowed(component, acc);
-                    let local_gss = ParserGSS::from_single_stack(
-                        local_top_first.into_vec(),
-                        local_disallowed,
-                    );
+                    let mut local_disallowed = self.segmented_local_disallowed(component, acc);
+                    let local_gss = if local_top_first.is_empty() {
+                        // The composed empty parser stack belongs to component
+                        // zero. Child entry is boundary language B, not the
+                        // standalone child root A_i. Scoped ignore at the
+                        // synthetic component root is suppressed through the
+                        // view metadata rather than by mutating the retained
+                        // source parser DWA.
+                        if component.terminal_offset() != 0 {
+                            continue;
+                        }
+                        if let Some(terminal) = component.root_disallowed_terminal {
+                            local_disallowed = local_disallowed.with_insert(
+                                local_tokenizer_state,
+                                terminal,
+                            );
+                        }
+                        ParserGSS::from_single_stack(Vec::new(), local_disallowed)
+                    } else {
+                        local_top_first.reverse();
+                        ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed)
+                    };
                     projected_states[component_index]
                         .merge_insert(local_tokenizer_state, local_gss);
                 }
@@ -2957,6 +2973,8 @@ impl<'a> ConstraintState<'a> {
         boundary: &crate::runtime::SegmentedBoundaryTerminalTrie,
         buf: &mut [u32],
     ) -> bool {
+        const MAX_NWA_PRODUCT_ENTRIES: usize = 4096;
+
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -2964,6 +2982,71 @@ impl<'a> ConstraintState<'a> {
                 dense.get(word)
                     .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
             })
+        }
+
+        #[derive(Clone)]
+        enum BoundaryTokenDomain {
+            Full,
+            Set(Arc<RangeSetBlaze<u32>>),
+        }
+
+        fn same_domain(left: &BoundaryTokenDomain, right: &BoundaryTokenDomain) -> bool {
+            match (left, right) {
+                (BoundaryTokenDomain::Full, BoundaryTokenDomain::Full) => true,
+                (BoundaryTokenDomain::Set(left), BoundaryTokenDomain::Set(right)) => {
+                    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+                }
+                _ => false,
+            }
+        }
+
+        fn intersect_domain(
+            current: &BoundaryTokenDomain,
+            edge: &Weight,
+            tsid: u32,
+        ) -> Option<BoundaryTokenDomain> {
+            if edge.is_empty() {
+                return None;
+            }
+            if edge.is_full() {
+                return Some(current.clone());
+            }
+            let edge_tokens = edge.token_set_for_tsid_ref(tsid)?;
+            match current {
+                BoundaryTokenDomain::Full => {
+                    Some(BoundaryTokenDomain::Set(Arc::clone(edge_tokens)))
+                }
+                BoundaryTokenDomain::Set(current_tokens) => {
+                    if Arc::ptr_eq(current_tokens, edge_tokens)
+                        || current_tokens.as_ref() == edge_tokens.as_ref()
+                    {
+                        return Some(current.clone());
+                    }
+                    if current_tokens.as_ref().is_disjoint(edge_tokens.as_ref()) {
+                        return None;
+                    }
+                    let overlap = current_tokens.as_ref() & edge_tokens.as_ref();
+                    (!overlap.is_empty())
+                        .then(|| BoundaryTokenDomain::Set(Arc::new(overlap)))
+                }
+            }
+        }
+
+        type ProductBucket = SmallVec<[(BoundaryTokenDomain, ParserGSS); 4]>;
+
+        fn push_product(
+            bucket: &mut ProductBucket,
+            domain: BoundaryTokenDomain,
+            parser: ParserGSS,
+        ) {
+            if let Some((_, existing_parser)) = bucket
+                .iter_mut()
+                .find(|(existing_domain, _)| same_domain(existing_domain, &domain))
+            {
+                *existing_parser = existing_parser.merge(&parser);
+            } else {
+                bucket.push((domain, parser));
+            }
         }
 
         for (&global_tokenizer_state, gss) in self.state.iter() {
@@ -2975,15 +3058,9 @@ impl<'a> ConstraintState<'a> {
             if tsid == u32::MAX {
                 continue;
             }
-            let root = boundary
-                .root_by_tsid
-                .get(tsid as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if root == u32::MAX {
-                continue;
-            }
+
             let mut complete = true;
+            let single_path = gss.is_single_path();
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
                 let Some(allowed) =
                     self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
@@ -2991,9 +3068,146 @@ impl<'a> ConstraintState<'a> {
                     complete = false;
                     return;
                 };
-                let mut stack = top_first.to_vec();
-                stack.reverse();
-                let parser = ParserGSS::from_single_stack(stack, acc.clone());
+                let parser = if single_path {
+                    gss.clone()
+                } else {
+                    let mut stack = SmallVec::<[u32; 64]>::from_slice(top_first);
+                    stack.reverse();
+                    ParserGSS::from_single_stack(stack.into_vec(), acc.clone())
+                };
+
+                let mut admit_internal_token = |internal_token: u32| -> bool {
+                    let Some(originals) = boundary
+                        .internal_token_to_originals
+                        .get(internal_token as usize)
+                    else {
+                        return false;
+                    };
+                    for &original in originals {
+                        let outer_internal = self
+                            .constraint
+                            .original_token_internal_at(original)
+                            .unwrap_or(u32::MAX);
+                        let outer_allowed = outer_internal != u32::MAX
+                            && dense_contains(&allowed, outer_internal);
+                        if outer_allowed {
+                            set_original_mask_bit(buf, original);
+                        }
+                    }
+                    true
+                };
+
+                if let Some(nwa) = boundary.symbolic_nwa.as_ref() {
+                    let mut buckets = SmallVec::<[ProductBucket; 16]>::new();
+                    buckets.resize_with(nwa.nodes.len(), ProductBucket::new);
+                    for &start in &nwa.start_states {
+                        let Some(bucket) = buckets.get_mut(start as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        push_product(bucket, BoundaryTokenDomain::Full, parser.clone());
+                    }
+
+                    let mut product_entries = 0usize;
+                    for &state_id in &nwa.topological_order {
+                        let Some(bucket) = buckets.get_mut(state_id as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        let entries = std::mem::take(bucket);
+                        if entries.is_empty() {
+                            continue;
+                        }
+                        product_entries = product_entries.saturating_add(entries.len());
+                        if product_entries > MAX_NWA_PRODUCT_ENTRIES {
+                            complete = false;
+                            return;
+                        }
+                        let Some(node) = nwa.nodes.get(state_id as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        for (domain, parser) in entries {
+                            if let Some(final_weight) = node.final_weight.as_ref()
+                                && let Some(output_domain) =
+                                    intersect_domain(&domain, final_weight, tsid)
+                            {
+                                match output_domain {
+                                    BoundaryTokenDomain::Full => {
+                                        for internal_token in
+                                            0..boundary.internal_token_to_originals.len() as u32
+                                        {
+                                            if !admit_internal_token(internal_token) {
+                                                complete = false;
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    BoundaryTokenDomain::Set(tokens) => {
+                                        for range in tokens.ranges() {
+                                            for internal_token in range {
+                                                if !admit_internal_token(internal_token) {
+                                                    complete = false;
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            for (target, edge_weight) in &node.epsilons {
+                                let Some(next_domain) =
+                                    intersect_domain(&domain, edge_weight, tsid)
+                                else {
+                                    continue;
+                                };
+                                let Some(target_bucket) = buckets.get_mut(*target as usize) else {
+                                    complete = false;
+                                    return;
+                                };
+                                push_product(target_bucket, next_domain, parser.clone());
+                            }
+                            for transition in &node.transitions {
+                                let Some(next_domain) =
+                                    intersect_domain(&domain, &transition.weight, tsid)
+                                else {
+                                    continue;
+                                };
+                                let advanced = super::commit::advance_parser_stacks_table_exact(
+                                    self.constraint,
+                                    &parser,
+                                    transition.terminal,
+                                );
+                                let Some(advanced) = advanced else {
+                                    continue;
+                                };
+                                if advanced.is_empty() {
+                                    continue;
+                                }
+                                let Some(target_bucket) =
+                                    buckets.get_mut(transition.target as usize)
+                                else {
+                                    complete = false;
+                                    return;
+                                };
+                                push_product(target_bucket, next_domain, advanced);
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Legacy v21 artifacts carry an explicitly expanded trie. Keep
+                // that evaluator unchanged for backwards compatibility.
+                let root = boundary
+                    .root_by_tsid
+                    .get(tsid as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if root == u32::MAX {
+                    return;
+                }
                 let mut pending = Vec::<(u32, ParserGSS)>::new();
                 pending.push((root, parser));
                 let mut visits = 0usize;
@@ -3011,29 +3225,13 @@ impl<'a> ConstraintState<'a> {
                     while outputs != 0 {
                         let internal_token = outputs.trailing_zeros() as u32;
                         outputs &= outputs - 1;
-                        let Some(originals) = boundary
-                            .internal_token_to_originals
-                            .get(internal_token as usize)
-                        else {
+                        if !admit_internal_token(internal_token) {
                             complete = false;
                             return;
-                        };
-                        for &original in originals {
-                            let outer_internal = self
-                                .constraint
-                                .original_token_to_internal
-                                .get(original as usize)
-                                .copied()
-                                .unwrap_or(u32::MAX);
-                            if outer_internal != u32::MAX
-                                && dense_contains(&allowed, outer_internal)
-                            {
-                                set_original_mask_bit(buf, original);
-                            }
                         }
                     }
                     for &(terminal, child) in &node.children {
-                        if let Some(advanced) = super::commit::advance_parser_stacks_if_possible(
+                        if let Some(advanced) = super::commit::advance_parser_stacks_table_exact(
                             self.constraint,
                             &parser,
                             terminal,

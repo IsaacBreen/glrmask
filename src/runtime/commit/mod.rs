@@ -719,6 +719,22 @@ pub(crate) fn advance_parser_stacks_if_possible(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+/// Advance against the authoritative composed GLR table without consulting
+/// parser-DWA/direct-regular admission caches. Boundary B can contain language
+/// absent from retained component A, so A cannot be used as B's admission gate.
+pub(crate) fn advance_parser_stacks_table_exact(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> Option<ParserGSS> {
+    let advanced = if constraint.table.control_terminals.is_empty() {
+        advance_stacks(&constraint.table, stack, terminal)
+    } else {
+        advance_control_closed_stacks(&constraint.table, stack, terminal)
+    };
+    (!advanced.is_empty()).then_some(advanced)
+}
+
 struct ProfiledAdvanceAttempt {
     advanced: ParserGSS,
     profile: AdvanceProfile,

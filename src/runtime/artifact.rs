@@ -4231,12 +4231,37 @@ pub(crate) struct BoundaryTerminalTrieNode {
     pub(crate) outputs: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BoundaryTerminalNwaTransition {
+    pub(crate) terminal: u32,
+    pub(crate) target: u32,
+    pub(crate) weight: Weight,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoundaryTerminalNwaNode {
+    pub(crate) final_weight: Option<Weight>,
+    pub(crate) transitions: Vec<BoundaryTerminalNwaTransition>,
+    pub(crate) epsilons: Vec<(u32, Weight)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoundaryTerminalNwa {
+    pub(crate) nodes: Vec<BoundaryTerminalNwaNode>,
+    pub(crate) start_states: Vec<u32>,
+    pub(crate) topological_order: Vec<u32>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryTerminalTrie {
     pub(crate) nodes: Vec<BoundaryTerminalTrieNode>,
     pub(crate) root_by_tsid: Vec<u32>,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
+    /// Current in-memory representation. Persistence materializes a static
+    /// snapshot for live hybrids, so this weighted DAG is runtime-only.
+    #[serde(skip, default)]
+    pub(crate) symbolic_nwa: Option<BoundaryTerminalNwa>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

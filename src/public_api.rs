@@ -259,10 +259,10 @@ impl<'a> ConstraintSpec<'a> {
             &token_bindings,
         )?;
         let children = self.compile_children(ChildCompileMode::Dynamic)?;
-        // Preserve dynamic parent/child backends now. The boundary remains the
-        // deterministic static parser backend until the dynamic boundary walker
-        // is promoted separately.
-        let boundary_backend = SegmentedBoundaryBackend::StaticParserDwa;
+        // Dynamic compilation preserves dynamic component-local masking and
+        // evaluates cross-component behavior through the exact terminal-NWA
+        // boundary walker rather than compiling B into a parser DWA.
+        let boundary_backend = SegmentedBoundaryBackend::DynamicTerminalNwa;
         let children = prepare_compiled_children(children, self.vocab, boundary_backend)?;
         let alternatives = parents
             .clone_constraints()
@@ -800,7 +800,7 @@ where
             "dynamic parent alternatives target incompatible vocabularies".to_owned(),
         ));
     }
-    let boundary_backend = SegmentedBoundaryBackend::StaticParserDwa;
+    let boundary_backend = SegmentedBoundaryBackend::DynamicTerminalNwa;
     let children = prepare_late_child(
         name,
         child,
@@ -877,6 +877,19 @@ mod hybrid_tests {
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
     }
 
+    fn assert_dynamic_boundary(constraint: &RuntimeConstraint) {
+        let overlay = constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("hybrid composition must publish segmented runtime metadata");
+        assert!(overlay.segmented_boundary_parser.is_none());
+        let boundary = overlay
+            .segmented_boundary_terminal_trie
+            .as_ref()
+            .expect("dynamic composition must publish a terminal-NWA boundary");
+        assert!(boundary.symbolic_nwa.is_some());
+    }
+
     #[test]
     fn segmented_composition_preserves_supplied_component_backends() {
         let vocab = Vocab::new(vec![
@@ -923,11 +936,188 @@ mod hybrid_tests {
             .unwrap();
         for alternative in dynamic_with_static.clone_constraints() {
             assert_eq!(component_backend_flags(&alternative), vec![true, false]);
-            assert_static_boundary(&alternative);
+            assert_dynamic_boundary(&alternative);
         }
         let mut state = dynamic_with_static.start();
         state.commit_token(2).unwrap();
         assert!(state.is_accepting());
+    }
+
+    #[test]
+    fn dynamic_late_binding_can_recurse_through_rebased_slots() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"z".to_vec()),
+            (3, b"xy".to_vec()),
+            (4, b"yz".to_vec()),
+            (5, b"xyz".to_vec()),
+        ]);
+        let parent = DynamicConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = DynamicConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar leaf; nt start = \"y\" leaf;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let once = parent.bind_grammar("child", &child).unwrap();
+        assert!(once.clone_constraints().iter().any(|alternative| {
+            alternative
+                .late_grammar_slots
+                .iter()
+                .any(|slot| slot.name == "child::leaf")
+        }));
+
+        let once = DynamicConstraint::load(&once.save()).unwrap();
+        assert!(once.clone_constraints().iter().any(|alternative| {
+            alternative
+                .late_grammar_slots
+                .iter()
+                .any(|slot| slot.name == "child::leaf")
+        }));
+
+        let leaf = DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab).unwrap();
+        let twice = once.bind_grammar("child::leaf", &leaf).unwrap();
+        assert!(twice
+            .clone_constraints()
+            .iter()
+            .all(|alternative| alternative.late_grammar_slots.is_empty()));
+
+        let mut fused = twice.start();
+        fused.commit_token(5).unwrap();
+        assert!(fused.is_accepting());
+
+        let mut split = twice.start();
+        split.commit_token(0).unwrap();
+        split.commit_token(1).unwrap();
+        split.commit_token(2).unwrap();
+        assert!(split.is_accepting());
+    }
+
+    #[test]
+    fn dynamic_boundary_preserves_scoped_component_ignores() {
+        let vocab = Vocab::new(vec![
+            (0, b" ".to_vec()),
+            (1, b"\t".to_vec()),
+            (2, b"<".to_vec()),
+            (3, b">".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"b".to_vec()),
+            (6, b"\ta".to_vec()),
+            (7, b"b\t".to_vec()),
+            (8, b"a b".to_vec()),
+        ]);
+        let parent = DynamicConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    start document;
+                    ignore PARENT_WS;
+                    t PARENT_WS ::= " "+;
+                    extern grammar child;
+                    nt document ::= "<" child ">";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = DynamicConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    start value;
+                    ignore CHILD_WS;
+                    t CHILD_WS ::= "\t"+;
+                    nt value ::= "a" "b";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent.bind_grammar("child", &child).unwrap();
+        for alternative in composed.clone_constraints() {
+            assert_dynamic_boundary(&alternative);
+        }
+
+        let inline = DynamicConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    start document;
+                    ignore PARENT_WS;
+                    t PARENT_WS ::= " "+;
+                    g child ::= {
+                        start value;
+                        ignore CHILD_WS;
+                        t CHILD_WS ::= "\t"+;
+                        nt value ::= "a" "b";
+                    };
+                    nt document ::= "<" child ">";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+
+        for sequence in [
+            &[2u32, 4, 5, 3][..],
+            &[0, 2, 1, 4, 1, 5, 1, 3, 0][..],
+            &[2, 6, 7, 3][..],
+            &[2, 4, 0, 5, 3][..],
+            &[1, 2, 4, 5, 3][..],
+        ] {
+            let mut actual = composed.start();
+            let mut expected = inline.start();
+            for &token in sequence {
+                assert_eq!(
+                    actual.mask(),
+                    expected.mask(),
+                    "mask differs before token {token} in {sequence:?}",
+                );
+                let actual_result = actual.commit_token(token).is_ok();
+                let expected_result = expected.commit_token(token).is_ok();
+                assert_eq!(
+                    actual_result, expected_result,
+                    "commit differs for token {token} in {sequence:?}",
+                );
+                if !expected_result {
+                    break;
+                }
+            }
+            assert_eq!(
+                actual.is_accepting(),
+                expected.is_accepting(),
+                "acceptance differs for {sequence:?}",
+            );
+        }
+
+        for bytes in [
+            &b"<ab>"[..],
+            &b" <\ta\t\tb\t> "[..],
+            &b"<a\tb\t>"[..],
+            &b"<a b>"[..],
+            &b"\t<ab>"[..],
+            &b"<\ta b>"[..],
+        ] {
+            let mut actual = composed.start();
+            let mut expected = inline.start();
+            assert_eq!(
+                actual.commit_bytes(bytes).is_ok(),
+                expected.commit_bytes(bytes).is_ok(),
+                "commit result differs for {:?}",
+                String::from_utf8_lossy(bytes),
+            );
+            assert_eq!(
+                actual.is_accepting(),
+                expected.is_accepting(),
+                "acceptance differs for {:?}",
+                String::from_utf8_lossy(bytes),
+            );
+        }
     }
 
     #[test]

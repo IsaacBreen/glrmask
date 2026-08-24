@@ -489,20 +489,19 @@ struct DirectComponentStateCoordinates {
     local_to_global_tsids: Vec<Vec<Vec<u32>>>,
 }
 
-fn invert_singleton_parser_state_relation(
+fn invert_parser_state_relation(
     relation: &[Vec<u32>],
     global_state_count: usize,
 ) -> Option<Vec<u32>> {
     let mut inverse = vec![u32::MAX; global_state_count];
     for (local_state, targets) in relation.iter().enumerate() {
-        let [global_state] = targets.as_slice() else {
-            return None;
-        };
-        let slot = inverse.get_mut(*global_state as usize)?;
-        if *slot != u32::MAX && *slot != local_state as u32 {
-            return None;
+        for &global_state in targets {
+            let slot = inverse.get_mut(global_state as usize)?;
+            if *slot != u32::MAX && *slot != local_state as u32 {
+                return None;
+            }
+            *slot = local_state as u32;
         }
-        *slot = local_state as u32;
     }
     Some(inverse)
 }
@@ -652,10 +651,10 @@ fn build_segmented_runtime_metadata(
     let started_at = Instant::now();
     let mut segmented_components = Vec::with_capacity(source_constraints.len());
     for (component_index, (source, root_disallowed_terminal)) in source_constraints.into_iter().enumerate() {
-        let global_to_local_parser_state = invert_singleton_parser_state_relation(
+        let global_to_local_parser_state = invert_parser_state_relation(
             &parser_state_relations[component_index],
             global_state_count,
-        ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
+        ).ok_or_else(|| format!("segmented parser component {component_index} has an ambiguous outer-to-local LR-state relation"))?;
         let view = crate::runtime::ConstraintView::segmented_leaf(
             source,
             terminal_offsets[component_index],
@@ -2074,9 +2073,10 @@ enum PositiveBoundaryParser {
 }
 
 
-struct BoundaryTerminalTrieWork {
+struct DynamicBoundaryTerminalWork {
     nodes: Vec<crate::runtime::BoundaryTerminalTrieNode>,
     root_by_tsid: Vec<u32>,
+    symbolic_nwa: Option<crate::runtime::BoundaryTerminalNwa>,
 }
 
 enum BoundaryRuntimeCandidate {
@@ -2086,8 +2086,8 @@ enum BoundaryRuntimeCandidate {
         template_cache: Option<Vec<Option<UnweightedDfa>>>,
         build_ms: f64,
     },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
+    TerminalNwa {
+        trie: DynamicBoundaryTerminalWork,
         id_map: InternalIdMap,
         template_cache: Option<Vec<Option<UnweightedDfa>>>,
         build_ms: f64,
@@ -2111,8 +2111,8 @@ enum PublishedBoundaryRuntime {
         normalize_ms: f64,
         tsid_quotient: Option<Vec<u32>>,
     },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
+    TerminalNwa {
+        trie: DynamicBoundaryTerminalWork,
         id_map: InternalIdMap,
         template_cache: Option<Vec<Option<UnweightedDfa>>>,
         build_ms: f64,
@@ -2702,132 +2702,147 @@ fn boundary_weight_contains_coordinate(weight: &Weight, tsid: u32, token: u32) -
             .is_some_and(|tokens| tokens.contains(token))
 }
 
-fn build_boundary_terminal_trie_work(
+fn build_dynamic_boundary_terminal_work(
     terminal_automaton: &TerminalAutomaton,
     id_map: &InternalIdMap,
-) -> Result<BoundaryTerminalTrieWork, String> {
-    let TerminalAutomaton::Dwa(dwa) = terminal_automaton else {
-        return Err(
-            "runtime boundary terminal trie currently requires a deterministic terminal DWA"
-                .into(),
-        );
+) -> Result<DynamicBoundaryTerminalWork, String> {
+    // Keep the acyclic weighted terminal machine compact. Expanding it into a
+    // terminal-prefix trie is not viable in general: a small converging DAG can
+    // encode exponentially many terminal sequences. Runtime evaluation takes
+    // the product with the *current* parser frontier instead, where grammar
+    // state prunes almost all of those paths; exceptional wide products fall
+    // back to the unified dynamic evaluator.
+    let owned_nwa;
+    let nwa = match terminal_automaton {
+        TerminalAutomaton::Dwa(dwa) => {
+            owned_nwa = dwa.to_nwa();
+            &owned_nwa
+        }
+        TerminalAutomaton::TokenDeterministicNwa(nwa)
+        | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
     };
-    if id_map.num_internal_tokens() == 0 || id_map.num_internal_tokens() > 64 {
-        return Err(
-            "runtime boundary terminal trie supports between 1 and 64 private token classes"
-                .into(),
-        );
+    if id_map.num_internal_tokens() == 0 {
+        return Err("runtime boundary terminal NWA requires a private token class".into());
+    }
+    if !nwa.is_acyclic() {
+        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
     }
 
-    let start = dwa.start_state();
-    let mut start_coordinates = BTreeSet::<(u32, u32)>::new();
-    let mut add_weight_coordinates = |weight: &Weight| {
-        if weight.is_full() {
-            for tsid in 0..id_map.num_tsids() {
-                for token in 0..id_map.num_internal_tokens() {
-                    start_coordinates.insert((tsid, token));
-                }
+    let state_count = nwa.states().len();
+    let mut indegree = vec![0usize; state_count];
+    for state in nwa.states() {
+        for (&label, branches) in &state.transitions {
+            if label < 0 {
+                return Err(format!(
+                    "boundary terminal NWA encountered non-terminal label {label}"
+                ));
             }
-        } else {
-            for (lo, hi, tokens) in weight.range_entries() {
-                for tsid in lo..=hi {
-                    for range in tokens.ranges() {
-                        for token in range {
-                            start_coordinates.insert((tsid, token));
-                        }
-                    }
-                }
-            }
-        }
-    };
-    if let Some(weight) = dwa.states()[start as usize].final_weight.as_ref() {
-        add_weight_coordinates(weight);
-    }
-    for (_, weight) in dwa.states()[start as usize].transitions.values() {
-        add_weight_coordinates(weight);
-    }
-
-    let mut nodes = Vec::<crate::runtime::BoundaryTerminalTrieNode>::new();
-    let mut root_by_tsid = vec![u32::MAX; id_map.num_tsids() as usize];
-    let insert_sequence = |nodes: &mut Vec<crate::runtime::BoundaryTerminalTrieNode>,
-                           roots: &mut [u32],
-                           tsid: u32,
-                           path: &[u32],
-                           token: u32| {
-        let mut node_id = roots[tsid as usize];
-        if node_id == u32::MAX {
-            node_id = nodes.len() as u32;
-            roots[tsid as usize] = node_id;
-            nodes.push(crate::runtime::BoundaryTerminalTrieNode {
-                children: Vec::new(),
-                outputs: 0,
-            });
-        }
-        for &terminal in path {
-            let existing = nodes[node_id as usize]
-                .children
-                .iter()
-                .find_map(|&(label, child)| (label == terminal).then_some(child));
-            node_id = if let Some(child) = existing {
-                child
-            } else {
-                let child = nodes.len() as u32;
-                nodes.push(crate::runtime::BoundaryTerminalTrieNode {
-                    children: Vec::new(),
-                    outputs: 0,
-                });
-                nodes[node_id as usize].children.push((terminal, child));
-                child
-            };
-        }
-        nodes[node_id as usize].outputs |= 1u64 << token;
-    };
-
-    for (tsid, token) in start_coordinates {
-        let mut stack = vec![(start, Vec::<u32>::new())];
-        let mut visits = 0usize;
-        while let Some((state_id, path)) = stack.pop() {
-            visits += 1;
-            if visits > 10_000 {
-                return Err("boundary terminal trie source exceeded acyclic visit bound".into());
-            }
-            let state = &dwa.states()[state_id as usize];
-            if state
-                .final_weight
-                .as_ref()
-                .is_some_and(|weight| boundary_weight_contains_coordinate(weight, tsid, token))
-            {
-                insert_sequence(&mut nodes, &mut root_by_tsid, tsid, &path, token);
-            }
-            for (&label, (target, weight)) in &state.transitions {
-                if label < 0 {
+            for (target, _) in branches {
+                let Some(slot) = indegree.get_mut(*target as usize) else {
                     return Err(format!(
-                        "boundary terminal trie encountered non-terminal label {label}"
+                        "boundary terminal NWA source references invalid state {target}"
                     ));
-                }
-                if boundary_weight_contains_coordinate(weight, tsid, token) {
-                    let mut next_path = path.clone();
-                    next_path.push(label as u32);
-                    stack.push((*target, next_path));
+                };
+                *slot += 1;
+            }
+        }
+        for (target, _) in &state.epsilons {
+            let Some(slot) = indegree.get_mut(*target as usize) else {
+                return Err(format!(
+                    "boundary terminal NWA source references invalid state {target}"
+                ));
+            };
+            *slot += 1;
+        }
+    }
+    for &start in nwa.start_states() {
+        if start as usize >= state_count {
+            return Err(format!(
+                "boundary terminal NWA source references invalid start state {start}"
+            ));
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state as u32);
+        }
+    }
+    let mut topological_order = Vec::with_capacity(state_count);
+    while let Some(state_id) = queue.pop_front() {
+        topological_order.push(state_id);
+        let state = &nwa.states()[state_id as usize];
+        for branches in state.transitions.values() {
+            for (target, _) in branches {
+                indegree[*target as usize] -= 1;
+                if indegree[*target as usize] == 0 {
+                    queue.push_back(*target);
                 }
             }
         }
+        for (target, _) in &state.epsilons {
+            indegree[*target as usize] -= 1;
+            if indegree[*target as usize] == 0 {
+                queue.push_back(*target);
+            }
+        }
     }
-    for node in &mut nodes {
-        node.children.sort_unstable_by_key(|(terminal, _)| *terminal);
-        node.children.dedup();
+    if topological_order.len() != state_count {
+        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
     }
-    Ok(BoundaryTerminalTrieWork {
-        nodes,
-        root_by_tsid,
+
+    let nodes = nwa
+        .states()
+        .iter()
+        .map(|state| {
+            let mut transitions = Vec::new();
+            for (&label, branches) in &state.transitions {
+                for (target, weight) in branches {
+                    transitions.push(crate::runtime::BoundaryTerminalNwaTransition {
+                        terminal: label as u32,
+                        target: *target,
+                        weight: weight.clone(),
+                    });
+                }
+            }
+            crate::runtime::BoundaryTerminalNwaNode {
+                final_weight: state.final_weight.clone(),
+                transitions,
+                epsilons: state.epsilons.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if compose_profile_enabled() {
+        let labeled_edges = nodes.iter().map(|node| node.transitions.len()).sum::<usize>();
+        let epsilon_edges = nodes.iter().map(|node| node.epsilons.len()).sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][boundary_terminal_nwa] states={} starts={} labeled_edges={} epsilon_edges={} tsids={} token_classes={}",
+            nodes.len(),
+            nwa.start_states().len(),
+            labeled_edges,
+            epsilon_edges,
+            id_map.num_tsids(),
+            id_map.num_internal_tokens(),
+        );
+    }
+    Ok(DynamicBoundaryTerminalWork {
+        // v21 artifacts used an expanded trie. New in-memory builds carry only
+        // the compact weighted DAG; the legacy fields remain for compatibility.
+        nodes: Vec::new(),
+        root_by_tsid: vec![u32::MAX; id_map.num_tsids() as usize],
+        symbolic_nwa: Some(crate::runtime::BoundaryTerminalNwa {
+            nodes,
+            start_states: nwa.start_states().to_vec(),
+            topological_order,
+        }),
     })
 }
 
 impl BoundaryParserWork {
-    fn materialize_terminal_trie(
+    fn materialize_terminal_nwa(
         self,
     ) -> Result<(
-        BoundaryTerminalTrieWork,
+        DynamicBoundaryTerminalWork,
         InternalIdMap,
         Option<Vec<Option<UnweightedDfa>>>,
     ), String> {
@@ -2839,7 +2854,7 @@ impl BoundaryParserWork {
                 templates,
                 prebuilt_bundle_cache: _,
             } => {
-                let trie = build_boundary_terminal_trie_work(&terminal_automaton, &id_map)?;
+                let trie = build_dynamic_boundary_terminal_work(&terminal_automaton, &id_map)?;
                 let mut template_cache = vec![None; num_terminals as usize];
                 for (terminal, dfa) in templates.by_terminal {
                     if let Some(slot) = template_cache.get_mut(terminal as usize) {
@@ -2848,7 +2863,7 @@ impl BoundaryParserWork {
                 }
                 Ok((trie, id_map, Some(template_cache)))
             }
-            _ => Err("runtime boundary terminal trie requires deferred count-only boundary work".into()),
+            _ => Err("runtime boundary terminal NWA requires deferred count-only boundary work".into()),
         }
     }
 
@@ -5378,6 +5393,7 @@ fn discover_boundary_token_paths(
     context_terminals: &BitSet,
     follow_transparent_terminals: &BitSet,
     disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    prefer_cross_interface_only: bool,
     candidate_limit: Option<&BTreeSet<u32>>,
 ) -> BoundaryTokenDiscovery {
     let discovery_total_started_at = Instant::now();
@@ -5444,7 +5460,8 @@ fn discover_boundary_token_paths(
     let allow_suffix_seed = !ignore_terminals.is_empty();
     let cross_interface_only = use_prefilter
         && ignore_terminals.is_empty()
-        && std::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some();
+        && (prefer_cross_interface_only
+            || std::env::var_os("GLRMASK_EXPERIMENT_CROSS_INTERFACE_PREFILTER_ONLY").is_some());
     // In the exact cross-interface factor, seed-only tokens are component-local
     // language and are deliberately excluded from boundary repair. Avoid the
     // full-vocabulary seed-DFA scan whose result would be discarded below.
@@ -5501,7 +5518,10 @@ fn discover_boundary_token_paths(
     } else {
         prefilter.extend(interface_pair_candidates.iter().copied());
     }
-    let context_residual_candidates = if use_prefilter && !use_component_scoped_identity {
+    let context_residual_candidates = if use_prefilter
+        && !cross_interface_only
+        && !use_component_scoped_identity
+    {
         boundary_terminal_residual_continuation_candidates(
             vocab,
             components,
@@ -15041,6 +15061,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
                     &context_terminals,
                     &follow_transparent_terminals,
                     disallowed_follows.as_ref(),
+                    false,
                     None,
                 );
                 (discovery, phase.elapsed().as_secs_f64() * 1000.0)
@@ -15105,6 +15126,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
             &context_terminals,
             &follow_transparent_terminals,
             disallowed_follows.as_ref(),
+            false,
             None,
         );
         let discovery_ms = phase.elapsed().as_secs_f64() * 1000.0;
@@ -15148,6 +15170,7 @@ fn build_boundary_repair(
     deferred_component_state_map: Option<&OnceLock<Result<ManyToOneIdMap, String>>>,
     pre_table_base_discovery: Option<&PreTableBoundaryBaseDiscovery>,
     selected_boundary_tokens: Option<&OnceLock<Result<Option<Vec<u32>>, String>>>,
+    explicit_dynamic_boundary: bool,
 ) -> Result<Option<BoundaryRepair>, String> {
     let total_started_at = Instant::now();
     if std::env::var_os("GLRMASK_PROFILE_COMPONENT_GRAMMAR_ANALYSIS").is_some() {
@@ -15252,11 +15275,12 @@ fn build_boundary_repair(
         }));
     }
 
-    let cross_only_boundary =
-        std::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some();
+    let cross_only_boundary = explicit_dynamic_boundary
+        || std::env::var_os("GLRMASK_EXPERIMENT_CROSS_ONLY_BOUNDARY").is_some();
     let fast_component_grammar_splice = cross_only_boundary
-        && std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
-        && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()
+        && (explicit_dynamic_boundary
+            || (std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some()
+                && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()))
         && std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
     // In the cross-only factor every accepted repair word has a parser-visible
@@ -15451,7 +15475,27 @@ fn build_boundary_repair(
             .collect::<Vec<_>>();
         eprintln!("[glrmask/profile][constraint_boundary_context_terminals] {context:?}");
     }
-    let mut one_terminal_support_terminals = if cross_only_boundary {
+    let mut one_terminal_support_terminals = if explicit_dynamic_boundary {
+        // Retained static component DWAs already expose a token that finishes
+        // exactly at a component boundary.  A retained dynamic component,
+        // however, quite correctly sees the unresolved placeholder as the
+        // next required terminal and cannot contribute that token through its
+        // standalone A_i walker.  Publish the one-terminal endpoints of every
+        // boundary interface into dynamic B as well.  Runtime traversal still
+        // advances the authoritative composed GLR state, so selecting both
+        // endpoints is exact: e.g. the child's first terminal is rejected at
+        // the parent start and accepted only once the call boundary is live.
+        let mut selected = vec![false; seed_terminals.len()];
+        for &(left, right) in &interface_pairs {
+            if let Some(slot) = selected.get_mut(left as usize) {
+                *slot = true;
+            }
+            if let Some(slot) = selected.get_mut(right as usize) {
+                *slot = true;
+            }
+        }
+        selected
+    } else if cross_only_boundary {
         // A one-terminal path cannot change component ownership. In segmented
         // mode those paths remain the responsibility of the retained component
         // parser segments; the boundary factor contains only paths with an
@@ -15664,7 +15708,8 @@ fn build_boundary_repair(
                     || {
                         let started_at = Instant::now();
                         let usable_precomputed = pre_table_base_discovery.filter(|precomputed| {
-                            fast_component_grammar_splice
+                            !explicit_dynamic_boundary
+                                && fast_component_grammar_splice
                                 && precomputed.terminal_offsets == composed_table.terminal_offsets
                                 && precomputed.tokenizer_state_offsets == tokenizer_state_offsets
                                 && precomputed.base_interface_pairs == base_interface_pairs
@@ -15707,6 +15752,7 @@ fn build_boundary_repair(
                                         &boundary_context_terminals,
                                         &follow_transparent_terminals,
                                         boundary_disallowed_follows.as_ref(),
+                                        explicit_dynamic_boundary,
                                         Some(&incremental_candidates),
                                     );
                                     combined = replace_boundary_discovery_tokens(
@@ -15749,6 +15795,7 @@ fn build_boundary_repair(
                                     &boundary_context_terminals,
                                     &follow_transparent_terminals,
                                     boundary_disallowed_follows.as_ref(),
+                                    explicit_dynamic_boundary,
                                     None,
                                 );
                                 assert_eq!(
@@ -15783,6 +15830,7 @@ fn build_boundary_repair(
                                 &boundary_context_terminals,
                                 &follow_transparent_terminals,
                                 boundary_disallowed_follows.as_ref(),
+                                explicit_dynamic_boundary,
                                 None,
                             )
                         };
@@ -15790,7 +15838,7 @@ fn build_boundary_repair(
                     },
                     || {
                         let started_at = Instant::now();
-                        let relations = if cross_only_boundary {
+                        let relations = if cross_only_boundary && !explicit_dynamic_boundary {
                             BTreeMap::new()
                         } else {
                             collect_one_byte_seed_relations_components(
@@ -16095,7 +16143,25 @@ fn build_boundary_repair(
                             &active_terminals,
                             &ignore_terminals.scoped,
                         )
-                        .expect("fast grammar splice requires cached count-only composition templates")
+                        .unwrap_or_else(|| {
+                            if explicit_dynamic_boundary {
+                                // The terminal-trie boundary evaluator advances the
+                                // authoritative composed GLR table directly. It needs
+                                // the exact cross-boundary terminal language, but no
+                                // parser-template DFA. A dynamic component therefore
+                                // need not be compiled merely to populate a cache used
+                                // only by the static boundary-DWA publisher.
+                                (
+                                    Templates::default(),
+                                    vec![None; analyzed.num_terminals as usize],
+                                    0.0,
+                                )
+                            } else {
+                                panic!(
+                                    "fast grammar splice requires cached count-only composition templates"
+                                )
+                            }
+                        })
                     } else {
                         try_build_cached_composition_templates(
                             composed_table,
@@ -16219,7 +16285,19 @@ fn build_boundary_repair(
                                     &active_terminals,
                                     &ignore_terminals.scoped,
                                 )
-                                .expect("fast grammar splice requires cached count-only composition templates")
+                                .unwrap_or_else(|| {
+                                    if explicit_dynamic_boundary {
+                                        (
+                                            Templates::default(),
+                                            vec![None; analyzed.num_terminals as usize],
+                                            0.0,
+                                        )
+                                    } else {
+                                        panic!(
+                                            "fast grammar splice requires cached count-only composition templates"
+                                        )
+                                    }
+                                })
                             } else {
                                 try_build_cached_composition_templates(
                                     composed_table,
@@ -16741,6 +16819,9 @@ fn merged_special_token_terminals(
             constraint
                 .special_token_terminals
                 .iter()
+                .filter(|special| {
+                    !constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+                })
                 .filter_map(|special| {
                     let terminal_id = terminal_offset + special.terminal_id;
                     if control_terminals.contains(&terminal_id) {
@@ -18227,6 +18308,7 @@ pub(crate) fn compose_constraints(
                     None,
                     None,
                     None,
+                    false,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
@@ -18280,6 +18362,7 @@ pub(crate) fn compose_constraints(
                                 None,
                                 None,
                                 None,
+                                false,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -18431,7 +18514,7 @@ pub(crate) fn compose_constraints_owned_parent(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SegmentedBoundaryBackend {
     StaticParserDwa,
-    DynamicTerminalTrie,
+    DynamicTerminalNwa,
 }
 
 pub(crate) fn compose_constraints_owned_parent_segmented(
@@ -19121,6 +19204,8 @@ fn compose_constraints_owned_parent_impl(
                     Some(&state_map_cell),
                     pre_table_base_discovery.as_ref(),
                     Some(&selected_boundary_tokens_cell),
+                    explicit_segmented_boundary
+                        == Some(SegmentedBoundaryBackend::DynamicTerminalNwa),
                 );
                 if selected_boundary_tokens_cell.get().is_none() {
                     let publication = match &result {
@@ -19165,8 +19250,11 @@ fn compose_constraints_owned_parent_impl(
     // mode controls grouped cancellation.  Starting here lets it overlap terminal
     // live-state merging, tokenizer assembly, coordinate canonicalization, and
     // unfinalized constraint construction.
+    let explicit_dynamic_boundary =
+        explicit_segmented_boundary == Some(SegmentedBoundaryBackend::DynamicTerminalNwa);
     let early_boundary_positive_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
+        !explicit_dynamic_boundary
+            && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
             && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_positive = None;
@@ -19325,7 +19413,8 @@ fn compose_constraints_owned_parent_impl(
     // work plus the composed LR table.  Start it before the remaining runtime
     // artifact assembly so deterministic B publication can overlap that work.
     let early_boundary_publish_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
+        !explicit_dynamic_boundary
+            && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
             && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_publish = None;
@@ -19351,7 +19440,8 @@ fn compose_constraints_owned_parent_impl(
     // lets us move the already-owned parent directly into runtime segment zero
     // instead of cloning a multi-megabyte parser artifact just to keep it alive.
     if segmented_skip_requested || two_dwa_runtime_requested {
-        if !global_ignores
+        if explicit_segmented_boundary.is_none()
+            && !global_ignores
             && let Some(ignore_terminal) = parent.ignore_terminal
             && let Some(ignore_weight) = parent.possible_matches.get(&ignore_terminal).cloned()
             && let Some(final_weight) = parent
@@ -19415,6 +19505,17 @@ fn compose_constraints_owned_parent_impl(
                             )
                         })
                         .collect::<Vec<_>>()
+                } else if explicit_segmented_boundary.is_some() {
+                    children
+                        .iter()
+                        .map(|child| {
+                            let source = child.constraint.clone();
+                            let root_disallowed_terminal = (!global_ignores)
+                                .then_some(source.ignore_terminal)
+                                .flatten();
+                            (Arc::new(source), root_disallowed_terminal)
+                        })
+                        .collect::<Vec<_>>()
                 } else {
                     let mut cloned = children
                         .iter()
@@ -19464,21 +19565,24 @@ fn compose_constraints_owned_parent_impl(
                     return Ok(None);
                 };
                 let started_at = Instant::now();
-                if std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE")
-                    .is_some()
+                if explicit_dynamic_boundary
+                    || (explicit_segmented_boundary.is_none()
+                        && std::env::var_os(
+                            "GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE",
+                        )
+                        .is_some())
                 {
                     let (trie, boundary_id_map, template_cache) =
-                        work.materialize_terminal_trie()?;
+                        work.materialize_terminal_nwa()?;
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=terminal_trie nodes={} live_tsids={} token_classes={} build_ms={elapsed_ms:.3}",
-                            trie.nodes.len(),
-                            trie.root_by_tsid.iter().filter(|&&root| root != u32::MAX).count(),
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=terminal_nwa states={} token_classes={} build_ms={elapsed_ms:.3}",
+                            trie.symbolic_nwa.as_ref().map_or(0, |nwa| nwa.nodes.len()),
                             boundary_id_map.num_internal_tokens(),
                         );
                     }
-                    Ok(Some(BoundaryRuntimeCandidate::TerminalTrie {
+                    Ok(Some(BoundaryRuntimeCandidate::TerminalNwa {
                         trie,
                         id_map: boundary_id_map,
                         template_cache,
@@ -19524,7 +19628,15 @@ fn compose_constraints_owned_parent_impl(
                     .sum::<usize>(),
             );
         }
-        source_constraints.insert(0, (Arc::new(parent), None));
+        let parent_root_disallowed_terminal = explicit_segmented_boundary
+            .is_some()
+            .then_some(parent.ignore_terminal)
+            .flatten()
+            .filter(|_| !global_ignores);
+        source_constraints.insert(
+            0,
+            (Arc::new(parent), parent_root_disallowed_terminal),
+        );
 
         let global_state_count = result.constraint.table.num_states as usize;
         if source_constraints.len() != result.parser_state_relations.len()
@@ -19640,12 +19752,12 @@ fn compose_constraints_owned_parent_impl(
                             tsid_quotient,
                         }))
                     }
-                    BoundaryRuntimeCandidate::TerminalTrie {
+                    BoundaryRuntimeCandidate::TerminalNwa {
                         trie,
                         id_map,
                         template_cache,
                         build_ms,
-                    } => Ok(Some(PublishedBoundaryRuntime::TerminalTrie {
+                    } => Ok(Some(PublishedBoundaryRuntime::TerminalNwa {
                         trie,
                         id_map,
                         template_cache,
@@ -19839,7 +19951,7 @@ fn compose_constraints_owned_parent_impl(
                             internal_token_to_originals,
                         }));
                 }
-                PublishedBoundaryRuntime::TerminalTrie {
+                PublishedBoundaryRuntime::TerminalNwa {
                     trie,
                     id_map: boundary_id_map,
                     template_cache,
@@ -19856,12 +19968,8 @@ fn compose_constraints_owned_parent_impl(
                         boundary_id_map.vocab_tokens.internal_to_originals;
                     if compose_profile_enabled() {
                         eprintln!(
-                            "[glrmask/profile][constraint_segmented_boundary_terminal_trie] nodes={} live_tsids={} token_classes={} build_ms={build_ms:.3}",
-                            trie.nodes.len(),
-                            trie.root_by_tsid
-                                .iter()
-                                .filter(|&&root| root != u32::MAX)
-                                .count(),
+                            "[glrmask/profile][constraint_segmented_boundary_terminal_nwa] states={} token_classes={} build_ms={build_ms:.3}",
+                            trie.symbolic_nwa.as_ref().map_or(0, |nwa| nwa.nodes.len()),
                             internal_token_to_originals.len(),
                         );
                     }
@@ -19874,6 +19982,7 @@ fn compose_constraints_owned_parent_impl(
                             root_by_tsid: trie.root_by_tsid,
                             tokenizer_state_to_tsid,
                             internal_token_to_originals,
+                            symbolic_nwa: trie.symbolic_nwa,
                         },
                     ));
                 }
@@ -19990,7 +20099,7 @@ fn compose_constraints_owned_parent_impl(
             && source_constraints.len() == result.terminal_offsets.len();
         if exact {
             for (component_index, source) in source_constraints.into_iter().enumerate() {
-                let Some(global_to_local_parser_state) = invert_singleton_parser_state_relation(
+                let Some(global_to_local_parser_state) = invert_parser_state_relation(
                     &result.parser_state_relations[component_index],
                     global_state_count,
                 ) else {
@@ -27229,6 +27338,31 @@ table: &dispatch.table,
             drop(all_components_residual);
             parser_from_residual("valid_trigrams", &trigram_filtered, &full_for_factor, &common_id_map, &vocab);
         }
+    }
+
+
+    #[test]
+    fn dynamic_boundary_symbolic_nwa_has_no_64_token_class_limit() {
+        let mut dwa = DWA::new(1, 64);
+        dwa.states_mut()[0].final_weight = Some(Weight::all());
+        let id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap {
+                original_to_internal: vec![0],
+                internal_to_originals: vec![vec![0]],
+                representative_original_ids: vec![0],
+            },
+            vocab_tokens: ManyToOneIdMap {
+                original_to_internal: (0..65).collect(),
+                internal_to_originals: (0..65).map(|token| vec![token]).collect(),
+                representative_original_ids: (0..65).collect(),
+            },
+            deferred_vocab_singleton_original_ids: None,
+        };
+        let work = build_dynamic_boundary_terminal_work(&TerminalAutomaton::Dwa(dwa), &id_map)
+            .expect("symbolic boundary NWA must support more than 64 token classes");
+        assert!(work.nodes.is_empty());
+        assert!(work.symbolic_nwa.is_some());
+        assert_eq!(id_map.num_internal_tokens(), 65);
     }
 
 }

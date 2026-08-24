@@ -20,7 +20,8 @@ pub(crate) enum VirtualIdMap {
     },
     Dense {
         outer_to_local: Arc<[u32]>,
-        local_to_outer: Arc<[u32]>,
+        local_to_outer_offsets: Arc<[u32]>,
+        local_to_outers: Arc<[u32]>,
     },
 }
 
@@ -39,35 +40,53 @@ impl VirtualIdMap {
     }
 
     /// Build a bidirectional dense map from an outer->local relation. Unmapped
-    /// outer entries are allowed. A local ID may be owned by at most one outer
-    /// ID; that is the property required by an intact component view.
+    /// outer entries are allowed. Composition may split one local LR state into
+    /// several outer LR states, so the reverse relation is intentionally
+    /// one-to-many.
     pub(crate) fn dense_from_outer_to_local(
         outer_to_local: Vec<u32>,
         local_len: u32,
     ) -> Result<Self, String> {
-        let mut local_to_outer = vec![UNMAPPED_ID; local_len as usize];
+        let mut counts = vec![0u32; local_len as usize];
         for (outer, &local) in outer_to_local.iter().enumerate() {
             if local == UNMAPPED_ID {
                 continue;
             }
-            let slot = local_to_outer.get_mut(local as usize).ok_or_else(|| {
+            let count = counts.get_mut(local as usize).ok_or_else(|| {
                 format!(
                     "component ID projection maps outer ID {outer} to out-of-range local ID {local} (local_len={local_len})"
                 )
             })?;
-            let outer = u32::try_from(outer)
-                .map_err(|_| "component outer ID exceeds u32 coordinate".to_owned())?;
-            if *slot != UNMAPPED_ID && *slot != outer {
-                return Err(format!(
-                    "component ID projection maps local ID {local} from multiple outer IDs ({}, {outer})",
-                    *slot
-                ));
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| "component reverse ID projection count overflows u32".to_owned())?;
+        }
+        let mut local_to_outer_offsets = Vec::with_capacity(local_len as usize + 1);
+        local_to_outer_offsets.push(0u32);
+        for count in counts {
+            let next = local_to_outer_offsets
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .checked_add(count)
+                .ok_or_else(|| "component reverse ID projection offset overflows u32".to_owned())?;
+            local_to_outer_offsets.push(next);
+        }
+        let mut cursors = local_to_outer_offsets[..local_len as usize].to_vec();
+        let mut local_to_outers = vec![0u32; *local_to_outer_offsets.last().unwrap_or(&0) as usize];
+        for (outer, &local) in outer_to_local.iter().enumerate() {
+            if local == UNMAPPED_ID {
+                continue;
             }
-            *slot = outer;
+            let cursor = &mut cursors[local as usize];
+            local_to_outers[*cursor as usize] = u32::try_from(outer)
+                .map_err(|_| "component outer ID exceeds u32 coordinate".to_owned())?;
+            *cursor += 1;
         }
         Ok(Self::Dense {
             outer_to_local: outer_to_local.into(),
-            local_to_outer: local_to_outer.into(),
+            local_to_outer_offsets: local_to_outer_offsets.into(),
+            local_to_outers: local_to_outers.into(),
         })
     }
 
@@ -89,18 +108,33 @@ impl VirtualIdMap {
     }
 
     #[inline]
-    pub(crate) fn to_outer(&self, local: u32) -> Option<u32> {
+    pub(crate) fn outer_ids_for_local(&self, local: u32) -> smallvec::SmallVec<[u32; 4]> {
         match self {
             Self::Offset {
                 outer_base,
                 local_len,
             } => (local < *local_len)
                 .then(|| outer_base.checked_add(local))
-                .flatten(),
-            Self::Dense { local_to_outer, .. } => local_to_outer
-                .get(local as usize)
-                .copied()
-                .filter(|&outer| outer != UNMAPPED_ID),
+                .flatten()
+                .into_iter()
+                .collect(),
+            Self::Dense {
+                local_to_outer_offsets,
+                local_to_outers,
+                ..
+            } => {
+                let index = local as usize;
+                let Some((&start, &end)) = local_to_outer_offsets
+                    .get(index)
+                    .zip(local_to_outer_offsets.get(index + 1))
+                else {
+                    return smallvec::SmallVec::new();
+                };
+                local_to_outers[start as usize..end as usize]
+                    .iter()
+                    .copied()
+                    .collect()
+            }
         }
     }
 
@@ -116,7 +150,7 @@ impl VirtualIdMap {
     pub(crate) fn local_len(&self) -> u32 {
         match self {
             Self::Offset { local_len, .. } => *local_len,
-            Self::Dense { local_to_outer, .. } => local_to_outer.len() as u32,
+            Self::Dense { local_to_outer_offsets, .. } => local_to_outer_offsets.len().saturating_sub(1) as u32,
         }
     }
 
@@ -241,9 +275,9 @@ mod tests {
         assert_eq!(map.to_local(10), Some(0));
         assert_eq!(map.to_local(12), Some(2));
         assert_eq!(map.to_local(13), None);
-        assert_eq!(map.to_outer(0), Some(10));
-        assert_eq!(map.to_outer(2), Some(12));
-        assert_eq!(map.to_outer(3), None);
+        assert_eq!(map.outer_ids_for_local(0).as_slice(), &[10]);
+        assert_eq!(map.outer_ids_for_local(2).as_slice(), &[12]);
+        assert!(map.outer_ids_for_local(3).is_empty());
     }
 
     #[test]
@@ -257,15 +291,17 @@ mod tests {
         assert_eq!(map.to_local(1), Some(2));
         assert_eq!(map.to_local(2), Some(0));
         assert_eq!(map.to_local(4), Some(1));
-        assert_eq!(map.to_outer(0), Some(2));
-        assert_eq!(map.to_outer(1), Some(4));
-        assert_eq!(map.to_outer(2), Some(1));
+        assert_eq!(map.outer_ids_for_local(0).as_slice(), &[2]);
+        assert_eq!(map.outer_ids_for_local(1).as_slice(), &[4]);
+        assert_eq!(map.outer_ids_for_local(2).as_slice(), &[1]);
     }
 
     #[test]
-    fn dense_projection_rejects_non_functional_reverse_relation() {
-        let error = VirtualIdMap::dense_from_outer_to_local(vec![0, 0], 1).unwrap_err();
-        assert!(error.contains("multiple outer IDs"));
+    fn dense_projection_preserves_split_local_state() {
+        let map = VirtualIdMap::dense_from_outer_to_local(vec![0, 0], 1).unwrap();
+        assert_eq!(map.to_local(0), Some(0));
+        assert_eq!(map.to_local(1), Some(0));
+        assert_eq!(map.outer_ids_for_local(0).as_slice(), &[0u32, 1]);
     }
 
     #[test]
