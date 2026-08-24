@@ -25,7 +25,7 @@ fn main() {
     vocab.prepare_for_compile();
     let reader = BufReader::new(File::open(input).unwrap());
     let mut out = File::create(out_path).unwrap();
-    writeln!(out, "id\tcompile_ms\tsave_ms\tload_owned_median_ms\tartifact_bytes").unwrap();
+    writeln!(out, "id\tcompile_ms\tsave_ms\tload_median_ms\tartifact_bytes").unwrap();
     let mut ok = 0usize;
     let mut unsupported = 0usize;
     for (index, line) in reader.lines().enumerate() {
@@ -54,7 +54,7 @@ fn main() {
         for _ in 0..load_iters {
             let copy = artifact.clone();
             let started = Instant::now();
-            let loaded = Constraint::load_owned(copy).unwrap();
+            let loaded = Constraint::load(copy).unwrap();
             loads.push(started.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(loaded);
         }

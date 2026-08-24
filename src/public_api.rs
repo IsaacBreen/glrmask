@@ -188,6 +188,12 @@ impl<'a> ConstraintSpec<'a> {
 
     /// Compile this specification into a reusable static artifact.
     pub fn compile(&self) -> Result<RuntimeConstraint> {
+        let mut constraint = self.compile_static_uncached()?;
+        constraint.cache_serialized_artifact_for_save();
+        Ok(constraint)
+    }
+
+    fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
             return compile_static_source(&self.grammar, self.vocab, &token_bindings);
@@ -470,9 +476,9 @@ impl GrammarBinding<'_> {
         match self {
             Self::Source(grammar) => {
                 let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
-                Ok(CompiledChild::Owned(spec.compile()?))
+                Ok(CompiledChild::Owned(spec.compile_static_uncached()?))
             }
-            Self::Spec(spec) => Ok(CompiledChild::Owned(spec.compile()?)),
+            Self::Spec(spec) => Ok(CompiledChild::Owned(spec.compile_static_uncached()?)),
             Self::StaticBorrowed(constraint) => Ok(CompiledChild::Borrowed(constraint)),
             Self::StaticOwned(constraint) => Ok(CompiledChild::Borrowed(constraint)),
             Self::DynamicBorrowed(_) | Self::DynamicOwned(_) => {

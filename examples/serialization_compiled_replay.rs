@@ -57,10 +57,10 @@ fn main() {
     let save_ms = save_started.elapsed().as_secs_f64() * 1000.0;
     let artifact_bytes = saved.len();
     let load_started = Instant::now();
-    let loaded = Constraint::load_owned(saved).unwrap();
+    let loaded = Constraint::load(saved).unwrap();
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
-        "save_ms={save_ms:.3} artifact_bytes={artifact_bytes} load_owned_ms={load_ms:.3}"
+        "save_ms={save_ms:.3} artifact_bytes={artifact_bytes} load_ms={load_ms:.3}"
     );
 
     let mut compiled_masks = Vec::<u128>::new();

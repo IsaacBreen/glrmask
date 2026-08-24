@@ -476,7 +476,135 @@ impl<'a> IntoIterator for &'a DenseBufMaskRows {
 }
 
 pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
-pub(crate) type PackedDwaDenseWeightMaskCache = FxHashMap<u32, DenseWords>;
+
+/// Dense masks for selected packed-DWA token sets.
+///
+/// Keep the rows in one contiguous slab rather than one `Arc<[u64]>` per
+/// token set. Besides reducing allocator traffic, this makes the cache cheap
+/// to persist and restore as two flat arrays while preserving O(1) lookup by
+/// packed token-set id.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PackedDwaDenseWeightMaskCache {
+    words_per_row: usize,
+    row_by_token_set: Box<[u32]>,
+    token_set_ids: Box<[u32]>,
+    rows: DenseWords,
+}
+
+impl PackedDwaDenseWeightMaskCache {
+    const MISSING_ROW: u32 = u32::MAX;
+
+    pub(crate) fn from_rows(
+        token_set_count: usize,
+        words_per_row: usize,
+        mut rows: Vec<(u32, DenseWords)>,
+    ) -> Result<Self, String> {
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        let mut row_by_token_set = vec![Self::MISSING_ROW; token_set_count];
+        let mut token_set_ids = Vec::with_capacity(rows.len());
+        let mut flat = Vec::with_capacity(rows.len().saturating_mul(words_per_row));
+        for (row_index, (id, words)) in rows.into_iter().enumerate() {
+            let slot = row_by_token_set
+                .get_mut(id as usize)
+                .ok_or_else(|| format!("packed DWA dense-mask token-set id {id} out of bounds"))?;
+            if *slot != Self::MISSING_ROW {
+                return Err(format!("duplicate packed DWA dense-mask token-set id {id}"));
+            }
+            if words.len() != words_per_row {
+                return Err(format!(
+                    "packed DWA dense-mask row has {} words; expected {words_per_row}",
+                    words.len(),
+                ));
+            }
+            *slot = u32::try_from(row_index)
+                .map_err(|_| "too many packed DWA dense-mask rows".to_owned())?;
+            token_set_ids.push(id);
+            flat.extend_from_slice(words.as_ref());
+        }
+        Ok(Self {
+            words_per_row,
+            row_by_token_set: row_by_token_set.into_boxed_slice(),
+            token_set_ids: token_set_ids.into_boxed_slice(),
+            rows: Arc::from(flat.into_boxed_slice()),
+        })
+    }
+
+    pub(crate) fn from_flat(
+        token_set_count: usize,
+        words_per_row: usize,
+        token_set_ids: Vec<u32>,
+        rows: Vec<u64>,
+    ) -> Result<Self, String> {
+        if rows.len() != token_set_ids.len().saturating_mul(words_per_row) {
+            return Err(format!(
+                "packed DWA dense-mask slab has {} words for {} rows of width {words_per_row}",
+                rows.len(),
+                token_set_ids.len(),
+            ));
+        }
+        let mut row_by_token_set = vec![Self::MISSING_ROW; token_set_count];
+        for (row_index, &id) in token_set_ids.iter().enumerate() {
+            let slot = row_by_token_set
+                .get_mut(id as usize)
+                .ok_or_else(|| format!("packed DWA dense-mask token-set id {id} out of bounds"))?;
+            if *slot != Self::MISSING_ROW {
+                return Err(format!("duplicate packed DWA dense-mask token-set id {id}"));
+            }
+            *slot = u32::try_from(row_index)
+                .map_err(|_| "too many packed DWA dense-mask rows".to_owned())?;
+        }
+        Ok(Self {
+            words_per_row,
+            row_by_token_set: row_by_token_set.into_boxed_slice(),
+            token_set_ids: token_set_ids.into_boxed_slice(),
+            rows: Arc::from(rows.into_boxed_slice()),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, id: u32) -> Option<&[u64]> {
+        let row = *self.row_by_token_set.get(id as usize)?;
+        if row == Self::MISSING_ROW {
+            return None;
+        }
+        let start = (row as usize).checked_mul(self.words_per_row)?;
+        self.rows.get(start..start + self.words_per_row)
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.token_set_ids.len()
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.token_set_ids.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    pub(crate) fn words_per_row(&self) -> usize {
+        self.words_per_row
+    }
+
+    #[inline]
+    pub(crate) fn token_set_count(&self) -> usize {
+        self.row_by_token_set.len()
+    }
+
+    #[inline]
+    pub(crate) fn token_set_ids(&self) -> &[u32] {
+        &self.token_set_ids
+    }
+
+    #[inline]
+    pub(crate) fn flat_rows(&self) -> &[u64] {
+        self.rows.as_ref()
+    }
+}
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
@@ -4918,6 +5046,18 @@ pub(crate) struct ConstraintSerde {
 #[cfg(test)]
 mod dynamic_mask_vocab_cache_boundary_tests {
     use super::*;
+
+    #[test]
+    fn packed_dwa_dense_mask_cache_rejects_malformed_flat_layouts() {
+        assert!(PackedDwaDenseWeightMaskCache::from_flat(4, 2, vec![1], vec![7]).is_err());
+        assert!(
+            PackedDwaDenseWeightMaskCache::from_flat(4, 2, vec![1, 1], vec![1, 2, 3, 4])
+                .is_err()
+        );
+        assert!(
+            PackedDwaDenseWeightMaskCache::from_flat(2, 1, vec![2], vec![7]).is_err()
+        );
+    }
 
     #[test]
     fn fresh_runtime_instance_shares_only_vocab_derived_data() {
