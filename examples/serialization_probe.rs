@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use glrmask::{Constraint, Grammar, Vocab};
-use glrmask::__private::{ConstraintExt, ConstraintStateExt, VocabExt};
+use glrmask::__private::{ConstraintStateExt, VocabExt};
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
@@ -171,7 +171,7 @@ fn main() {
                 artifact_bytes = bytes.len();
 
                 let started = Instant::now();
-                let constraint = Constraint::load_owned(bytes).unwrap();
+                let constraint = Constraint::load(bytes).unwrap();
                 loads.push(started.elapsed().as_nanos());
 
                 let started = Instant::now();
@@ -182,7 +182,7 @@ fn main() {
                 std::hint::black_box(constraint);
             }
             println!(
-                "artifact={} artifact_bytes={} resaved_bytes={} iters={} read_median_ms={:.3} load_owned_median_ms={:.3} save_median_ms={:.3}",
+                "artifact={} artifact_bytes={} resaved_bytes={} iters={} read_median_ms={:.3} load_median_ms={:.3} save_median_ms={:.3}",
                 path.display(),
                 artifact_bytes,
                 resaved_bytes,
@@ -229,7 +229,7 @@ fn main() {
         }
         Some("commit-bench") => {
             let bytes = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_owned(bytes).unwrap();
+            let constraint = Constraint::load(bytes).unwrap();
             let state = constraint.start();
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10_000usize);
             let mask = state.mask();
@@ -268,7 +268,7 @@ fn main() {
         }
         Some("profile-token") => {
             let artifact = std::fs::read(&args[2]).unwrap();
-            let constraint = Constraint::load_owned(artifact).unwrap();
+            let constraint = Constraint::load(artifact).unwrap();
             let token: u32 = args[3].parse().unwrap();
             let mut state = constraint.start();
             let started = Instant::now();
@@ -293,7 +293,7 @@ fn main() {
             // artifact allocation. Nothing mutable survives from run N to N+1;
             // multiple runs exist only to reduce scheduler noise.
             for run in 0..runs {
-                let constraint = Constraint::load_owned(artifact.clone()).unwrap();
+                let constraint = Constraint::load(artifact.clone()).unwrap();
                 mask_words = constraint.mask_len();
                 let mut sample_index = 0usize;
                 for (example_index, tokens) in token_sequences.iter().enumerate() {
@@ -384,8 +384,8 @@ fn main() {
             print("tbm", &best_tbm);
         }
         Some("compare-replay") => {
-            let left = Constraint::load_owned(std::fs::read(&args[2]).unwrap()).unwrap();
-            let right = Constraint::load_owned(std::fs::read(&args[3]).unwrap()).unwrap();
+            let left = Constraint::load(std::fs::read(&args[2]).unwrap()).unwrap();
+            let right = Constraint::load(std::fs::read(&args[3]).unwrap()).unwrap();
             let token_sequences: Vec<Vec<u32>> =
                 serde_json::from_slice(&std::fs::read(&args[4]).unwrap()).unwrap();
             assert_eq!(left.mask_len(), right.mask_len());

@@ -282,6 +282,8 @@ constraint = glrmask.Constraint.load(blob, vocab)
 
 Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
 
+In Rust, `Constraint::load(bytes)` accepts a `Vec<u8>` or a byte slice. A `Vec<u8>` is reused as artifact backing; a borrowed slice is copied only when persistent backing is needed.
+
 ## How it works
 
 GLRMask maintains a GLR parser state for the generated prefix, updating it as tokens are committed. To compute the next-token mask, a precomputed deterministic weighted automaton reads each parser stack one symbol at a time.

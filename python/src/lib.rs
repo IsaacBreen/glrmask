@@ -736,7 +736,7 @@ impl PyConstraint {
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let mut constraint = constraint_result(glrmask::Constraint::load(data))?;
+        let mut constraint = constraint_result(glrmask::Constraint::load(data.to_vec()))?;
         constraint
             .bind_vocab_exact(&vocab.inner)
             .map_err(PyValueError::new_err)?;
