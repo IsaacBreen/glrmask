@@ -4154,6 +4154,12 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// ordinary flattened parser artifact remains the serialization fallback.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+    /// True when the segmented component/boundary evaluator is the production
+    /// mask backend for this composition, rather than an opt-in experiment.
+    /// Runtime-only: serialized constraints materialize an ordinary static
+    /// parser representation instead of recursively embedding child artifacts.
+    #[serde(skip, default)]
+    pub(crate) segmented_mask_authoritative: bool,
     /// Compressed deterministic union root routing for
     /// `segmented_parser_components`. When non-empty, the component collection
     /// is one deterministic parser DWA in segmented storage: a synthetic root

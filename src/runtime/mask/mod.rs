@@ -5349,12 +5349,15 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn prefill_mask_cache(&self) {
-        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
-            && self
-                .constraint
-                .static_dynamic_overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
+        if self
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                !overlay.segmented_parser_components.is_empty()
+                    && (overlay.segmented_mask_authoritative
+                        || std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some())
+            })
         {
             return;
         }
@@ -5602,6 +5605,26 @@ impl<'a> ConstraintState<'a> {
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
+        let authoritative_segmented = self
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                overlay.segmented_mask_authoritative
+                    && !overlay.segmented_parser_components.is_empty()
+            });
+        if authoritative_segmented {
+            if self.try_fill_mask_segmented_single_paths(mask) {
+                self.update_control_special_token_mask(mask);
+                return;
+            }
+            // The view evaluator deliberately declines uncommon GSS shapes it
+            // cannot yet project allocation-free. The unified composed GLR
+            // table remains an exact fallback and does not require a flattened
+            // component parser DWA.
+            self.fill_mask_dynamic(mask);
+            return;
+        }
         if self.constraint.uses_dynamic_runtime() {
             if !self.try_fill_mask_from_cache(mask) {
                 self.fill_mask_dynamic(mask);

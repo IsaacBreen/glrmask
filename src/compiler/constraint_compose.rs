@@ -16689,6 +16689,7 @@ fn build_static_dynamic_overlay_metadata(
             repair_terminals,
             non_parent_only_parser_states,
             segmented_parser_components: Vec::new(),
+            segmented_mask_authoritative: false,
             segmented_component_union_root_routing: Default::default(),
             segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
@@ -18146,7 +18147,19 @@ pub(crate) fn compose_constraints_owned_parent(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    compose_constraints_owned_parent_impl(parent, children, None, vocab)
+    compose_constraints_owned_parent_impl(parent, children, None, false, vocab)
+}
+
+/// Compose using the retained-component runtime as the authoritative mask
+/// backend. This is the production entry point for late binding: the compiled
+/// parent is moved intact into component zero, child artifacts remain intact,
+/// and only the cross-component boundary recognizer is compiled here.
+pub(crate) fn compose_constraints_owned_parent_view(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    vocab: &Vocab,
+) -> Result<ConstraintComposition, String> {
+    compose_constraints_owned_parent_impl(parent, children, None, true, vocab)
 }
 
 pub(crate) fn compose_constraints_owned_parent_shared(
@@ -18163,13 +18176,14 @@ pub(crate) fn compose_constraints_owned_parent_shared(
             return Err(format!("shared child {index} does not match borrowed composition input"));
         }
     }
-    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), vocab)
+    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), false, vocab)
 }
 
 fn compose_constraints_owned_parent_impl(
     mut parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     shared_children: Option<&[Arc<Constraint>]>,
+    explicit_segmented: bool,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
     parent.materialize_parser_dwa_for_compilation()?;
@@ -18200,19 +18214,22 @@ fn compose_constraints_owned_parent_impl(
     };
 
     parent.serialized_artifact_cache = None;
-    if std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
-        || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some()
+    if !explicit_segmented
+        && (std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
+            || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
     {
         return compose_constraints(&parent, children, vocab);
     }
     let total_started_at = Instant::now();
-    let segmented_runtime_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
+    let segmented_runtime_requested = explicit_segmented
+        || std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
     let two_dwa_runtime_requested = segmented_runtime_requested
+        && !explicit_segmented
         && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
-    let segmented_skip_requested = segmented_runtime_requested
-        && !two_dwa_runtime_requested
-        && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some();
+    let segmented_skip_requested = explicit_segmented
+        || (segmented_runtime_requested
+            && !two_dwa_runtime_requested
+            && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some());
     let mut segmented_source_constraints =
         if segmented_runtime_requested && !segmented_skip_requested && !two_dwa_runtime_requested {
             let started = Instant::now();
@@ -19342,12 +19359,14 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
+                segmented_mask_authoritative: false,
                 segmented_component_union_root_routing: Default::default(),
                 segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
             }
         });
         overlay.segmented_parser_components = segmented_components;
+        overlay.segmented_mask_authoritative = explicit_segmented;
         if let Some(dispatch) = deterministic_root_dispatch {
             overlay.segmented_component_union_root_routing =
                 crate::runtime::DenseViewRouting::new(
@@ -19687,6 +19706,7 @@ fn compose_constraints_owned_parent_impl(
                     repair_terminals: vec![false; num_terminals],
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
+                    segmented_mask_authoritative: false,
                     segmented_component_union_root_routing: Default::default(),
                     segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
@@ -19746,6 +19766,7 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
+                segmented_mask_authoritative: false,
                 segmented_component_union_root_routing: Default::default(),
                 segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
