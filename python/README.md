@@ -116,13 +116,13 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-One model token may span the parent and child grammars. Every constraint must use the same vocabulary.
+Every constraint in a composition must use the same vocabulary.
 
-Parent and child constraints may use different `ignore` terminals. Equal ignore languages are shared. Different ones stay scoped to their grammar, including within tokens that span the boundary.
+Parent and child constraints may use different `ignore` terminals. Equal ignore languages are shared; different ones stay scoped to their grammar.
 
 ### Decode
 
-Create one state per generated sequence:
+Call `constraint.start()` to create a new state for each generation run:
 
 ```python
 state = constraint.start()
@@ -156,7 +156,7 @@ artifact = constraint.save()
 constraint = glrmask.Constraint.load(artifact, vocab)
 ```
 
-`DynamicConstraint` compiles faster and produces masks more slowly. Use it for one-off constraints or cache misses while compiling a `Constraint` for later requests.
+For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` is a drop-in replacement for `Constraint` that starts much faster, but leaves more work in the token loop and hence generates masks more slowly.
 
 ```python
 constraint = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
@@ -167,7 +167,7 @@ state = constraint.start()
 
 ## Grammar formats
 
-GLRM is GLRMask's native grammar format. Its source starts with the literal `glrm 1;` header. Declarations use `=`, regexes use full-match semantics, and unsupported or non-regular constructs are rejected:
+GLRM is GLRMask's native grammar format. A grammar begins with `glrm 1;` and a `start` declaration. Rules use `=`; regexes use full-match semantics, and unsupported or non-regular constructs are rejected:
 
 ```glrm
 glrm 1;
@@ -176,7 +176,7 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Exact model-token terminals are named in GLRM and bound outside the grammar:
+Special tokens are declared by name in GLRM and bound to their model token IDs outside the grammar:
 
 ```python
 grammar = '''

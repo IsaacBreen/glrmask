@@ -43,7 +43,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-`DynamicConstraint` compiles faster and produces masks more slowly. Use it for one-off constraints or cache misses while compiling a `Constraint` for later requests.
+For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` is a drop-in replacement for `Constraint` that starts much faster, but leaves more work in the token loop and hence generates masks more slowly.
 
 ## Python quickstart
 
@@ -203,7 +203,7 @@ let mut state = constraint.start();
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
-GLRM is GLRMask's native grammar format. Its source starts with the literal `glrm 1;` header:
+GLRM is GLRMask's native grammar format. A grammar begins with `glrm 1;` and a `start` declaration:
 
 ```glrm
 glrm 1;
@@ -234,11 +234,11 @@ document = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Inline `g name = { ... };` and externally bound `extern grammar name;` use the same language semantics, including scope-local ignores and model tokens that span a parent/child boundary.
+Inline `g name = { ... };` and externally bound `extern grammar name;` use the same language semantics, including scope-local ignores.
 
 ## Special tokens
 
-GLRM declares exact model-token terminals by name and binds their token IDs outside the grammar:
+Special tokens are declared by name and bound to their model token IDs outside the grammar:
 
 ```python
 grammar = '''
@@ -281,8 +281,6 @@ constraint = glrmask.Constraint.load(blob, vocab)
 ```
 
 Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
-
-In Rust, `Constraint::load(bytes)` accepts a `Vec<u8>` or a byte slice. A `Vec<u8>` is reused as artifact backing; a borrowed slice is copied only when persistent backing is needed.
 
 ## How it works
 
