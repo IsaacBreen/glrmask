@@ -1147,7 +1147,7 @@ impl Constraint {
     /// The deep byte-map equality check is paid at load/bind time; successful
     /// binding then lets repeated composition prove compatibility by `Arc` identity.
     #[doc(hidden)]
-    pub fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
+    pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
             return Ok(());

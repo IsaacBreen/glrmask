@@ -84,7 +84,7 @@ vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
 ```
 
-The constructor excludes EOG, control, unused, and empty-piece tokens from the byte vocabulary. Pass `end_token_ids` to the constraint constructor when those tokens should terminate generation.
+The constructor excludes EOG, control, unused, and empty-piece tokens from the byte vocabulary. `llama_cpp_end_token_ids` is provided for decoder stopping policy; these IDs are not compiled into the constraint.
 
 ### Compile a constraint
 
@@ -97,33 +97,8 @@ constraint = glrmask.Constraint.from_lark(grammar, vocab)
 constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 ```
 
-Each constructor accepts an optional `end_token_ids=[...]` argument.
+`from_glrm_grammar(...)` also accepts `subgrammars={name: constraint}` for `extern grammar` declarations and `bindings={name: token_id_or_ids}` for `extern token` declarations. `DynamicConstraint.from_glrm_grammar(...)` supports the same binding shape.
 
-For schema-aware programmatic JavaScript tool calling, build a reusable compiler
-and then compile/link each tool schema:
-
-```python
-ptc = glrmask.ProgrammaticJsCompiler(vocab)
-lookup = ptc.compile_schema(lookup_schema, vocab)
-update = ptc.compile_schema(update_schema, vocab)
-constraint = ptc.compose_tools({"lookup": lookup, "update": update}, vocab)
-```
-
-The arguments object itself remains schema-controlled. Nested opaque runtime
-values such as `customer.id` are allowed, and conditional result arms are
-recursively checked against the same schema. Thus an enum accepts
-`ready ? "open" : "closed"` but not `ready ? "open" : "bogus"`. The `tools`
-namespace is reserved so an unconstrained nested `tools.*` call cannot bypass
-the dispatcher.
-
-The shared build phases are also exposed independently:
-
-```python
-parent = glrmask.ProgrammaticJsCompiler.compile_parent(vocab)
-dynamic = glrmask.ProgrammaticJsCompiler.compile_dynamic_value(vocab)
-condition = glrmask.ProgrammaticJsCompiler.compile_condition(vocab)
-ptc = glrmask.ProgrammaticJsCompiler.from_components(parent, dynamic, condition)
-```
 
 Already-compiled constraints can be composed without recompiling their full
 grammars. Declare typed external subgrammars in GLRM and bind them by name. The
@@ -163,7 +138,12 @@ state = constraint.start()
 
 while generating:
     mask = state.mask(model_vocab_size)
+    if state.is_accepting():
+        mask[end_token_ids] = True
+
     token_id = sample_with_mask(logits, mask)
+    if token_id in end_tokens:
+        break
     state.commit_token(token_id)
 ```
 
@@ -196,7 +176,7 @@ state = constraint.start()
 
 ## Grammar formats
 
-GLRM is GLRMask's native grammar format. New grammars should start with `glrm 1;` and use `=` declarations. Raw regexes use full-match semantics, and unsupported or non-regular regex constructs are rejected:
+GLRM is GLRMask's native grammar format. GLRM grammars begin with `glrm 1;` and use `=` declarations. Raw regexes use full-match semantics, and unsupported or non-regular regex constructs are rejected:
 
 ```glrm
 glrm 1;
@@ -205,7 +185,7 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Exact model-token terminals are named in GLRM v1 and bound outside the grammar:
+Exact model-token terminals are named in GLRM and bound outside the grammar:
 
 ```python
 grammar = '''
@@ -221,7 +201,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-A binding value may be one token ID or a list of interchangeable IDs. Unversioned GLRM remains the legacy compatibility format and continues to accept `::=` and numeric `@token(<id>)`. Lark and EBNF retain their existing `@token(<id>)` syntax.
+A binding value may be one token ID or a list of interchangeable IDs. Lark and EBNF also support numeric `@token(<id>)` syntax when exact model-token identity is required.
 
 See the [root README](../README.md#grammar-formats) for the fuller format overview.
 

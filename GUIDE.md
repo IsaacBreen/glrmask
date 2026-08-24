@@ -43,7 +43,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-For constraints that will not be reused enough to justify static compilation, `DynamicConstraint` leaves more work in the token loop and avoids the full static build. The corresponding `Constraint` can be compiled separately and cached for later requests.
+For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` leaves more work in the token loop and starts much faster. The corresponding `Constraint` can be compiled separately and cached for later requests.
 
 ## Python quickstart
 
@@ -98,11 +98,7 @@ print(llm.detokenize(generated).decode())
 
 ```python
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
-constraint = glrmask.Constraint.from_json_schema(
-    schema,
-    vocab,
-    end_token_ids=end_token_ids,
-)
+constraint = glrmask.Constraint.from_json_schema(schema, vocab)
 
 llm.reset()
 llm.eval(input_tokens)
@@ -113,15 +109,17 @@ generated = []
 for _ in range(MAX_OUTPUT_TOKENS):
     logits = get_logits()
     mask = state.mask(llm.n_vocab())
+    if state.is_accepting():
+        mask[end_token_ids] = True
     logits[~mask] = -np.inf
 
     token = sample(logits)
     llm.eval([token])
-    state.commit_token(token)
     generated.append(token)
 
     if token in end_tokens:
         break
+    state.commit_token(token)
 
 print(llm.detokenize(generated).decode())
 ```
@@ -153,7 +151,7 @@ if state.is_rejected() {
 # Ok::<(), glrmask::Error>(())
 ```
 
-Use `DynamicConstraint::compile(...)` with the same `Grammar` when startup latency matters more than per-token mask latency. Once started, static and dynamic states expose the same decoding interface.
+Use `DynamicConstraint::compile(...)` with the same `Grammar` when startup latency matters more than per-token mask latency. Once started, `ConstraintState` and `DynamicConstraintState` expose the same decoding interface.
 
 When an external subgrammar is still just source, it can be attached before choosing a vocabulary:
 
@@ -182,7 +180,6 @@ let vocab = Vocab::new(vec![
 let child = Constraint::compile(
     Grammar::json_schema(r#"{"type":"null"}"#),
     &vocab,
-    &options,
 )?;
 let source = r#"
 glrm 1;
@@ -196,9 +193,9 @@ let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)?
     .bind_grammar("payload", &child)?
     .build()?;
 
-let static_constraint = spec.compile()?;
+let constraint = spec.compile()?;
 let dynamic_constraint = spec.compile_dynamic()?;
-let mut state = static_constraint.start();
+let mut state = constraint.start();
 # Ok::<(), glrmask::Error>(())
 ```
 
@@ -206,7 +203,7 @@ let mut state = static_constraint.start();
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
-GLRM is GLRMask's native grammar format. New grammars should use the versioned GLRM v1 syntax:
+GLRM is GLRMask's native grammar format. GLRM grammars begin with `glrm 1;`:
 
 ```glrm
 glrm 1;
@@ -216,7 +213,7 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-GLRM v1 uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. Unversioned GLRM is parsed as the legacy format for compatibility, including `::=` and `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
+GLRM uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. GLRMask also accepts Lark and EBNF grammars.
 
 ### Reusing compiled subgrammars
 
@@ -241,7 +238,7 @@ Inline `g name = { ... };` and externally bound `extern grammar name;` have the 
 
 ## Special tokens
 
-GLRM v1 declares exact model-token terminals by name and binds their token IDs outside the grammar:
+GLRM declares exact model-token terminals by name and binds their token IDs outside the grammar:
 
 ```python
 grammar = '''
@@ -258,19 +255,21 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-A binding may also be a list of interchangeable exact token IDs. `extern token` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Legacy unversioned GLRM, Lark, and EBNF continue to support numeric `@token(<id>)` syntax.
+A binding may also be a list of interchangeable exact token IDs. `extern token` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Lark and EBNF also support numeric `@token(<id>)` syntax when exact model-token identity is required.
 
-Use `end_token_ids` to require one of the specified model tokens after the grammar completes:
+End tokens are decoder policy, not part of the compiled constraint. When `state.is_accepting()` is true, the caller may admit one or more model end tokens alongside the grammar mask. If an end token is sampled, stop without committing it to the constraint state.
 
 ```python
-constraint = glrmask.Constraint.from_json_schema(
-    schema,
-    vocab,
-    end_token_ids=[128009],
-)
-```
+mask = state.mask(model_vocab_size)
+if state.is_accepting():
+    mask[end_token_ids] = True
 
-The state becomes accepting only after one of those tokens is committed.
+token = sample_with_mask(logits, mask)
+if token in end_tokens:
+    stop_generation()
+else:
+    state.commit_token(token)
+```
 
 ## Saving compiled constraints
 
@@ -283,7 +282,7 @@ constraint = glrmask.Constraint.load(blob, vocab)
 
 Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
 
-`DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify static compilation.
+`DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify full compilation.
 
 ## How it works
 

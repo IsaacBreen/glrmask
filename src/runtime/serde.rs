@@ -3187,7 +3187,7 @@ impl Constraint {
     ///
     /// This avoids the whole-artifact copy otherwise required to retain exact
     /// current-format bytes for a later unchanged [`Constraint::save`].
-    pub fn load_owned(bytes: Vec<u8>) -> crate::Result<Self> {
+    pub(crate) fn load_owned(bytes: Vec<u8>) -> crate::Result<Self> {
         let backing = std::sync::Arc::new(bytes);
         Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
     }

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use glrmask::{Constraint, Grammar, Vocab};
-use glrmask::__private::{ConstraintStateExt, VocabExt};
+use glrmask::__private::{ConstraintExt, ConstraintStateExt, VocabExt};
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())

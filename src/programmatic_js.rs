@@ -58,7 +58,7 @@ nt dynamic_reference_suffix ::=
 
 /// Reusable compiler for programmatic JavaScript tool calling.
 #[derive(Debug)]
-pub struct ProgrammaticJsCompiler {
+pub(crate) struct ProgrammaticJsCompiler {
     parent: Constraint,
     dynamic_value: Constraint,
     condition: Constraint,
@@ -222,7 +222,7 @@ impl ProgrammaticJsCompiler {
 /// Canonical full JavaScript grammar bundled with GLRMask's programmatic tool
 /// calling support. It omits CFA's textual EOF sentinel; model end-token IDs
 /// remain a separate runtime concern.
-pub fn javascript_glrm() -> &'static str {
+pub(crate) fn javascript_glrm() -> &'static str {
     JAVASCRIPT_GLRM
 }
 

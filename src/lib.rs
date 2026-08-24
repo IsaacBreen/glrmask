@@ -38,9 +38,8 @@
 //!
 //! # Grammar inputs
 //!
-//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. New GLRM grammars use
-//! the versioned `glrm 1;` syntax; unversioned GLRM remains the legacy
-//! compatibility format. Use [`ConstraintSpec::builder`] for target-bound GLRM
+//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. GLRM grammars begin
+//! with `glrm 1;`. Use [`ConstraintSpec::builder`] for target-bound GLRM
 //! extern bindings, then compile the same immutable spec as either a
 //! [`Constraint`] or [`DynamicConstraint`].
 //!
@@ -51,7 +50,7 @@
 //!
 //! # GLRM external bindings
 //!
-//! GLRM v1 can declare exact model-token terminals with `extern token NAME;`.
+//! GLRM can declare exact model-token terminals with `extern token NAME;`.
 //! Bind those names through [`ConstraintSpecBuilder::bind_token`]. Token IDs
 //! stay outside the grammar source.
 //!
@@ -77,55 +76,18 @@ mod error;
 mod public_api;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
-pub mod programmatic_js;
+pub(crate) mod programmatic_js;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-pub use programmatic_js::ProgrammaticJsCompiler;
 pub use runtime::{Constraint, ConstraintState};
-#[doc(hidden)]
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
-pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar, IntoGrammarBinding};
+pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar};
 
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CompilerCacheStats {
-    pub token_set_entries: usize,
-    pub live_token_set_entries: usize,
-    pub weight_buckets: usize,
-    pub weight_entries: usize,
-    pub live_weight_entries: usize,
-    pub current_thread_weight_ops: usize,
-    pub current_thread_token_set_ops: usize,
-    pub current_thread_public_intersections: usize,
-    pub current_thread_weight_hashes: usize,
-    pub weight_op_generation: u64,
-    pub weight_hash_generation: u64,
-    pub vocab_artifacts: usize,
-}
-
-#[doc(hidden)]
-pub fn compiler_cache_stats(vocab: Option<&Vocab>) -> CompilerCacheStats {
-    let stats = ds::weight::weight_cache_stats();
-    CompilerCacheStats {
-        token_set_entries: stats.token_set_entries,
-        live_token_set_entries: stats.live_token_set_entries,
-        weight_buckets: stats.weight_buckets,
-        weight_entries: stats.weight_entries,
-        live_weight_entries: stats.live_weight_entries,
-        current_thread_weight_ops: stats.current_thread_weight_ops,
-        current_thread_token_set_ops: stats.current_thread_token_set_ops,
-        current_thread_public_intersections: stats.current_thread_public_intersections,
-        current_thread_weight_hashes: stats.current_thread_weight_hashes,
-        weight_op_generation: stats.weight_op_generation,
-        weight_hash_generation: stats.weight_hash_generation,
-        vocab_artifacts: vocab.map_or(0, Vocab::compiler_cache_entry_count),
-    }
-}
 
 #[cfg(test)]
 mod grammar_cross_tests;
@@ -186,6 +148,40 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct CompilerCacheStats {
+        pub token_set_entries: usize,
+        pub live_token_set_entries: usize,
+        pub weight_buckets: usize,
+        pub weight_entries: usize,
+        pub live_weight_entries: usize,
+        pub current_thread_weight_ops: usize,
+        pub current_thread_token_set_ops: usize,
+        pub current_thread_public_intersections: usize,
+        pub current_thread_weight_hashes: usize,
+        pub weight_op_generation: u64,
+        pub weight_hash_generation: u64,
+        pub vocab_artifacts: usize,
+    }
+
+    pub fn compiler_cache_stats(vocab: Option<&crate::Vocab>) -> CompilerCacheStats {
+        let stats = crate::ds::weight::weight_cache_stats();
+        CompilerCacheStats {
+            token_set_entries: stats.token_set_entries,
+            live_token_set_entries: stats.live_token_set_entries,
+            weight_buckets: stats.weight_buckets,
+            weight_entries: stats.weight_entries,
+            live_weight_entries: stats.live_weight_entries,
+            current_thread_weight_ops: stats.current_thread_weight_ops,
+            current_thread_token_set_ops: stats.current_thread_token_set_ops,
+            current_thread_public_intersections: stats.current_thread_public_intersections,
+            current_thread_weight_hashes: stats.current_thread_weight_hashes,
+            weight_op_generation: stats.weight_op_generation,
+            weight_hash_generation: stats.weight_hash_generation,
+            vocab_artifacts: vocab.map_or(0, crate::Vocab::compiler_cache_entry_count),
+        }
+    }
+
     pub use crate::compiler::glr::table::TableAmbiguity;
     pub use crate::error::Error;
     pub use crate::runtime::{
@@ -216,6 +212,9 @@ pub mod __private {
         fn clear_weight_op_caches();
         fn set_test_compat_mode(enabled: bool);
         fn prepare_composition_grammar_summary(&mut self) -> Result<()>;
+
+        fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String>;
+        fn load_owned(bytes: Vec<u8>) -> Result<Self>;
 
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
@@ -300,6 +299,14 @@ pub mod __private {
 
         fn warm_ti_pool() {
             crate::warm_ti_pool();
+        }
+
+        fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String> {
+            Constraint::bind_vocab_exact(self, vocab)
+        }
+
+        fn load_owned(bytes: Vec<u8>) -> Result<Self> {
+            Constraint::load_owned(bytes)
         }
 
         fn compose_compiled_subgrammars(

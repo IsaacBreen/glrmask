@@ -606,7 +606,7 @@ impl Constraint {
     /// `{"customer_id": customer.id}` may use the dynamic child for the
     /// `customer_id` value. Literal values continue through the ordinary schema
     /// branch and therefore retain enum/range/pattern/object-shape validation.
-    pub fn from_json_schema_with_dynamic_value(
+    pub(crate) fn from_json_schema_with_dynamic_value(
         schema: &str,
         dynamic_value: &Constraint,
         vocab: &crate::Vocab,
@@ -621,7 +621,7 @@ impl Constraint {
 
     /// Compile a JSON Schema with a nested dynamic-value subgrammar and model
     /// end-token IDs.
-    pub fn from_json_schema_with_dynamic_value_and_end_tokens(
+    pub(crate) fn from_json_schema_with_dynamic_value_and_end_tokens(
         schema: &str,
         dynamic_value: &Constraint,
         vocab: &crate::Vocab,
@@ -681,7 +681,7 @@ impl Constraint {
     /// Opaque runtime values are accepted at nested value positions, while
     /// conditional expressions keep both result branches recursively constrained
     /// by the same schema.
-    pub fn from_json_schema_with_programmatic_values(
+    pub(crate) fn from_json_schema_with_programmatic_values(
         schema: &str,
         dynamic_value: &Constraint,
         condition: &Constraint,

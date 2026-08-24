@@ -105,7 +105,7 @@ pub struct ConstraintSpecBuilder<'a> {
 #[doc(hidden)]
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub enum GrammarBinding<'a> {
+pub(crate) enum GrammarBinding<'a> {
     Source(Grammar<'a>),
     Spec(Box<ConstraintSpec<'a>>),
     #[doc(hidden)]
@@ -119,7 +119,8 @@ pub enum GrammarBinding<'a> {
 }
 
 /// Converts a source, spec, or compiled artifact into one grammar realization.
-pub trait IntoGrammarBinding<'a> {
+#[doc(hidden)]
+pub(crate) trait IntoGrammarBinding<'a> {
     #[doc(hidden)]
     fn into_grammar_binding(self) -> GrammarBinding<'a>;
 }
@@ -317,6 +318,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
     }
 
     /// Bind an `extern grammar NAME;` declaration to a source, spec, or artifact.
+    #[allow(private_bounds)]
     pub fn bind_grammar<T>(mut self, name: impl AsRef<str>, realization: T) -> Result<Self>
     where
         T: IntoGrammarBinding<'a>,
