@@ -257,7 +257,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 
 A binding may also be a list of interchangeable exact token IDs. `extern token` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Lark and EBNF also support numeric `@token(<id>)` syntax when exact model-token identity is required.
 
-End tokens are decoder policy, not part of the compiled constraint. When `state.is_accepting()` is true, the caller may admit one or more model end tokens alongside the grammar mask. If an end token is sampled, stop without committing it to the constraint state.
+End tokens are handled by the decoder. Once `state.is_accepting()` is true, the decoder may stop generation instead of committing another token.
 
 ```python
 mask = state.mask(model_vocab_size)
