@@ -4291,6 +4291,10 @@ pub struct Constraint {
     /// empty and use `parser_dwa` directly.
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
+    /// Runtime-only override for the parser-DWA start final. Composition uses
+    /// this to suppress a component's standalone globally-erased ignore at the
+    /// union root without materializing or mutating the full parser DWA.
+    pub(crate) parser_start_final_override: Option<Weight>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one
@@ -4643,6 +4647,8 @@ pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
+    #[serde(skip, default)]
+    pub(crate) parser_start_final_override: Option<Weight>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one

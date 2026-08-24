@@ -4512,6 +4512,7 @@ fn compile_prepared_with_profile_and_table_construction(
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
             packed_parser_dwa: None,
+            parser_start_final_override: None,
             parser_top_accept,
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,

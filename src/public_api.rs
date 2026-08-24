@@ -579,9 +579,10 @@ impl RuntimeConstraint {
 
     /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
     ///
-    /// The parent remains reusable: loaded compiler-side state is prepared in
-    /// place on the first bind, then the linker receives a fork of that prepared
-    /// parent. The supplied child must already be fully bound.
+    /// The parent remains reusable. Loaded constraints keep their large parser
+    /// DWA and pooled weights in packed form; the first bind lazily decodes only
+    /// small composition metadata before linking. The supplied child must
+    /// already be fully bound.
     pub fn bind_grammar(
         &mut self,
         name: impl AsRef<str>,
@@ -655,10 +656,10 @@ impl RuntimeConstraint {
 
     pub(crate) fn prepare_for_composition_internal(&mut self, vocab: &Vocab) -> Result<()> {
         self.bind_vocab_exact(vocab).map_err(Error::Compilation)?;
-        self.materialize_parser_dwa_for_compilation()
-            .map_err(Error::Compilation)?;
-        self.materialize_non_dwa_weights_for_compilation()
-            .map_err(Error::Compilation)?;
+        // Composition metadata is small and compiler-facing. Keep the large
+        // parser DWA and pooled non-DWA weights in their packed runtime forms;
+        // the segmented/two-DWA linker consumes them through runtime views.
+        // Legacy flattened linker paths materialize them on demand.
         self.materialize_composition_metadata_for_compilation()
             .map_err(Error::Compilation)?;
         Ok(())

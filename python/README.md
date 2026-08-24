@@ -116,7 +116,7 @@ child = glrmask.Constraint.from_json_schema(schema, vocab)
 constraint = parent.bind_grammar("payload", child, vocab)
 ```
 
-`parent` remains reusable for later children, including after a save/load round trip.
+`parent` remains reusable for later children, including after a save/load round trip. Loaded parser automata stay in their packed representation during the fast late-binding path.
 
 A compiled child is bound by name:
 

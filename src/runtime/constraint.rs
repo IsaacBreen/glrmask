@@ -185,6 +185,21 @@ impl<'a> RuntimeWeightRef<'a> {
     }
 
     #[inline]
+    pub(crate) fn to_weight(self) -> Weight {
+        if self.is_full() {
+            return Weight::all();
+        }
+        if self.is_empty() {
+            return Weight::empty();
+        }
+        let mut entries = Vec::<(u32, RangeSetBlaze<u32>)>::new();
+        self.for_each_entry(|start, end, tokens| {
+            let tokens = tokens.to_range_set();
+            entries.extend((start..=end).map(|tsid| (tsid, tokens.clone())));
+        });
+        Weight::from_per_tsid_token_sets(entries)
+    }
+
     pub(crate) fn for_each_entry(
         self,
         mut f: impl FnMut(u32, u32, RuntimeTokenSetRef<'a>),
@@ -1198,6 +1213,11 @@ impl Constraint {
         &self,
         dwa_state: u32,
     ) -> Option<RuntimeWeightRef<'_>> {
+        if dwa_state == self.runtime_parser_dwa_start_state()
+            && let Some(weight) = self.parser_start_final_override.as_ref()
+        {
+            return (!weight.is_empty()).then_some(RuntimeWeightRef::Materialized(weight));
+        }
         if let Some(dwa) = &self.packed_parser_dwa {
             return dwa
                 .final_weight(dwa_state)
@@ -6422,22 +6442,30 @@ impl Constraint {
         Ok(())
     }
 
-    /// Compiler-side escape hatch for a constraint loaded in the packed
-    /// runtime representation. Ordinary load/mask/commit paths deliberately
-    /// keep `packed_parser_dwa` zero-copy; transformations such as composition
-    /// need the mutable ordinary DWA and pay this materialization cost only
-    /// when invoked.
+    /// Compiler-side escape hatch for transformations that genuinely require
+    /// a mutable ordinary parser DWA. Ordinary load/mask/commit and the
+    /// segmented late-binding composition path deliberately keep
+    /// `packed_parser_dwa` zero-copy.
     pub(crate) fn materialize_parser_dwa_for_compilation(&mut self) -> Result<(), String> {
-        let Some(packed) = self.packed_parser_dwa.take() else {
-            return Ok(());
-        };
-        self.parser_dwa = packed.to_dwa()?;
-        self.serialized_artifact_cache = None;
-        self.parser_runtime_caches_prebuilt = false;
-        self.packed_dwa_token_dense_masks.clear();
-        self.dwa_fast_transitions = Default::default();
-        self.indexed_dag_dense_transitions.clear();
-        self.indexed_dag_dense_finals.clear();
+        if let Some(packed) = self.packed_parser_dwa.take() {
+            self.parser_dwa = packed.to_dwa()?;
+            self.serialized_artifact_cache = None;
+            self.parser_runtime_caches_prebuilt = false;
+            self.packed_dwa_token_dense_masks.clear();
+            self.dwa_fast_transitions = Default::default();
+            self.indexed_dag_dense_transitions.clear();
+            self.indexed_dag_dense_finals.clear();
+        }
+        if let Some(override_weight) = self.parser_start_final_override.take() {
+            let start = self.parser_dwa.start_state() as usize;
+            self.parser_dwa.states_mut()[start].final_weight =
+                (!override_weight.is_empty()).then_some(override_weight);
+            self.serialized_artifact_cache = None;
+            self.parser_runtime_caches_prebuilt = false;
+            self.dwa_fast_transitions = Default::default();
+            self.indexed_dag_dense_transitions.clear();
+            self.indexed_dag_dense_finals.clear();
+        }
         Ok(())
     }
 

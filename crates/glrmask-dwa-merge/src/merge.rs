@@ -1338,6 +1338,70 @@ pub fn merge_mapped_parser_dwas_with_top_accept(
         return (inputs.into_iter().next().unwrap(), BTreeMap::new());
     }
 
+    if inputs.len() > 2 {
+        let input_count = inputs.len();
+        let immediate_count = inputs
+            .iter()
+            .filter(|input| immediate_dwa_accepting_edges(input.artifact()).is_some())
+            .count();
+        if immediate_count > 0 && immediate_count < input_count {
+            let total_started_at = Instant::now();
+            let mut primaries = Vec::with_capacity(input_count - immediate_count);
+            let mut overlay: Option<MappedArtifact<BTreeMap<i32, Weight>>> = None;
+            for input in inputs {
+                if immediate_dwa_accepting_edges(input.artifact()).is_some() {
+                    let (dwa, id_map) = input.into_parts();
+                    let mapped = MappedArtifact::new(
+                        immediate_dwa_accepting_edges(&dwa)
+                            .expect("immediate parser shape was checked above")
+                            .into_iter()
+                            .collect::<BTreeMap<_, _>>(),
+                        id_map,
+                    );
+                    overlay = Some(match overlay.take() {
+                        None => mapped,
+                        Some(existing) => {
+                            let ((mut left, right), id_map) =
+                                existing.pair_forced_common(mapped).into_parts();
+                            for (label, weight) in right {
+                                left.entry(label)
+                                    .and_modify(|existing| *existing = existing.union(&weight))
+                                    .or_insert(weight);
+                            }
+                            MappedArtifact::new(left, id_map)
+                        }
+                    });
+                } else {
+                    primaries.push(input);
+                }
+            }
+            let primary = if primaries.len() == 1 {
+                primaries.pop().unwrap()
+            } else {
+                merge_mapped_parser_dwas(primaries, num_tokenizer_states, max_token_id)
+            };
+            let overlay = overlay.expect("at least one immediate parser family was counted");
+            let ((primary_dwa, top_accept), common_id_map) =
+                primary.pair_forced_common(overlay).into_parts();
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_merge] inputs={} mode=multi_top_accept_overlay overlay_families={} primary_families={} overlay_labels={} states={} transitions={} total_ms={:.3}",
+                    input_count,
+                    immediate_count,
+                    input_count - immediate_count,
+                    top_accept.len(),
+                    primary_dwa.num_states(),
+                    primary_dwa.num_transitions(),
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return (
+                MappedArtifact::new(primary_dwa, common_id_map),
+                top_accept,
+            );
+        }
+    }
+
     if inputs.len() == 2 {
         let total_started_at = Instant::now();
         let mut iter = inputs.into_iter();
@@ -3817,5 +3881,92 @@ mod tests {
         }
         assert_eq!(quotient.eval_word(&[7]), token_range_weight(0, 1));
         assert_eq!(quotient.eval_word(&[7, 8]), token_range_weight(1, 2));
+    }
+
+    #[test]
+    fn immediate_parser_family_is_overlayed_before_two_deep_families_merge() {
+        let mut left = DWA::new(1, 2);
+        let left_mid = left.add_state();
+        let left_end = left.add_state();
+        left.add_transition(left.start_state(), 7, left_mid, token_range_weight(0, 1));
+        left.add_transition(left_mid, 8, left_end, token_range_weight(0, 1));
+        left.set_final_weight(left_end, Weight::all());
+
+        let mut right = DWA::new(1, 2);
+        let right_mid = right.add_state();
+        let right_end = right.add_state();
+        right.add_transition(right.start_state(), 7, right_mid, token_range_weight(1, 2));
+        right.add_transition(right_mid, 9, right_end, token_range_weight(1, 2));
+        right.set_final_weight(right_end, Weight::all());
+
+        let mut immediate = DWA::new(1, 2);
+        let immediate_final = immediate.add_state();
+        immediate.add_transition(immediate.start_state(), 10, immediate_final, singleton_weight(2));
+        immediate.set_final_weight(immediate_final, Weight::all());
+
+        let generic = generic_union(&[left.clone(), right.clone(), immediate.clone()]);
+        let id_map = id_map_with_vocab_partition(vec![0, 1, 2], 3);
+        let (merged, overlay) = merge_mapped_parser_dwas_with_top_accept(
+            vec![
+                MappedArtifact::new(left, id_map.clone()),
+                MappedArtifact::new(right, id_map.clone()),
+                MappedArtifact::new(immediate, id_map),
+            ],
+            1,
+            2,
+        );
+
+        for word in all_words(&[7, 8, 9, 10], 3) {
+            let mut actual = merged.artifact().eval_word(&word);
+            if let [label] = word.as_slice() {
+                if let Some(weight) = overlay.get(label) {
+                    actual = actual.union(weight);
+                }
+            }
+            assert_eq!(actual, generic.eval_word(&word), "word={word:?}");
+        }
+    }
+
+    #[test]
+    fn multiple_immediate_parser_families_stay_as_top_accept_overlay() {
+        let mut deep = DWA::new(1, 2);
+        let deep_mid = deep.add_state();
+        let deep_end = deep.add_state();
+        deep.add_transition(deep.start_state(), 7, deep_mid, token_range_weight(1, 2));
+        deep.add_transition(deep_mid, 8, deep_end, token_range_weight(0, 2));
+        deep.set_final_weight(deep_mid, singleton_weight(1));
+        deep.set_final_weight(deep_end, Weight::all());
+
+        let mut first = DWA::new(1, 2);
+        let first_final = first.add_state();
+        first.add_transition(first.start_state(), 7, first_final, singleton_weight(0));
+        first.set_final_weight(first_final, Weight::all());
+
+        let mut second = DWA::new(1, 2);
+        let second_final = second.add_state();
+        second.add_transition(second.start_state(), 9, second_final, singleton_weight(2));
+        second.set_final_weight(second_final, Weight::all());
+
+        let generic = generic_union(&[deep.clone(), first.clone(), second.clone()]);
+        let id_map = id_map_with_vocab_partition(vec![0, 1, 2], 3);
+        let (merged, overlay) = merge_mapped_parser_dwas_with_top_accept(
+            vec![
+                MappedArtifact::new(deep, id_map.clone()),
+                MappedArtifact::new(first, id_map.clone()),
+                MappedArtifact::new(second, id_map),
+            ],
+            1,
+            2,
+        );
+
+        for word in all_words(&[7, 8, 9], 3) {
+            let mut actual = merged.artifact().eval_word(&word);
+            if let [label] = word.as_slice() {
+                if let Some(weight) = overlay.get(label) {
+                    actual = actual.union(weight);
+                }
+            }
+            assert_eq!(actual, generic.eval_word(&word), "word={word:?}");
+        }
     }
 }

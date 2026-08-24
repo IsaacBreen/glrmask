@@ -221,7 +221,7 @@ let with_b = parent.bind_grammar("payload", &child_b, &vocab)?;
 # Ok::<(), glrmask::Error>(())
 ```
 
-The parent remains reusable. It can also be saved and loaded before binding; the first bind prepares the compiler-side composition data in place so later binds reuse it. A child passed to `Constraint::bind_grammar(...)` must already have all of its own external grammars bound.
+The parent remains reusable. It can also be saved and loaded before binding; late binding consumes loaded parser automata and pooled weights directly from their packed representation, while small composition metadata is decoded lazily. A child passed to `Constraint::bind_grammar(...)` must already have all of its own external grammars bound.
 
 ## Grammar formats
 

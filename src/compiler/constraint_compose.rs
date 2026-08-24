@@ -508,8 +508,8 @@ fn invert_singleton_parser_state_relation(
 }
 
 #[inline]
-fn weight_survives_component_coordinate_maps(
-    weight: &Weight,
+fn runtime_weight_survives_component_coordinate_maps(
+    weight: crate::runtime::RuntimeWeightRef<'_>,
     maps: &DirectComponentCoordinateMaps,
 ) -> bool {
     if weight.is_empty() {
@@ -519,26 +519,61 @@ fn weight_survives_component_coordinate_maps(
         return maps.local_to_global_tsids.iter().any(|targets| !targets.is_empty())
             && maps.local_to_global_tokens.iter().any(|targets| !targets.is_empty());
     }
-    for (start_tsid, end_tsid, tokens) in weight.range_entries() {
+    let mut survives = false;
+    weight.for_each_entry(|start_tsid, end_tsid, tokens| {
+        if survives {
+            return;
+        }
         let has_tsid = (start_tsid..=end_tsid).any(|tsid| {
             maps.local_to_global_tsids
                 .get(tsid as usize)
                 .is_some_and(|targets| !targets.is_empty())
         });
         if !has_tsid {
-            continue;
+            return;
         }
-        for mut range in tokens.ranges() {
-            if range.any(|token| {
-                maps.local_to_global_tokens
-                    .get(token as usize)
-                    .is_some_and(|targets| !targets.is_empty())
-            }) {
-                return true;
+        tokens.for_each_range(|start, end| {
+            if !survives
+                && (start..=end).any(|token| {
+                    maps.local_to_global_tokens
+                        .get(token as usize)
+                        .is_some_and(|targets| !targets.is_empty())
+                })
+            {
+                survives = true;
             }
-        }
+        });
+    });
+    survives
+}
+
+#[inline]
+fn weight_survives_component_coordinate_maps(
+    weight: &Weight,
+    maps: &DirectComponentCoordinateMaps,
+) -> bool {
+    runtime_weight_survives_component_coordinate_maps(weight.into(), maps)
+}
+
+fn install_segmented_start_ignore_override(
+    constraint: &mut Constraint,
+    global_ignores: bool,
+) {
+    if global_ignores {
+        return;
     }
-    false
+    let Some(ignore_terminal) = constraint.ignore_terminal else {
+        return;
+    };
+    let start = constraint.runtime_parser_dwa_start_state();
+    let Some(final_weight) = constraint.runtime_parser_dwa_final_weight(start) else {
+        return;
+    };
+    let Some(ignore_weight) = constraint.runtime_possible_match_weight(ignore_terminal) else {
+        return;
+    };
+    let retained = final_weight.to_weight().difference(&ignore_weight.to_weight());
+    constraint.parser_start_final_override = Some(retained);
 }
 
 fn deterministic_component_union_root_dispatch_direct(
@@ -559,28 +594,15 @@ fn deterministic_component_union_root_dispatch_direct(
     let mut dead = 0usize;
     let mut syntactic_overlaps = 0usize;
     for global_state in 0..global_state_count {
-        let mut candidates = SmallVec::<[(u32, &Weight); 4]>::new();
+        let mut candidates = SmallVec::<[(u32, crate::runtime::RuntimeWeightRef<'_>); 4]>::new();
         for (component_index, component) in components.iter().enumerate() {
             let local_state = component.global_to_local_parser_state[global_state];
             if local_state == u32::MAX {
                 continue;
             }
             let source = component.constraint.as_ref();
-            let root = source
-                .parser_dwa
-                .states()
-                .get(source.parser_dwa.start_state() as usize)?;
-            let positive = encode_positive_label(local_state);
-            let transition = root
-                .transitions
-                .get(&positive)
-                .or_else(|| {
-                    source
-                        .parser_state_domain_label(local_state)
-                        .and_then(|label| root.transitions.get(&label))
-                })
-                .or_else(|| root.transitions.get(&DEFAULT_LABEL));
-            let Some((_, weight)) = transition else {
+            let root = source.runtime_parser_dwa_start_state();
+            let Some((_, weight)) = source.runtime_parser_dwa_transition(root, local_state) else {
                 continue;
             };
             if !weight.is_empty() {
@@ -594,7 +616,7 @@ fn deterministic_component_union_root_dispatch_direct(
                 syntactic_overlaps += 1;
                 let mut live = SmallVec::<[u32; 4]>::new();
                 for (component_index, weight) in candidates {
-                    if weight_survives_component_coordinate_maps(
+                    if runtime_weight_survives_component_coordinate_maps(
                         weight,
                         &component_maps[component_index as usize],
                     ) {
@@ -9137,12 +9159,27 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
 
     let relation_ms = total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    // The hot segmented runtime may retain components in packed parser-DWA
+    // form and may carry a start-final override for scoped-ignore suppression.
+    // Persistence emits one ordinary deterministic parser artifact, so fold
+    // those runtime representations into temporary compiler-side clones here.
+    // This cost belongs to save(), never to load -> bind_grammar().
+    let mut serialization_components = overlay
+        .segmented_parser_components
+        .iter()
+        .map(|component| component.constraint.as_ref().clone())
+        .collect::<Vec<_>>();
+    for component in &mut serialization_components {
+        component.materialize_parser_dwa_for_compilation()?;
+        component.materialize_non_dwa_weights_for_compilation()?;
+    }
     let components = overlay
         .segmented_parser_components
         .iter()
+        .zip(serialization_components.iter())
         .zip(relations.iter())
-        .map(|(component, relation)| ParserDwaComponent {
-            constraint: component.constraint.as_ref(),
+        .map(|((component, constraint), relation)| ParserDwaComponent {
+            constraint,
             parser_state_relation: relation,
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
@@ -10011,9 +10048,13 @@ fn component_possible_matches(
     }
     Ok(component
         .constraint
-        .possible_matches
-        .iter()
-        .map(|(&terminal, weight)| (terminal_offset + terminal, weight.clone()))
+        .runtime_possible_match_terminals()
+        .filter_map(|terminal| {
+            component
+                .constraint
+                .runtime_possible_match_weight(terminal)
+                .map(|weight| (terminal_offset + terminal, weight.to_weight()))
+        })
         .collect())
 }
 
@@ -17042,6 +17083,7 @@ fn build_composed_constraint_unfinalized(
     terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
     defer_internal_token_bytes: bool,
+    dynamic_mask_vocab: crate::runtime::DynamicMaskVocab,
     vocab: &Vocab,
 ) -> ConstraintComposition {
     let terminal_offsets = composed_table.terminal_offsets.clone();
@@ -17089,6 +17131,7 @@ fn build_composed_constraint_unfinalized(
         scoped_ignore_prefix_fusions: Vec::new(),
         parser_dwa,
         packed_parser_dwa: None,
+        parser_start_final_override: None,
         parser_top_accept: BTreeMap::new(),
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
@@ -17103,7 +17146,7 @@ fn build_composed_constraint_unfinalized(
         tokenizer_has_epsilon_transitions,
         ignore_terminal,
         special_token_terminals,
-        dynamic_mask_vocab: runtime_dynamic_vocab_for_vocab(vocab),
+        dynamic_mask_vocab,
         lazy_dynamic_mask_vocab: OnceLock::new(),
         // Constraint composition is not allowed to rely on the legacy dynamic
         // possible-matches fallback. This is the exact transported and
@@ -17234,6 +17277,7 @@ fn finalize_composed_constraint(
         terminal_live_states,
         tokenizer_fast_transitions,
         false,
+        runtime_dynamic_vocab_for_vocab(vocab),
         vocab,
     );
     composition.constraint.parser_top_accept = parser_top_accept;
@@ -18175,13 +18219,23 @@ fn compose_constraints_owned_parent_impl(
     shared_children: Option<&[Arc<Constraint>]>,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    parent.materialize_parser_dwa_for_compilation()?;
-    parent.materialize_non_dwa_weights_for_compilation()?;
+    let segmented_runtime_requested =
+        std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
+    let two_dwa_runtime_requested = segmented_runtime_requested
+        && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
+    if !two_dwa_runtime_requested {
+        parent.materialize_parser_dwa_for_compilation()?;
+        parent.materialize_non_dwa_weights_for_compilation()?;
+    }
     parent.materialize_composition_metadata_for_compilation()?;
-    let materialized_children = children
-        .iter()
-        .map(|child| materialized_constraint_for_composition(child.constraint))
-        .collect::<Result<Vec<_>, _>>()?;
+    let materialized_children = if two_dwa_runtime_requested {
+        (0..children.len()).map(|_| Ok(None)).collect::<Result<Vec<_>, String>>()?
+    } else {
+        children
+            .iter()
+            .map(|child| materialized_constraint_for_composition(child.constraint))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let materialized_any_child = materialized_children.iter().any(Option::is_some);
     let normalized_children = children
         .iter()
@@ -18210,10 +18264,6 @@ fn compose_constraints_owned_parent_impl(
         return compose_constraints(&parent, children, vocab);
     }
     let total_started_at = Instant::now();
-    let segmented_runtime_requested =
-        std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
-    let two_dwa_runtime_requested = segmented_runtime_requested
-        && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
     let segmented_skip_requested = segmented_runtime_requested
         && !two_dwa_runtime_requested
         && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some();
@@ -19021,22 +19071,7 @@ fn compose_constraints_owned_parent_impl(
     // lets us move the already-owned parent directly into runtime segment zero
     // instead of cloning a multi-megabyte parser artifact just to keep it alive.
     if segmented_skip_requested || two_dwa_runtime_requested {
-        if !global_ignores
-            && let Some(ignore_terminal) = parent.ignore_terminal
-            && let Some(ignore_weight) = parent.possible_matches.get(&ignore_terminal).cloned()
-            && let Some(final_weight) = parent
-                .parser_dwa
-                .states()
-                .get(parent.parser_dwa.start_state() as usize)
-                .and_then(|state| state.final_weight.as_ref())
-                .cloned()
-        {
-            let retained = final_weight.difference(&ignore_weight);
-            let start = parent.parser_dwa.start_state() as usize;
-            parent.parser_dwa.states_mut()[start].final_weight =
-                (!retained.is_empty()).then_some(retained);
-        }
-
+        let composed_dynamic_mask_vocab = parent.dynamic_mask_vocab.fresh_runtime_instance();
         let mut result = build_composed_constraint_unfinalized(
             composed_table,
             tokenizer,
@@ -19054,6 +19089,7 @@ fn compose_constraints_owned_parent_impl(
             terminal_live_states,
             tokenizer_fast_transitions,
             true,
+            composed_dynamic_mask_vocab,
             vocab,
         );
         result.constraint.composition_parser_templates_by_terminal =
@@ -19079,45 +19115,19 @@ fn compose_constraints_owned_parent_impl(
                     shared_children
                         .iter()
                         .map(|source| {
-                            (
-                                Arc::clone(source),
-                                (!global_ignores).then_some(source.ignore_terminal).flatten(),
-                            )
+                            let mut source = source.as_ref().clone();
+                            install_segmented_start_ignore_override(&mut source, global_ignores);
+                            (Arc::new(source), None)
                         })
                         .collect::<Vec<_>>()
                 } else {
-                    let mut cloned = children
+                    children
                         .iter()
-                        .map(|child| child.constraint.clone())
-                        .collect::<Vec<_>>();
-                    if !global_ignores {
-                        cloned.par_iter_mut().for_each(|source| {
-                            let Some(ignore_terminal) = source.ignore_terminal else {
-                                return;
-                            };
-                            let Some(ignore_weight) =
-                                source.possible_matches.get(&ignore_terminal).cloned()
-                            else {
-                                return;
-                            };
-                            let start = source.parser_dwa.start_state() as usize;
-                            let Some(final_weight) = source
-                                .parser_dwa
-                                .states()
-                                .get(start)
-                                .and_then(|state| state.final_weight.as_ref())
-                                .cloned()
-                            else {
-                                return;
-                            };
-                            let retained = final_weight.difference(&ignore_weight);
-                            source.parser_dwa.states_mut()[start].final_weight =
-                                (!retained.is_empty()).then_some(retained);
-                        });
-                    }
-                    cloned
-                        .into_iter()
-                        .map(|source| (Arc::new(source), None))
+                        .map(|child| {
+                            let mut source = child.constraint.clone();
+                            install_segmented_start_ignore_override(&mut source, global_ignores);
+                            (Arc::new(source), None)
+                        })
                         .collect::<Vec<_>>()
                 };
                 let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -19194,6 +19204,7 @@ fn compose_constraints_owned_parent_impl(
                     .sum::<usize>(),
             );
         }
+        install_segmented_start_ignore_override(&mut parent, global_ignores);
         source_constraints.insert(0, (Arc::new(parent), None));
 
         let global_state_count = result.constraint.table.num_states as usize;
@@ -19640,6 +19651,7 @@ fn compose_constraints_owned_parent_impl(
         terminal_live_states,
         tokenizer_fast_transitions,
         true,
+        runtime_dynamic_vocab_for_vocab(vocab),
         vocab,
     );
     result.constraint.composition_parser_templates_by_terminal =
@@ -21182,8 +21194,8 @@ table: &child.table,
         let mut loaded_child = Constraint::load(&child.save()).unwrap();
         loaded_parent.prepare_for_composition_internal(&vocab).unwrap();
         loaded_child.prepare_for_composition_internal(&vocab).unwrap();
-        assert!(loaded_parent.packed_parser_dwa.is_none());
-        assert!(loaded_child.packed_parser_dwa.is_none());
+        assert!(loaded_parent.packed_parser_dwa.is_some());
+        assert!(loaded_child.packed_parser_dwa.is_some());
         assert!(loaded_parent.deferred_composition_metadata_blob.is_none());
         assert!(loaded_child.deferred_composition_metadata_blob.is_none());
 
