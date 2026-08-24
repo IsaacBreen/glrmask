@@ -4154,14 +4154,13 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// ordinary flattened parser artifact remains the serialization fallback.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
-    /// Compressed deterministic union root for `segmented_parser_components`.
-    /// Entry `g` is the unique component selected by composed LR state `g`, or
-    /// `u32::MAX` when no component has a root transition on that state. When
-    /// non-empty, the component collection is one deterministic parser DWA in
-    /// segmented storage: a synthetic root followed by one cached component
-    /// body. No runtime parser-NWA branching is involved.
+    /// Compressed deterministic union root routing for
+    /// `segmented_parser_components`. When non-empty, the component collection
+    /// is one deterministic parser DWA in segmented storage: a synthetic root
+    /// followed by one cached component body. No runtime parser-NWA branching
+    /// is involved.
     #[serde(skip, default)]
-    pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
+    pub(crate) segmented_component_union_root_routing: crate::runtime::DenseViewRouting,
     #[serde(skip, default)]
     pub(crate) segmented_boundary_parser: Option<Box<SegmentedBoundaryParser>>,
     #[serde(skip, default)]
@@ -4170,15 +4169,53 @@ pub(crate) struct StaticDynamicOverlayMetadata {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedParserComponent {
-    pub(crate) constraint: Arc<Constraint>,
-    pub(crate) tokenizer_state_offset: u32,
-    pub(crate) terminal_offset: u32,
+    /// Virtual composed-coordinate view of an intact compiled child. The child
+    /// owns all of its private parser/tokenizer/DWA coordinates; composition
+    /// owns only these projections.
+    pub(crate) view: crate::runtime::ConstraintView,
     /// Terminal to suppress only on the synthetic union-root empty-stack
     /// projection. Shared component artifacts retain their standalone start
     /// final weight; this root-only disallow is exactly the old cloned-artifact
     /// start-final subtraction without mutating the shared parser DWA.
     pub(crate) root_disallowed_terminal: Option<u32>,
-    pub(crate) global_to_local_parser_state: Vec<u32>,
+}
+
+impl SegmentedParserComponent {
+    #[inline]
+    pub(crate) fn constraint(&self) -> &Constraint {
+        self.view.constraint.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn constraint_arc(&self) -> &Arc<Constraint> {
+        &self.view.constraint
+    }
+
+    #[inline]
+    pub(crate) fn local_parser_state(&self, outer: u32) -> Option<u32> {
+        self.view.lrids.to_local(outer)
+    }
+
+    #[inline]
+    pub(crate) fn parser_outer_domain_len(&self) -> usize {
+        self.view.lrids.outer_domain_len()
+    }
+
+    #[inline]
+    pub(crate) fn tokenizer_state_offset(&self) -> u32 {
+        self.view
+            .lexer_states
+            .outer_base()
+            .expect("segmented component tokenizer projection must be affine")
+    }
+
+    #[inline]
+    pub(crate) fn terminal_offset(&self) -> u32 {
+        self.view
+            .terminal_ids
+            .outer_base()
+            .expect("segmented component terminal projection must be affine")
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

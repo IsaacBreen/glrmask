@@ -2416,11 +2416,10 @@ impl<'a> ConstraintState<'a> {
         component: &crate::runtime::SegmentedParserComponent,
         global_state: u32,
     ) -> Option<u32> {
-        if global_state == self.constraint.runtime_commit_initial_state() {
-            return Some(component.constraint.tokenizer.start_state());
-        }
-        let local = global_state.checked_sub(component.tokenizer_state_offset)?;
-        (local < component.constraint.tokenizer.num_states()).then_some(local)
+        component.view.local_lexer_state(
+            global_state,
+            self.constraint.runtime_commit_initial_state(),
+        )
     }
 
     fn segmented_local_disallowed(
@@ -2428,8 +2427,6 @@ impl<'a> ConstraintState<'a> {
         component: &crate::runtime::SegmentedParserComponent,
         source: &TerminalsDisallowed,
     ) -> TerminalsDisallowed {
-        let terminal_start = component.terminal_offset;
-        let terminal_end = terminal_start.saturating_add(component.constraint.table.num_terminals);
         let mut result = TerminalsDisallowed::new();
         for (global_tokenizer_state, terminals) in source.iter() {
             let Some(local_tokenizer_state) =
@@ -2438,11 +2435,8 @@ impl<'a> ConstraintState<'a> {
                 continue;
             };
             for &terminal in terminals.iter() {
-                if terminal_start <= terminal && terminal < terminal_end {
-                    result = result.with_insert(
-                        local_tokenizer_state,
-                        terminal - terminal_start,
-                    );
+                if let Some(local_terminal) = component.view.terminal_ids.to_local(terminal) {
+                    result = result.with_insert(local_tokenizer_state, local_terminal);
                 }
             }
         }
@@ -2454,7 +2448,7 @@ impl<'a> ConstraintState<'a> {
             component: &crate::runtime::SegmentedParserComponent,
             top_first: &[u32],
         ) -> Weight {
-            let constraint = component.constraint.as_ref();
+            let constraint = component.constraint();
             let dwa = &constraint.parser_dwa;
             let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
             let mut state_id = dwa.start_state();
@@ -2526,7 +2520,7 @@ impl<'a> ConstraintState<'a> {
             else {
                 return true;
             };
-            let source = component.constraint.as_ref();
+            let source = component.constraint();
             let blocked = root_disallow
                 .then(|| component.root_disallowed_terminal)
                 .flatten()
@@ -2588,8 +2582,8 @@ impl<'a> ConstraintState<'a> {
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
-        let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+        let routing = &overlay.segmented_component_union_root_routing;
+        if routing.is_empty() || overlay.segmented_parser_components.is_empty() {
             return false;
         }
         buf.fill(0);
@@ -2621,16 +2615,12 @@ impl<'a> ConstraintState<'a> {
                 let Some(&global_top) = top_first.first() else {
                     return;
                 };
-                let component_index = dispatch
-                    .get(global_top as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if component_index == u32::MAX {
+                let Some(component_index) = routing.route(global_top) else {
                     return;
-                }
+                };
                 let Some(component) = overlay
                     .segmented_parser_components
-                    .get(component_index as usize)
+                    .get(component_index)
                 else {
                     complete = false;
                     return;
@@ -2638,9 +2628,7 @@ impl<'a> ConstraintState<'a> {
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 for &global_parser_state in top_first {
                     let local = component
-                        .global_to_local_parser_state
-                        .get(global_parser_state as usize)
-                        .copied()
+                        .local_parser_state(global_parser_state)
                         .unwrap_or(u32::MAX);
                     if local == u32::MAX {
                         break;
@@ -2681,7 +2669,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     /// Evaluate the compressed deterministic union A.  Its synthetic root is
-    /// represented by `segmented_component_union_root_dispatch`; after the
+    /// represented by `segmented_component_union_root_routing`; after the
     /// first parser-state read each concrete stack path is in exactly one
     /// cached component DWA body.  Root final weights are the union of every
     /// component start final, so we also project an empty stack into each
@@ -2695,8 +2683,8 @@ impl<'a> ConstraintState<'a> {
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
-        let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+        let routing = &overlay.segmented_component_union_root_routing;
+        if routing.is_empty() || overlay.segmented_parser_components.is_empty() {
             return false;
         }
 
@@ -2737,16 +2725,12 @@ impl<'a> ConstraintState<'a> {
                 let Some(&global_top) = top_first.first() else {
                     return;
                 };
-                let component_index = dispatch
-                    .get(global_top as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if component_index == u32::MAX {
+                let Some(component_index) = routing.route(global_top) else {
                     return;
-                }
+                };
                 let Some(component) = overlay
                     .segmented_parser_components
-                    .get(component_index as usize)
+                    .get(component_index)
                 else {
                     return;
                 };
@@ -2759,9 +2743,7 @@ impl<'a> ConstraintState<'a> {
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 for &global_parser_state in top_first {
                     let local = component
-                        .global_to_local_parser_state
-                        .get(global_parser_state as usize)
-                        .copied()
+                        .local_parser_state(global_parser_state)
                         .unwrap_or(u32::MAX);
                     if local == u32::MAX {
                         break;
@@ -2773,7 +2755,7 @@ impl<'a> ConstraintState<'a> {
                 }
                 local_top_first.reverse();
                 let local_disallowed = self.segmented_local_disallowed(component, acc);
-                projected_states[component_index as usize].merge_insert(
+                projected_states[component_index].merge_insert(
                     local_tokenizer_state,
                     ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed),
                 );
@@ -2798,13 +2780,13 @@ impl<'a> ConstraintState<'a> {
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
             let shadow = ConstraintState {
-                constraint: component.constraint.as_ref(),
+                constraint: component.constraint(),
                 state,
                 buffers: Default::default(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: Mutex::new(MaskScratch::for_constraint(
-                    component.constraint.as_ref(),
+                    component.constraint(),
                 )),
             };
             shadow.fill_mask_uncached(&mut component_buf);
@@ -2853,7 +2835,7 @@ impl<'a> ConstraintState<'a> {
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
-        if !overlay.segmented_component_union_root_dispatch.is_empty() {
+        if !overlay.segmented_component_union_root_routing.is_empty() {
             return self.try_fill_mask_segmented_deterministic_union(buf);
         }
         if overlay.segmented_parser_components.is_empty() {
@@ -2882,9 +2864,7 @@ impl<'a> ConstraintState<'a> {
                     let mut local_top_first = SmallVec::<[u32; 64]>::new();
                     for &global_parser_state in top_first {
                         let local = component
-                            .global_to_local_parser_state
-                            .get(global_parser_state as usize)
-                            .copied()
+                            .local_parser_state(global_parser_state)
                             .unwrap_or(u32::MAX);
                         if local == u32::MAX {
                             break;
@@ -2921,13 +2901,13 @@ impl<'a> ConstraintState<'a> {
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
             let shadow = ConstraintState {
-                constraint: component.constraint.as_ref(),
+                constraint: component.constraint(),
                 state,
                 buffers: Default::default(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: Mutex::new(MaskScratch::for_constraint(
-                    component.constraint.as_ref(),
+                    component.constraint(),
                 )),
             };
             shadow.fill_mask_uncached(&mut component_buf);

@@ -1,5 +1,6 @@
 mod artifact;
 mod commit;
+mod composition_view;
 mod constraint;
 mod dynamic_mask;
 mod finalize;
@@ -7,6 +8,7 @@ mod mask;
 pub(crate) mod mask_mapping;
 mod serde;
 pub(crate) use serde::compact_large_non_dwa_weight_runtime;
+pub(crate) use composition_view::{ConstraintView, DenseViewRouting};
 mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;

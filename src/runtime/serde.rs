@@ -1734,7 +1734,7 @@ fn restore_segmented_runtime_v20(
     // zero-copy component collection remains an in-memory optimization and is
     // deliberately not recursively embedded in the artifact.
     overlay.segmented_parser_components.clear();
-    overlay.segmented_component_union_root_dispatch.clear();
+    overlay.segmented_component_union_root_routing.clear();
     overlay.segmented_boundary_parser = runtime.boundary_parser.map(Box::new);
     overlay.segmented_boundary_terminal_trie = runtime.boundary_terminal_trie.map(Box::new);
     Ok(())
@@ -4676,7 +4676,7 @@ mod tests {
             vec![true, false, true],
         );
         assert!(overlay.segmented_parser_components.is_empty());
-        assert!(overlay.segmented_component_union_root_dispatch.is_empty());
+        assert!(overlay.segmented_component_union_root_routing.is_empty());
         assert!(overlay.segmented_boundary_parser.is_none());
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert_eq!(loaded.start().mask(), constraint.start().mask());

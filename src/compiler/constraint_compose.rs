@@ -550,7 +550,7 @@ fn deterministic_component_union_root_dispatch_direct(
     if components.len() != component_maps.len()
         || components
             .iter()
-            .any(|component| component.global_to_local_parser_state.len() < global_state_count)
+            .any(|component| component.parser_outer_domain_len() < global_state_count)
     {
         return None;
     }
@@ -561,11 +561,13 @@ fn deterministic_component_union_root_dispatch_direct(
     for global_state in 0..global_state_count {
         let mut candidates = SmallVec::<[(u32, &Weight); 4]>::new();
         for (component_index, component) in components.iter().enumerate() {
-            let local_state = component.global_to_local_parser_state[global_state];
+            let local_state = component
+                .local_parser_state(global_state as u32)
+                .unwrap_or(u32::MAX);
             if local_state == u32::MAX {
                 continue;
             }
-            let source = component.constraint.as_ref();
+            let source = component.constraint();
             let root = source
                 .parser_dwa
                 .states()
@@ -654,12 +656,15 @@ fn build_segmented_runtime_metadata(
             &parser_state_relations[component_index],
             global_state_count,
         ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
-        segmented_components.push(crate::runtime::SegmentedParserComponent {
-            constraint: source,
-            tokenizer_state_offset: tokenizer_state_offsets[component_index],
-            terminal_offset: terminal_offsets[component_index],
-            root_disallowed_terminal,
+        let view = crate::runtime::ConstraintView::segmented_leaf(
+            source,
+            terminal_offsets[component_index],
+            tokenizer_state_offsets[component_index],
             global_to_local_parser_state,
+        )?;
+        segmented_components.push(crate::runtime::SegmentedParserComponent {
+            view,
+            root_disallowed_terminal,
         });
     }
     let deterministic_root_dispatch = if two_dwa_runtime_requested {
@@ -707,7 +712,7 @@ fn deterministic_component_union_root_dispatch(
     let transport_started_at = Instant::now();
     let mut transported_roots = Vec::with_capacity(components.len());
     for (component_index, component) in components.iter().enumerate() {
-        let source = component.constraint.as_ref();
+        let source = component.constraint();
         let source_root = source
             .parser_dwa
             .states()
@@ -9104,12 +9109,12 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
         overlay.segmented_parser_components.len(),
     );
     for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
-        let local_state_count = component.constraint.table.num_states as usize;
+        let local_state_count = component.constraint().table.num_states as usize;
         let mut relation = vec![Vec::<u32>::new(); local_state_count];
-        for (global, &local) in component.global_to_local_parser_state.iter().enumerate() {
-            if local == u32::MAX {
+        for global in 0..component.parser_outer_domain_len() {
+            let Some(local) = component.local_parser_state(global as u32) else {
                 continue;
-            }
+            };
             let Some(targets) = relation.get_mut(local as usize) else {
                 return Err(format!(
                     "segmented component {component_index} maps global LR state {global} to out-of-range local state {local}"
@@ -9136,10 +9141,10 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
         .iter()
         .zip(relations.iter())
         .map(|(component, relation)| ParserDwaComponent {
-            constraint: component.constraint.as_ref(),
+            constraint: component.constraint(),
             parser_state_relation: relation,
-            tokenizer_state_offset: component.tokenizer_state_offset,
-            terminal_offset: component.terminal_offset,
+            tokenizer_state_offset: component.tokenizer_state_offset(),
+            terminal_offset: component.terminal_offset(),
             composed_table: None,
         })
         .collect::<Vec<_>>();
@@ -9189,7 +9194,7 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
         .zip(overlay.segmented_parser_components.iter())
         .enumerate()
     {
-        let source = component.constraint.as_ref();
+        let source = component.constraint();
         let source_tsid_groups = source.internal_tsid_groups();
         let local_tsid_count = source_tsid_groups.len();
         let mut tsid_map = vec![Vec::<u32>::new(); local_tsid_count];
@@ -9199,7 +9204,7 @@ pub(crate) fn materialize_segmented_component_parser_for_serialization(
             };
             for &local_state in local_states {
                 let global_state = component
-                    .tokenizer_state_offset
+                    .tokenizer_state_offset()
                     .checked_add(local_state)
                     .ok_or_else(|| "segmented tokenizer-state offset overflow".to_string())?;
                 if global_state < constraint.tokenizer.num_states() {
@@ -16684,7 +16689,7 @@ fn build_static_dynamic_overlay_metadata(
             repair_terminals,
             non_parent_only_parser_states,
             segmented_parser_components: Vec::new(),
-            segmented_component_union_root_dispatch: Vec::new(),
+            segmented_component_union_root_routing: Default::default(),
             segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
         },
@@ -19337,20 +19342,24 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
-                segmented_component_union_root_dispatch: Vec::new(),
+                segmented_component_union_root_routing: Default::default(),
                 segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
             }
         });
         overlay.segmented_parser_components = segmented_components;
         if let Some(dispatch) = deterministic_root_dispatch {
-            overlay.segmented_component_union_root_dispatch = dispatch;
+            overlay.segmented_component_union_root_routing =
+                crate::runtime::DenseViewRouting::new(
+                    dispatch,
+                    overlay.segmented_parser_components.len(),
+                )?;
         }
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true parent_moved=true deterministic_union_view={} publish_ms={segment_publish_ms:.3}",
                 overlay.segmented_parser_components.len(),
-                !overlay.segmented_component_union_root_dispatch.is_empty(),
+                !overlay.segmented_component_union_root_routing.is_empty(),
             );
         }
 
@@ -19652,12 +19661,21 @@ fn compose_constraints_owned_parent_impl(
                     exact = false;
                     break;
                 };
-                segmented_components.push(crate::runtime::SegmentedParserComponent {
-                    constraint: Arc::new(source),
-                    tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
-                    terminal_offset: result.terminal_offsets[component_index],
-                    root_disallowed_terminal: None,
+                let view = match crate::runtime::ConstraintView::segmented_leaf(
+                    Arc::new(source),
+                    result.terminal_offsets[component_index],
+                    result.tokenizer_state_offsets[component_index],
                     global_to_local_parser_state,
+                ) {
+                    Ok(view) => view,
+                    Err(_) => {
+                        exact = false;
+                        break;
+                    }
+                };
+                segmented_components.push(crate::runtime::SegmentedParserComponent {
+                    view,
+                    root_disallowed_terminal: None,
                 });
             }
         }
@@ -19669,7 +19687,7 @@ fn compose_constraints_owned_parent_impl(
                     repair_terminals: vec![false; num_terminals],
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
-                    segmented_component_union_root_dispatch: Vec::new(),
+                    segmented_component_union_root_routing: Default::default(),
                     segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
                 }
@@ -19728,7 +19746,7 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
-                segmented_component_union_root_dispatch: Vec::new(),
+                segmented_component_union_root_routing: Default::default(),
                 segmented_boundary_parser: None,
             segmented_boundary_terminal_trie: None,
             }
