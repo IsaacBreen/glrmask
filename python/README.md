@@ -182,17 +182,18 @@ Special tokens are declared by name in GLRM and bound to their model token IDs o
 grammar = '''
 glrm 1;
 start message;
-extern token END_TURN;
-nt message = "hello" END_TURN;
+extern token TOOL_CALL;
+nt message = TOOL_CALL call;
+nt call = "lookup()";
 '''
 constraint = glrmask.Constraint.from_glrm_grammar(
     grammar,
     vocab,
-    bindings={"END_TURN": end_turn_id},
+    bindings={"TOOL_CALL": tool_call_token_id},
 )
 ```
 
-Bind the special token ID used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
+Bind the tool-call special token used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
 
 See the [root README](../README.md#grammar-formats) for the fuller format overview.
 
