@@ -4,6 +4,8 @@
 
 ### Improved
 
+- Static constraint serialization now primes canonical artifact bytes during public compilation, making the first subsequent `save()` a bulk copy rather than a full re-encode. Current artifacts also persist the packed-DWA dense-mask cache needed by the runtime, substantially reducing load-time cache reconstruction. Rust now exposes one `Constraint::load(...)` entry point that automatically takes the zero-copy backing path for owned `Vec<u8>` input while continuing to accept borrowed bytes.
+
 - Direct dynamic masking now walks the vocabulary trie once with interned
   correlated lexer/parser recognizer states instead of repeating the trie walk
   for each live branch. Runtime vocabulary data uses a flat preorder walk,

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use glrmask::__private::{ConstraintStateExt, VocabExt};
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint, Grammar, Vocab};
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
@@ -49,7 +49,7 @@ fn main() {
         serde_json::from_slice(&std::fs::read(&args[3]).unwrap()).unwrap();
 
     let started = Instant::now();
-    let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+    let constraint = Constraint::compile(Grammar::glrm(&grammar), &vocab).unwrap();
     eprintln!("compile_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
 
     let save_started = Instant::now();
@@ -57,10 +57,10 @@ fn main() {
     let save_ms = save_started.elapsed().as_secs_f64() * 1000.0;
     let artifact_bytes = saved.len();
     let load_started = Instant::now();
-    let loaded = Constraint::load_owned(saved).unwrap();
+    let loaded = Constraint::load(saved).unwrap();
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
-        "save_ms={save_ms:.3} artifact_bytes={artifact_bytes} load_owned_ms={load_ms:.3}"
+        "save_ms={save_ms:.3} artifact_bytes={artifact_bytes} load_ms={load_ms:.3}"
     );
 
     let mut compiled_masks = Vec::<u128>::new();

@@ -93,6 +93,10 @@ path = "tests/integration.rs"
 name = "end_tokens"
 path = "tests/end_tokens.rs"
 
+[[test]]
+name = "glrm_v1"
+path = "tests/glrm_v1.rs"
+
 # Focused JSON Schema suites.
 [[test]]
 name = "json_schema_unicode_class_pattern"

@@ -14,7 +14,7 @@
 //! # Quickstart
 //!
 //! ```
-//! use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+//! use glrmask::{Constraint, Grammar, Vocab};
 //!
 //! let vocab = Vocab::new(vec![
 //!     (0, b"hello".to_vec()),
@@ -22,7 +22,7 @@
 //!     (2, b"world".to_vec()),
 //! ]);
 //! let grammar = Grammar::ebnf(r#"start ::= "hello" " " "world""#);
-//! let constraint = Constraint::compile(grammar, &vocab, &CompileOptions::default()).unwrap();
+//! let constraint = Constraint::compile(grammar, &vocab).unwrap();
 //!
 //! let mut state = constraint.start();
 //! assert_ne!(state.mask()[0] & (1 << 0), 0);
@@ -38,22 +38,30 @@
 //!
 //! # Grammar inputs
 //!
-//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. [`CompileOptions`]
-//! carries optional end-token IDs and compiled GLRM subgrammar bindings. Use the
-//! same [`Constraint::compile`] / [`DynamicConstraint::compile`] shape for both
-//! execution modes.
+//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. New GLRM grammars use
+//! the versioned `glrm 1;` syntax; unversioned GLRM remains the legacy
+//! compatibility format. Use [`ConstraintSpec::builder`] for target-bound GLRM
+//! extern bindings, then compile the same immutable spec as either a
+//! [`Constraint`] or [`DynamicConstraint`].
 //!
 //! # Persistence
 //!
 //! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
 //! constraints across requests or process restarts.
 //!
-//! # Reusing compiled subgrammars
+//! # GLRM external bindings
 //!
-//! GLRM can declare typed external subgrammars with `extern g name;`. Bind
-//! already-compiled children through [`CompileOptions::subgrammars`]. The compiler
-//! allocates hidden call placeholders automatically and links the components
-//! exactly, including model tokens that cross grammar boundaries.
+//! GLRM v1 can declare exact model-token terminals with `extern token NAME;`.
+//! Bind those names through [`ConstraintSpecBuilder::bind_token`]. Token IDs
+//! stay outside the grammar source.
+//!
+//! GLRM can also declare typed external subgrammars with `extern grammar name;`.
+//! A source [`Grammar`] can bind another source grammar directly with
+//! [`Grammar::bind_grammar`] before a target vocabulary is chosen. Target-bound
+//! source/spec/compiled realizations can instead be supplied through
+//! [`ConstraintSpecBuilder::bind_grammar`]. The compiler allocates hidden call
+//! placeholders automatically and links the components exactly, including model
+//! tokens that cross grammar boundaries.
 //!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.
@@ -78,9 +86,10 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use programmatic_js::ProgrammaticJsCompiler;
 pub use runtime::{Constraint, ConstraintState};
+#[doc(hidden)]
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
-pub use public_api::{CompileOptions, Grammar};
+pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar, IntoGrammarBinding};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -127,7 +136,10 @@ pub(crate) use error::GlrMaskError;
 
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
-pub(crate) fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {
+pub(crate) fn compile_grammar_def_json(
+    grammar_def_json: &str,
+    vocab: &Vocab,
+) -> Result<Constraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
     error::catch_internal_invariant(|| {

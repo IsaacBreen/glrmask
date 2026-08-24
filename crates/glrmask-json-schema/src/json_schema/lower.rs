@@ -1225,30 +1225,21 @@ impl<'a> Lowerer<'a> {
     fn hoist_raw_regexes_out_of_expr_nfa_symbols(&mut self, expr: GrammarExpr) -> GrammarExpr {
         match expr {
             GrammarExpr::ExprNFA(expr_nfa) => {
-                let ExprNFA {
-                    nfa,
-                    symbols,
-                    is_determinized_and_minimized,
-                    prefer_direct_nfa_emission,
-                    complete_parser_language,
-                    canonical_dfa,
-                } = *expr_nfa;
-                let preserves_canonical_dfa = is_determinized_and_minimized
-                    && symbols
+                let mut expr_nfa = *expr_nfa;
+                let preserves_canonical_dfa = expr_nfa.is_determinized_and_minimized
+                    && expr_nfa
+                        .symbols
                         .iter()
                         .all(|symbol| !Self::expr_contains_raw_regex(symbol));
-                let symbols = symbols
+                expr_nfa.symbols = std::mem::take(&mut expr_nfa.symbols)
                     .into_iter()
                     .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
                     .collect();
-                GrammarExpr::ExprNFA(Box::new(ExprNFA {
-                    nfa,
-                    symbols,
-                    is_determinized_and_minimized: preserves_canonical_dfa,
-                    prefer_direct_nfa_emission,
-                    complete_parser_language,
-                    canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
-                }))
+                expr_nfa.is_determinized_and_minimized = preserves_canonical_dfa;
+                if !preserves_canonical_dfa {
+                    expr_nfa.canonical_dfa = None;
+                }
+                GrammarExpr::ExprNFA(Box::new(expr_nfa))
             }
             other => other,
         }
@@ -1301,30 +1292,21 @@ impl<'a> Lowerer<'a> {
                 }
             }
             GrammarExpr::ExprNFA(expr_nfa) => {
-                let ExprNFA {
-                    nfa,
-                    symbols,
-                    is_determinized_and_minimized,
-                    prefer_direct_nfa_emission,
-                    complete_parser_language,
-                    canonical_dfa,
-                } = *expr_nfa;
-                let preserves_canonical_dfa = is_determinized_and_minimized
-                    && symbols
+                let mut expr_nfa = *expr_nfa;
+                let preserves_canonical_dfa = expr_nfa.is_determinized_and_minimized
+                    && expr_nfa
+                        .symbols
                         .iter()
                         .all(|symbol| !Self::expr_contains_raw_regex(symbol));
-                let symbols = symbols
+                expr_nfa.symbols = std::mem::take(&mut expr_nfa.symbols)
                     .into_iter()
                     .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
                     .collect();
-                GrammarExpr::ExprNFA(Box::new(ExprNFA {
-                    nfa,
-                    symbols,
-                    is_determinized_and_minimized: preserves_canonical_dfa,
-                    prefer_direct_nfa_emission,
-                    complete_parser_language,
-                    canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
-                }))
+                expr_nfa.is_determinized_and_minimized = preserves_canonical_dfa;
+                if !preserves_canonical_dfa {
+                    expr_nfa.canonical_dfa = None;
+                }
+                GrammarExpr::ExprNFA(Box::new(expr_nfa))
             }
             other => other,
         }

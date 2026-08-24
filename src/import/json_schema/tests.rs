@@ -23,7 +23,7 @@ use crate::grammar::ast::{
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::dump_json_schema_grammar_glrm;
-use crate::{Constraint, DynamicConstraint, Vocab};
+use crate::{DynamicConstraint, Constraint as Constraint, Vocab};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

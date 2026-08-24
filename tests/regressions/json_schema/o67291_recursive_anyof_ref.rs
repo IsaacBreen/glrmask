@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();
@@ -27,7 +27,7 @@ fn recursive_duplicate_anyof_ref_closed_object_does_not_overflow() {
     }"##;
 
     let vocab = byte_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"{}").unwrap();
     assert!(state.is_accepting());
@@ -60,7 +60,7 @@ fn recursive_mixed_anyof_ref_closed_object_does_not_overflow() {
     }"##;
 
     let vocab = byte_vocab();
-    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(b"{}").unwrap();
     assert!(state.is_accepting());

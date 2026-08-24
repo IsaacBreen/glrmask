@@ -992,7 +992,7 @@ mod tests {
     use crate::automata::lexer::Lexer;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::{Constraint, Vocab};
+    use crate::{Constraint as Constraint, Vocab};
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;

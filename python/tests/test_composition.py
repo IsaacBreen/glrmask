@@ -15,7 +15,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -56,7 +56,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -102,7 +102,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -142,7 +142,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
     middle = glrmask.Constraint.from_glrm_grammar(
         '''
         start middle;
-        extern g leaf;
+        extern grammar leaf;
         nt middle ::= leaf?;
         ''',
         vocab,
@@ -152,7 +152,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g middle;
+        extern grammar middle;
         nt document ::= "X" middle "!";
         ''',
         vocab,
@@ -203,7 +203,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         start document;
         ignore WS;
         t WS ::= " "+;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
@@ -252,8 +252,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g left;
-        extern g right;
+        extern grammar left;
+        extern grammar right;
         nt document ::= "<" left ">,<" right ">";
         ''',
         vocab,
@@ -279,8 +279,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         assert expected.is_accepting()
 
 
-def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
-    end_token = 1000
+def test_external_subgrammar_roundtrips_without_special_end_token() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"Xa!", 1: b"X", 2: b"a", 3: b"!"}
     )
@@ -294,11 +293,10 @@ def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
     composed = glrmask.Constraint.from_glrm_grammar(
         '''
         start document;
-        extern g payload;
+        extern grammar payload;
         nt document ::= "X" payload "!";
         ''',
         vocab,
-        end_token_ids=[end_token],
         subgrammars={"payload": child},
     )
 
@@ -306,16 +304,14 @@ def test_external_subgrammar_preserves_out_of_vocab_end_token() -> None:
         state = composed.start()
         for token in sequence:
             state.commit_token(token)
-        mask = state.mask().tolist()
-        assert mask[end_token]
-        assert state.forced() == [end_token]
-        state.commit_token(end_token)
         assert state.is_accepting()
 
     loaded = glrmask.Constraint.load(composed.save(), vocab)
-    loaded_state = loaded.start()
-    loaded_state.commit_token(0)
-    assert loaded_state.forced() == [end_token]
+    for sequence in ([0], [1, 2, 3]):
+        state = loaded.start()
+        for token in sequence:
+            state.commit_token(token)
+        assert state.is_accepting()
 
 
 def test_legacy_manual_subgrammar_composition_api_is_not_exposed() -> None:
@@ -355,5 +351,5 @@ def test_compose_compiled_subgrammars_links_cached_parent_and_child() -> None:
     assert actual.mask().tolist() == expected.mask().tolist()
     actual.commit_token(2)
     expected.commit_token(2)
-    assert actual.is_finished()
-    assert expected.is_finished()
+    assert actual.is_accepting()
+    assert expected.is_accepting()

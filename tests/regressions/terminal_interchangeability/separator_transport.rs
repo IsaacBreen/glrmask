@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 #[test]
 fn ti_separator_transport_matches_ti_off_reference() {
@@ -17,5 +17,5 @@ t X ::= "x";
 nt S ::= X KEY X | X ITEM BOOL | BOOL KEY BOOL | BOOL ITEM X;
 "#;
     let vocab = Vocab::new(vec![(0, b" t".to_vec())]);
-    Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+    Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
 }

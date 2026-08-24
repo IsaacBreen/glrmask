@@ -1,4 +1,4 @@
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 use glrmask::__private::ConstraintStateExt as _;
 
 fn byte_vocab() -> Vocab {
@@ -154,7 +154,7 @@ fn direct_glrm_ordered_suffix_ambiguity_grows() {
     for (n_caps, mask, expected_max_paths, expected_max_stacks) in cases {
         let grammar = direct_ordered_suffix_glrm(n_caps);
         let example = direct_ordered_suffix_example(n_caps, mask);
-        let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab, &glrmask::CompileOptions::default()).unwrap();
+        let constraint = Constraint::compile(glrmask::Grammar::glrm(&grammar), &vocab).unwrap();
         let (max_paths, max_stacks) = measure_max_counts_for_text(&constraint, &example);
 
         println!(

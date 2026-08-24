@@ -326,7 +326,7 @@ fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     let names = names.into_iter().collect::<Vec<_>>();
     let mut source = String::new();
     for index in 0..names.len() {
-        source.push_str(&format!("extern g args_{index};\n"));
+        source.push_str(&format!("extern grammar args_{index};\n"));
     }
     source.push_str("start suffix;\nnt suffix ::=\n");
     for (index, name) in names.iter().enumerate() {

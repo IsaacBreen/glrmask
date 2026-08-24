@@ -5048,6 +5048,18 @@ mod dynamic_mask_vocab_cache_boundary_tests {
     use super::*;
 
     #[test]
+    fn packed_dwa_dense_mask_cache_rejects_malformed_flat_layouts() {
+        assert!(PackedDwaDenseWeightMaskCache::from_flat(4, 2, vec![1], vec![7]).is_err());
+        assert!(
+            PackedDwaDenseWeightMaskCache::from_flat(4, 2, vec![1, 1], vec![1, 2, 3, 4])
+                .is_err()
+        );
+        assert!(
+            PackedDwaDenseWeightMaskCache::from_flat(2, 1, vec![2], vec![7]).is_err()
+        );
+    }
+
+    #[test]
     fn fresh_runtime_instance_shares_only_vocab_derived_data() {
         let template = DynamicMaskVocab::from_materialized_ordered(
             Arc::new(DynamicMaskTrie::new()),

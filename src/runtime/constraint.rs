@@ -10949,7 +10949,7 @@ mod dense_internal_token_mask_tests {
     }
 
     #[test]
-    fn load_owned_preserves_heavy_token_mask_classification_for_backed_buf_masks() {
+    fn owned_load_preserves_heavy_token_mask_classification_for_backed_buf_masks() {
         let vocab = Vocab::new(
             (0..200u32)
                 .map(|token| (token, b"a".to_vec()))
@@ -10965,11 +10965,11 @@ mod dense_internal_token_mask_tests {
             "duplicate-token expansion should produce at least one heavy internal token",
         );
 
-        let loaded = Constraint::load_owned(constraint.save()).unwrap();
+        let loaded = Constraint::load(constraint.save()).unwrap();
         let backed = loaded
             .backed_internal_token_buf_flat
             .as_ref()
-            .expect("current load_owned should retain IBM2 entries in artifact backing");
+            .expect("owned current load should retain IBM2 entries in artifact backing");
         assert!(
             backed.slice(0, backed.len()).is_some(),
             "fresh current-format IBM2 entries should be naturally aligned for native access",

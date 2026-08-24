@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
-use std::sync::OnceLock;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
@@ -57,21 +56,6 @@ const PREVIOUS_CURRENT_CORE_HEADER_LEN: usize = PREVIOUS_CURRENT_CORE_MAGIC.len(
 const CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
-
-const PARALLEL_LOAD_POOL_MAX_THREADS: usize = 8;
-const PARALLEL_LOAD_POOL_MIN_BYTES: usize = 1024 * 1024;
-
-fn constraint_load_pool() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let available = std::thread::available_parallelism().map_or(1, usize::from);
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(available.min(PARALLEL_LOAD_POOL_MAX_THREADS).max(1))
-            .thread_name(|index| format!("glrmask-load-{index}"))
-            .build()
-            .expect("build constraint load thread pool")
-    })
-}
 
 #[inline]
 fn uses_external_runtime_sections(version: u16) -> bool {
@@ -1001,7 +985,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let word_offsets_bytes = (word_groups + 1).saturating_mul(4);
     let word_entries_bytes = word_entries.saturating_mul(6);
-    // TMC6/7 align the dense u32 matrix so load_owned can retain it directly
+    // TMC6/7 align the dense u32 matrix so an owned load can retain it directly
     // from the artifact rather than copying ~1.3 MiB merely for alignment.
     let prefix_unaligned_start = HEADER_LEN
         .saturating_add(tail.len())
@@ -1667,8 +1651,6 @@ struct SegmentedRuntimeArtifactV20 {
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
     segmented_runtime: Option<SegmentedRuntimeArtifactV20Ref<'a>>,
-    packed_dwa_dense_mask_words_per_row: u32,
-    packed_dwa_dense_mask_token_set_count: u32,
     packed_dwa_dense_mask_ids: &'a [u32],
     packed_dwa_dense_mask_rows: &'a [u64],
 }
@@ -1677,8 +1659,6 @@ struct ConstraintArtifactCurrentRuntimeRef<'a> {
 struct ConstraintArtifactCurrentRuntime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
-    packed_dwa_dense_mask_words_per_row: u32,
-    packed_dwa_dense_mask_token_set_count: u32,
     packed_dwa_dense_mask_ids: Vec<u32>,
     packed_dwa_dense_mask_rows: Vec<u64>,
 }
@@ -1692,7 +1672,7 @@ struct ConstraintArtifactV20Runtime {
 struct DecodedConstraintRuntime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
-    packed_dwa_dense_masks: Option<crate::runtime::artifact::PackedDwaDenseWeightMaskCache>,
+    packed_dwa_dense_masks: Option<(Vec<u32>, Vec<u64>)>,
 }
 
 fn segmented_runtime_artifact_ref(
@@ -2463,9 +2443,8 @@ impl Constraint {
 
     /// Serialize this compiled constraint to a versioned binary artifact.
     ///
-    /// v13 intentionally stores the compact wire representation uncompressed.
-    /// The wire format itself must be small and fast enough that loading does
-    /// not depend on a decompression pass to hide structural redundancy.
+    /// Current artifacts use a compact sectioned representation and retain
+    /// runtime-native sections where doing so materially reduces load latency.
     pub fn save(&self) -> Vec<u8> {
         if let Some(bytes) = &self.serialized_artifact_cache {
             return clone_serialized_artifact(bytes.as_slice());
@@ -2855,14 +2834,6 @@ impl Constraint {
                             let bytes = bincode::serialize(&ConstraintArtifactCurrentRuntimeRef {
                                 terminal_live_states: &self.terminal_live_states,
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
-                                packed_dwa_dense_mask_words_per_row: u32::try_from(
-                                    packed_dwa_dense_masks.words_per_row(),
-                                )
-                                .expect("packed DWA dense-mask row width must fit u32"),
-                                packed_dwa_dense_mask_token_set_count: u32::try_from(
-                                    packed_dwa_dense_masks.token_set_count(),
-                                )
-                                .expect("packed DWA token-set count must fit u32"),
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
                                 packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
                             })
@@ -3311,22 +3282,18 @@ impl Constraint {
     }
 
     /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
-    pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        Self::load_impl(bytes, None)
-    }
-
-    /// Load a compiled constraint while taking ownership of the artifact bytes.
     ///
-    /// This avoids the whole-artifact copy otherwise required to retain exact
-    /// current-format bytes for a later unchanged [`Constraint::save`].
-    pub fn load_owned(bytes: Vec<u8>) -> crate::Result<Self> {
-        let backing = std::sync::Arc::new(bytes);
-        if backing.len() >= PARALLEL_LOAD_POOL_MIN_BYTES {
-            constraint_load_pool().install(|| {
+    /// Passing an owned `Vec<u8>` transfers its allocation into the loaded
+    /// constraint without copying the artifact. Borrowed byte slices are also
+    /// accepted; current-format artifacts copy borrowed input once because
+    /// runtime structures retain zero-copy views into persistent backing bytes.
+    pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
+        match bytes.into() {
+            Cow::Owned(bytes) => {
+                let backing = std::sync::Arc::new(bytes);
                 Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
-            })
-        } else {
-            Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
+            }
+            Cow::Borrowed(bytes) => Self::load_impl(bytes, None),
         }
     }
 
@@ -3689,15 +3656,10 @@ impl Constraint {
                                                 }
                                                 None
                                             } else {
-                                                Some(
-                                                    crate::runtime::artifact::PackedDwaDenseWeightMaskCache::from_flat(
-                                                        runtime.packed_dwa_dense_mask_token_set_count as usize,
-                                                        runtime.packed_dwa_dense_mask_words_per_row as usize,
-                                                        runtime.packed_dwa_dense_mask_ids,
-                                                        runtime.packed_dwa_dense_mask_rows,
-                                                    )
-                                                    .map_err(|err| bincode::Error::new(bincode::ErrorKind::Custom(err)))?,
-                                                )
+                                                Some((
+                                                    runtime.packed_dwa_dense_mask_ids,
+                                                    runtime.packed_dwa_dense_mask_rows,
+                                                ))
                                             };
                                             Ok(DecodedConstraintRuntime {
                                                 terminal_live_states: runtime.terminal_live_states,
@@ -4225,24 +4187,19 @@ impl Constraint {
             }
             if let Some(runtime) = runtime {
                 constraint.terminal_live_states = runtime.terminal_live_states;
-                if let Some(cache) = runtime.packed_dwa_dense_masks {
+                if let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
                     let token_set_count = constraint
                         .packed_parser_dwa
                         .as_ref()
                         .map_or(0, |dwa| dwa.token_set_count());
-                    if cache.words_per_row() != expected_words {
-                        return Err(crate::GlrMaskError::Serialization(format!(
-                            "packed DWA dense-mask cache has row width {}; expected {expected_words}",
-                            cache.words_per_row(),
-                        )));
-                    }
-                    if cache.token_set_count() != token_set_count {
-                        return Err(crate::GlrMaskError::Serialization(format!(
-                            "packed DWA dense-mask cache indexes {} token sets; expected {token_set_count}",
-                            cache.token_set_count(),
-                        )));
-                    }
+                    let cache = crate::runtime::artifact::PackedDwaDenseWeightMaskCache::from_flat(
+                        token_set_count,
+                        expected_words,
+                        ids,
+                        rows,
+                    )
+                    .map_err(crate::GlrMaskError::Serialization)?;
                     constraint.packed_dwa_token_dense_masks = cache;
                     loaded_packed_dwa_dense_masks = true;
                 }
@@ -4435,7 +4392,7 @@ mod tests {
         actual.commit_token(0).unwrap();
         assert_eq!(actual.mask(), expected.mask());
 
-        let loaded = Constraint::load_owned(packed.save()).unwrap();
+        let loaded = Constraint::load(packed.save()).unwrap();
         let mut loaded_state = loaded.start();
         assert_eq!(loaded_state.mask(), baseline.start().mask());
         loaded_state.commit_token(0).unwrap();
@@ -4491,15 +4448,58 @@ mod tests {
     }
 
     #[test]
-    fn load_owned_keeps_token_mask_prefix_matrix_in_artifact_backing() {
+    fn load_moves_owned_vec_and_accepts_borrowed_bytes() {
+        let constraint = tiny_constraint();
+
+        let owned = constraint.save();
+        let owned_ptr = owned.as_ptr();
+        let loaded_owned = Constraint::load(owned).unwrap();
+        let owned_backing = loaded_owned
+            .serialized_artifact_cache
+            .as_ref()
+            .expect("current owned load should retain artifact backing");
+        assert_eq!(owned_backing.as_ptr(), owned_ptr);
+
+        let borrowed = constraint.save();
+        let borrowed_ptr = borrowed.as_ptr();
+        let loaded_borrowed = Constraint::load(borrowed.as_slice()).unwrap();
+        let borrowed_backing = loaded_borrowed
+            .serialized_artifact_cache
+            .as_ref()
+            .expect("current borrowed load should create retained backing");
+        assert_ne!(borrowed_backing.as_ptr(), borrowed_ptr);
+        assert_eq!(loaded_borrowed.start().mask(), constraint.start().mask());
+
+        // `&Vec<u8>` is a common caller shape and should remain ergonomic.
+        let loaded_vec_ref = Constraint::load(&borrowed).unwrap();
+        assert_eq!(loaded_vec_ref.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn public_compile_primes_first_save_artifact() {
+        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let constraint = Constraint::compile(
+            crate::Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
+            &vocab,
+        )
+        .unwrap();
+        let cached = constraint
+            .serialized_artifact_cache
+            .as_ref()
+            .expect("public static compile should prime the canonical artifact");
+        assert_eq!(constraint.save().as_slice(), cached.as_slice());
+    }
+
+    #[test]
+    fn owned_load_keeps_token_mask_prefix_matrix_in_artifact_backing() {
         let constraint = tiny_constraint();
         let saved = constraint.save();
-        let loaded = Constraint::load_owned(saved).unwrap();
+        let loaded = Constraint::load(saved).unwrap();
 
         let backing = loaded
             .serialized_artifact_cache
             .as_ref()
-            .expect("current load_owned constraint should retain artifact backing");
+            .expect("owned current load should retain artifact backing");
         let prefix = loaded
             .word_group_prefix_buf_masks
             .as_contiguous()

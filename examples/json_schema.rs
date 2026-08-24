@@ -1,4 +1,4 @@
-use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+use glrmask::{Constraint as Constraint, Grammar, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();
@@ -19,7 +19,6 @@ fn main() {
     let constraint = Constraint::compile(
         Grammar::json_schema(schema),
         &vocab,
-        &CompileOptions::default(),
     )
     .unwrap();
     let mut state = constraint.start();

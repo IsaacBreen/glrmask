@@ -1,5 +1,5 @@
 ﻿use std::{collections::BTreeMap, fs::File, io::{BufRead, BufReader, Write}, path::Path, time::Instant};
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint, Grammar, Vocab};
 use glrmask::__private::VocabExt;
 use serde::Deserialize;
 
@@ -24,13 +24,13 @@ fn main() {
     vocab.prepare_for_compile();
     let reader = BufReader::new(File::open(input).unwrap());
     let mut out = File::create(out_path).unwrap();
-    writeln!(out, "id\tcompile_ms\tsave_ms\tload_owned_median_ms\tartifact_bytes").unwrap();
+    writeln!(out, "id\tcompile_ms\tsave_ms\tload_median_ms\tartifact_bytes").unwrap();
     let mut ok = 0usize;
     let mut unsupported = 0usize;
     for (index, line) in reader.lines().enumerate() {
         let row: Row = serde_json::from_str(&line.unwrap()).unwrap();
         let started = Instant::now();
-        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Constraint::from_json_schema(&row.schema, &vocab)));
+        let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Constraint::compile(Grammar::json_schema(&row.schema), &vocab)));
         let constraint = match compiled {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => { unsupported += 1; eprintln!("ERROR\t{}\t{}", row.id, e); continue; },
@@ -53,7 +53,7 @@ fn main() {
         for _ in 0..load_iters {
             let copy = artifact.clone();
             let started = Instant::now();
-            let loaded = Constraint::load_owned(copy).unwrap();
+            let loaded = Constraint::load(copy).unwrap();
             loads.push(started.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(loaded);
         }

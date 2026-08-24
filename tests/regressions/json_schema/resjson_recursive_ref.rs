@@ -1,5 +1,5 @@
 //! Reproduce segfault from JsonSchemaStore---resjson schema (recursive $ref).
-use glrmask::{Constraint, Vocab};
+use glrmask::{Constraint as Constraint, Vocab};
 
 fn make_vocab(entries: &[&str]) -> Vocab {
     let entries: Vec<(u32, Vec<u8>)> = entries
@@ -40,7 +40,7 @@ fn test_resjson_recursive_ref() {
         }
     }"##;
 
-    let result = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab, &glrmask::CompileOptions::default());
+    let result = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab);
     // Should either succeed or return an error, NOT segfault
     match result {
         Ok(_) => println!("Compiled successfully"),

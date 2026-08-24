@@ -9,7 +9,7 @@ use criterion::{
     criterion_group,
     criterion_main,
 };
-use glrmask::Constraint;
+use glrmask::{Grammar, Constraint};
 use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 use std::time::Duration;
 
@@ -107,7 +107,13 @@ fn prepare_state<'a>(
     close_token_bytes: &[u8],
     token_id_override: Option<u32>,
 ) -> glrmask::ConstraintState<'a> {
-    let constraint = Box::leak(Box::new(Constraint::from_json_schema(schema, vocab).unwrap()));
+    let constraint = Box::leak(Box::new(
+        Constraint::compile(
+            Grammar::json_schema(schema),
+            vocab,
+        )
+        .unwrap(),
+    ));
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
     let close_token_id = token_id_override.unwrap_or_else(|| close_token_id(vocab, close_token_bytes));
@@ -252,7 +258,11 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let mut total_ns = 0u128;
                     for _ in 0..iters {
-                        let constraint = Constraint::from_json_schema(case.schema, &vocab).unwrap();
+                        let constraint = Constraint::compile(
+                            Grammar::json_schema(case.schema),
+                            &vocab,
+                        )
+                        .unwrap();
                         let mut state = constraint.start();
                         state.commit_bytes(case.prefix).unwrap();
                         let mut mask_buf = vec![0u32; mask_words];
@@ -272,7 +282,11 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                 || vocab.clone(),
                 |fresh_vocab| {
                     cfa_sweep::clear_compile_caches();
-                    let constraint = Constraint::from_json_schema(black_box(case.schema), black_box(&fresh_vocab)).unwrap();
+                    let constraint = Constraint::compile(
+                        Grammar::json_schema(black_box(case.schema)),
+                        black_box(&fresh_vocab),
+                    )
+                    .unwrap();
                     black_box(constraint.num_parser_states());
                 },
                 BatchSize::SmallInput,

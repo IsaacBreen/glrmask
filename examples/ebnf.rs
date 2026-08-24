@@ -1,4 +1,4 @@
-use glrmask::{CompileOptions, Constraint, Grammar, Vocab};
+use glrmask::{Constraint as Constraint, Grammar, Vocab};
 
 fn token_allowed(mask: &[u32], token_id: usize) -> bool {
     let word = token_id / 32;
@@ -16,7 +16,6 @@ fn main() {
     let constraint = Constraint::compile(
         Grammar::ebnf(r#"start ::= "hello" " " "world""#),
         &vocab,
-        &CompileOptions::default(),
     )
     .unwrap();
 

@@ -1,71 +1,90 @@
-//! GLRM: Glrmask Grammar Format
+//! GLRM: GLRMask's native grammar format.
 //!
-//! A fully-featured, human-readable grammar format that can represent every
-//! construct in [`NamedGrammar`] / [`GrammarExpr`], including
-//! `Exclude`, `Intersect`, internal terminals, and `SeparatedSequence`.
+//! New grammars use the versioned GLRM v1 surface. Unversioned input is parsed
+//! as the legacy compatibility format, so existing `::=` grammars and numeric
+//! `@token(id)` terminals continue to work unchanged.
 //!
-//! # Format overview
+//! # GLRM v1
 //!
 //! ```text
-//! // Line comment
-//! /* Block comment */
+//! glrm 1;
+//! start value;
+//! [ignore IGNORE;]
 //!
-//! start <nt-name>;
-//! [ignore <TM-NAME>;]
-//! [g <name> ::= { <grammar-body> };]
-//! [extern g <name>;]
-//! [lexer group <partition-name> ::= <TM-NAME> | "literal" | @literals | *, ...;]
-//!
-//! // Nonterminal rules
-//! nt rule_name ::= <expr>;
-//!
-//! // Terminal rules (RHS uses the same expression syntax)
-//! t TERM_NAME ::= <expr>;
-//!
-//! // Internal terminal rules (shared between other terminals)
-//! internal t TERM_NAME ::= <expr>;
+//! internal t DIGIT = /[0-9]/;
+//! t NUMBER = /-?(0|[1-9][0-9]*)/;
+//! extern token END_TURN;
+//! nt value = NUMBER | "null" | END_TURN;
 //! ```
 //!
-//! A `g` declaration defines a named subgrammar. Its body is a complete GLRM
-//! grammar scope with its own `start`, optional `ignore`, terminals, rules,
-//! lexer groups, and nested subgrammars. Definitions are strictly scope-local:
-//! a subgrammar cannot see its parent's definitions, and its private definitions
-//! are not visible to the parent. Only the declared subgrammar name is visible
-//! in the enclosing scope, where it is referenced like a nonterminal.
+//! V1 declarations use `=` and terminate with semicolons. Epsilon is written
+//! explicitly as `eps`; empty alternatives and empty groups are errors. Single
+//! and double quoted literals have the same byte-string semantics; the v1
+//! formatter chooses the delimiter requiring fewer escapes and prefers double
+//! quotes on a tie. Exact
+//! model-token IDs do not appear in v1 source: `extern token NAME;` declares a
+//! parser-visible exact-token terminal whose ID or IDs are supplied by the host.
+//! External terminals may appear in nonterminal expressions and nonterminal FA
+//! edges, but not in byte-level terminal expressions.
 //!
-//! `extern g name;` declares the same kind of scoped call without defining the
-//! child body in this source file. It is accepted by
-//! [`from_glrm_with_external_subgrammars`], which lowers each external call to a
-//! hidden non-vocabulary linker control and returns the exact binding manifest.
+//! Direct finite automata are declaration bodies in v1:
 //!
-//! Ignore is also scope-local. `ignore I;` admits `I*` before the first lexical
-//! atom in that grammar scope, between lexical atoms, and after the last lexical
-//! atom. It never splits a terminal match. A subgrammar with no `ignore`
-//! declaration inherits nothing from its parent.
+//! ```text
+//! nt member = fa {
+//!     start begin;
+//!     accept done;
+//!     begin -> done: STRING;
+//! };
+//! ```
 //!
-//! ## Expressions (used for both NT and terminal rule bodies)
+//! States may be integers or identifiers. Epsilon edges use `: eps;`. Terminal
+//! declarations may use the same `fa { ... }` form; those automata are compiled
+//! directly into the lexer rather than expanded into regular-expression syntax.
 //!
-//! | Syntax                          | Meaning                              |
-//! |--------------------------------|--------------------------------------|
-//! | `name`                         | Reference to a rule                  |
-//! | `"text"`                       | Literal bytes                        |
-//! | `/regex/`                      | Raw regex pattern (terminal rules only) |
-//! | `[class]`, `[^class]`          | Byte character class                 |
-//! | `[class]/utf8`                 | UTF-8 character class                |
-//! | `.`                            | Any byte                             |
-//! | `eps`                          | Epsilon (empty string)               |
-//! | `@token(123)`                  | Exact LLM token id 123               |
-//! | `a b c`                        | Sequence                             |
-//! | `a \| b \| c`                  | Choice                               |
-//! | `e?`, `e*`, `e+`              | Optional / Repeat / RepeatOne        |
-//! | `e{n}`, `e{n,m}`              | RepeatRange                          |
-//! | `(e)`                          | Grouping                             |
-//! | `a - b`                        | GrammarExpr::Exclude                 |
-//! | `a & b`                        | GrammarExpr::Intersect               |
-//! | `sep ~ ( i1? i2 i3? )`           | SeparatedSequence                    |
+//! GLRMask-specific lexer partition hints are namespaced in v1:
+//!
+//! ```text
+//! pragma glrmask {
+//!     lexer group strings = STRING, KEY, @literals;
+//! }
+//! ```
+//!
+//! Inline subgrammars use `g name = { ... };`; `extern grammar name;` declares a
+//! compiled subgrammar supplied by the host. Scope and ignore semantics remain
+//! local to each grammar.
+//!
+//! ## Expressions
+//!
+//! | Syntax | Meaning |
+//! |---|---|
+//! | `name` | Reference to a rule or declared external |
+//! | `"text"`, `'text'` | Literal bytes |
+//! | `/regex/` | Raw regex pattern (terminal expressions only) |
+//! | `[class]`, `[^class]` | Byte character class |
+//! | `[class]/utf8` | UTF-8 character class |
+//! | `.` | Any byte |
+//! | `eps` | Epsilon |
+//! | `a b c` | Sequence |
+//! | `a \| b` | Choice |
+//! | `e?`, `e*`, `e+`, `e{n}`, `e{n,m}` | Repetition |
+//! | `a - b` | Exact-language subtraction |
+//! | `a & b` | Intersection |
+//! | `sep ~ (item_a? item_b)` | Separated sequence |
+//!
+//! # Legacy compatibility
+//!
+//! With no `glrm 1;` header the legacy parser is selected. It retains `::=`,
+//! implicit epsilon alternatives, top-level `fa name ::= { ... };`, numeric
+//! `@token(id)`, legacy lexer-group syntax, and the terminal-FA syntax added by
+//! the earlier terminal-automata feature branch.
+//!
+//! `to_glrm` serializes the legacy form. `to_glrm_v1` serializes the versioned
+//! form when the lowered grammar still contains enough source information to do
+//! so. Bound external-token names cannot be reconstructed from raw token IDs.
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::regex::validate_regular_regex;
 use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::grammar::ast::{
@@ -78,13 +97,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // Dumper
 // ============================================================
 
-/// Serialise `grammar` to the GLRM text format.
-pub fn to_glrm(grammar: &NamedGrammar) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("start {};\n", grammar.start));
-    if let Some(ref ign) = grammar.ignore {
-        out.push_str(&format!("ignore {};\n", ign));
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DumpFlavor {
+    Legacy,
+    V1,
+}
+
+fn lexer_groups_for_dump(grammar: &NamedGrammar, flavor: DumpFlavor) -> Vec<(String, Vec<String>)> {
     let anonymous_literals = grammar.emitted_anonymous_literals();
     let literal_selector_partition = if !anonymous_literals.is_empty()
         && anonymous_literals
@@ -129,7 +148,7 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
         lexer_groups
             .entry(partition.as_str())
             .or_default()
-            .push(format!("\"{}\"", escape_bytes_for_string(literal)));
+            .push(format_literal(literal, flavor));
     }
     if let Some(partition) = literal_selector_partition {
         lexer_groups
@@ -143,8 +162,24 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
             .or_default()
             .push("*".to_string());
     }
-    for (partition, mut members) in lexer_groups {
-        members.sort_unstable();
+
+    lexer_groups
+        .into_iter()
+        .map(|(partition, mut members)| {
+            members.sort_unstable();
+            (partition.to_string(), members)
+        })
+        .collect()
+}
+
+/// Serialise `grammar` to the legacy, unversioned GLRM text format.
+pub fn to_glrm(grammar: &NamedGrammar) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("start {};\n", grammar.start));
+    if let Some(ref ign) = grammar.ignore {
+        out.push_str(&format!("ignore {};\n", ign));
+    }
+    for (partition, members) in lexer_groups_for_dump(grammar, DumpFlavor::Legacy) {
         out.push_str(&format!(
             "lexer group {} ::= {};\n",
             partition,
@@ -154,19 +189,22 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     out.push('\n');
 
     for rule in &grammar.rules {
-        if !rule.is_terminal {
-            if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
-                out.push_str(&format!("fa {} ::= {{\n", rule.name));
-                out.push_str(&dump_expr_nfa(expr_nfa));
-                out.push_str("};\n");
-                continue;
-            }
-        }
         let prefix = match (rule.is_terminal, rule.is_internal) {
             (true, true) => "internal t",
             (true, false) => "t",
             (false, _) => "nt",
         };
+        if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+            if rule.is_terminal {
+                out.push_str(&format!("{prefix} {} ::= fa {{\n", rule.name));
+            } else {
+                // Preserve the established unversioned spelling for parser FAs.
+                out.push_str(&format!("fa {} ::= {{\n", rule.name));
+            }
+            out.push_str(&dump_expr_nfa(expr_nfa));
+            out.push_str("};\n");
+            continue;
+        }
         let body = dump_nt_expr(&rule.expr, false);
         out.push_str(&format!("{} {} ::= {};\n", prefix, rule.name, body));
     }
@@ -174,13 +212,256 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     out
 }
 
-fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
+/// Serialize a grammar using the versioned GLRM v1 surface syntax.
+///
+/// Bound exact-token terminals cannot be reconstructed as named `extern token`
+/// declarations from a lowered [`NamedGrammar`], so grammars containing raw
+/// [`GrammarExpr::SpecialToken`] nodes are rejected instead of leaking the
+/// legacy numeric `@token(id)` syntax into v1 output.
+pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
+    fn contains_special(expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::SpecialToken(_) => true,
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => contains_special(inner),
+            GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_special),
+            GrammarExpr::Exclude { expr, exclude } => contains_special(expr) || contains_special(exclude),
+            GrammarExpr::Intersect { expr, intersect } => contains_special(expr) || contains_special(intersect),
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                items.iter().any(|(item, _)| contains_special(item)) || contains_special(separator)
+            }
+            GrammarExpr::ExprNFA(nfa) => nfa.symbols.iter().any(contains_special),
+            _ => false,
+        }
+    }
+    if grammar.rules.iter().any(|rule| contains_special(&rule.expr)) {
+        return Err(err("cannot dump bound exact-token IDs as GLRM v1; source-level external terminal names are not retained in NamedGrammar"));
+    }
+
+    let lexer_groups = lexer_groups_for_dump(grammar, DumpFlavor::V1);
+    let mut out = format!("glrm 1;\nstart {};\n", grammar.start);
+    if let Some(ignore) = &grammar.ignore {
+        out.push_str(&format!("ignore {ignore};\n"));
+    }
+    if !lexer_groups.is_empty() {
+        out.push_str("pragma glrmask {\n");
+        for (partition, members) in lexer_groups {
+            out.push_str(&format!(
+                "  lexer group {} = {};\n",
+                partition,
+                members.join(", "),
+            ));
+        }
+        out.push_str("}\n");
+    }
+    out.push('\n');
+    for rule in &grammar.rules {
+        let prefix = match (rule.is_terminal, rule.is_internal) {
+            (true, true) => "internal t",
+            (true, false) => "t",
+            (false, _) => "nt",
+        };
+        if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+            out.push_str(&format!("{prefix} {} = fa {{\n", rule.name));
+            out.push_str(&dump_expr_nfa_v1(expr_nfa));
+            out.push_str("};\n");
+        } else {
+            out.push_str(&format!(
+                "{prefix} {} = {};\n",
+                rule.name,
+                dump_nt_expr_v1(&rule.expr, false)
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Canonically format a versioned GLRM v1 source document without lowering
+/// source-level declarations such as `extern token NAME;`.
+///
+/// This is intentionally a source-layer formatter: exact token IDs are not
+/// accepted or emitted, and externally bound terminal names survive unchanged.
+/// Unversioned legacy GLRM must first be migrated explicitly rather than being
+/// silently reinterpreted as v1.
+pub fn format_glrm_v1(input: &str) -> Result<String, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    if parser.version != GlrmVersion::V1 {
+        return Err(err(
+            "format_glrm_v1 requires a leading 'glrm 1;' header",
+        ));
+    }
+    let scope = parser.parse_root_scope()?;
+    validate_scope_for_v1_format(&scope, "grammar")?;
+
+    let mut out = String::from("glrm 1;\n");
+    dump_parsed_scope_v1(&scope, 0, &mut out)?;
+    Ok(out)
+}
+
+fn validate_scope_for_v1_format(
+    scope: &ParsedGlrmScope,
+    scope_label: &str,
+) -> Result<(), GlrMaskError> {
+    scope_symbol_kinds(scope, scope_label)?;
+    for subgrammar in &scope.subgrammars {
+        if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
+            validate_scope_for_v1_format(child, &format!("{scope_label}::{}", subgrammar.name))?;
+        }
+    }
+    Ok(())
+}
+
+fn scope_grammar_for_v1_format(scope: &ParsedGlrmScope) -> NamedGrammar {
+    let mut grammar = NamedGrammar {
+        rules: scope.rules.clone(),
+        start: scope.start.clone(),
+        ignore: scope.ignore.clone(),
+        lexer_partitions: scope.lexer_partitions.clone(),
+        lexer_literal_partitions: scope.lexer_literal_partitions.clone(),
+        default_lexer_partition: scope.default_lexer_partition.clone(),
+    };
+    if let Some(partition) = scope.all_literals_partition.as_deref() {
+        for literal in grammar.emitted_anonymous_literals() {
+            grammar
+                .lexer_literal_partitions
+                .entry(literal)
+                .or_insert_with(|| partition.to_string());
+        }
+    }
+    grammar
+}
+
+fn push_indented_line(out: &mut String, indent: usize, line: &str) {
+    out.extend(std::iter::repeat_n(' ', indent));
+    out.push_str(line);
+    out.push('\n');
+}
+
+fn push_indented_block(out: &mut String, indent: usize, block: &str) {
+    for line in block.lines() {
+        push_indented_line(out, indent, line);
+    }
+}
+
+fn dump_parsed_scope_v1(
+    scope: &ParsedGlrmScope,
+    indent: usize,
+    out: &mut String,
+) -> Result<(), GlrMaskError> {
+    push_indented_line(out, indent, &format!("start {};", scope.start));
+    if let Some(ignore) = &scope.ignore {
+        push_indented_line(out, indent, &format!("ignore {ignore};"));
+    }
+
+    let grammar = scope_grammar_for_v1_format(scope);
+    let lexer_groups = lexer_groups_for_dump(&grammar, DumpFlavor::V1);
+    if !lexer_groups.is_empty() {
+        push_indented_line(out, indent, "pragma glrmask {");
+        for (partition, members) in lexer_groups {
+            push_indented_line(
+                out,
+                indent + 2,
+                &format!("lexer group {partition} = {};", members.join(", ")),
+            );
+        }
+        push_indented_line(out, indent, "}");
+    }
+
+    for terminal in &scope.external_terminals {
+        push_indented_line(out, indent, &format!("extern token {};", terminal.name));
+    }
+
+    for subgrammar in &scope.subgrammars {
+        match &subgrammar.body {
+            ParsedSubgrammarBody::External => {
+                push_indented_line(out, indent, &format!("extern grammar {};", subgrammar.name));
+            }
+            ParsedSubgrammarBody::Inline(child) => {
+                push_indented_line(out, indent, &format!("g {} = {{", subgrammar.name));
+                dump_parsed_scope_v1(child, indent + 2, out)?;
+                push_indented_line(out, indent, "};");
+            }
+        }
+    }
+
+    for rule in &scope.rules {
+        let prefix = match (rule.is_terminal, rule.is_internal) {
+            (true, true) => "internal t",
+            (true, false) => "t",
+            (false, _) => "nt",
+        };
+        if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+            push_indented_line(out, indent, &format!("{prefix} {} = fa {{", rule.name));
+            push_indented_block(out, indent, &dump_expr_nfa_v1(expr_nfa));
+            push_indented_line(out, indent, "};");
+        } else {
+            push_indented_line(
+                out,
+                indent,
+                &format!(
+                    "{prefix} {} = {};",
+                    rule.name,
+                    dump_nt_expr_v1(&rule.expr, false)
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn dump_expr_nfa_v1(expr_nfa: &ExprNFA) -> String {
     let mut out = String::new();
     let starts = expr_nfa
         .nfa
         .start_states
         .iter()
-        .map(u32::to_string)
+        .map(|&state| expr_nfa.state_name(state))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("  start {starts};\n"));
+    let accepts = expr_nfa
+        .nfa
+        .states
+        .iter()
+        .enumerate()
+        .filter_map(|(state, value)| value.is_accepting.then(|| expr_nfa.state_name(state as u32)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("  accept {accepts};\n"));
+    for (from, state) in expr_nfa.nfa.states.iter().enumerate() {
+        let from = expr_nfa.state_name(from as u32);
+        for &to in &state.epsilons {
+            out.push_str(&format!("  {from} -> {}: eps;\n", expr_nfa.state_name(to)));
+        }
+        for (&label, targets) in &state.transitions {
+            let symbol = expr_nfa
+                .symbol_for_label(label)
+                .map(|expr| dump_nt_expr_v1(expr, false))
+                .unwrap_or_else(|| "eps".to_string());
+            for &to in targets {
+                out.push_str(&format!("  {from} -> {}: {symbol};\n", expr_nfa.state_name(to)));
+            }
+        }
+    }
+    out
+}
+
+fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
+    fn is_epsilon_only(expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::Epsilon => true,
+            GrammarExpr::Sequence(parts) => parts.is_empty(),
+            GrammarExpr::Grouped(inner) => is_epsilon_only(inner),
+            _ => false,
+        }
+    }
+
+    let mut out = String::new();
+    let starts = expr_nfa
+        .nfa
+        .start_states
+        .iter()
+        .map(|&state| expr_nfa.state_name(state))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("  start {};\n", starts));
@@ -190,22 +471,33 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
         .states
         .iter()
         .enumerate()
-        .filter_map(|(state_id, state)| state.is_accepting.then(|| state_id.to_string()))
+        .filter_map(|(state_id, state)| state.is_accepting.then(|| expr_nfa.state_name(state_id as u32)))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("  accept {};\n\n", accepts));
 
     for (state_id, state) in expr_nfa.nfa.states.iter().enumerate() {
+        let source = expr_nfa.state_name(state_id as u32);
         for &target in &state.epsilons {
-            out.push_str(&format!("  {state_id} --> {target};\n"));
+            out.push_str(&format!("  {source} --> {};\n", expr_nfa.state_name(target)));
         }
         for (&label, targets) in &state.transitions {
-            let symbol = expr_nfa
-                .symbol_for_label(label)
-                .map(|expr| dump_nt_expr(expr, false))
-                .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
+            let symbol_expr = expr_nfa.symbol_for_label(label);
             for &target in targets {
-                out.push_str(&format!("  {state_id} -- {symbol} --> {target};\n"));
+                if symbol_expr.is_some_and(is_epsilon_only) {
+                    out.push_str(&format!(
+                        "  {source} --> {};\n",
+                        expr_nfa.state_name(target)
+                    ));
+                } else {
+                    let symbol = symbol_expr
+                        .map(|expr| dump_nt_expr(expr, false))
+                        .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
+                    out.push_str(&format!(
+                        "  {source} -- {symbol} --> {};\n",
+                        expr_nfa.state_name(target)
+                    ));
+                }
             }
         }
     }
@@ -215,61 +507,68 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
 // ---- NT-expression dumper --------------------------------------------------
 
 fn dump_nt_expr(expr: &GrammarExpr, needs_parens: bool) -> String {
+    dump_nt_expr_with_flavor(expr, needs_parens, DumpFlavor::Legacy)
+}
+
+fn dump_nt_expr_v1(expr: &GrammarExpr, needs_parens: bool) -> String {
+    dump_nt_expr_with_flavor(expr, needs_parens, DumpFlavor::V1)
+}
+
+fn dump_nt_expr_with_flavor(
+    expr: &GrammarExpr,
+    needs_parens: bool,
+    flavor: DumpFlavor,
+) -> String {
     match expr {
         GrammarExpr::Choice(alts) => {
-            let inner = alts.iter()
-                .map(|a| dump_nt_seq(a))
+            let inner = alts
+                .iter()
+                .map(|a| dump_nt_seq(a, flavor))
                 .collect::<Vec<_>>()
                 .join(" | ");
             if needs_parens && alts.len() > 1 {
-                format!("({})", inner)
+                format!("({inner})")
             } else {
                 inner
             }
         }
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            let lhs = dump_set_operand(inner);
+            let lhs = dump_set_operand(inner, flavor);
             let rhs = match exclude.as_ref() {
                 GrammarExpr::Choice(alts) if !alts.is_empty() => alts
                     .iter()
-                    .map(dump_set_operand)
+                    .map(|expr| dump_set_operand(expr, flavor))
                     .collect::<Vec<_>>()
                     .join(" - "),
-                _ => dump_set_operand(exclude),
+                _ => dump_set_operand(exclude, flavor),
             };
-            let infix = format!("{} - {}", lhs, rhs);
-            if needs_parens {
-                format!("({})", infix)
-            } else {
-                infix
-            }
+            let infix = format!("{lhs} - {rhs}");
+            if needs_parens { format!("({infix})") } else { infix }
         }
         GrammarExpr::Intersect { expr: inner, intersect } => {
             let infix = format!(
                 "{} & {}",
-                dump_set_operand(inner),
-                dump_set_operand(intersect)
+                dump_set_operand(inner, flavor),
+                dump_set_operand(intersect, flavor)
             );
-            if needs_parens {
-                format!("({})", infix)
-            } else {
-                infix
-            }
+            if needs_parens { format!("({infix})") } else { infix }
         }
-        _ => dump_nt_seq(expr),
+        _ => dump_nt_seq(expr, flavor),
     }
 }
 
 /// Dump a sequence (or a single non-choice item).
-fn dump_nt_seq(expr: &GrammarExpr) -> String {
+fn dump_nt_seq(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Sequence(items) => {
-            items.iter()
-                .map(|e| dump_nt_postfix(e))
-                .collect::<Vec<_>>()
-                .join(" ")
+        GrammarExpr::Sequence(items) if items.is_empty() && flavor == DumpFlavor::V1 => {
+            "eps".to_string()
         }
-        _ => dump_nt_postfix(expr),
+        GrammarExpr::Sequence(items) => items
+            .iter()
+            .map(|expr| dump_nt_postfix(expr, flavor))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => dump_nt_postfix(expr, flavor),
     }
 }
 
@@ -278,124 +577,149 @@ fn dump_quantifier(quantifier: &Quantifier) -> String {
         Quantifier::Optional => "?".to_string(),
         Quantifier::ZeroPlus => "*".to_string(),
         Quantifier::OnePlus => "+".to_string(),
-        Quantifier::Range(min, Some(max)) if min == max => format!("{{{}}}", min),
-        Quantifier::Range(min, Some(max)) => format!("{{{},{}}}", min, max),
-        Quantifier::Range(min, None) => format!("{{{},}}", min),
+        Quantifier::Range(min, Some(max)) if min == max => format!("{{{min}}}"),
+        Quantifier::Range(min, Some(max)) => format!("{{{min},{max}}}"),
+        Quantifier::Range(min, None) => format!("{{{min},}}"),
     }
 }
 
-fn dump_nt_postfix(expr: &GrammarExpr) -> String {
+fn dump_nt_postfix(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Quantified(inner, Quantifier::Optional) => format!("{}?", dump_nt_atom(inner)),
-        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => format!("{}*", dump_nt_atom(inner)),
-        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => format!("{}+", dump_nt_atom(inner)),
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => {
+            format!("{}?", dump_nt_atom(inner, flavor))
+        }
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
+            format!("{}*", dump_nt_atom(inner, flavor))
+        }
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
+            format!("{}+", dump_nt_atom(inner, flavor))
+        }
         GrammarExpr::Quantified(inner, Quantifier::Range(min, max)) => match max {
-            Some(max) if min == max => format!("{}{{{}}}", dump_nt_atom(inner), min),
-            Some(max) => format!("{}{{{},{}}}", dump_nt_atom(inner), min, max),
-            None => format!("{}{{{},}}", dump_nt_atom(inner), min),
+            Some(max) if min == max => format!("{}{{{min}}}", dump_nt_atom(inner, flavor)),
+            Some(max) => format!("{}{{{min},{max}}}", dump_nt_atom(inner, flavor)),
+            None => format!("{}{{{min},}}", dump_nt_atom(inner, flavor)),
         },
-        _ => dump_nt_atom(expr),
+        _ => dump_nt_atom(expr, flavor),
     }
 }
 
-fn dump_nt_atom(expr: &GrammarExpr) -> String {
+fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Ref(name) => name.clone(),
-        GrammarExpr::Grouped(inner) => format!("({})", dump_nt_expr(inner, false)),
-        GrammarExpr::Literal(bytes) => format!("\"{}\"", escape_bytes_for_string(bytes)),
+        GrammarExpr::Grouped(inner) => {
+            format!("({})", dump_nt_expr_with_flavor(inner, false, flavor))
+        }
+        GrammarExpr::Literal(bytes) => format_literal(bytes, flavor),
         GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
         GrammarExpr::RawRegex(pat) => format!("/{}/", escape_regex_for_slash(pat)),
         GrammarExpr::CharClass { def, negate, utf8 } => {
-            let inner = if *negate { format!("^{}", def) } else { def.clone() };
+            let inner = if *negate { format!("^{def}") } else { def.clone() };
             let suffix = if *utf8 { "/utf8" } else { "" };
-            format!("[{}]{}", inner, suffix)
+            format!("[{inner}]{suffix}")
         }
         GrammarExpr::LexerDfa(_) => "LexerDfa".to_string(),
         GrammarExpr::AnyByte => ".".to_string(),
         GrammarExpr::Epsilon => "eps".to_string(),
         GrammarExpr::Exclude { expr: inner, exclude } => {
-            let lhs = dump_set_operand(inner);
+            let lhs = dump_set_operand(inner, flavor);
             match exclude.as_ref() {
                 GrammarExpr::Choice(alts) if !alts.is_empty() => {
                     let rhs = alts
                         .iter()
-                        .map(dump_set_operand)
+                        .map(|expr| dump_set_operand(expr, flavor))
                         .collect::<Vec<_>>()
                         .join(" - ");
-                    format!("({} - {})", lhs, rhs)
+                    format!("({lhs} - {rhs})")
                 }
-                _ => format!("({} - {})", lhs, dump_set_operand(exclude)),
+                _ => format!("({lhs} - {})", dump_set_operand(exclude, flavor)),
             }
         }
-        GrammarExpr::Intersect { expr: inner, intersect } => {
-            format!(
-                "({} & {})",
-                dump_set_operand(inner),
-                dump_set_operand(intersect)
-            )
-        }
+        GrammarExpr::Intersect { expr: inner, intersect } => format!(
+            "({} & {})",
+            dump_set_operand(inner, flavor),
+            dump_set_operand(intersect, flavor)
+        ),
         GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
-            let sep_str = dump_nt_atom(separator);
-            let items_str = items.iter()
-                .map(|(e, quantifier)| {
-                    let mut s = dump_nt_atom(e);
+            let sep_str = dump_nt_atom(separator, flavor);
+            let items_str = items
+                .iter()
+                .map(|(expr, quantifier)| {
+                    let mut text = dump_nt_atom(expr, flavor);
                     if let Some(quantifier) = quantifier {
-                        s.push_str(&dump_quantifier(quantifier));
+                        text.push_str(&dump_quantifier(quantifier));
                     }
-                    s
+                    text
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
             if *allow_empty {
-                format!("{} ~ ( {} )", sep_str, items_str)
+                format!("{sep_str} ~ ( {items_str} )")
             } else {
-                format!("{} ~+ ( {} )", sep_str, items_str)
+                format!("{sep_str} ~+ ( {items_str} )")
             }
         }
-        GrammarExpr::ExprNFA(expr_nfa) => {
-            format!(
-                "ExprNFA(states={}, symbols={})",
-                expr_nfa.nfa.states.len(),
-                expr_nfa.symbols.len()
-            )
-        }
-        // For compound exprs that need parens as atoms:
+        GrammarExpr::ExprNFA(expr_nfa) => format!(
+            "ExprNFA(states={}, symbols={})",
+            expr_nfa.nfa.states.len(),
+            expr_nfa.symbols.len()
+        ),
         GrammarExpr::Sequence(_) | GrammarExpr::Choice(_) => {
-            format!("({})", dump_nt_expr(expr, false))
+            format!("({})", dump_nt_expr_with_flavor(expr, false, flavor))
         }
-        // Quantifiers that appear here need parens around their inner:
-        GrammarExpr::Quantified(_, Quantifier::Optional) | GrammarExpr::Quantified(_, Quantifier::ZeroPlus) | GrammarExpr::Quantified(_, Quantifier::OnePlus)
+        GrammarExpr::Quantified(_, Quantifier::Optional)
+        | GrammarExpr::Quantified(_, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(_, Quantifier::OnePlus)
         | GrammarExpr::Quantified(_, Quantifier::Range(_, _)) => {
-            format!("({})", dump_nt_postfix(expr))
+            format!("({})", dump_nt_postfix(expr, flavor))
         }
     }
 }
 
-fn dump_set_operand(expr: &GrammarExpr) -> String {
+fn dump_set_operand(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Choice(_) | GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
-            format!("({})", dump_nt_expr(expr, false))
+            format!("({})", dump_nt_expr_with_flavor(expr, false, flavor))
         }
-        _ => dump_nt_expr(expr, false),
+        _ => dump_nt_expr_with_flavor(expr, false, flavor),
     }
 }
 
 // ---- Helpers ---------------------------------------------------------------
 
-fn escape_bytes_for_string(bytes: &[u8]) -> String {
+fn escape_bytes_for_delimiter(bytes: &[u8], delimiter: u8) -> String {
+    debug_assert!(delimiter == b'"' || delimiter == b'\'');
     let mut out = String::new();
-    for &b in bytes {
-        match b {
+    for &byte in bytes {
+        match byte {
             b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
             b'\n' => out.push_str("\\n"),
             b'\r' => out.push_str("\\r"),
             b'\t' => out.push_str("\\t"),
-            0x20..=0x7E => out.push(b as char),
-            _ => out.push_str(&format!("\\x{:02X}", b)),
+            byte if byte == delimiter => {
+                out.push('\\');
+                out.push(byte as char);
+            }
+            0x20..=0x7E => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02X}")),
         }
     }
     out
+}
+
+fn format_literal(bytes: &[u8], flavor: DumpFlavor) -> String {
+    let double_quoted = escape_bytes_for_delimiter(bytes, b'"');
+    if flavor == DumpFlavor::Legacy {
+        return format!("\"{double_quoted}\"");
+    }
+
+    let single_quoted = escape_bytes_for_delimiter(bytes, b'\'');
+    if single_quoted.len() < double_quoted.len() {
+        format!("'{single_quoted}'")
+    } else {
+        // GLRM v1 prefers double quotes when both spellings require the same
+        // amount of escaping.
+        format!("\"{double_quoted}\"")
+    }
 }
 
 fn escape_regex_for_slash(pat: &str) -> String {
@@ -409,13 +733,33 @@ fn escape_regex_for_slash(pat: &str) -> String {
 /// Parse a GLRM-format string into a [`NamedGrammar`].
 pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
-    let mut parser = GlrmParser { tokens, pos: 0 };
-    let scope = parser.parse_root_scope()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let mut scope = parser.parse_root_scope()?;
     if contains_external_subgrammar(&scope) {
         return Err(err(
             "external subgrammars require from_glrm_with_external_subgrammars and explicit bindings",
         ));
     }
+    bind_external_terminals(&mut scope, &[])?;
+    lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
+}
+
+/// Parse GLRM v1 and bind every `extern token NAME;` declaration to one or more
+/// exact model token IDs. These terminals are parser-visible and have no byte
+/// language; token IDs need not occur in the byte vocabulary.
+pub fn from_glrm_with_external_terminals(
+    input: &str,
+    bindings: &[(&str, &[u32])],
+) -> Result<NamedGrammar, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let mut scope = parser.parse_root_scope()?;
+    if contains_external_subgrammar(&scope) {
+        return Err(err(
+            "external subgrammars require from_glrm_with_external_subgrammars and explicit bindings",
+        ));
+    }
+    bind_external_terminals(&mut scope, bindings)?;
     lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
 }
 
@@ -435,7 +779,30 @@ pub struct GlrmWithExternalSubgrammars {
     pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
-/// Parse GLRM containing `extern g name;` declarations.
+/// The target-independent external declarations in a GLRM source descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlrmExternalDeclarations {
+    pub token_names: Vec<String>,
+    pub grammar_names: Vec<String>,
+}
+
+/// Parse and validate GLRM declarations without binding or lowering them.
+///
+/// Names nested inside inline grammar scopes are qualified with `::`.
+pub fn external_declarations(
+    input: &str,
+) -> Result<GlrmExternalDeclarations, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let scope = parser.parse_root_scope()?;
+    validate_scope_for_v1_format(&scope, "grammar")?;
+    Ok(GlrmExternalDeclarations {
+        token_names: collect_external_terminal_names(&scope),
+        grammar_names: collect_external_subgrammar_names(&scope),
+    })
+}
+
+/// Parse GLRM containing `extern grammar name;` declarations.
 ///
 /// `first_placeholder_token_id` must lie outside the model vocabulary.
 /// `reserved_token_ids` contains end-token and other caller-reserved IDs.
@@ -447,9 +814,25 @@ pub fn from_glrm_with_external_subgrammars(
     first_placeholder_token_id: u32,
     reserved_token_ids: impl IntoIterator<Item = u32>,
 ) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
+    from_glrm_with_bindings_and_external_subgrammars(
+        input,
+        first_placeholder_token_id,
+        reserved_token_ids,
+        &[],
+    )
+}
+
+/// Parse GLRM with both exact-token terminal and compiled-subgrammar manifests.
+pub fn from_glrm_with_bindings_and_external_subgrammars(
+    input: &str,
+    first_placeholder_token_id: u32,
+    reserved_token_ids: impl IntoIterator<Item = u32>,
+    terminal_bindings: &[(&str, &[u32])],
+) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
-    let mut parser = GlrmParser { tokens, pos: 0 };
-    let scope = parser.parse_root_scope()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let mut scope = parser.parse_root_scope()?;
+    bind_external_terminals(&mut scope, terminal_bindings)?;
 
     let mut used_token_ids = reserved_token_ids.into_iter().collect::<BTreeSet<_>>();
     collect_scope_special_token_ids(&scope, &mut used_token_ids);
@@ -487,6 +870,10 @@ enum Tok {
     Int(usize),
     /// `::=`
     DeclEq,
+    /// `=`
+    Equals,
+    /// `:`
+    Colon,
     /// `;`
     Semi,
     /// `(`
@@ -507,6 +894,8 @@ enum Tok {
     Dashes,
     /// `-->`
     Arrow,
+    /// `->`
+    ThinArrow,
     /// `~`
     Tilde,
     /// `*`
@@ -740,6 +1129,9 @@ impl<'a> Lexer<'a> {
                             } else if self.peek() == Some(b'-') {
                                 self.pos += 1;
                                 tokens.push(Tok::Dashes);
+                            } else if self.peek() == Some(b'>') {
+                                self.pos += 1;
+                                tokens.push(Tok::ThinArrow);
                             } else {
                                 tokens.push(Tok::Minus);
                             }
@@ -752,11 +1144,14 @@ impl<'a> Lexer<'a> {
                         b',' => tokens.push(Tok::Comma),
                         b'.' => tokens.push(Tok::Dot),
                         b':' => {
-                            // Expect `::=`
-                            if self.peek() == Some(b':') { self.pos += 1; }
-                            if self.peek() == Some(b'=') { self.pos += 1; }
-                            tokens.push(Tok::DeclEq);
+                            if self.peek() == Some(b':') && self.peek2() == Some(b'=') {
+                                self.pos += 2;
+                                tokens.push(Tok::DeclEq);
+                            } else {
+                                tokens.push(Tok::Colon);
+                            }
                         }
+                        b'=' => tokens.push(Tok::Equals),
                         b'"' | b'\'' => {
                             let bytes = self.lex_string(b)?;
                             tokens.push(Tok::StringLit(bytes));
@@ -790,9 +1185,16 @@ impl<'a> Lexer<'a> {
 
 // ---- Parser ----------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlrmVersion {
+    Legacy,
+    V1,
+}
+
 struct GlrmParser {
     tokens: Vec<Tok>,
     pos: usize,
+    version: GlrmVersion,
 }
 
 #[derive(Debug, Clone)]
@@ -810,6 +1212,7 @@ enum ParsedSubgrammarBody {
 #[derive(Debug, Clone)]
 struct ParsedGlrmScope {
     rules: Vec<NamedRule>,
+    external_terminals: Vec<ParsedExternalTerminal>,
     subgrammars: Vec<ParsedSubgrammar>,
     start: String,
     ignore: Option<String>,
@@ -817,6 +1220,139 @@ struct ParsedGlrmScope {
     lexer_literal_partitions: BTreeMap<Vec<u8>, String>,
     default_lexer_partition: Option<String>,
     all_literals_partition: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedExternalTerminal {
+    name: String,
+    token_ids: Vec<u32>,
+}
+
+fn collect_external_terminal_names(scope: &ParsedGlrmScope) -> Vec<String> {
+    fn collect(scope: &ParsedGlrmScope, prefix: &str, names: &mut Vec<String>) {
+        for terminal in &scope.external_terminals {
+            names.push(if prefix.is_empty() {
+                terminal.name.clone()
+            } else {
+                format!("{prefix}::{}", terminal.name)
+            });
+        }
+        for subgrammar in &scope.subgrammars {
+            if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
+                let child_prefix = if prefix.is_empty() {
+                    subgrammar.name.clone()
+                } else {
+                    format!("{prefix}::{}", subgrammar.name)
+                };
+                collect(child, &child_prefix, names);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    collect(scope, "", &mut names);
+    names
+}
+
+fn bind_external_terminals(
+    scope: &mut ParsedGlrmScope,
+    bindings: &[(&str, &[u32])],
+) -> Result<(), GlrMaskError> {
+    let declared_names = collect_external_terminal_names(scope);
+    let declared = declared_names.iter().cloned().collect::<BTreeSet<_>>();
+    if declared.len() != declared_names.len() {
+        let mut seen = BTreeSet::new();
+        let duplicate = declared_names
+            .iter()
+            .find(|name| !seen.insert((*name).clone()))
+            .expect("length mismatch implies a duplicate");
+        return Err(err(&format!(
+            "external terminal {duplicate:?} is declared more than once"
+        )));
+    }
+    let mut supplied = BTreeMap::<String, Vec<u32>>::new();
+    for &(name, token_ids) in bindings {
+        if supplied.contains_key(name) {
+            return Err(err(&format!(
+                "external terminal binding {name:?} was supplied more than once"
+            )));
+        }
+        if token_ids.is_empty() {
+            return Err(err(&format!(
+                "external terminal binding {name:?} must contain at least one token ID"
+            )));
+        }
+        let unique = token_ids.iter().copied().collect::<BTreeSet<_>>();
+        if unique.len() != token_ids.len() {
+            return Err(err(&format!(
+                "external terminal binding {name:?} contains a duplicate token ID"
+            )));
+        }
+        supplied.insert(name.to_string(), unique.into_iter().collect());
+    }
+    if let Some(unknown) = supplied.keys().find(|name| !declared.contains(*name)) {
+        return Err(err(&format!(
+            "exact-token binding was supplied for unknown external terminal {unknown:?}"
+        )));
+    }
+    for name in &declared {
+        if !supplied.contains_key(name) {
+            return Err(err(&format!(
+                "GLRM declares external terminal {name:?}, but no exact-token binding was supplied"
+            )));
+        }
+    }
+
+    fn assign(
+        scope: &mut ParsedGlrmScope,
+        prefix: &str,
+        supplied: &BTreeMap<String, Vec<u32>>,
+    ) {
+        for terminal in &mut scope.external_terminals {
+            let binding_name = if prefix.is_empty() {
+                terminal.name.clone()
+            } else {
+                format!("{prefix}::{}", terminal.name)
+            };
+            terminal.token_ids = supplied[&binding_name].clone();
+        }
+        for subgrammar in &mut scope.subgrammars {
+            if let ParsedSubgrammarBody::Inline(child) = &mut subgrammar.body {
+                let child_prefix = if prefix.is_empty() {
+                    subgrammar.name.clone()
+                } else {
+                    format!("{prefix}::{}", subgrammar.name)
+                };
+                assign(child, &child_prefix, supplied);
+            }
+        }
+    }
+    assign(scope, "", &supplied);
+    Ok(())
+}
+
+fn external_terminal_rules(scope: &ParsedGlrmScope) -> Vec<NamedRule> {
+    scope
+        .external_terminals
+        .iter()
+        .map(|terminal| NamedRule {
+            name: terminal.name.clone(),
+            expr: if terminal.token_ids.len() == 1 {
+                GrammarExpr::SpecialToken(terminal.token_ids[0])
+            } else {
+                GrammarExpr::Choice(
+                    terminal
+                        .token_ids
+                        .iter()
+                        .copied()
+                        .map(GrammarExpr::SpecialToken)
+                        .collect(),
+                )
+            },
+            // Exact-token terminals participate in parser tables, not the byte lexer.
+            is_terminal: false,
+            is_internal: false,
+        })
+        .collect()
 }
 
 fn contains_external_subgrammar(scope: &ParsedGlrmScope) -> bool {
@@ -894,6 +1430,9 @@ fn collect_scope_special_token_ids(scope: &ParsedGlrmScope, token_ids: &mut BTre
     for rule in &scope.rules {
         collect_expr_special_token_ids(&rule.expr, token_ids);
     }
+    for external in &scope.external_terminals {
+        token_ids.extend(external.token_ids.iter().copied());
+    }
     for subgrammar in &scope.subgrammars {
         if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
             collect_scope_special_token_ids(child, token_ids);
@@ -921,6 +1460,53 @@ fn next_free_token_id(
 }
 
 impl GlrmParser {
+
+    fn new(tokens: Vec<Tok>) -> Result<Self, GlrMaskError> {
+        let version = match tokens.as_slice() {
+            [Tok::Ident(keyword), Tok::Int(1), Tok::Semi, ..] if keyword == "glrm" => {
+                GlrmVersion::V1
+            }
+            [Tok::Ident(keyword), Tok::Int(version), ..] if keyword == "glrm" => {
+                return Err(err(&format!(
+                    "unsupported or malformed GLRM version header: glrm {version}; only glrm 1; is supported"
+                )));
+            }
+            _ => GlrmVersion::Legacy,
+        };
+        Ok(Self { tokens, pos: 0, version })
+    }
+
+    fn consume_decl_eq(&mut self) -> Result<(), GlrMaskError> {
+        let expected = match self.version {
+            GlrmVersion::Legacy => Tok::DeclEq,
+            GlrmVersion::V1 => Tok::Equals,
+        };
+        self.consume(&expected).map_err(|_| {
+            err(match self.version {
+                GlrmVersion::Legacy => "legacy unversioned GLRM declarations require '::='",
+                GlrmVersion::V1 => "GLRM v1 declarations require '='; '::=' is legacy syntax",
+            })
+        })
+    }
+
+    fn token_at(&self, offset: usize) -> &Tok {
+        self.tokens.get(self.pos + offset).unwrap_or(&Tok::Eof)
+    }
+
+    fn starts_legacy_contextual_fa_body(&self) -> bool {
+        if self.version != GlrmVersion::Legacy
+            || !matches!(self.token_at(0), Tok::Ident(keyword) if keyword == "fa")
+            || !matches!(self.token_at(1), Tok::LBrace)
+        {
+            return false;
+        }
+        match self.token_at(2) {
+            Tok::RBrace => true,
+            Tok::Ident(keyword) if keyword == "start" || keyword == "accept" => true,
+            Tok::Int(_) | Tok::Ident(_) => matches!(self.token_at(3), Tok::Dashes | Tok::Arrow),
+            _ => false,
+        }
+    }
 
     fn peek(&self) -> &Tok {
         self.tokens.get(self.pos).unwrap_or(&Tok::Eof)
@@ -956,6 +1542,11 @@ impl GlrmParser {
     }
 
     fn parse_root_scope(&mut self) -> Result<ParsedGlrmScope, GlrMaskError> {
+        if self.version == GlrmVersion::V1 {
+            self.advance();
+            self.advance();
+            self.consume(&Tok::Semi)?;
+        }
         self.parse_scope(false, "grammar")
     }
 
@@ -967,6 +1558,7 @@ impl GlrmParser {
         let mut start: Option<String> = None;
         let mut ignore: Option<String> = None;
         let mut rules: Vec<NamedRule> = Vec::new();
+        let mut external_terminals = Vec::new();
         let mut subgrammars = Vec::new();
         let mut lexer_partitions = BTreeMap::<String, String>::new();
         let mut lexer_literal_partitions = BTreeMap::<Vec<u8>, String>::new();
@@ -1010,7 +1602,7 @@ impl GlrmParser {
                     "g" | "subgrammar" => {
                         self.advance();
                         let name = self.expect_ident()?;
-                        self.consume(&Tok::DeclEq)?;
+                        self.consume_decl_eq()?;
                         self.consume(&Tok::LBrace)?;
                         let child_label = format!("subgrammar '{name}'");
                         let scope = self.parse_scope(true, &child_label)?;
@@ -1023,10 +1615,22 @@ impl GlrmParser {
                     "extern" => {
                         self.advance();
                         match self.advance().clone() {
-                            Tok::Ident(ref kind) if kind == "g" || kind == "subgrammar" => {}
+                            Tok::Ident(ref kind) if kind == "token" => {
+                                if self.version != GlrmVersion::V1 {
+                                    return Err(err("extern token declarations require a leading 'glrm 1;' header"));
+                                }
+                                let name = self.expect_ident()?;
+                                self.consume(&Tok::Semi)?;
+                                external_terminals.push(ParsedExternalTerminal {
+                                    name,
+                                    token_ids: Vec::new(),
+                                });
+                                continue;
+                            }
+                            Tok::Ident(ref kind) if kind == "grammar" => {}
                             other => {
                                 return Err(err(&format!(
-                                    "expected 'g' after 'extern', got {:?}",
+                                    "expected 'token' or 'grammar' after 'extern', got {:?}",
                                     other,
                                 )));
                             }
@@ -1039,6 +1643,9 @@ impl GlrmParser {
                         });
                     }
                     "lexer" => {
+                        if self.version == GlrmVersion::V1 {
+                            return Err(err("GLRM v1 lexer groups must be inside 'pragma glrmask { ... }'"));
+                        }
                         self.advance();
                         self.parse_lexer_group(
                             &mut lexer_partitions,
@@ -1052,6 +1659,9 @@ impl GlrmParser {
                         rules.push(self.parse_rule(false, false)?);
                     }
                     "fa" | "nfa" => {
+                        if self.version == GlrmVersion::V1 {
+                            return Err(err("GLRM v1 FA syntax is a declaration body, for example 'nt name = fa { ... };'"));
+                        }
                         self.advance();
                         rules.push(self.parse_expr_nfa_rule()?);
                     }
@@ -1067,6 +1677,26 @@ impl GlrmParser {
                             other => return Err(err(&format!("expected 't' after 'internal', got {:?}", other))),
                         }
                         rules.push(self.parse_rule(true, true)?);
+                    }
+                    "pragma" if self.version == GlrmVersion::V1 => {
+                        self.advance();
+                        let namespace = self.expect_ident()?;
+                        if namespace != "glrmask" {
+                            return Err(err(&format!("unsupported GLRM v1 pragma namespace {namespace:?}")));
+                        }
+                        self.consume(&Tok::LBrace)?;
+                        while !matches!(self.peek(), Tok::RBrace) {
+                            match self.advance().clone() {
+                                Tok::Ident(keyword) if keyword == "lexer" => self.parse_lexer_group(
+                                    &mut lexer_partitions,
+                                    &mut lexer_literal_partitions,
+                                    &mut default_lexer_partition,
+                                    &mut all_literals_partition,
+                                )?,
+                                other => return Err(err(&format!("unexpected token {other:?} in pragma glrmask"))),
+                            }
+                        }
+                        self.consume(&Tok::RBrace)?;
                     }
                     other => {
                         return Err(err(&format!(
@@ -1086,6 +1716,7 @@ impl GlrmParser {
         let start = start.ok_or_else(|| err(&format!("{scope_label} has no 'start' declaration")))?;
         Ok(ParsedGlrmScope {
             rules,
+            external_terminals,
             subgrammars,
             start,
             ignore,
@@ -1113,7 +1744,7 @@ impl GlrmParser {
             }
         }
         let partition = self.expect_ident()?;
-        self.consume(&Tok::DeclEq)?;
+        self.consume_decl_eq()?;
         loop {
             match self.advance().clone() {
                 Tok::Ident(terminal) => {
@@ -1183,21 +1814,166 @@ impl GlrmParser {
 
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
         let name = self.expect_ident()?;
-        self.consume(&Tok::DeclEq)?;
-        // The expression can be empty (ε-only rule), so we don't require an atom.
-        let expr = self.parse_nt_expr(is_terminal)?;
+        self.consume_decl_eq()?;
+        let expr = if self.version == GlrmVersion::V1
+            && matches!(self.peek(), Tok::Ident(keyword) if keyword == "fa")
+        {
+            self.advance();
+            GrammarExpr::ExprNFA(Box::new(self.parse_v1_expr_nfa_body(is_terminal)?))
+        } else if self.starts_legacy_contextual_fa_body() {
+            self.advance();
+            GrammarExpr::ExprNFA(Box::new(self.parse_legacy_expr_nfa_body(is_terminal)?))
+        } else {
+            if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
+                return Err(err("GLRM v1 declaration bodies cannot be empty; use 'eps' explicitly"));
+            }
+            self.parse_nt_expr(is_terminal)?
+        };
         self.consume(&Tok::Semi)?;
         Ok(NamedRule { name, expr, is_terminal, is_internal })
     }
 
-    fn parse_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
-        let name = self.expect_ident()?;
-        self.consume(&Tok::DeclEq)?;
+    fn parse_v1_expr_nfa_body(&mut self, allow_raw_regex: bool) -> Result<ExprNFA, GlrMaskError> {
         self.consume(&Tok::LBrace)?;
-
         let mut nfa = NFA::new_empty();
+        let mut state_ids = HashMap::<String, u32>::new();
+        let mut state_names = Vec::<String>::new();
         let mut symbols = Vec::<GrammarExpr>::new();
         let mut symbol_labels = HashMap::<GrammarExpr, Label>::new();
+
+        fn state(
+            parser: &mut GlrmParser,
+            nfa: &mut NFA,
+            state_ids: &mut HashMap<String, u32>,
+            state_names: &mut Vec<String>,
+        ) -> Result<u32, GlrMaskError> {
+            let (key, display) = match parser.advance().clone() {
+                Tok::Int(value) => (format!("i:{value}"), value.to_string()),
+                Tok::Ident(name) => (format!("n:{name}"), name),
+                other => return Err(err(&format!("expected FA state name or integer, got {other:?}"))),
+            };
+            if let Some(&id) = state_ids.get(&key) {
+                return Ok(id);
+            }
+            let id = state_names.len() as u32;
+            nfa.add_state();
+            state_ids.insert(key, id);
+            state_names.push(display);
+            Ok(id)
+        }
+
+        while !matches!(self.peek(), Tok::RBrace) {
+            match self.peek().clone() {
+                Tok::Eof => return Err(err("unterminated GLRM v1 FA body")),
+                Tok::Ident(ref keyword)
+                    if keyword == "start" && !matches!(self.token_at(1), Tok::ThinArrow) =>
+                {
+                    self.advance();
+                    nfa.start_states.clear();
+                    loop {
+                        let id = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                        if !nfa.start_states.contains(&id) {
+                            nfa.start_states.push(id);
+                        }
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                Tok::Ident(ref keyword)
+                    if keyword == "accept" && !matches!(self.token_at(1), Tok::ThinArrow) =>
+                {
+                    self.advance();
+                    if matches!(self.peek(), Tok::Semi) {
+                        return Err(err("GLRM v1 FA must declare at least one accept state"));
+                    }
+                    loop {
+                        let id = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                        nfa.set_accepting(id);
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                Tok::Int(_) | Tok::Ident(_) => {
+                    let from = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                    self.consume(&Tok::ThinArrow)?;
+                    let to = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                    self.consume(&Tok::Colon)?;
+                    if !self.can_start_nt_atom() {
+                        return Err(err("GLRM v1 FA edge expression cannot be empty; use 'eps'"));
+                    }
+                    let symbol = self.parse_nt_expr(allow_raw_regex)?;
+                    if matches!(symbol, GrammarExpr::Epsilon) {
+                        nfa.add_epsilon(from, to);
+                    } else {
+                        let label = intern_expr_nfa_symbol(&mut symbols, &mut symbol_labels, symbol);
+                        nfa.add_transition(from, label, to);
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                other => return Err(err(&format!("unexpected token {other:?} in GLRM v1 FA body"))),
+            }
+        }
+        self.consume(&Tok::RBrace)?;
+        if nfa.start_states.is_empty() {
+            return Err(err("FA definition has no start state"));
+        }
+        if !nfa.states.iter().any(|state| state.is_accepting) {
+            return Err(err("FA definition has no accept state"));
+        }
+        Ok(ExprNFA::new(nfa, symbols).with_state_names(state_names))
+    }
+
+    fn parse_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
+        let name = self.expect_ident()?;
+        self.consume_decl_eq()?;
+        let expr_nfa = self.parse_legacy_expr_nfa_body(false)?;
+        self.consume(&Tok::Semi)?;
+        Ok(NamedRule {
+            name,
+            expr: GrammarExpr::ExprNFA(Box::new(expr_nfa)),
+            is_terminal: false,
+            is_internal: false,
+        })
+    }
+
+    fn parse_legacy_expr_nfa_body(
+        &mut self,
+        allow_raw_regex: bool,
+    ) -> Result<ExprNFA, GlrMaskError> {
+        self.consume(&Tok::LBrace)?;
+        let mut nfa = NFA::new_empty();
+        let mut state_ids = HashMap::<String, u32>::new();
+        let mut state_names = Vec::<String>::new();
+        let mut symbols = Vec::<GrammarExpr>::new();
+        let mut symbol_labels = HashMap::<GrammarExpr, Label>::new();
+
+        fn state(
+            parser: &mut GlrmParser,
+            nfa: &mut NFA,
+            state_ids: &mut HashMap<String, u32>,
+            state_names: &mut Vec<String>,
+        ) -> Result<u32, GlrMaskError> {
+            let (key, display) = match parser.advance().clone() {
+                Tok::Int(value) => (format!("i:{value}"), value.to_string()),
+                Tok::Ident(name) => (format!("n:{name}"), name),
+                other => return Err(err(&format!("expected FA state name or integer, got {other:?}"))),
+            };
+            if let Some(&id) = state_ids.get(&key) {
+                return Ok(id);
+            }
+            let id = nfa.add_state();
+            state_ids.insert(key, id);
+            state_names.push(display);
+            Ok(id)
+        }
 
         loop {
             match self.peek().clone() {
@@ -1205,53 +1981,59 @@ impl GlrmParser {
                     self.advance();
                     break;
                 }
-                Tok::Ident(ref kw) if kw == "start" => {
+                Tok::Ident(ref keyword)
+                    if keyword == "start" && !matches!(self.token_at(1), Tok::Dashes | Tok::Arrow) =>
+                {
                     self.advance();
                     nfa.start_states.clear();
                     loop {
-                        let state = self.expect_int()? as u32;
-                        ensure_nfa_state(&mut nfa, state);
-                        nfa.start_states.push(state);
+                        let id = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                        if !nfa.start_states.contains(&id) {
+                            nfa.start_states.push(id);
+                        }
                         if matches!(self.peek(), Tok::Comma) {
                             self.advance();
-                            continue;
-                        }
-                        break;
-                    }
-                    self.consume(&Tok::Semi)?;
-                }
-                Tok::Ident(ref kw) if kw == "accept" => {
-                    self.advance();
-                    if !matches!(self.peek(), Tok::Semi) {
-                        loop {
-                            let state = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, state);
-                            nfa.set_accepting(state);
-                            if matches!(self.peek(), Tok::Comma) {
-                                self.advance();
-                                continue;
-                            }
+                        } else {
                             break;
                         }
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                Tok::Int(_) => {
-                    let from = self.expect_int()? as u32;
-                    ensure_nfa_state(&mut nfa, from);
+                Tok::Ident(ref keyword)
+                    if keyword == "accept" && !matches!(self.token_at(1), Tok::Dashes | Tok::Arrow) =>
+                {
+                    self.advance();
+                    if !matches!(self.peek(), Tok::Semi) {
+                        loop {
+                            let id = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
+                            nfa.set_accepting(id);
+                            if matches!(self.peek(), Tok::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume(&Tok::Semi)?;
+                }
+                Tok::Int(_) | Tok::Ident(_) => {
+                    let from = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
                     match self.peek() {
                         Tok::Arrow => {
                             self.advance();
-                            let to = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, to);
+                            let to = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
                             nfa.add_epsilon(from, to);
                         }
                         Tok::Dashes => {
                             self.advance();
-                            let symbol = self.parse_expr_nfa_transition_expr()?;
+                            let symbol = self.parse_expr_nfa_transition_expr(allow_raw_regex)?;
+                            if matches!(symbol, GrammarExpr::Epsilon) {
+                                return Err(err(
+                                    "an epsilon FA transition is written `source --> target`, not `source -- eps --> target`",
+                                ));
+                            }
                             self.consume(&Tok::Arrow)?;
-                            let to = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, to);
+                            let to = state(self, &mut nfa, &mut state_ids, &mut state_names)?;
                             let label = intern_expr_nfa_symbol(
                                 &mut symbols,
                                 &mut symbol_labels,
@@ -1261,30 +2043,25 @@ impl GlrmParser {
                         }
                         other => {
                             return Err(err(&format!(
-                                "expected '--' or '-->' after FA transition source, got {:?}",
-                                other
+                                "expected '--' or '-->' after FA transition source, got {other:?}"
                             )));
                         }
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                other => return Err(err(&format!("unexpected token {:?} in FA definition", other))),
+                other => return Err(err(&format!("unexpected token {other:?} in FA definition"))),
             }
         }
-
-        self.consume(&Tok::Semi)?;
         if nfa.start_states.is_empty() {
             return Err(err("FA definition has no start state"));
         }
-        Ok(NamedRule {
-            name,
-            expr: GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols))),
-            is_terminal: false,
-            is_internal: false,
-        })
+        Ok(ExprNFA::new(nfa, symbols).with_state_names(state_names))
     }
 
-    fn parse_expr_nfa_transition_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_expr_nfa_transition_expr(
+        &mut self,
+        allow_raw_regex: bool,
+    ) -> Result<GrammarExpr, GlrMaskError> {
         if matches!(self.peek(), Tok::Arrow) {
             return Err(err(
                 "FA transition expression cannot be empty; use epsilon transition syntax",
@@ -1296,13 +2073,16 @@ impl GlrmParser {
                 self.peek()
             )));
         }
-        self.parse_nt_expr(false)
+        self.parse_nt_expr(allow_raw_regex)
     }
 
     // ---- NT expression parsing ---------------------------------------------
 
     fn parse_nt_expr(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
-        // An alternative can be empty (ε), so try to parse even if no atom is visible.
+        if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
+            return Err(err("GLRM v1 expressions cannot contain empty alternatives or groups; use 'eps' explicitly"));
+        }
+        // Legacy GLRM permits an implicit empty alternative for compatibility.
         let first = if self.can_start_nt_atom() {
             self.parse_nt_exclude(allow_raw_regex)?
         } else {
@@ -1314,6 +2094,9 @@ impl GlrmParser {
         let mut alts = vec![first];
         while matches!(self.peek(), Tok::Pipe) {
             self.advance(); // consume `|`
+            if self.version == GlrmVersion::V1 && !self.can_start_nt_atom() {
+                return Err(err("GLRM v1 expressions cannot contain empty alternatives; use 'eps' explicitly"));
+            }
             let alt = if self.can_start_nt_atom() {
                 self.parse_nt_exclude(allow_raw_regex)?
             } else {
@@ -1486,6 +2269,13 @@ impl GlrmParser {
                     Some(min)
                 };
                 self.consume(&Tok::RBrace)?;
+                if let Some(max) = max
+                    && max < min
+                {
+                    return Err(err(&format!(
+                        "repetition upper bound {max} is smaller than lower bound {min}"
+                    )));
+                }
                 Some(Quantifier::Range(min, max))
             }
             _ => None,
@@ -1525,6 +2315,11 @@ impl GlrmParser {
                     min
                 };
                 self.consume(&Tok::RBrace)?;
+                if max < min {
+                    return Err(err(&format!(
+                        "repetition upper bound {max} is smaller than lower bound {min}"
+                    )));
+                }
                 Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, Some(max))))
             }
             _ => Ok(atom),
@@ -1541,6 +2336,10 @@ impl GlrmParser {
                 if !allow_raw_regex {
                     return Err(err("raw regex literals are only allowed in terminal (`t`) rules"));
                 }
+                if self.version == GlrmVersion::V1 {
+                    validate_regular_regex(&pat)
+                        .map_err(|message| err(&format!("invalid GLRM v1 regex: {message}")))?;
+                }
                 self.advance();
                 Ok(GrammarExpr::RawRegex(pat))
             }
@@ -1555,6 +2354,9 @@ impl GlrmParser {
                 Ok(GrammarExpr::AnyByte)
             }
             Tok::At => {
+                if self.version == GlrmVersion::V1 {
+                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern token NAME;' and bind it by name"));
+                }
                 self.advance();
                 match self.advance().clone() {
                     Tok::Ident(keyword) if keyword == "token" => {}
@@ -1602,12 +2404,15 @@ enum ScopedSymbolKind {
     Nonterminal,
     Terminal,
     InternalTerminal,
+    ExternalTerminal,
     Subgrammar,
 }
 
 fn named_grammar_for_scope(scope: &ParsedGlrmScope) -> Result<NamedGrammar, GlrMaskError> {
+    let mut rules = scope.rules.clone();
+    rules.extend(external_terminal_rules(scope));
     let mut grammar = NamedGrammar {
-        rules: scope.rules.clone(),
+        rules,
         start: scope.start.clone(),
         ignore: scope.ignore.clone(),
         lexer_partitions: scope.lexer_partitions.clone(),
@@ -1645,6 +2450,17 @@ fn scope_symbol_kinds(
             )));
         }
     }
+    for terminal in &scope.external_terminals {
+        if symbols
+            .insert(terminal.name.clone(), ScopedSymbolKind::ExternalTerminal)
+            .is_some()
+        {
+            return Err(err(&format!(
+                "duplicate definition '{}' in {scope_label}",
+                terminal.name
+            )));
+        }
+    }
     for subgrammar in &scope.subgrammars {
         if symbols
             .insert(subgrammar.name.clone(), ScopedSymbolKind::Subgrammar)
@@ -1654,6 +2470,16 @@ fn scope_symbol_kinds(
                 "subgrammar '{}' conflicts with another definition in {scope_label}",
                 subgrammar.name,
             )));
+        }
+    }
+    for rule in scope.rules.iter().filter(|rule| rule.is_terminal) {
+        for external in &scope.external_terminals {
+            if grammar_expr_contains_ref(&rule.expr, &external.name) {
+                return Err(err(&format!(
+                    "external terminal '{}' cannot be referenced from terminal body '{}' in {scope_label}",
+                    external.name, rule.name
+                )));
+            }
         }
     }
     let Some(start_kind) = symbols.get(&scope.start).copied() else {
@@ -1858,6 +2684,7 @@ fn lower_parsed_grammar(
     scope: ParsedGlrmScope,
     external_tokens: &BTreeMap<String, u32>,
 ) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
+    scope_symbol_kinds(&scope, "grammar")?;
     if scope.subgrammars.is_empty() {
         let grammar = named_grammar_for_scope(&scope)?;
         validate_ignore_terminal(&grammar, "grammar")?;
@@ -2032,6 +2859,7 @@ fn flatten_scope(
 
     let mut local_existing_names = symbol_kinds.keys().cloned().collect::<HashSet<_>>();
     let mut working_rules = scope.rules.clone();
+    working_rules.extend(external_terminal_rules(scope));
     let entry_local_name = fresh_local_name(&mut local_existing_names, "__glrm_scope_entry");
 
     let mut promoted_default_partitions = BTreeMap::<String, String>::new();
@@ -3037,7 +3865,7 @@ accept 1;
         };
 
         let err = lower(&grammar).unwrap_err().to_string();
-        assert!(err.contains("complete expression of a nonterminal rule"), "{err}");
+        assert!(err.contains("complete expression of a named rule"), "{err}");
     }
 
     #[test]
@@ -3306,7 +4134,7 @@ nt document ::= A inner;
         let error = from_glrm(
             r#"
 start document;
-extern g payload;
+extern grammar payload;
 nt document ::= "<" payload ">";
 "#,
         )
@@ -3320,10 +4148,10 @@ nt document ::= "<" payload ">";
         let parsed = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern g payload;
+extern grammar payload;
 g wrapper ::= {
     start value;
-    extern g leaf;
+    extern grammar leaf;
     nt value ::= "[" leaf "]";
 };
 t END ::= @token(52);
@@ -3368,8 +4196,8 @@ nt document ::= "<" payload wrapper ">" END?;
         let error = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern g left;
-extern g right;
+extern grammar left;
+extern grammar right;
 nt document ::= left right;
 "#,
             u32::MAX,
@@ -3379,4 +4207,373 @@ nt document ::= left right;
         .to_string();
         assert!(error.contains("another external subgrammar"), "{error}");
     }
+
+    #[test]
+    fn glrm_v1_requires_versioned_equals_syntax_and_legacy_stays_legacy() {
+        let legacy = from_glrm("start start; nt start ::= 'a';").unwrap();
+        assert_eq!(legacy.start, "start");
+        assert!(from_glrm("start start; nt start = 'a';").is_err());
+
+        let v1 = from_glrm("glrm 1; start start; nt start = 'a';").unwrap();
+        assert_eq!(v1.start, "start");
+        let error = from_glrm("glrm 1; start start; nt start ::= 'a';")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("require '='"), "{error}");
+    }
+
+    #[test]
+    fn glrm_v1_quote_styles_have_the_same_literal_semantics() {
+        for (single, double) in [
+            ("'true'", "\"true\""),
+            ("'\"'", "\"\\\"\""),
+            ("'\\\''", "\"'\""),
+        ] {
+            let single = from_glrm(&format!(
+                "glrm 1; start start; nt start = {single};"
+            ))
+            .unwrap();
+            let double = from_glrm(&format!(
+                "glrm 1; start start; nt start = {double};"
+            ))
+            .unwrap();
+            assert_eq!(single.rules, double.rules);
+        }
+    }
+
+    #[test]
+    fn glrm_v1_formatter_minimizes_literal_quote_escaping() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start start;
+nt start = '"' | "'" | "plain";
+"#,
+        )
+        .unwrap();
+        let dumped = to_glrm_v1(&grammar).unwrap();
+        assert!(dumped.contains("'\"'"), "{dumped}");
+        assert!(dumped.contains("\"'\""), "{dumped}");
+        assert!(dumped.contains("\"plain\""), "{dumped}");
+        assert!(!dumped.contains("\\\""), "{dumped}");
+        assert_eq!(from_glrm(&dumped).unwrap().rules, grammar.rules);
+    }
+
+    #[test]
+    fn glrm_v1_rejects_nonregular_and_malformed_regex_syntax() {
+        for pattern in [r"(a)\1", r"(?=a)a", r"a(?<=b)", r"\bword", r"a{3,2}", r"(abc", r"[abc"] {
+            let source = format!("glrm 1; start start; t RX = /{pattern}/; nt start = RX;");
+            assert!(from_glrm(&source).is_err(), "pattern unexpectedly accepted: {pattern}");
+        }
+        assert!(from_glrm(r#"glrm 1; start start; t RX = /(?:ab|a)+/; nt start = RX;"#).is_ok());
+    }
+
+    #[test]
+    fn glrm_v1_rejects_descending_repetition_bounds() {
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{3,2};"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt item = "a"; nt start = "," ~ ( item{3,2} );"#).is_err());
+        assert!(from_glrm(r#"glrm 1; start start; nt start = "a"{2,3};"#).is_ok());
+    }
+
+    #[test]
+    fn legacy_implicit_epsilon_formats_as_explicit_v1_eps() {
+        for source in [
+            "start start; nt start ::= ;",
+            "start start; nt start ::= 'a' |;",
+        ] {
+            let grammar = from_glrm(source).unwrap();
+            let dumped = to_glrm_v1(&grammar).unwrap();
+            assert!(dumped.contains("eps"), "{dumped}");
+            from_glrm(&dumped).unwrap();
+        }
+    }
+
+    #[test]
+    fn glrm_v1_rejects_numeric_token_syntax_and_implicit_epsilon() {
+        let error = from_glrm("glrm 1; start start; nt start = @token(7);")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not expose numeric @token"), "{error}");
+
+        assert!(from_glrm("start start; nt start ::= 'a' |;").is_ok());
+        assert!(from_glrm("glrm 1; start start; nt start = 'a' |;").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = ();").is_err());
+        assert!(from_glrm("glrm 1; start start; nt start = 'a' | eps;").is_ok());
+    }
+
+    #[test]
+    fn glrm_v1_external_terminals_bind_by_name_and_support_multiple_ids() {
+        let ids = [100, 101];
+        let grammar = from_glrm_with_external_terminals(
+            r#"
+glrm 1;
+start start;
+extern token END_TURN;
+nt start = "a" END_TURN;
+"#,
+            &[("END_TURN", &ids)],
+        )
+        .unwrap();
+        lower(&grammar).unwrap();
+        assert!(grammar.rules.iter().any(|rule| {
+            rule.name == "END_TURN"
+                && matches!(
+                    &rule.expr,
+                    GrammarExpr::Choice(items)
+                        if items == &vec![GrammarExpr::SpecialToken(100), GrammarExpr::SpecialToken(101)]
+                )
+        }));
+    }
+
+    #[test]
+    fn glrm_v1_external_terminal_binding_errors_are_explicit() {
+        let source = "glrm 1; start start; extern token X; nt start = X;";
+        let missing = from_glrm(source).unwrap_err().to_string();
+        assert!(missing.contains("no exact-token binding"), "{missing}");
+        let empty = from_glrm_with_external_terminals(source, &[("X", &[])])
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("at least one token ID"), "{empty}");
+        let unknown_ids = [1];
+        let unknown = from_glrm_with_external_terminals(source, &[("Y", &unknown_ids)])
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("unknown external terminal"), "{unknown}");
+        let duplicate_ids = [1, 1];
+        let duplicate = from_glrm_with_external_terminals(source, &[("X", &duplicate_ids)])
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate.contains("duplicate token ID"), "{duplicate}");
+    }
+
+    #[test]
+    fn glrm_v1_external_terminal_is_not_visible_inside_terminal_bodies() {
+        let ids = [100];
+        let error = from_glrm_with_external_terminals(
+            "glrm 1; start start; extern token X; t BAD = X; nt start = BAD;",
+            &[("X", &ids)],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot be referenced from terminal body"), "{error}");
+    }
+
+    #[test]
+    fn glrm_v1_fa_edges_accept_multiline_compound_expressions() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start declaration;
+t IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/;
+nt expression = IDENTIFIER;
+nt declaration = fa {
+    start 0;
+    accept 3;
+    0 -> 1: "const" | "let" | "var";
+    1 -> 2: IDENTIFIER;
+    2 -> 3:
+        ("=" expression)?
+        ";";
+};
+"#,
+        )
+        .unwrap();
+        let declaration = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.name == "declaration")
+            .unwrap();
+        assert!(matches!(declaration.expr, GrammarExpr::ExprNFA(_)));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn glrm_v1_fa_body_supports_named_states_and_terminal_fas() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start start;
+t WORD = fa {
+    start begin;
+    accept done;
+    begin -> middle: /a+/;
+    middle -> done: "b";
+};
+nt start = fa {
+    start root;
+    accept end;
+    root -> end: WORD;
+};
+"#,
+        )
+        .unwrap();
+        let word = grammar.rules.iter().find(|rule| rule.name == "WORD").unwrap();
+        assert!(word.is_terminal);
+        assert!(matches!(word.expr, GrammarExpr::ExprNFA(_)));
+        let start = grammar.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert!(matches!(start.expr, GrammarExpr::ExprNFA(_)));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_preserves_external_terminal_names_and_bindings() {
+        let source = r#"
+glrm 1;
+start message;
+pragma glrmask {
+    lexer group words = WORD;
+}
+extern token END_TURN;
+g inner = {
+    start value;
+    extern token BEGIN_ASSISTANT;
+    nt value = BEGIN_ASSISTANT "x";
+};
+t WORD = /[a-z]+/;
+nt message = inner WORD END_TURN;
+"#;
+        let begin_ids = [41];
+        let end_ids = [42, 43];
+        let bindings = [
+            ("inner::BEGIN_ASSISTANT", begin_ids.as_slice()),
+            ("END_TURN", end_ids.as_slice()),
+        ];
+        let before = from_glrm_with_external_terminals(source, &bindings).unwrap();
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(formatted.starts_with("glrm 1;\n"), "{formatted}");
+        assert!(formatted.contains("extern token END_TURN;"), "{formatted}");
+        assert!(formatted.contains("extern token BEGIN_ASSISTANT;"), "{formatted}");
+        assert!(formatted.contains("g inner = {"), "{formatted}");
+        assert!(formatted.contains("pragma glrmask {"), "{formatted}");
+        assert!(!formatted.contains("@token"), "{formatted}");
+        assert!(!formatted.contains("41"), "{formatted}");
+        assert!(!formatted.contains("42"), "{formatted}");
+        assert!(!formatted.contains("43"), "{formatted}");
+
+        let after = from_glrm_with_external_terminals(&formatted, &bindings).unwrap();
+        assert_eq!(after.rules, before.rules);
+        assert_eq!(after.start, before.start);
+        assert_eq!(after.ignore, before.ignore);
+        assert_eq!(after.lexer_partitions, before.lexer_partitions);
+        assert_eq!(
+            after.lexer_literal_partitions,
+            before.lexer_literal_partitions
+        );
+        assert_eq!(after.default_lexer_partition, before.default_lexer_partition);
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_preserves_external_subgrammar_declarations() {
+        let source = r#"
+glrm 1;
+start document;
+extern grammar payload;
+nt document = "<" payload ">";
+"#;
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(formatted.contains("extern grammar payload;"), "{formatted}");
+        let before = from_glrm_with_external_subgrammars(source, 100, []).unwrap();
+        let after = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
+        assert_eq!(after.grammar.rules, before.grammar.rules);
+        assert_eq!(after.grammar.start, before.grammar.start);
+        assert_eq!(after.placeholders, before.placeholders);
+    }
+
+    #[test]
+    fn glrm_v1_source_formatter_requires_version_header() {
+        let error = format_glrm_v1("start start; nt start ::= 'x';")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("glrm 1;"), "{error}");
+    }
+
+    #[test]
+    fn glrm_v1_dump_roundtrips_versioned_fa_and_pragma_syntax() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start start;
+pragma glrmask {
+    lexer group words = WORD;
+}
+t WORD = fa {
+    start begin;
+    accept done;
+    begin -> middle: "a";
+    middle -> done: "b";
+};
+nt start = WORD | "x";
+"#,
+        )
+        .unwrap();
+        let dumped = to_glrm_v1(&grammar).unwrap();
+        assert!(dumped.starts_with("glrm 1;\n"), "{dumped}");
+        assert!(dumped.contains("lexer group words = WORD;"), "{dumped}");
+        assert!(dumped.contains("t WORD = fa {"), "{dumped}");
+        assert!(dumped.contains("begin -> middle: \"a\";"), "{dumped}");
+        let reparsed = from_glrm(&dumped).unwrap();
+        assert_eq!(reparsed.rules, grammar.rules);
+        assert_eq!(reparsed.start, grammar.start);
+        assert_eq!(reparsed.ignore, grammar.ignore);
+        assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
+        assert_eq!(
+            reparsed.lexer_literal_partitions,
+            grammar.lexer_literal_partitions
+        );
+    }
+
+    #[test]
+    fn glrm_v1_dump_does_not_leak_numeric_special_token_ids() {
+        let legacy = from_glrm("start start; nt start ::= @token(7);").unwrap();
+        let error = to_glrm_v1(&legacy).unwrap_err().to_string();
+        assert!(error.contains("cannot dump bound exact-token IDs"), "{error}");
+    }
+
+    #[test]
+    fn legacy_terminal_fa_from_feature_branch_remains_supported() {
+        let grammar = from_glrm(
+            r#"
+start start;
+t WORD ::= fa {
+    start begin;
+    accept done;
+    begin -- /a+/ --> middle;
+    middle -- "b" --> done;
+};
+nt start ::= WORD;
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            grammar.rules.iter().find(|rule| rule.name == "WORD").unwrap().expr,
+            GrammarExpr::ExprNFA(_)
+        ));
+        lower(&grammar).unwrap();
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("t WORD ::= fa {"), "{dumped}");
+        from_glrm(&dumped).unwrap();
+    }
+
+    #[test]
+    fn glrm_v1_namespaces_lexer_groups_under_glrmask_pragma() {
+        let grammar = from_glrm(
+            r#"
+glrm 1;
+start start;
+pragma glrmask {
+    lexer group words = WORD;
+}
+t WORD = /[a-z]+/;
+nt start = WORD;
+"#,
+        )
+        .unwrap();
+        assert_eq!(grammar.lexer_partitions.get("WORD").map(String::as_str), Some("words"));
+        let dumped = to_glrm_v1(&grammar).unwrap();
+        assert!(dumped.starts_with("glrm 1;\n"), "{dumped}");
+        assert!(dumped.contains("pragma glrmask {"), "{dumped}");
+        assert!(dumped.contains("t WORD = /[a-z]+/;"), "{dumped}");
+        from_glrm(&dumped).unwrap();
+    }
+
 }

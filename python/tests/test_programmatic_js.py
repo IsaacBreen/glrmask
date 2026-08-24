@@ -30,7 +30,7 @@ def _accepts(constraint: glrmask.Constraint, source: str) -> bool:
         state.commit_bytes(source.encode())
     except ValueError:
         return False
-    return state.is_finished()
+    return state.is_accepting()
 
 
 def test_programmatic_js_compiler_shared_parts_and_schema_semantics() -> None:
