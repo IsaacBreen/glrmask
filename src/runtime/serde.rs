@@ -2597,6 +2597,12 @@ impl Constraint {
     /// Current artifacts use a compact sectioned representation and retain
     /// runtime-native sections where doing so materially reduces load latency.
     pub fn save(&self) -> Vec<u8> {
+        if crate::compiler::constraint_compose::segmented_constraint_retains_dynamic(self) {
+            let materialized = crate::compiler::constraint_compose::
+                materialize_hybrid_constraint_for_serialization(self)
+                .expect("hybrid constraint should materialize to a static serialization snapshot");
+            return materialized.save();
+        }
         if let Some(bytes) = &self.serialized_artifact_cache {
             return clone_serialized_artifact(bytes.as_slice());
         }

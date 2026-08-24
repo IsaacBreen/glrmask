@@ -1248,20 +1248,20 @@ impl DynamicConstraint {
             }
 
             let mut external_bindings = Vec::with_capacity(parsed.placeholders.len());
+            let mut unresolved_placeholders = Vec::new();
             for placeholder in &parsed.placeholders {
-                let child = children_by_name
-                    .remove(placeholder.binding_name.as_str())
-                    .ok_or_else(|| {
-                        crate::GlrMaskError::Compilation(format!(
-                            "GLRM declares external subgrammar {:?}, but no compiled child was supplied",
-                            placeholder.binding_name,
-                        ))
-                    })?;
-                external_bindings.push((
-                    placeholder.token_id,
-                    placeholder.binding_name.as_str(),
-                    child,
-                ));
+                if let Some(child) = children_by_name.remove(placeholder.binding_name.as_str()) {
+                    external_bindings.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.as_str(),
+                        child,
+                    ));
+                } else {
+                    unresolved_placeholders.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.clone(),
+                    ));
+                }
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
                 return Err(crate::GlrMaskError::Compilation(format!(
@@ -1269,13 +1269,17 @@ impl DynamicConstraint {
                 )));
             }
 
-            let parents = compile_dynamic_from_named(
+            let mut dynamic_parent = compile_dynamic_from_named(
                 parsed.grammar,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
                 &[],
-            )?
-            .composition_constraints(vocab)?;
+            )?;
+            dynamic_parent.attach_late_grammar_placeholders(&unresolved_placeholders)?;
+            if external_bindings.is_empty() {
+                return Ok(dynamic_parent);
+            }
+            let parents = dynamic_parent.composition_constraints(vocab)?;
             let mut composed = Vec::with_capacity(parents.len());
             for parent in parents {
                 let mut composition_inputs = Vec::new();

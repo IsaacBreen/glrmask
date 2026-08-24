@@ -847,8 +847,59 @@ fn build_direct_component_state_coordinates_from_constraints(
 
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
     for (component_index, &(constraint, tokenizer_state_offset)) in components.iter().enumerate() {
+        // Dynamic constraints deliberately omit the static parser-DWA TSID
+        // quotient. Preserve that backend and use the exact raw tokenizer
+        // coordinate as this component's private TSID coordinate instead of
+        // compiling/materializing a quotient solely for linking.
+        if constraint.state_to_internal_tsid.is_empty()
+            && constraint.internal_tsid_to_states.is_empty()
+        {
+            let local_tsid_count = constraint.tokenizer.num_states() as usize;
+            if local_tsid_count == 0 {
+                return Err("component tokenizer contains no states".into());
+            }
+            let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
+            for local_state in 0..constraint.tokenizer.num_states() {
+                let merged_state = tokenizer_state_offset
+                    .checked_add(local_state)
+                    .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
+                if merged_state == 0 {
+                    local_map[local_state as usize].push(0);
+                    continue;
+                }
+                let Some(slot) = state_to_global.get_mut(merged_state as usize) else {
+                    return Err(format!(
+                        "component {component_index} tokenizer state {local_state} maps outside merged tokenizer"
+                    ));
+                };
+                if *slot != u32::MAX {
+                    return Err(format!(
+                        "merged tokenizer state {merged_state} belongs to more than one component class"
+                    ));
+                }
+                let global_tsid = global_to_states.len() as u32;
+                *slot = global_tsid;
+                state_representatives.push(merged_state);
+                global_to_states.push(vec![merged_state]);
+                local_map[local_state as usize].push(global_tsid);
+            }
+            let local_start = constraint.tokenizer.initial_state() as usize;
+            let Some(start_targets) = local_map.get_mut(local_start) else {
+                return Err("component start tokenizer state lies outside its raw-state domain".into());
+            };
+            start_targets.push(0);
+            start_targets.sort_unstable();
+            start_targets.dedup();
+            local_to_global_tsids.push(local_map);
+            continue;
+        }
         if constraint.state_to_internal_tsid.len() != constraint.tokenizer.num_states() as usize {
-            return Err("component tokenizer-state map does not cover its runtime tokenizer".into());
+            return Err(format!(
+                "component {component_index} tokenizer-state map does not cover its runtime tokenizer: mapped_states={} tokenizer_states={} dynamic={}",
+                constraint.state_to_internal_tsid.len(),
+                constraint.tokenizer.num_states(),
+                constraint.uses_dynamic_runtime(),
+            ));
         }
         let internal_tsid_to_states = constraint.internal_tsid_groups();
         let local_tsid_count = internal_tsid_to_states.len();
@@ -1110,9 +1161,76 @@ fn build_direct_component_token_coordinates(
     let mut local_to_global_tokens = components
         .iter()
         .map(|component| {
-            vec![Vec::<u32>::new(); component.constraint.internal_token_count()]
+            let constraint = component.constraint;
+            let local_count = if constraint.has_original_token_map() {
+                constraint.internal_token_count()
+            } else {
+                original_token_count
+            };
+            vec![Vec::<u32>::new(); local_count]
         })
         .collect::<Vec<_>>();
+
+    // A retained dynamic component has no static internal-token quotient. Its
+    // exact private coordinate is the model-token ID itself. Build the common
+    // product partition directly from original tokens whenever at least one
+    // component uses that identity coordinate; the optimized static/static
+    // paths below remain unchanged.
+    if components
+        .iter()
+        .any(|component| !component.constraint.has_original_token_map())
+    {
+        let mut groups = BTreeMap::<Vec<u32>, Vec<u32>>::new();
+        for &original in original_token_ids {
+            let tuple = components
+                .iter()
+                .map(|component| {
+                    let constraint = component.constraint;
+                    if constraint.has_original_token_map() {
+                        constraint
+                            .original_token_internal_at(original)
+                            .unwrap_or(u32::MAX)
+                    } else {
+                        original
+                    }
+                })
+                .collect::<Vec<_>>();
+            groups.entry(tuple).or_default().push(original);
+        }
+        for (tuple, originals) in groups {
+            if tuple.iter().all(|&local| local == u32::MAX) {
+                continue;
+            }
+            let global = global_to_tokens.len() as u32;
+            for &original in &originals {
+                token_to_global[original as usize] = global;
+            }
+            for (component_index, &local) in tuple.iter().enumerate() {
+                if local == u32::MAX {
+                    continue;
+                }
+                let Some(destinations) = local_to_global_tokens
+                    .get_mut(component_index)
+                    .and_then(|classes| classes.get_mut(local as usize))
+                else {
+                    return Err(format!(
+                        "component {component_index} token class {local} lies outside its internal token domain"
+                    ));
+                };
+                destinations.push(global);
+            }
+            token_representatives.push(originals[0]);
+            global_to_tokens.push(originals);
+        }
+        return Ok((
+            ManyToOneIdMap {
+                original_to_internal: token_to_global,
+                internal_to_originals: global_to_tokens,
+                representative_original_ids: token_representatives,
+            },
+            local_to_global_tokens,
+        ));
+    }
 
     // The overwhelmingly common subgrammar link is parent + one composed
     // child. Its exact common vocabulary partition is keyed by one child class
@@ -2753,13 +2871,21 @@ impl BoundaryParserWork {
                 analyzed,
                 templates,
             } => {
-                let mut parser_nwa = build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
+                let Some(mut parser_nwa) = build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
                     &terminal_automaton,
                     &analyzed,
                     &templates,
                     table,
-                )
-                .ok_or_else(|| "boundary terminal automaton induced no parser NWA".to_string())?;
+                ) else {
+                    return Ok((
+                        PositiveBoundaryParser::Dwa(DWA::new(
+                            id_map.num_tsids(),
+                            id_map.max_internal_token_id(),
+                        )),
+                        id_map,
+                        None,
+                    ));
+                };
                 resolve_negative_codes_in_nwa(
                     &mut parser_nwa,
                     table.construction
@@ -2816,7 +2942,7 @@ impl BoundaryParserWork {
                 .unwrap_or(64);
                 let compile_nondeterministic_bundles = nondeterministic_bundles_requested
                     && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
-                let mut parser_nwa = if compile_nondeterministic_bundles {
+                let parser_nwa = if compile_nondeterministic_bundles {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
                         &terminal_automaton,
                         num_terminals,
@@ -2830,10 +2956,23 @@ impl BoundaryParserWork {
                         &templates,
                         table,
                     )
-                }
-                .ok_or_else(|| {
-                    "count-only boundary terminal automaton induced no parser NWA".to_string()
-                })?;
+                };
+                let Some(mut parser_nwa) = parser_nwa else {
+                    let mut template_cache = vec![None; num_terminals as usize];
+                    for (terminal, dfa) in templates.by_terminal {
+                        if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                            *slot = Some(dfa);
+                        }
+                    }
+                    return Ok((
+                        PositiveBoundaryParser::Dwa(DWA::new(
+                            id_map.num_tsids(),
+                            id_map.max_internal_token_id(),
+                        )),
+                        id_map,
+                        Some(template_cache),
+                    ));
+                };
                 let build_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
                 if std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some()
                     && id_map.num_tsids() as usize <= 16
@@ -2991,7 +3130,7 @@ impl BoundaryParserWork {
         .unwrap_or(64);
         let compile_nondeterministic_bundles = nondeterministic_bundles_requested
             && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
-        let mut parser_nwa = if !compile_nondeterministic_bundles
+        let parser_nwa = if !compile_nondeterministic_bundles
             && let Some(cache) = prebuilt_bundle_cache.as_ref()
         {
             build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache(
@@ -3007,10 +3146,24 @@ impl BoundaryParserWork {
                 &templates,
                 compile_nondeterministic_bundles,
             )
-        }
-        .ok_or_else(|| {
-            "count-only boundary terminal automaton induced no parser NWA".to_string()
-        })?;
+        };
+        let Some(mut parser_nwa) = parser_nwa else {
+            let mut template_cache = vec![None; num_terminals as usize];
+            for (terminal, dfa) in templates.by_terminal {
+                if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                    *slot = Some(dfa);
+                }
+            }
+            return Ok(BoundaryRuntimeCandidate::Parser {
+                positive: PositiveBoundaryParser::Dwa(DWA::new(
+                    id_map.num_tsids(),
+                    id_map.max_internal_token_id(),
+                )),
+                id_map,
+                template_cache: Some(template_cache),
+                build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+            });
+        };
         if fused_signed_requested
             && id_map.num_tsids() as usize <= 16
             && id_map.num_internal_tokens() as usize <= 64
@@ -4400,7 +4553,41 @@ fn boundary_candidate_state_ranges_by_token(
         std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_UNION_POSSIBLE_MATCHES").is_some();
     let mut by_token = BTreeMap::<u32, Vec<(usize, u32, u32)>>::new();
     for (component_index, constraint) in components.iter().enumerate() {
-        debug_assert!(constraint.possible_matches_complete);
+        if !constraint.possible_matches_complete {
+            // Dynamic components deliberately do not publish the static
+            // possible-matches table. This relation is only a coarse
+            // starting-state prefilter for boundary discovery; the subsequent
+            // tokenizer-graph expansion is exact. Conservatively admit every
+            // private TSID here instead of compiling a static possible-matches
+            // table solely for linking.
+            let num_tsids = if constraint.state_to_internal_tsid.is_empty() {
+                constraint.tokenizer.num_states()
+            } else {
+                constraint
+                    .state_to_internal_tsid
+                    .iter()
+                    .copied()
+                    .filter(|&tsid| tsid != u32::MAX)
+                    .max()
+                    .map_or(0, |tsid| tsid + 1)
+            };
+            if num_tsids != 0 {
+                for &original in candidate_tokens {
+                    if vocab
+                        .entries_map()
+                        .get(&original)
+                        .is_some_and(|bytes| bytes.len() >= 2)
+                    {
+                        by_token.entry(original).or_default().push((
+                            component_index,
+                            0,
+                            num_tsids - 1,
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
 
         // Restrict the token dimension *before* walking possible-match weights.
         // The historical implementation iterated every internal token carried
@@ -9330,7 +9517,16 @@ fn prepare_unmapped_component_possible_matches(
         .copied()
         .zip(terminal_offsets.par_iter().copied())
         .map(|(component, terminal_offset)| {
-            component_possible_matches(&component, terminal_offset)
+            if component.constraint.possible_matches_complete {
+                component_possible_matches(&component, terminal_offset)
+            } else {
+                // Dynamic retained components compute their local masks through
+                // their own backend and deliberately have no static
+                // possible-matches summary. The segmented runtime does not
+                // consume such a summary for A, so keep this optional composed
+                // static summary sparse rather than materializing the child.
+                Ok(PossibleMatches::new())
+            }
         })
         .collect()
 }
@@ -16991,6 +17187,7 @@ fn merged_terminal_live_states_owned_parent(
     terminal_offsets: &[u32],
     tokenizer_state_offsets: &[u32],
     num_terminals: usize,
+    preserve_parent_runtime: bool,
 ) -> Vec<Vec<u32>> {
     if parent.terminal_live_states.len() != parent.tokenizer.num_terminals() as usize
         || children.iter().any(|child| {
@@ -17000,7 +17197,11 @@ fn merged_terminal_live_states_owned_parent(
     {
         return Vec::new();
     }
-    let mut merged = std::mem::take(&mut parent.terminal_live_states);
+    let mut merged = if preserve_parent_runtime {
+        parent.terminal_live_states.clone()
+    } else {
+        std::mem::take(&mut parent.terminal_live_states)
+    };
     merged.resize_with(num_terminals, Vec::new);
     for (child_index, child) in children.iter().enumerate() {
         let component_index = child_index + 1;
@@ -17323,6 +17524,80 @@ fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option
     materialized.materialize_parser_dwa_for_compilation()?;
     materialized.materialize_composition_metadata_for_compilation()?;
     Ok(Some(materialized))
+}
+
+/// Prepare a source for segmented linking without changing its local masking
+/// backend. Dynamic constraints deliberately have no parser DWA: rebuilding
+/// one from retained grammar would turn a dynamic component into a static one
+/// before it is stored in the retained component view.
+pub(crate) fn segmented_constraint_retains_dynamic(source: &Constraint) -> bool {
+    if source.uses_dynamic_runtime() {
+        return true;
+    }
+    source.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+        overlay
+            .segmented_parser_components
+            .iter()
+            .any(|component| segmented_constraint_retains_dynamic(component.constraint()))
+    })
+}
+
+/// Materialize one ordinary static constraint for persistence of a live hybrid.
+/// The runtime view graph is intentionally an in-memory representation: save()
+/// may pay this compilation cost once, while load() receives a conventional
+/// self-contained static artifact.
+ pub(crate) fn materialize_hybrid_constraint_for_serialization(
+    source: &Constraint,
+) -> Result<Constraint, String> {
+    if !segmented_constraint_retains_dynamic(source) {
+        return Ok(source.clone());
+    }
+    let vocab = Vocab::new(
+        source
+            .token_bytes_iter()
+            .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+            .collect(),
+    );
+    let grammar = crate::DynamicConstraint::reconstruct_composition_grammar(source)
+        .map_err(|error| error.to_string())?;
+    let embedded_start_nullable = source.table.embedded_start_nullable();
+    let embedded_end_token_ids = source.table.embedded_end_token_ids();
+    let mut materialized = crate::error::catch_internal_invariant(|| {
+        crate::compiler::pipeline::compile_prepared(grammar, &vocab)
+    })
+    .map_err(|error| error.to_string())?;
+    materialized
+        .table
+        .set_embedded_start_nullable(embedded_start_nullable);
+    materialized
+        .table
+        .set_embedded_end_token_ids(&embedded_end_token_ids);
+    if materialized.table.num_terminals != source.table.num_terminals {
+        return Err(format!(
+            "hybrid serialization changed terminal domain ({} -> {})",
+            source.table.num_terminals, materialized.table.num_terminals,
+        ));
+    }
+    // GrammarDef preserves terminal IDs, so retained linker slots remain in the
+    // same terminal coordinate. Copy names only after checking that domain.
+    materialized.late_grammar_slots = source.late_grammar_slots.clone();
+    Ok(materialized)
+}
+
+fn prepared_constraint_for_segmented_composition(
+    source: &Constraint,
+) -> Result<Option<Constraint>, String> {
+    if source.uses_dynamic_runtime() {
+        if source.deferred_composition_metadata_blob.is_none() {
+            return Ok(None);
+        }
+        let mut prepared = source.clone();
+        prepared.materialize_composition_metadata_for_compilation()?;
+        debug_assert!(prepared.uses_dynamic_runtime());
+        debug_assert!(prepared.parser_dwa.states().is_empty());
+        return Ok(Some(prepared));
+    }
+    materialized_constraint_for_composition(source)
 }
 
 
@@ -18148,19 +18423,45 @@ pub(crate) fn compose_constraints_owned_parent(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    compose_constraints_owned_parent_impl(parent, children, None, false, vocab)
+    compose_constraints_owned_parent_impl(parent, children, None, None, vocab)
 }
 
-/// Compose using the retained-component runtime as the authoritative mask
-/// backend. This is the production entry point for late binding: the compiled
-/// parent is moved intact into component zero, child artifacts remain intact,
-/// and only the cross-component boundary recognizer is compiled here.
+/// Boundary backend for exact segmented composition. Component-local masking
+/// remains backed by each retained source constraint in either mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentedBoundaryBackend {
+    StaticParserDwa,
+    DynamicTerminalTrie,
+}
+
+pub(crate) fn compose_constraints_owned_parent_segmented(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<ConstraintComposition, String> {
+    compose_constraints_owned_parent_impl(
+        parent,
+        children,
+        None,
+        Some(boundary_backend),
+        vocab,
+    )
+}
+
+/// Backward-compatible internal name for the production static-boundary view
+/// linker used by the first late-binding slice.
 pub(crate) fn compose_constraints_owned_parent_view(
     parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    compose_constraints_owned_parent_impl(parent, children, None, true, vocab)
+    compose_constraints_owned_parent_segmented(
+        parent,
+        children,
+        vocab,
+        SegmentedBoundaryBackend::StaticParserDwa,
+    )
 }
 
 pub(crate) fn compose_constraints_owned_parent_shared(
@@ -18177,21 +18478,29 @@ pub(crate) fn compose_constraints_owned_parent_shared(
             return Err(format!("shared child {index} does not match borrowed composition input"));
         }
     }
-    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), false, vocab)
+    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), None, vocab)
 }
 
 fn compose_constraints_owned_parent_impl(
     mut parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     shared_children: Option<&[Arc<Constraint>]>,
-    explicit_segmented: bool,
+    explicit_segmented_boundary: Option<SegmentedBoundaryBackend>,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    parent.materialize_parser_dwa_for_compilation()?;
+    if explicit_segmented_boundary.is_none() || !parent.uses_dynamic_runtime() {
+        parent.materialize_parser_dwa_for_compilation()?;
+    }
     parent.materialize_composition_metadata_for_compilation()?;
     let materialized_children = children
         .iter()
-        .map(|child| materialized_constraint_for_composition(child.constraint))
+        .map(|child| {
+            if explicit_segmented_boundary.is_some() {
+                prepared_constraint_for_segmented_composition(child.constraint)
+            } else {
+                materialized_constraint_for_composition(child.constraint)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let materialized_any_child = materialized_children.iter().any(Option::is_some);
     let normalized_children = children
@@ -18215,19 +18524,19 @@ fn compose_constraints_owned_parent_impl(
     };
 
     parent.serialized_artifact_cache = None;
-    if !explicit_segmented
+    if explicit_segmented_boundary.is_none()
         && (std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
             || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
     {
         return compose_constraints(&parent, children, vocab);
     }
     let total_started_at = Instant::now();
-    let segmented_runtime_requested = explicit_segmented
+    let segmented_runtime_requested = explicit_segmented_boundary.is_some()
         || std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some();
     let two_dwa_runtime_requested = segmented_runtime_requested
-        && !explicit_segmented
+        && explicit_segmented_boundary.is_none()
         && std::env::var_os("GLRMASK_EXPERIMENT_TWO_DWA_RUNTIME").is_some();
-    let segmented_skip_requested = explicit_segmented
+    let segmented_skip_requested = explicit_segmented_boundary.is_some()
         || (segmented_runtime_requested
             && !two_dwa_runtime_requested
             && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN").is_some());
@@ -18890,12 +19199,15 @@ fn compose_constraints_owned_parent_impl(
     drop(component_constraints);
 
     let terminal_live_started_at = Instant::now();
+    let preserve_parent_runtime =
+        explicit_segmented_boundary.is_some() && parent.uses_dynamic_runtime();
     let mut terminal_live_states = merged_terminal_live_states_owned_parent(
         &mut parent,
         children,
         &composed_table.terminal_offsets,
         &expected_tokenizer_state_offsets,
         composed_table.table.num_terminals as usize,
+        preserve_parent_runtime,
     );
     canonicalize_terminal_live_states(
         &mut terminal_live_states,
@@ -18904,7 +19216,11 @@ fn compose_constraints_owned_parent_impl(
     );
     let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let parent_fast_transitions = std::mem::take(&mut parent.tokenizer_fast_transitions);
+    let parent_fast_transitions = if preserve_parent_runtime {
+        parent.tokenizer_fast_transitions.clone()
+    } else {
+        std::mem::take(&mut parent.tokenizer_fast_transitions)
+    };
     let child_fast_transitions = children
         .iter()
         .enumerate()
@@ -19367,7 +19683,7 @@ fn compose_constraints_owned_parent_impl(
             }
         });
         overlay.segmented_parser_components = segmented_components;
-        overlay.segmented_mask_authoritative = explicit_segmented;
+        overlay.segmented_mask_authoritative = explicit_segmented_boundary.is_some();
         if let Some(dispatch) = deterministic_root_dispatch {
             overlay.segmented_component_union_root_routing =
                 crate::runtime::DenseViewRouting::new(
