@@ -192,7 +192,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Bindings accept one token ID or a list of interchangeable IDs. Lark and EBNF use `@token(<id>)` for exact IDs.
+Bind the special token ID used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
 
 See the [root README](../README.md#grammar-formats) for the fuller format overview.
 

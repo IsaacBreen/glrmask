@@ -255,7 +255,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Bindings accept one token ID or a list of interchangeable IDs. `extern token` matches token IDs, not bytes. Lark and EBNF use `@token(<id>)` for exact IDs.
+Bind the special token ID used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
 
 End tokens are handled by the decoder. If the constraint is accepting, generation may stop without committing another token.
 
