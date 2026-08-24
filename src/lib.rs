@@ -7,9 +7,9 @@
 //! obtain the next-token mask, sample a token, then commit that token to advance
 //! the parser state.
 //!
-//! [`DynamicConstraint`] exposes the same decoding model with much lower
-//! compilation latency and higher mask-generation latency. It is intended for
-//! cache misses while a reusable [`Constraint`] is compiled separately.
+//! [`DynamicConstraint`] compiles faster than [`Constraint`] and produces masks
+//! more slowly. [`DynamicConstraintState`] has the same decoding operations as
+//! [`ConstraintState`].
 //!
 //! # Quickstart
 //!
@@ -38,10 +38,10 @@
 //!
 //! # Grammar inputs
 //!
-//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. GLRM grammars begin
-//! with `glrm 1;`. Use [`ConstraintSpec::builder`] for target-bound GLRM
-//! extern bindings, then compile the same immutable spec as either a
-//! [`Constraint`] or [`DynamicConstraint`].
+//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. GLRM source uses the
+//! literal `glrm 1;` header. Bind source subgrammars with
+//! [`Grammar::bind_grammar`]. Use [`ConstraintSpec::builder`] for exact-token or
+//! compiled-subgrammar bindings.
 //!
 //! # Persistence
 //!
@@ -50,17 +50,12 @@
 //!
 //! # GLRM external bindings
 //!
-//! GLRM can declare exact model-token terminals with `extern token NAME;`.
-//! Bind those names through [`ConstraintSpecBuilder::bind_token`]. Token IDs
-//! stay outside the grammar source.
+//! GLRM declares exact model-token terminals with `extern token NAME;`. Bind
+//! their IDs with [`ConstraintSpecBuilder::bind_token`].
 //!
-//! GLRM can also declare typed external subgrammars with `extern grammar name;`.
-//! A source [`Grammar`] can bind another source grammar directly with
-//! [`Grammar::bind_grammar`] before a target vocabulary is chosen. Target-bound
-//! source/spec/compiled realizations can instead be supplied through
-//! [`ConstraintSpecBuilder::bind_grammar`]. The compiler allocates hidden call
-//! placeholders automatically and links the components exactly, including model
-//! tokens that cross grammar boundaries.
+//! GLRM declares child grammars with `extern grammar name;`. Bind a source child
+//! with [`Grammar::bind_grammar`], or bind a source, spec, [`Constraint`], or
+//! [`DynamicConstraint`] with [`ConstraintSpecBuilder::bind_grammar`].
 //!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.

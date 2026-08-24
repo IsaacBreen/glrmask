@@ -47,7 +47,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` leaves more work in the token loop and starts much faster. The corresponding `Constraint` can be compiled separately and cached for later requests.
+`DynamicConstraint` compiles faster and produces masks more slowly. Use it for one-off constraints or cache misses while compiling a `Constraint` for later requests.
 
 ## Python quickstart
 
@@ -130,7 +130,7 @@ print(llm.detokenize(generated).decode())
 
 ## Rust quickstart
 
-Rust uses `Constraint` as the normal compiled artifact and `DynamicConstraint` as the lower-build-latency alternative:
+`Constraint` is the normal compiled Rust type:
 
 ```rust
 use glrmask::{Grammar, Constraint, Vocab};
@@ -155,9 +155,9 @@ if state.is_rejected() {
 # Ok::<(), glrmask::Error>(())
 ```
 
-Use `DynamicConstraint::compile(...)` with the same `Grammar` when startup latency matters more than per-token mask latency. Once started, `ConstraintState` and `DynamicConstraintState` expose the same decoding interface.
+`DynamicConstraint::compile(...)` also accepts a `Grammar` and returns a `DynamicConstraint`. Its `start()` method returns a `DynamicConstraintState` with the same decoding methods as `ConstraintState`.
 
-When an external subgrammar is still just source, it can be attached before choosing a vocabulary:
+`Grammar::bind_grammar(...)` binds a child source grammar before a vocabulary is chosen:
 
 ```rust
 let grammar = Grammar::glrm(
@@ -169,9 +169,7 @@ let constraint = Constraint::compile(grammar, &vocab)?;
 # Ok::<(), glrmask::Error>(())
 ```
 
-`Grammar::bind_grammar(...)` is deliberately target-neutral. Exact token IDs and compiled child constraints are bound through `ConstraintSpec` instead.
-
-For GLRM extern declarations that need target-specific bindings, build a target-bound `ConstraintSpec`. The completed immutable spec can be reused to compile either artifact type, and the same `bind_grammar(...)` method accepts source, another spec, a `Constraint`, or a `DynamicConstraint`:
+For exact token IDs or compiled child constraints, build a `ConstraintSpec`:
 
 ```rust
 use glrmask::{ConstraintSpec, Grammar, Constraint, Vocab};
@@ -203,11 +201,13 @@ let mut state = constraint.start();
 # Ok::<(), glrmask::Error>(())
 ```
 
+`ConstraintSpecBuilder::bind_grammar(...)` accepts a `Grammar`, `ConstraintSpec`, `Constraint`, or `DynamicConstraint` child.
+
 ## Grammar formats
 
 Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
-GLRM is GLRMask's native grammar format. GLRM grammars begin with `glrm 1;`:
+GLRM is GLRMask's native grammar format. Its source starts with the literal `glrm 1;` header:
 
 ```glrm
 glrm 1;
@@ -217,11 +217,11 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-GLRM uses `=` for declarations, requires explicit `eps` for epsilon, supports `fa { ... }` bodies, and keeps model token IDs out of grammar source. Raw regexes use full-match semantics; unsupported or non-regular constructs are rejected rather than reinterpreted. GLRMask also accepts Lark and EBNF grammars.
+Declarations use `=`, and epsilon is written as `eps`. Terminals and nonterminals can use `fa { ... }` bodies. Regexes use full-match semantics and reject unsupported or non-regular constructs. GLRMask also accepts Lark and EBNF.
 
 ### Reusing compiled subgrammars
 
-Declare an external grammar with `extern grammar name;`, then bind an independently compiled constraint by name. Hidden call terminals and cross-boundary token paths are handled automatically:
+Declare a compiled child with `extern grammar name;` and bind it by name:
 
 ```python
 payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
@@ -238,7 +238,7 @@ document = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Inline `g name = { ... };` and externally bound `extern grammar name;` have the same language semantics, including scope-local ignores and model tokens that cross parent/child boundaries.
+Inline `g name = { ... };` and externally bound `extern grammar name;` use the same language semantics, including scope-local ignores and model tokens that span a parent/child boundary.
 
 ## Special tokens
 
@@ -259,9 +259,9 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-A binding may also be a list of interchangeable exact token IDs. `extern token` terminals are parser-visible but have no byte language, and they remain separate from end-token policy. Lark and EBNF also support numeric `@token(<id>)` syntax when exact model-token identity is required.
+Bindings accept one token ID or a list of interchangeable IDs. `extern token` matches token IDs, not bytes. Lark and EBNF use `@token(<id>)` for exact IDs.
 
-End tokens are handled by the decoder. Once `state.is_accepting()` is true, the decoder may stop generation instead of committing another token.
+End tokens are handled by the decoder. If the constraint is accepting, generation may stop without committing another token.
 
 ```python
 mask = state.mask(model_vocab_size)
@@ -285,8 +285,6 @@ constraint = glrmask.Constraint.load(blob, vocab)
 ```
 
 Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
-
-`DynamicConstraint` supports the same source formats but leaves more work for mask generation. It is useful for constraints that are unlikely to be reused enough to justify full compilation.
 
 ## How it works
 

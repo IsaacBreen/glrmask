@@ -595,7 +595,7 @@ impl PyVocab {
     ///
     /// EOG, control, unused, and empty-piece tokens are omitted from the byte
     /// vocabulary. EOG IDs remain available through `llama_cpp_end_token_ids`
-    /// so callers can pass them explicitly to a constraint constructor.
+    /// for the decoder's stopping policy.
     #[staticmethod]
     fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;

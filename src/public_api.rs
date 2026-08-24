@@ -4,11 +4,10 @@ use std::sync::Arc;
 use crate::runtime::Constraint as RuntimeConstraint;
 use crate::{DynamicConstraint, Error, Result, Vocab};
 
-/// Target-neutral grammar source, optionally with source-level subgrammar bindings.
+/// Grammar source with optional source-level subgrammar bindings.
 ///
-/// `Grammar::bind_grammar` resolves only `extern grammar` declarations, so it
-/// remains independent of a decoder vocabulary. Exact-token externs are bound
-/// later through [`ConstraintSpecBuilder::bind_token`].
+/// [`Grammar::bind_grammar`] binds source children. Use [`ConstraintSpecBuilder`]
+/// for exact tokens or compiled child constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grammar<'a> {
     source: GrammarSource<'a>,
@@ -33,11 +32,9 @@ impl<'a> Grammar<'a> {
         Self { source, grammar_bindings: BTreeMap::new() }
     }
 
-    /// Bind an `extern grammar NAME;` directly at the target-neutral grammar layer.
+    /// Bind an `extern grammar NAME;` to another source grammar.
     ///
-    /// This is useful when both parent and child are still grammar sources.
-    /// Target-bound realizations such as compiled constraints belong on
-    /// [`ConstraintSpecBuilder::bind_grammar`] instead.
+    /// Use [`ConstraintSpecBuilder::bind_grammar`] for compiled children.
     pub fn bind_grammar(mut self, name: impl AsRef<str>, grammar: Grammar<'a>) -> Result<Self> {
         let name = name.as_ref();
         let GrammarSource::Glrm(source) = self.source else {
@@ -78,7 +75,7 @@ impl<'a> Grammar<'a> {
     }
 }
 
-/// A target-bound, immutable grammar specification with complete extern bindings.
+/// A grammar, vocabulary, and complete set of extern bindings.
 #[derive(Debug, Clone)]
 pub struct ConstraintSpec<'a> {
     grammar: Grammar<'a>,
@@ -87,7 +84,7 @@ pub struct ConstraintSpec<'a> {
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
 }
 
-/// Builder for a target-bound [`ConstraintSpec`].
+/// Builder for [`ConstraintSpec`].
 #[derive(Debug)]
 pub struct ConstraintSpecBuilder<'a> {
     grammar: Grammar<'a>,
@@ -98,10 +95,7 @@ pub struct ConstraintSpecBuilder<'a> {
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
 }
 
-/// Accepted input to [`ConstraintSpecBuilder::bind_grammar`].
-///
-/// This is public only to support the conversion trait; its variants are not a
-/// standalone binding API.
+/// Internal input accepted by [`ConstraintSpecBuilder::bind_grammar`].
 #[doc(hidden)]
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -118,7 +112,7 @@ pub(crate) enum GrammarBinding<'a> {
     DynamicOwned(Arc<DynamicConstraint>),
 }
 
-/// Converts a source, spec, or compiled artifact into one grammar realization.
+/// Converts a supported child grammar into an internal binding.
 #[doc(hidden)]
 pub(crate) trait IntoGrammarBinding<'a> {
     #[doc(hidden)]
@@ -178,7 +172,7 @@ impl<'a> IntoGrammarBinding<'a> for Arc<DynamicConstraint> {
 }
 
 impl<'a> ConstraintSpec<'a> {
-    /// Start building a specification for `grammar` and this exact decoder target.
+    /// Start a specification for `grammar` and `vocab`.
     pub fn builder(
         grammar: Grammar<'a>,
         vocab: &'a Vocab,
@@ -186,7 +180,7 @@ impl<'a> ConstraintSpec<'a> {
         ConstraintSpecBuilder::new(grammar, vocab)
     }
 
-    /// Compile this specification into a reusable static artifact.
+    /// Compile this specification into a [`Constraint`](crate::Constraint).
     pub fn compile(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
@@ -210,7 +204,7 @@ impl<'a> ConstraintSpec<'a> {
         )
     }
 
-    /// Compile this specification into a lower-build-latency dynamic artifact.
+    /// Compile this specification into a [`DynamicConstraint`].
     pub fn compile_dynamic(&self) -> Result<DynamicConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
@@ -287,7 +281,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         })
     }
 
-    /// Bind an `extern token NAME;` declaration to exact decoder token IDs.
+    /// Bind an `extern token NAME;` declaration to exact token IDs.
     pub fn bind_token(
         mut self,
         name: impl AsRef<str>,
@@ -317,7 +311,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         Ok(self)
     }
 
-    /// Bind an `extern grammar NAME;` declaration to a source, spec, or artifact.
+    /// Bind an `extern grammar NAME;` to a source, spec, or compiled constraint.
     #[allow(private_bounds)]
     pub fn bind_grammar<T>(mut self, name: impl AsRef<str>, realization: T) -> Result<Self>
     where
@@ -336,7 +330,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         Ok(self)
     }
 
-    /// Finish the immutable specification after verifying binding completeness.
+    /// Check that every extern is bound and finish the specification.
     pub fn build(self) -> Result<ConstraintSpec<'a>> {
         if let Some(name) = self
             .declared_tokens
@@ -556,14 +550,14 @@ fn compile_dynamic_source(
 }
 
 impl RuntimeConstraint {
-    /// Compile a reusable static constraint without external declarations.
+    /// Compile `grammar` into a [`Constraint`](crate::Constraint) for `vocab`.
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
 }
 
 impl DynamicConstraint {
-    /// Compile a dynamic constraint without external declarations.
+    /// Compile `grammar` into a [`DynamicConstraint`] for `vocab`.
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic()
     }

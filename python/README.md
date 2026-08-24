@@ -84,7 +84,7 @@ vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
 ```
 
-The constructor excludes EOG, control, unused, and empty-piece tokens from the byte vocabulary. `llama_cpp_end_token_ids` is provided for decoder stopping policy; these IDs are not compiled into the constraint.
+`Vocab.from_llama_cpp()` excludes EOG, control, unused, and empty-piece tokens from the byte vocabulary. Their IDs are available in `llama_cpp_end_token_ids` for the decoder.
 
 ### Compile a constraint
 
@@ -97,12 +97,9 @@ constraint = glrmask.Constraint.from_lark(grammar, vocab)
 constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 ```
 
-`from_glrm_grammar(...)` also accepts `subgrammars={name: constraint}` for `extern grammar` declarations and `bindings={name: token_id_or_ids}` for `extern token` declarations. `DynamicConstraint.from_glrm_grammar(...)` supports the same binding shape.
+`from_glrm_grammar(...)` accepts compiled child constraints in `subgrammars` and exact token IDs in `bindings`. `DynamicConstraint.from_glrm_grammar(...)` accepts the same arguments.
 
-
-Already-compiled constraints can be composed without recompiling their full
-grammars. Declare typed external subgrammars in GLRM and bind them by name. The
-compiler allocates hidden non-vocabulary sentinels automatically:
+A compiled child is bound by name:
 
 ```python
 payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
@@ -119,15 +116,9 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-Composition remains exact when one model token contains bytes from both the
-parent and child grammars. Every component must have been compiled for the same
-vocabulary contents.
+One model token may span the parent and child grammars. Every constraint must use the same vocabulary.
 
-Parent and child constraints may use different `ignore` terminals. Equal ignore
-languages are canonicalized into one global transparent ignore. Different
-ignore languages remain scope-local: parent trivia is accepted in parent states
-and child trivia is accepted only after entering the child, including inside
-fused model tokens.
+Parent and child constraints may use different `ignore` terminals. Equal ignore languages are shared. Different ones stay scoped to their grammar, including within tokens that span the boundary.
 
 ### Decode
 
@@ -165,18 +156,18 @@ artifact = constraint.save()
 constraint = glrmask.Constraint.load(artifact, vocab)
 ```
 
-For complex constraints, compilation typically takes a few hundred milliseconds. To minimize cold-start latency on cache miss, use `DynamicConstraint`. It has the same grammar constructors and produces identical masks, but compiles much faster at the cost of higher mask-generation latency. Compile and cache the corresponding `Constraint` separately for subsequent requests.
+`DynamicConstraint` compiles faster and produces masks more slowly. Use it for one-off constraints or cache misses while compiling a `Constraint` for later requests.
 
 ```python
 constraint = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
 state = constraint.start()
 ```
 
-`DynamicConstraint` uses the same state interface as `Constraint`, including `mask()`, `commit_token()`, `commit_bytes()`, `forced()`, `is_accepting()`, and `is_rejected()`.
+`DynamicConstraintState` has the same decoding methods as `ConstraintState`.
 
 ## Grammar formats
 
-GLRM is GLRMask's native grammar format. GLRM grammars begin with `glrm 1;` and use `=` declarations. Raw regexes use full-match semantics, and unsupported or non-regular regex constructs are rejected:
+GLRM is GLRMask's native grammar format. Its source starts with the literal `glrm 1;` header. Declarations use `=`, regexes use full-match semantics, and unsupported or non-regular constructs are rejected:
 
 ```glrm
 glrm 1;
@@ -201,7 +192,7 @@ constraint = glrmask.Constraint.from_glrm_grammar(
 )
 ```
 
-A binding value may be one token ID or a list of interchangeable IDs. Lark and EBNF also support numeric `@token(<id>)` syntax when exact model-token identity is required.
+Bindings accept one token ID or a list of interchangeable IDs. Lark and EBNF use `@token(<id>)` for exact IDs.
 
 See the [root README](../README.md#grammar-formats) for the fuller format overview.
 
