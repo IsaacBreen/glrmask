@@ -15,6 +15,7 @@ use super::ast::Expr;
 use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
 };
+use super::runtime_unit_repeat::virtual_unit_repeat_state_ids_fit;
 use super::tokenizer::{
     CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
 };
@@ -539,6 +540,14 @@ fn exact_unit_byte_language(expr: &Expr) -> Option<U8Set> {
     }
 }
 
+#[doc(hidden)]
+pub fn virtual_zero_min_unit_repeat_fits_state_ids(
+    max: usize,
+    physical_state_count: u32,
+) -> bool {
+    virtual_unit_repeat_state_ids_fit(max, physical_state_count)
+}
+
 /// Recognize the exact standalone runtime lane after factoring. The body proof
 /// is syntactic and therefore fails closed for any variable-width repetition.
 #[doc(hidden)]
@@ -551,6 +560,14 @@ pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, us
     else {
         return None;
     };
+    // The standalone arithmetic runtime has one physical reset state and
+    // reserves the high raw-state bit. Keep descriptor eligibility identical
+    // to that state-ID contract. Larger exact repeats can still use the
+    // binary repeat-product lane, where the repetition count is not encoded as
+    // a contiguous virtual-state interval.
+    if !virtual_zero_min_unit_repeat_fits_state_ids(*max, 1) {
+        return None;
+    }
     let bytes = exact_unit_byte_language(body)?;
     (!bytes.is_empty() && *max > 0).then_some((bytes, *max))
 }
@@ -587,6 +604,14 @@ fn virtual_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> 
     // case. Keep nonzero lower bounds on the ordinary exact compiler until the
     // analogous lower-bound stencil is implemented and certified.
     if *min != 0 || *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND || min > max {
+        return None;
+    }
+    // The body is compiled below in order to prove the deterministic,
+    // non-nullable, prefix-free residual model. Do not perform that semantic
+    // probe if the body itself contains another giant bounded repeat: doing so
+    // would eagerly materialize exactly the state space this virtual lane is
+    // intended to avoid.
+    if expression_contains_large_bounded_repeat(body) {
         return None;
     }
     let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(body, None)?;
@@ -1150,6 +1175,7 @@ fn materialize_repeated_subexpression_dfas_with_limits(
             (count >= min_occurrences
                 && expr_structural_size(&expr) >= min_size
                 && !expr_contains_group_op(&expr)
+                && !expression_contains_large_bounded_repeat(&expr)
                 && !matches!(expr, Expr::Dfa(_)))
             .then_some(expr)
         })
@@ -3010,6 +3036,8 @@ struct LazyZeroMinRepeatSuffixComponent {
     class_targets: Vec<u32>,
 }
 
+const LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND: usize = 1_024;
+
 impl LazyZeroMinRepeatSuffixComponent {
     fn from_expr(expr: &Expr) -> Option<Self> {
         let unwrapped = unwrap_shared(expr);
@@ -3037,8 +3065,14 @@ impl LazyZeroMinRepeatSuffixComponent {
             // whose eager constituent DFA would dominate compilation. Smaller
             // repeats are already cheap to materialize and preserve better
             // downstream state locality through the ordinary product path.
-            if *max < 1_024 {
+            if *max < LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND {
                 continue;
+            }
+            // `u32::MAX` is the unreachable sentinel in body_min_counts, so it
+            // cannot also be a real completed-copy count. Reject it (and any
+            // larger usize bound) before compiling either body or suffix.
+            if *max >= u32::MAX as usize {
+                return None;
             }
             let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
             let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
@@ -11838,8 +11872,15 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let lazy_zero_min_repeat_product =
-        std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
+    // For giant nested repeats this is a correctness/safety lane, not merely a
+    // performance optimization. A debug override must not route an expression
+    // that validation accepted back into eager repeat materialization.
+    let requires_lazy_giant = plan
+        .compiled_exprs
+        .iter()
+        .any(expression_contains_large_bounded_repeat);
+    let lazy_zero_min_repeat_product = requires_lazy_giant
+        || std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
     if retain_transition_rows_during_discovery
         && lazy_zero_min_repeat_product
         && let Some(runtime) =
@@ -11910,6 +11951,134 @@ pub fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
     plan.visible_groups == 1
         && plan.compiled_exprs.len() == 2
         && pure_binary_intersection(&plan.exclusions, &plan.intersections)
+}
+
+/// Whether this expression contains any bounded repetition large enough that
+/// falling through to the ordinary repeat compiler could allocate in direct
+/// proportion to the declared bound.
+#[doc(hidden)]
+pub fn expression_contains_large_bounded_repeat(expr: &Expr) -> bool {
+    match unwrap_shared(expr) {
+        Expr::Repeat { expr, max, .. } => {
+            max.is_some_and(|max| max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+                || expression_contains_large_bounded_repeat(expr)
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            parts.iter().any(expression_contains_large_bounded_repeat)
+        }
+        Expr::Intersect { expr, intersect } => {
+            expression_contains_large_bounded_repeat(expr)
+                || expression_contains_large_bounded_repeat(intersect)
+        }
+        Expr::Exclude { expr, exclude } => {
+            expression_contains_large_bounded_repeat(expr)
+                || expression_contains_large_bounded_repeat(exclude)
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+        Expr::Shared(_) => unreachable!("unwrap_shared removes Shared"),
+    }
+}
+
+fn large_repeat_is_safe_lazy_zero_min_suffix_component(expr: &Expr) -> bool {
+    let Expr::Seq(parts) = unwrap_shared(expr) else {
+        return false;
+    };
+    let mut flat_parts = Vec::<Expr>::new();
+    for part in parts {
+        match unwrap_shared(part) {
+            Expr::Seq(inner) => flat_parts.extend(inner.iter().cloned()),
+            _ => flat_parts.push(part.clone()),
+        }
+    }
+
+    // `LazyZeroMinRepeatSuffixComponent::from_expr` tries qualifying repeats
+    // from left to right and compiles the candidate body and suffix while
+    // probing it. Therefore we may only call it after proving that the first
+    // candidate it can probe is itself the giant repeat, and that no second
+    // giant repeat can be hidden in that candidate's body or suffix.
+    let Some(repeat_index) = flat_parts.iter().position(|part| {
+        matches!(
+            unwrap_shared(part),
+            Expr::Repeat {
+                min: 0,
+                max: Some(max),
+                ..
+            } if *max >= LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND
+        )
+    }) else {
+        return false;
+    };
+    let Expr::Repeat {
+        expr: body,
+        min: 0,
+        max: Some(max),
+    } = unwrap_shared(&flat_parts[repeat_index])
+    else {
+        unreachable!("repeat_index only selects zero-minimum bounded repeats");
+    };
+    if *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+        || expression_contains_large_bounded_repeat(body)
+        || flat_parts
+            .iter()
+            .enumerate()
+            .any(|(index, part)| index != repeat_index && expression_contains_large_bounded_repeat(part))
+    {
+        return false;
+    }
+
+    // At this point probing `from_expr` cannot itself materialize a giant
+    // repeat: the selected root is the only giant repeat in the component.
+    LazyZeroMinRepeatSuffixComponent::from_expr(expr).is_some()
+}
+
+fn non_giant_product_component_materializes(expr: &Expr) -> bool {
+    if expression_contains_large_bounded_repeat(expr) {
+        return false;
+    }
+    compile_product_component_with_options(expr, true, true, None)
+        .materialized_dfa()
+        .is_some()
+}
+
+/// Prove that every giant repeat inside a binary-intersection terminal stays
+/// on an existing exact lazy component path. This is intentionally stronger
+/// than `expression_supports_deferred_dense_runtime`: a generic binary product
+/// may still materialize one of its component expressions before discovery.
+#[doc(hidden)]
+pub fn expression_large_repeats_are_deferred_exactly(expr: &Expr) -> bool {
+    // Keep this validation predicate structural. Building an exclusion plan
+    // can materialize nested group operations, which would make the safety
+    // check itself capable of eagerly compiling the giant repeat it is meant
+    // to guard. A direct top-level intersection with group-op-free operands
+    // maps to the exact two-coordinate product without such preprocessing.
+    let Expr::Intersect { expr: left, intersect: right } = unwrap_shared(expr) else {
+        return false;
+    };
+    if expr_contains_group_op(left) || expr_contains_group_op(right) {
+        return false;
+    }
+
+    // The existing lazy zero-min-repeat/suffix product can keep exactly one
+    // giant component symbolic while the other coordinate is an ordinary
+    // materialized DFA. Other combinations (two lazy suffix components, or a
+    // lazy suffix paired with a top-level virtual repeat) currently miss that
+    // special path and can fall back to eager compilation. Do not claim those
+    // combinations are safe here.
+    let components_are_safe = match (
+        expression_contains_large_bounded_repeat(left),
+        expression_contains_large_bounded_repeat(right),
+    ) {
+        (true, false) => {
+            large_repeat_is_safe_lazy_zero_min_suffix_component(left)
+                && non_giant_product_component_materializes(right)
+        }
+        (false, true) => {
+            large_repeat_is_safe_lazy_zero_min_suffix_component(right)
+                && non_giant_product_component_materializes(left)
+        }
+        _ => false,
+    };
+    components_are_safe && expression_supports_deferred_dense_runtime(expr)
 }
 
 fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
@@ -12070,6 +12239,28 @@ mod tests {
 
     fn byte_choice(bytes: &[u8]) -> Expr {
         Expr::Choice(bytes.iter().copied().map(byte_expr).collect())
+    }
+
+    #[test]
+    fn lazy_zero_min_repeat_suffix_accepts_last_non_sentinel_bound() {
+        let expr_for = |max| {
+            Expr::Seq(vec![
+                byte_expr(b'['),
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(max),
+                },
+                byte_expr(b'z'),
+            ])
+        };
+
+        assert!(super::large_repeat_is_safe_lazy_zero_min_suffix_component(
+            &expr_for((u32::MAX - 1) as usize),
+        ));
+        assert!(!super::large_repeat_is_safe_lazy_zero_min_suffix_component(
+            &expr_for(u32::MAX as usize),
+        ));
     }
 
     fn terminal_matches(expr: Expr, input: &[u8]) -> bool {

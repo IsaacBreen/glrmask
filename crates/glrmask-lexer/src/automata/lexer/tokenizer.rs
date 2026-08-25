@@ -6462,6 +6462,17 @@ impl Tokenizer {
         let physical_state_count = self.num_states();
         let mut restored = Vec::<(TerminalID, U8Set, usize, u32)>::new();
         for (terminal, body, max) in descriptors {
+            // The same one-byte repeat expression may deliberately have used
+            // the repeat-product runtime when a hybrid proxy left too little
+            // room below the reserved high state bit. Do not misidentify that
+            // proxy as an arithmetic-unit runtime during reconstruction; the
+            // repeat-product restoration pass below will recover it exactly.
+            if !super::compile::virtual_zero_min_unit_repeat_fits_state_ids(
+                max,
+                physical_state_count,
+            ) {
+                continue;
+            }
             if physical_state_count == 1 && self.num_terminals == 1 && terminal == 0 {
                 restored.push((terminal, body, max, 0));
                 continue;

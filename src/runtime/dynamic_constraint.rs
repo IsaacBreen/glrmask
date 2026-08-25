@@ -1844,6 +1844,13 @@ mod tests {
         let loaded = DynamicConstraint::load(&saved).unwrap();
         assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
+
+        let mut original_state = dynamic.start();
+        let mut loaded_state = loaded.start();
+        original_state.commit_token(0).unwrap();
+        loaded_state.commit_token(0).unwrap();
+        assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
+        assert_eq!(loaded_state.mask(), original_state.mask());
     }
 
     #[test]
@@ -1927,6 +1934,503 @@ mod tests {
         .unwrap_err();
         assert!(
             error.to_string().contains("refusing eager materialization"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_unsupported_nested_large_repeat_fails_closed() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Seq(vec![
+                    Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 0,
+                        max: Some(10_000),
+                    },
+                    Expr::U8Seq(b"b".to_vec()),
+                ]),
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_nested_large_repeat_in_lazy_intersection_remains_supported() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::U8Seq(b"[".to_vec()),
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(max),
+                        },
+                        Expr::U8Seq(b"]".to_vec()),
+                    ])),
+                    intersect: Box::new(Expr::Seq(vec![
+                        Expr::U8Seq(b"[".to_vec()),
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(7),
+                        },
+                        Expr::U8Seq(b"]".to_vec()),
+                    ])),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"[".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"[a]".to_vec()),
+            (5, b"[aa]".to_vec()),
+            (6, b"x".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(1_000_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(
+            dynamic.inner.tokenizer.num_states() < 128,
+            "nested giant repeat must stay on the existing lazy intersection path",
+        );
+        assert!(
+            !dynamic
+                .inner
+                .tokenizer
+                .has_virtual_binary_repeat_intersection(),
+            "this regression must exercise the nested repeat-with-suffix lane, not the top-level virtual repeat product",
+        );
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+
+        let mut dynamic_state = dynamic.start();
+        let mut oracle_state = oracle.start();
+        for token in [0, 2, 3] {
+            dynamic_state.commit_token(token).unwrap();
+            oracle_state.commit_token(token).unwrap();
+            assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+            assert_eq!(dynamic_state.mask(), oracle_state.mask());
+        }
+    }
+
+    #[test]
+    fn dynamic_nested_lazy_repeat_rejects_u32_max_sentinel_bound() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::U8Seq(b"[".to_vec()),
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(max),
+                        },
+                        Expr::U8Seq(b"z".to_vec()),
+                    ])),
+                    intersect: Box::new(Expr::Seq(vec![
+                        Expr::U8Seq(b"[".to_vec()),
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(7),
+                        },
+                        Expr::U8Seq(b"z".to_vec()),
+                    ])),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"[".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"z".to_vec()),
+            (4, b"[aaz".to_vec()),
+        ]);
+
+        let supported = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for((u32::MAX - 1) as usize),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        assert!(supported.inner.tokenizer.num_states() < 128);
+
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(u32::MAX as usize),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_hybrid_unit_repeat_near_state_id_limit_uses_repeat_product() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+            ],
+            terminals: vec![
+                Terminal::Expr {
+                    id: 0,
+                    expr: Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 0,
+                        max: Some(((1u64 << 31) - 1) as usize),
+                    },
+                },
+                Terminal::Expr {
+                    id: 1,
+                    expr: Expr::U8Seq(b"b".to_vec()),
+                },
+            ],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        assert!(
+            dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection(),
+            "hybrid physical states leave too little high-bit state-ID space for the arithmetic unit lane",
+        );
+        assert!(dynamic.inner.tokenizer.num_states() < 64);
+
+        let saved = dynamic.save();
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert!(loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn dynamic_top_level_large_repeat_inside_generic_intersection_fails_closed() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::Choice(vec![
+                            Expr::U8Seq(b"ab".to_vec()),
+                            Expr::U8Seq(b"ac".to_vec()),
+                        ])),
+                        min: 0,
+                        max: Some(10_000),
+                    }),
+                    intersect: Box::new(Expr::U8Seq(b"ab".to_vec())),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"ac".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_nested_giant_with_virtual_other_component_fails_closed() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(10_000),
+                        },
+                        Expr::U8Seq(b"b".to_vec()),
+                    ])),
+                    // A root bounded repeat above the direct-product threshold
+                    // becomes a VirtualBoundedRepeat coordinate rather than a
+                    // materialized DFA, so it cannot be the ordinary side of
+                    // the one-lazy-component special path.
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 0,
+                        max: Some(100),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_two_nested_large_repeat_components_fail_closed() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let repeated_suffix = |suffix| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 0,
+                    max: Some(10_000),
+                },
+                Expr::U8Seq(vec![suffix]),
+            ])
+        };
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(repeated_suffix(b'b')),
+                    intersect: Box::new(repeated_suffix(b'c')),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_multiple_giant_terminals_fail_closed_before_hybrid_selection() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+            ],
+            terminals: vec![
+                Terminal::Expr {
+                    id: 0,
+                    expr: Expr::Intersect {
+                        expr: Box::new(Expr::Repeat {
+                            expr: Box::new(Expr::Choice(vec![
+                                Expr::U8Seq(b"a".to_vec()),
+                                Expr::U8Seq(b"bb".to_vec()),
+                            ])),
+                            min: 0,
+                            max: Some(10_000),
+                        }),
+                        intersect: Box::new(Expr::Repeat {
+                            expr: Box::new(Expr::Choice(vec![
+                                Expr::U8Seq(b"a".to_vec()),
+                                Expr::U8Seq(b"cc".to_vec()),
+                            ])),
+                            min: 0,
+                            max: Some(9_000),
+                        }),
+                    },
+                },
+                Terminal::Expr {
+                    id: 1,
+                    expr: Expr::Intersect {
+                        expr: Box::new(Expr::Seq(vec![
+                            Expr::U8Seq(b"[".to_vec()),
+                            Expr::Repeat {
+                                expr: Box::new(Expr::U8Seq(b"x".to_vec())),
+                                min: 0,
+                                max: Some(10_000),
+                            },
+                            Expr::U8Seq(b"]".to_vec()),
+                        ])),
+                        intersect: Box::new(Expr::Seq(vec![
+                            Expr::U8Seq(b"[".to_vec()),
+                            Expr::Repeat {
+                                expr: Box::new(Expr::U8Seq(b"x".to_vec())),
+                                min: 0,
+                                max: Some(7),
+                            },
+                            Expr::U8Seq(b"]".to_vec()),
+                        ])),
+                    },
+                },
+            ],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"bb".to_vec()),
+            (2, b"cc".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"[".to_vec()),
+            (5, b"]".to_vec()),
+        ]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("one terminal per tokenizer"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_large_repeat_with_nested_giant_body_fails_before_body_compilation() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(10_000),
+                        },
+                        Expr::U8Seq(b"b".to_vec()),
+                    ])),
+                    min: 0,
+                    max: Some(10_000),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot represent large bounded-repeat terminal"),
             "unexpected error: {error}",
         );
     }

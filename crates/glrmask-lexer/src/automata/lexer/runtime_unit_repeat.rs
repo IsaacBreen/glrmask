@@ -13,6 +13,24 @@ use crate::grammar::flat::TerminalID;
 /// Virtual tokenizer ids must therefore remain below it.
 const VIRTUAL_STATE_LIMIT: u32 = 1 << 31;
 
+/// Whether an arithmetic unit-repeat runtime with `max` positive residuals
+/// fits beside `physical_state_count` materialized tokenizer states. Dynamic
+/// compilation uses this before mutating the tokenizer so an oversized unit
+/// lane can be routed to the exact repeat-product runtime instead.
+pub(super) fn virtual_unit_repeat_state_ids_fit(
+    max: usize,
+    physical_state_count: u32,
+) -> bool {
+    let Ok(virtual_count) = u32::try_from(max) else {
+        return false;
+    };
+    physical_state_count > 0
+        && physical_state_count < VIRTUAL_STATE_LIMIT
+        && physical_state_count
+            .checked_add(virtual_count)
+            .is_some_and(|end| end <= VIRTUAL_STATE_LIMIT)
+}
+
 #[derive(Debug)]
 pub(super) struct VirtualZeroMinUnitRepeatRuntime {
     body: U8Set,
@@ -160,14 +178,11 @@ impl VirtualZeroMinUnitRepeatRuntime {
         physical_state_count: u32,
         root_state: u32,
     ) -> Option<Self> {
-        let virtual_count = u32::try_from(max).ok()?;
-        let virtual_end = physical_state_count.checked_add(virtual_count)?;
         if body.is_empty()
             || max == 0
             || physical_state_count == 0
             || root_state >= physical_state_count
-            || physical_state_count >= VIRTUAL_STATE_LIMIT
-            || virtual_end > VIRTUAL_STATE_LIMIT
+            || !virtual_unit_repeat_state_ids_fit(max, physical_state_count)
             || terminal >= num_terminals
         {
             return None;
@@ -284,5 +299,21 @@ impl VirtualZeroMinUnitRepeatRuntime {
         (consumed < self.max)
             .then(|| self.encode_positive(consumed + 1))
             .flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{virtual_unit_repeat_state_ids_fit, VIRTUAL_STATE_LIMIT};
+
+    #[test]
+    fn virtual_unit_repeat_state_id_boundary_is_exact() {
+        let physical = 17u32;
+        let last_fitting = (VIRTUAL_STATE_LIMIT - physical) as usize;
+        assert!(virtual_unit_repeat_state_ids_fit(last_fitting, physical));
+        assert!(!virtual_unit_repeat_state_ids_fit(
+            last_fitting + 1,
+            physical,
+        ));
     }
 }
