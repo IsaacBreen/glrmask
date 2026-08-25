@@ -639,6 +639,57 @@ fn virtual_zero_min_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRep
     (spec.min == 0).then_some(spec)
 }
 
+/// Exactly factor an intersection of two bounded repetitions over the same
+/// certified prefix-free body. Prefix-free body languages are codes, so every
+/// word in `L*` has a unique factor count; a common word therefore has one
+/// count which must lie in both intervals.
+///
+/// Keep this rewrite focused on the giant nonzero-minimum case which otherwise
+/// needs the special synchronized virtual runtime. Small ordinary products and
+/// established zero-minimum paths remain unchanged.
+fn factor_same_body_nonzero_repeat_intersection(left: &Expr, right: &Expr) -> Option<Expr> {
+    let Expr::Repeat {
+        expr: left_body,
+        min: left_min,
+        max: Some(left_max),
+    } = unwrap_shared(left)
+    else {
+        return None;
+    };
+    let Expr::Repeat {
+        expr: right_body,
+        min: right_min,
+        max: Some(right_max),
+    } = unwrap_shared(right)
+    else {
+        return None;
+    };
+    if (*left_min == 0 && *right_min == 0)
+        || (*left_max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+            && *right_max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+        || unwrap_shared(left_body) != unwrap_shared(right_body)
+        || expression_contains_large_bounded_repeat(left_body)
+    {
+        return None;
+    }
+
+    // Establish unique factor counts before reasoning about interval overlap.
+    // Without this proof, a non-code body such as {"a", "aa"} can represent
+    // the same byte string with different repetition counts on the two sides.
+    cached_direct_bounded_repeat_base_dfa_unconditionally(left_body, None)?;
+
+    let min = (*left_min).max(*right_min);
+    let max = (*left_max).min(*right_max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    Some(Expr::Repeat {
+        expr: Box::new((**left_body).clone()),
+        min,
+        max: Some(max),
+    })
+}
+
 /// Recognize an exact pure intersection whose two large bounded-repeat
 /// coordinates can remain symbolic at runtime. Each body must be deterministic,
 /// non-nullable and prefix-free; that makes `(completed copies, body state)` a
@@ -769,12 +820,12 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
         Expr::Intersect { expr, intersect } => {
             let expr = factor_regex_expr(*expr);
             let intersect = factor_regex_expr(*intersect);
-            factor_aligned_unit_repeat_intersection(&expr, &intersect).unwrap_or_else(|| {
-                Expr::Intersect {
+            factor_aligned_unit_repeat_intersection(&expr, &intersect)
+                .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
+                .unwrap_or_else(|| Expr::Intersect {
                     expr: Box::new(expr),
                     intersect: Box::new(intersect),
-                }
-            })
+                })
         }
         Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
@@ -13713,6 +13764,110 @@ mod tests {
         };
 
         assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+    }
+
+    #[test]
+    fn factors_same_prefix_free_body_nonzero_repeat_intersection_exactly() {
+        let body = factor_regex_expr(Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]));
+        let original = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 2,
+                max: Some(3),
+            }),
+        };
+        let factored = factor_regex_expr(original.clone());
+        assert_eq!(
+            factored,
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 2,
+                max: Some(3),
+            },
+        );
+
+        // Keep the giant side only barely above the virtualization threshold
+        // so the unfactored expression is still a cheap materialized oracle.
+        let original_dfa = build_regex(std::slice::from_ref(&original)).dfa;
+        let factored_dfa = build_regex(std::slice::from_ref(&factored)).dfa;
+        for input in enumerate_inputs(b"abc", 6) {
+            assert_eq!(
+                dfa_accepts(&original_dfa, &input),
+                dfa_accepts(&factored_dfa, &input),
+                "same-body factoring changed acceptance for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn same_prefix_free_body_disjoint_repeat_intervals_factor_to_empty() {
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 4,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: 1,
+                max: Some(3),
+            }),
+        };
+        assert_eq!(factor_regex_expr(expression), Expr::U8Class(U8Set::empty()));
+    }
+
+    #[test]
+    fn same_body_nonzero_repeat_factoring_requires_prefix_free_body() {
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"aa".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: 2,
+                max: Some(3),
+            }),
+        };
+        assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+
+        // Disjoint factor-count intervals are not enough without unique
+        // decipherability: a^(4097) has both a 4097-copy decomposition and a
+        // 4096-copy decomposition when the body language is {"a", "aa"}.
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"aa".to_vec()),
+        ]);
+        let disjoint = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1),
+            }),
+        };
+        assert!(matches!(factor_regex_expr(disjoint), Expr::Intersect { .. }));
     }
 
     #[test]
