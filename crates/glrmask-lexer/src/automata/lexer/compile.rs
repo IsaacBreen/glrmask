@@ -838,6 +838,167 @@ fn factor_same_body_delimited_literal_repeat_suffix_intersection(
     Some(seq_from_parts(parts))
 }
 
+struct DelimitedFixedSequenceRepeatShape<'a> {
+    prefix: Vec<u8>,
+    body: &'a Expr,
+    min: usize,
+    max: usize,
+    suffix: Vec<U8Set>,
+}
+
+fn delimited_fixed_sequence_repeat_shape(
+    expr: &Expr,
+) -> Option<DelimitedFixedSequenceRepeatShape<'_>> {
+    fn literal_bytes(parts: &[Expr]) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for part in parts {
+            match unwrap_shared(part) {
+                Expr::U8Seq(chunk) => bytes.extend_from_slice(chunk),
+                Expr::Epsilon => {}
+                _ => return None,
+            }
+        }
+        Some(bytes)
+    }
+
+    let Expr::Seq(parts) = unwrap_shared(expr) else {
+        return None;
+    };
+    let mut repeat_index = None;
+    for (index, part) in parts.iter().enumerate() {
+        if matches!(unwrap_shared(part), Expr::Repeat { max: Some(_), .. }) {
+            if repeat_index.replace(index).is_some() {
+                return None;
+            }
+        }
+    }
+    let repeat_index = repeat_index?;
+    let Expr::Repeat {
+        expr: body,
+        min,
+        max: Some(max),
+    } = unwrap_shared(&parts[repeat_index])
+    else {
+        return None;
+    };
+    let prefix = literal_bytes(&parts[..repeat_index])?;
+    let suffix_expr = seq_from_parts(parts[repeat_index + 1..].to_vec());
+    let mut suffix = Vec::new();
+    if !collect_fixed_sequence_byte_sets(&suffix_expr, &mut suffix) || suffix.is_empty() {
+        return None;
+    }
+    Some(DelimitedFixedSequenceRepeatShape {
+        prefix,
+        body,
+        min: *min,
+        max: *max,
+        suffix,
+    })
+}
+
+/// Extend the uniquely-delimited repeat/suffix identity to fixed-length suffix
+/// languages described by literal bytes and byte classes. Their intersection
+/// is exact position-by-position, so no nested group operation or suffix DFA
+/// product is introduced by this rewrite.
+///
+/// Nonliteral fixed-sequence results are emitted only for the zero-minimum
+/// giant lazy lane (or when the repeat disappears entirely). Ordinary
+/// positive-minimum results still require a literal suffix so their existing
+/// direct layered builder and its fixed resource budget remain authoritative.
+fn factor_same_body_delimited_fixed_sequence_repeat_suffix_intersection(
+    left: &Expr,
+    right: &Expr,
+) -> Option<Expr> {
+    let left = delimited_fixed_sequence_repeat_shape(left)?;
+    let right = delimited_fixed_sequence_repeat_shape(right)?;
+    if (left.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+        && right.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+        || left.prefix != right.prefix
+        || unwrap_shared(left.body) != unwrap_shared(right.body)
+        || expression_contains_large_bounded_repeat(left.body)
+    {
+        return None;
+    }
+
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(left.body, None)?;
+    let productive = productive_dfa_states(&base_dfa);
+    let mut body_first = U8Set::empty();
+    for (byte, &target) in base_dfa.states()[0].transitions.iter() {
+        if productive[target as usize] {
+            body_first.insert(byte);
+        }
+    }
+    if !left.suffix[0].is_disjoint(&body_first) || !right.suffix[0].is_disjoint(&body_first) {
+        return None;
+    }
+
+    let min = left.min.max(right.min);
+    let max = left.max.min(right.max);
+    if min > max || left.suffix.len() != right.suffix.len() {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    let mut suffix = Vec::with_capacity(left.suffix.len());
+    for (left_bytes, right_bytes) in left.suffix.iter().zip(&right.suffix) {
+        let bytes = left_bytes.intersection(right_bytes);
+        if bytes.is_empty() {
+            return Some(Expr::U8Class(U8Set::empty()));
+        }
+        suffix.push(bytes);
+    }
+
+    let suffix_is_literal = suffix.iter().all(|bytes| bytes.len() == 1);
+    if max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND {
+        if min != 0 {
+            return None;
+        }
+    } else if max != 0 {
+        // A nonliteral ordinary suffix would switch to the general regex-suffix
+        // builder, whose product footprint is not covered by the literal
+        // layered budget. Leave that shape unchanged for now.
+        if !suffix_is_literal {
+            return None;
+        }
+        let layers = max.checked_add(1)?;
+        let states = layers
+            .checked_mul(base_dfa.num_states())?
+            .checked_add(left.prefix.len())?
+            .checked_add(suffix.len())?;
+        let transitions = max
+            .checked_mul(dfa_transition_count(&base_dfa))?
+            .checked_add(layers)?
+            .checked_add(left.prefix.len())?
+            .checked_add(suffix.len())?;
+        if states > DELIMITED_REPEAT_SUFFIX_MERGED_STATE_BUDGET
+            || transitions > DELIMITED_REPEAT_SUFFIX_MERGED_TRANSITION_BUDGET
+        {
+            return None;
+        }
+    }
+
+    let mut parts = Vec::with_capacity(2 + suffix.len());
+    if !left.prefix.is_empty() {
+        parts.push(Expr::U8Seq(left.prefix));
+    }
+    if max != 0 {
+        parts.push(Expr::Repeat {
+            expr: Box::new((*left.body).clone()),
+            min,
+            max: Some(max),
+        });
+    }
+    if suffix_is_literal {
+        parts.push(Expr::U8Seq(
+            suffix
+                .iter()
+                .map(|bytes| bytes.iter().next().expect("singleton suffix byte set"))
+                .collect(),
+        ));
+    } else {
+        parts.extend(suffix.into_iter().map(Expr::U8Class));
+    }
+    Some(seq_from_parts(parts))
+}
+
 /// Recognize an exact pure intersection whose two large bounded-repeat
 /// coordinates can remain symbolic at runtime. Each body must be deterministic,
 /// non-nullable and prefix-free; that makes `(completed copies, body state)` a
@@ -981,6 +1142,12 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             let expr = factor_regex_expr(*expr);
             let intersect = factor_regex_expr(*intersect);
             factor_same_body_delimited_literal_repeat_suffix_intersection(&expr, &intersect)
+                .or_else(|| {
+                    factor_same_body_delimited_fixed_sequence_repeat_suffix_intersection(
+                        &expr,
+                        &intersect,
+                    )
+                })
                 .or_else(|| factor_aligned_unit_repeat_intersection(&expr, &intersect))
                 .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
                 .unwrap_or_else(|| Expr::Intersect {
@@ -3319,7 +3486,11 @@ impl LazyZeroMinRepeatSuffixComponent {
             if *max >= u32::MAX as usize {
                 return None;
             }
-            let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+            let prefix = if repeat_index == 0 {
+                Vec::new()
+            } else {
+                collect_suffix_bytes(&flat_parts[..repeat_index])?
+            };
             let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
             let body_dfa = compile_expr_to_dfa(body);
             let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
@@ -8138,7 +8309,11 @@ fn zero_min_repeat_suffix_component_trace(
         if *max == 0 {
             continue;
         }
-        let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+        let prefix = if repeat_index == 0 {
+            Vec::new()
+        } else {
+            collect_suffix_bytes(&flat_parts[..repeat_index])?
+        };
         let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
         let body_dfa = compile_expr_to_dfa(body);
         let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
@@ -12930,6 +13105,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn lazy_zero_min_repeat_suffix_accepts_empty_literal_prefix() {
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            Expr::U8Class(U8Set::from_bytes(b"bc")),
+        ]);
+        assert!(
+            super::large_repeat_is_safe_lazy_zero_min_suffix_component(&expr),
+            "a root zero-minimum giant repeat followed by a nonnullable suffix must not require a dummy literal prefix",
+        );
+
+        let mut component = super::LazyZeroMinRepeatSuffixComponent::from_expr(&expr)
+            .expect("zero-prefix lazy repeat+suffix component");
+        assert_eq!(component.prefix_len(), 0);
+        let start = component.start_state();
+        assert!(!component.is_accepting(start));
+        assert!(component.has_future(start));
+        let suffix_target = component
+            .step_uncached(start, b'b')
+            .expect("zero copies may enter the suffix immediately");
+        assert!(component.is_accepting(suffix_target));
+        let trace = super::zero_min_repeat_suffix_component_trace(&expr)
+            .expect("zero-prefix structural trace must rebuild from the expression");
+        assert_eq!(trace.prefix_len, 0);
+    }
+
     fn terminal_matches(expr: Expr, input: &[u8]) -> bool {
         let regex = build_regex(std::slice::from_ref(&expr));
         let tokenizer = Tokenizer {
@@ -15027,6 +15232,82 @@ mod tests {
                 Expr::Intersect { .. }
             ),
             "a sub-threshold merged repeat must still remain unfactored when its exact layered DFA exceeds the explicit budget",
+        );
+    }
+
+    #[test]
+    fn delimited_fixed_sequence_suffixes_intersect_position_by_position() {
+        let giant = super::VIRTUAL_BINARY_REPEAT_MIN_BOUND;
+        let component = |min, max, suffix: &[U8Set]| {
+            let mut parts = vec![Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min,
+                max: Some(max),
+            }];
+            parts.extend(suffix.iter().copied().map(Expr::U8Class));
+            Expr::Seq(parts)
+        };
+
+        let left_suffix = [U8Set::from_bytes(b"bcd"), U8Set::from_bytes(b"xy")];
+        let right_suffix = [U8Set::from_bytes(b"cde"), U8Set::from_bytes(b"yz")];
+        let expression = Expr::Intersect {
+            expr: Box::new(component(0, giant + 5, &left_suffix)),
+            intersect: Box::new(component(0, giant, &right_suffix)),
+        };
+        assert_eq!(
+            factor_regex_expr(expression),
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(giant),
+                },
+                Expr::U8Class(U8Set::from_bytes(b"cd")),
+                Expr::U8Class(U8Set::single(b'y')),
+            ]),
+            "fixed-length suffix intersection must retain a genuinely nonliteral byte class",
+        );
+
+        let different_lengths = Expr::Intersect {
+            expr: Box::new(component(0, giant, &[U8Set::single(b'b')])),
+            intersect: Box::new(component(
+                0,
+                giant,
+                &[U8Set::single(b'b'), U8Set::single(b'c')],
+            )),
+        };
+        assert_eq!(
+            factor_regex_expr(different_lengths),
+            Expr::U8Class(U8Set::empty()),
+            "uniquely-delimited fixed suffixes with different widths cannot match",
+        );
+
+        let disjoint_position = Expr::Intersect {
+            expr: Box::new(component(2, giant, &[U8Set::from_bytes(b"bc")])),
+            intersect: Box::new(component(3, giant + 1, &[U8Set::from_bytes(b"de")])),
+        };
+        assert_eq!(
+            factor_regex_expr(disjoint_position),
+            Expr::U8Class(U8Set::empty()),
+            "a disjoint fixed-sequence suffix position is empty even with positive minima",
+        );
+
+        let unsafe_delimiter = Expr::Intersect {
+            expr: Box::new(component(0, giant, &[U8Set::from_bytes(b"ab")])),
+            intersect: Box::new(component(0, giant, &[U8Set::from_bytes(b"ab")])),
+        };
+        assert!(
+            matches!(factor_regex_expr(unsafe_delimiter), Expr::Intersect { .. }),
+            "a suffix class containing a productive body-start byte must not be treated as a unique delimiter",
+        );
+
+        let positive_min_giant = Expr::Intersect {
+            expr: Box::new(component(2, giant + 1, &[U8Set::from_bytes(b"bc")])),
+            intersect: Box::new(component(3, giant, &[U8Set::from_bytes(b"cd")])),
+        };
+        assert!(
+            matches!(factor_regex_expr(positive_min_giant), Expr::Intersect { .. }),
+            "a nonempty positive-minimum giant result remains unsupported even when the fixed suffix intersection is exact",
         );
     }
 
