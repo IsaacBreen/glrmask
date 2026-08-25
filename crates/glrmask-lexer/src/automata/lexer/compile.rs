@@ -618,6 +618,38 @@ pub fn virtual_binary_bounded_repeat_intersection_descriptor(
     })
 }
 
+/// Recognize one large zero-minimum bounded repetition whose body admits the
+/// exact symbolic repeat coordinate used by the lazy product runtime.
+///
+/// The runtime already implements the exact language intersection of two
+/// bounded-repeat coordinates.  Supplying the same coordinate on both sides
+/// therefore represents the original language exactly by `L = L ∩ L`, while
+/// avoiding `(max + 1) * body_states` materialization.
+#[doc(hidden)]
+pub fn virtual_large_bounded_repeat_descriptor(
+    expr: &Expr,
+) -> Option<VirtualBinaryRepeatIntersectionDescriptor> {
+    let spec = virtual_bounded_repeat_spec(expr)?;
+    let byte_support = expr_u8set(expr);
+    (!byte_support.is_empty()).then_some(VirtualBinaryRepeatIntersectionDescriptor {
+        left: spec.clone(),
+        right: spec,
+        byte_support,
+    })
+}
+
+/// Return the declared upper bound of a top-level bounded repetition large
+/// enough to require symbolic treatment. This deliberately ignores whether
+/// the body is currently supported by the exact symbolic backend: callers use
+/// it to fail closed instead of falling through to the eager repeat compiler.
+#[doc(hidden)]
+pub fn large_top_level_bounded_repeat_bound(expr: &Expr) -> Option<usize> {
+    let Expr::Repeat { max: Some(max), .. } = unwrap_shared(expr) else {
+        return None;
+    };
+    (*max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND).then_some(*max)
+}
+
 /// Exactly normalize two aligned zero-minimum unit-byte repeats.  Iteration
 /// boundaries coincide after every consumed byte, so language intersection
 /// distributes over the bodies and the two upper bounds combine by `min`.

@@ -396,7 +396,7 @@ fn compile_dynamic_from_named(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     Ok(DynamicConstraint::from_alternatives(compiled))
 }
@@ -417,7 +417,7 @@ fn compile_dynamic_from_source(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     Ok(DynamicConstraint::from_alternatives(compiled))
 }
@@ -449,7 +449,7 @@ fn compile_dynamic_serialized_from_source_profiled(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     let compile_ms = compile_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);

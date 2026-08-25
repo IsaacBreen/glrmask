@@ -6526,6 +6526,7 @@ impl Tokenizer {
             .enumerate()
             .filter_map(|(terminal, expression)| {
                 super::compile::virtual_binary_bounded_repeat_intersection_descriptor(expression)
+                    .or_else(|| super::compile::virtual_large_bounded_repeat_descriptor(expression))
                     .map(|descriptor| (terminal as TerminalID, descriptor))
             })
             .collect::<Vec<_>>();

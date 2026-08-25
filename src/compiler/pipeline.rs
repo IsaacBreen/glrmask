@@ -24,9 +24,11 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_supports_deferred_dense_runtime,
     factor_regex_expr,
+    large_top_level_bounded_repeat_bound,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
     virtual_binary_bounded_repeat_intersection_descriptor,
+    virtual_large_bounded_repeat_descriptor,
     virtual_zero_min_unit_repeat_descriptor,
     DeferredPartitionedRegex,
 };
@@ -653,6 +655,54 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 /// construction up front. Keep the historical tokenizer policy for smaller
 /// grammars, where the more deterministic shape is useful at mask time.
 /// Explicit lexer env overrides continue to take precedence over this default.
+fn validate_dynamic_large_repeat_shapes(grammar: &GrammarDef) -> crate::Result<()> {
+    let expressions = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let mut supported_plain_large = Vec::new();
+    for (terminal, expression) in expressions.iter().enumerate() {
+        let Some(bound) = large_top_level_bounded_repeat_bound(expression) else {
+            continue;
+        };
+        let supported = virtual_zero_min_unit_repeat_descriptor(expression).is_some()
+            || virtual_large_bounded_repeat_descriptor(expression).is_some();
+        if !supported {
+            return Err(crate::Error::Compilation(format!(
+                "dynamic lexer cannot represent large bounded-repeat terminal {} with bound {} symbolically; refusing eager materialization",
+                grammar.terminal_display_name(terminal as u32),
+                bound,
+            )));
+        }
+        supported_plain_large.push(terminal as TerminalID);
+    }
+
+    if supported_plain_large.len() > 1 {
+        return Err(crate::Error::Compilation(format!(
+            "dynamic lexer currently supports one symbolic large bounded-repeat terminal per tokenizer; found {} ({})",
+            supported_plain_large.len(),
+            supported_plain_large
+                .iter()
+                .map(|&terminal| grammar.terminal_display_name(terminal))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )));
+    }
+    if !supported_plain_large.is_empty()
+        && expressions
+            .iter()
+            .any(|expression| virtual_binary_bounded_repeat_intersection_descriptor(expression).is_some())
+    {
+        return Err(crate::Error::Compilation(
+            "dynamic lexer currently cannot combine a symbolic large bounded-repeat terminal with a separate symbolic repeat-intersection terminal; refusing eager materialization"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> Option<Tokenizer> {
     const HYBRID_MIN_BOUND: usize = 4_096;
 
@@ -685,6 +735,15 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> Option<Tokenizer> {
                 .map(|(body, max)| (terminal as TerminalID, body, max))
         })
         .collect::<Vec<_>>();
+    let repeat_candidates = expressions
+        .iter()
+        .enumerate()
+        .filter(|(_, expression)| virtual_zero_min_unit_repeat_descriptor(expression).is_none())
+        .filter_map(|(terminal, expression)| {
+            virtual_large_bounded_repeat_descriptor(expression)
+                .map(|descriptor| (terminal as TerminalID, descriptor))
+        })
+        .collect::<Vec<_>>();
     let product_candidates = expressions
         .iter()
         .enumerate()
@@ -693,12 +752,13 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> Option<Tokenizer> {
                 .map(|descriptor| (terminal as TerminalID, descriptor))
         })
         .collect::<Vec<_>>();
-    if unit_candidates.len() + product_candidates.len() != 1 {
+    if unit_candidates.len() + repeat_candidates.len() + product_candidates.len() != 1 {
         return None;
     }
     let virtual_terminal = unit_candidates
         .first()
         .map(|(terminal, _, _)| *terminal)
+        .or_else(|| repeat_candidates.first().map(|(terminal, _)| *terminal))
         .or_else(|| product_candidates.first().map(|(terminal, _)| *terminal))?;
 
     let mut proxy_expressions = expressions.clone();
@@ -727,6 +787,13 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> Option<Tokenizer> {
         tokenizer.install_virtual_zero_min_unit_repeat_component(body, max, virtual_terminal)?;
         profile_kind = "hybrid_virtual_zero_min_unit_repeat";
         profile_bound = max;
+    } else if let Some((_, descriptor)) = repeat_candidates.into_iter().next() {
+        profile_bound = descriptor.left.max as usize;
+        tokenizer.install_virtual_binary_repeat_intersection_component(
+            descriptor,
+            virtual_terminal,
+        )?;
+        profile_kind = "hybrid_virtual_bounded_repeat";
     } else {
         let (_, descriptor) = product_candidates.into_iter().next()?;
         profile_bound = descriptor.left.max.max(descriptor.right.max) as usize;
@@ -4796,7 +4863,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
-) -> DynamicConstraint {
+) -> crate::Result<DynamicConstraint> {
     compile_dynamic_owned_impl(grammar, vocab, default_table_construction, true)
 }
 
@@ -4804,7 +4871,7 @@ pub(crate) fn compile_dynamic_owned_unfinalized_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
-) -> DynamicConstraint {
+) -> crate::Result<DynamicConstraint> {
     compile_dynamic_owned_impl(grammar, vocab, default_table_construction, false)
 }
 
@@ -4813,7 +4880,11 @@ fn compile_dynamic_owned_impl(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
     finalize_runtime: bool,
-) -> DynamicConstraint {
+) -> crate::Result<DynamicConstraint> {
+    // Validate the original terminal expressions before grammar preparation can
+    // rewrite their shape. This is a hard safety boundary: unsupported giant
+    // repeats must never reach the eager `(max + 1) * body_states` compiler.
+    validate_dynamic_large_repeat_shapes(&grammar)?;
     let start_nullable = grammar.start_is_nullable();
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
@@ -4841,7 +4912,7 @@ fn compile_dynamic_owned_impl(
         prepare_grammar(grammar)
     };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
-    run_with_compile_thread_pool(|| {
+    Ok(run_with_compile_thread_pool(|| {
         if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_some() {
             let quotient_started_at = Instant::now();
             let plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
@@ -5087,7 +5158,7 @@ fn compile_dynamic_owned_impl(
             );
         }
         constraint
-    })
+    }))
 }
 
 pub(crate) fn compile_owned_with_table_construction(
