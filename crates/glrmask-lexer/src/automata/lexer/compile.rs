@@ -10424,6 +10424,18 @@ fn build_product_dfa(
     {
         return result;
     }
+    if direct_single_visible_group
+        && pure_binary_intersection(exclusions, intersections)
+        && let Some(result) = try_build_sparse_virtual_repeat_finite_intersection_product(
+            &components,
+            &class_members,
+            &component_class_transitions,
+            capture_trace,
+            profile_timing,
+        )
+    {
+        return result;
+    }
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(if direct_single_visible_group {
         1
@@ -10835,6 +10847,247 @@ fn build_product_class_transitions(
             }
         })
         .collect()
+}
+
+fn finite_product_component_class_row(
+    component: &ProductComponent,
+    class_transitions: &ProductComponentClassTransitions,
+    state: u32,
+    out: &mut Vec<(u8, u32)>,
+) -> Option<()> {
+    out.clear();
+    match (component, class_transitions) {
+        (
+            ProductComponent::Materialized(_)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { .. },
+            ProductComponentClassTransitions::Materialized(rows),
+        ) => out.extend_from_slice(rows.get(state as usize)?),
+        (
+            ProductComponent::VirtualFixedSequence { .. },
+            ProductComponentClassTransitions::VirtualFixedSequence(rows),
+        ) => out.extend_from_slice(rows.get(state as usize)?),
+        _ => return None,
+    }
+    Some(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SparseVirtualRepeatResidual {
+    completed: u32,
+    base_state: u32,
+}
+
+fn sparse_virtual_repeat_class_row(
+    component: &ProductComponent,
+    class_transitions: &ProductComponentClassTransitions,
+    state: SparseVirtualRepeatResidual,
+    out: &mut Vec<(u8, SparseVirtualRepeatResidual)>,
+) -> Option<()> {
+    let ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. } = component else {
+        return None;
+    };
+    let ProductComponentClassTransitions::VirtualBoundedRepeat(base_rows) = class_transitions else {
+        return None;
+    };
+    out.clear();
+    if state.completed >= *max {
+        return Some(());
+    }
+    if base_dfa.finalizers(state.base_state).contains(0) {
+        return Some(());
+    }
+    let dead = explicit_dead_sink_state(base_dfa);
+    for &(class, target_base) in base_rows.get(state.base_state as usize)? {
+        if dead == Some(target_base) {
+            continue;
+        }
+        let target = if base_dfa.finalizers(target_base).contains(0) {
+            SparseVirtualRepeatResidual {
+                completed: state.completed.checked_add(1)?,
+                base_state: 0,
+            }
+        } else {
+            SparseVirtualRepeatResidual {
+                completed: state.completed,
+                base_state: target_base,
+            }
+        };
+        out.push((class, target));
+    }
+    Some(())
+}
+
+fn sparse_virtual_repeat_is_accepting(
+    component: &ProductComponent,
+    state: SparseVirtualRepeatResidual,
+) -> Option<bool> {
+    let ProductComponent::VirtualBoundedRepeat { min, .. } = component else {
+        return None;
+    };
+    Some(state.base_state == 0 && state.completed >= *min)
+}
+
+/// Exact sparse product for a pure binary intersection containing one virtual
+/// bounded-repeat coordinate and one finite-language coordinate.  The generic
+/// product builder intentionally keeps partial tuples so it can represent
+/// unions/exclusions as well as intersections; for a giant repeat that can
+/// leave a repeat-only tuple alive after the other coordinate dies and expand
+/// once per declared repetition.  Here intersection semantics let us require
+/// both coordinates to transition on every byte and discard targets that can
+/// no longer accept, so the finite coordinate's live DAG bounds discovery
+/// independently of the repeat maximum.
+fn try_build_sparse_virtual_repeat_finite_intersection_product(
+    components: &[ProductComponent],
+    class_members: &[Vec<u8>],
+    component_class_transitions: &[ProductComponentClassTransitions],
+    capture_trace: bool,
+    profile_timing: bool,
+) -> Option<(DFA, bool, Option<ProductBuildTrace>)> {
+    if components.len() != 2 || component_class_transitions.len() != 2 {
+        return None;
+    }
+    let repeat_index = match (&components[0], &components[1]) {
+        (ProductComponent::VirtualBoundedRepeat { .. }, ProductComponent::VirtualBoundedRepeat { .. }) => {
+            return None;
+        }
+        (ProductComponent::VirtualBoundedRepeat { .. }, _) => 0usize,
+        (_, ProductComponent::VirtualBoundedRepeat { .. }) => 1usize,
+        _ => return None,
+    };
+    let finite_index = 1 - repeat_index;
+    if !product_component_has_finite_language(&components[finite_index]) {
+        return None;
+    }
+
+    let started_at = profile_timing.then(Instant::now);
+    let start_repeat = SparseVirtualRepeatResidual {
+        completed: 0,
+        base_state: 0,
+    };
+    let start = (start_repeat, 0u32);
+    let mut pair_to_state = FxHashMap::<(SparseVirtualRepeatResidual, u32), u32>::default();
+    pair_to_state.insert(start, 0);
+    let mut pairs = vec![start];
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
+    let start_accepting = sparse_virtual_repeat_is_accepting(
+        &components[repeat_index],
+        start_repeat,
+    )
+    .expect("identified virtual repeat component must expose repeat acceptance")
+        && product_component_state_flags(&components[finite_index], 0).0;
+    let mut accepting = vec![start_accepting];
+    let mut repeat_row = Vec::<(u8, SparseVirtualRepeatResidual)>::new();
+    let mut finite_row = Vec::<(u8, u32)>::new();
+
+    let mut cursor = 0usize;
+    while cursor < pairs.len() {
+        let (repeat_state, finite_state) = pairs[cursor];
+        sparse_virtual_repeat_class_row(
+            &components[repeat_index],
+            &component_class_transitions[repeat_index],
+            repeat_state,
+            &mut repeat_row,
+        )
+        .expect("identified virtual repeat component must expose an exact class row");
+        finite_product_component_class_row(
+            &components[finite_index],
+            &component_class_transitions[finite_index],
+            finite_state,
+            &mut finite_row,
+        )
+        .expect("finite intersection component must expose an exact class row");
+
+        let mut repeat_position = 0usize;
+        let mut finite_position = 0usize;
+        let mut row = Vec::<(u8, u32)>::new();
+        while repeat_position < repeat_row.len() && finite_position < finite_row.len() {
+            let (repeat_class, repeat_target) = repeat_row[repeat_position];
+            let (finite_class, finite_target) = finite_row[finite_position];
+            if repeat_class < finite_class {
+                repeat_position += 1;
+                continue;
+            }
+            if finite_class < repeat_class {
+                finite_position += 1;
+                continue;
+            }
+            repeat_position += 1;
+            finite_position += 1;
+
+            let finite_flags =
+                product_component_state_flags(&components[finite_index], finite_target);
+            if !finite_flags.0 && !finite_flags.1 {
+                continue;
+            }
+            let repeat_accepting = sparse_virtual_repeat_is_accepting(
+                &components[repeat_index],
+                repeat_target,
+            )
+            .expect("identified virtual repeat component must expose repeat acceptance");
+            let pair = (repeat_target, finite_target);
+            let target = if let Some(&target) = pair_to_state.get(&pair) {
+                target
+            } else {
+                let target = u32::try_from(pairs.len())
+                    .expect("sparse exact product exceeded the DFA u32 state-id domain");
+                pair_to_state.insert(pair, target);
+                pairs.push(pair);
+                pending_class_transitions.push(Vec::new());
+                accepting.push(repeat_accepting && finite_flags.0);
+                target
+            };
+            row.push((repeat_class, target));
+        }
+        pending_class_transitions[cursor] = row;
+        cursor += 1;
+    }
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    while dfa.num_states() < pairs.len() {
+        dfa.add_state();
+    }
+    for (state, &is_accepting) in accepting.iter().enumerate() {
+        let mut finalizers = BitSet::new(1);
+        if is_accepting {
+            finalizers.set(0);
+        }
+        dfa.overwrite_state_metadata(state as u32, finalizers, BitSet::new(1));
+    }
+    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
+
+    let expanded = pending_class_transitions
+        .into_iter()
+        .map(|row| {
+            let mut transitions = Vec::new();
+            for (class, target) in row {
+                transitions.extend(
+                    class_members[class as usize]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, target)),
+                );
+            }
+            if transitions.len() > 1 {
+                transitions.sort_unstable_by_key(|entry| entry.0);
+            }
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded) {
+        state.transitions = transitions;
+    }
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] sparse_virtual_repeat_finite_intersection repeat_component={} states={} classes={} total_ms={:.3}",
+            repeat_index,
+            dfa.num_states(),
+            class_members.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let _ = capture_trace;
+    Some((dfa, true, None))
 }
 
 fn pure_binary_intersection(
@@ -12120,6 +12373,93 @@ fn non_giant_product_component_materializes(expr: &Expr) -> bool {
         .is_some()
 }
 
+/// Whether the language accepted by one already-materializable product
+/// component is finite.  We only care about states that are both reachable
+/// from the component root and can still participate in an accepting word;
+/// that live subgraph accepts an infinite language iff it contains a cycle.
+///
+/// This is a resource-safety proof for pairing an exact virtual bounded-repeat
+/// coordinate with an ordinary product coordinate.  If the ordinary language
+/// is finite, its live DAG bounds every product walk independently of the
+/// repeat's declared (possibly billion-scale) upper bound.
+fn single_group_dfa_has_finite_language(dfa: &DFA) -> bool {
+    if dfa.num_states() == 0 {
+        return true;
+    }
+
+    let is_live = |state: u32| {
+        dfa.finalizers(state).contains(0) || dfa.possible_future_group_ids(state).contains(0)
+    };
+    if !is_live(0) {
+        return true;
+    }
+
+    let mut reachable = vec![false; dfa.num_states()];
+    let mut stack = vec![0u32];
+    reachable[0] = true;
+    while let Some(state) = stack.pop() {
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if is_live(target) && !reachable[target as usize] {
+                reachable[target as usize] = true;
+                stack.push(target);
+            }
+        }
+    }
+
+    let mut indegree = vec![0u32; dfa.num_states()];
+    let mut live_count = 0usize;
+    for state in 0..dfa.num_states() as u32 {
+        if !reachable[state as usize] {
+            continue;
+        }
+        live_count += 1;
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if reachable[target as usize] {
+                indegree[target as usize] = indegree[target as usize].saturating_add(1);
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for state in 0..dfa.num_states() as u32 {
+        if reachable[state as usize] && indegree[state as usize] == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut removed = 0usize;
+    while let Some(state) = queue.pop_front() {
+        removed += 1;
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if !reachable[target as usize] {
+                continue;
+            }
+            indegree[target as usize] -= 1;
+            if indegree[target as usize] == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    removed == live_count
+}
+
+fn product_component_has_finite_language(component: &ProductComponent) -> bool {
+    match component {
+        ProductComponent::Materialized(dfa)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+            single_group_dfa_has_finite_language(dfa)
+        }
+        ProductComponent::VirtualFixedSequence { .. } => true,
+        ProductComponent::VirtualBoundedRepeat { .. } => false,
+    }
+}
+
+fn non_giant_product_component_has_finite_language(expr: &Expr) -> bool {
+    if expression_contains_large_bounded_repeat(expr) {
+        return false;
+    }
+    let component = compile_product_component_with_options(expr, true, true, None);
+    product_component_has_finite_language(&component)
+}
+
 /// Prove that every giant repeat inside a binary-intersection terminal stays
 /// on an existing exact lazy component path. This is intentionally stronger
 /// than `expression_supports_deferred_dense_runtime`: a generic binary product
@@ -12149,12 +12489,16 @@ pub fn expression_large_repeats_are_deferred_exactly(expr: &Expr) -> bool {
         expression_contains_large_bounded_repeat(right),
     ) {
         (true, false) => {
-            large_repeat_is_safe_lazy_zero_min_suffix_component(left)
-                && non_giant_product_component_materializes(right)
+            (large_repeat_is_safe_lazy_zero_min_suffix_component(left)
+                && non_giant_product_component_materializes(right))
+                || (virtual_bounded_repeat_spec(left).is_some()
+                    && non_giant_product_component_has_finite_language(right))
         }
         (false, true) => {
-            large_repeat_is_safe_lazy_zero_min_suffix_component(right)
-                && non_giant_product_component_materializes(left)
+            (large_repeat_is_safe_lazy_zero_min_suffix_component(right)
+                && non_giant_product_component_materializes(left))
+                || (virtual_bounded_repeat_spec(right).is_some()
+                    && non_giant_product_component_has_finite_language(left))
         }
         _ => false,
     };
@@ -13845,6 +14189,101 @@ mod tests {
         };
 
         assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+    }
+
+    #[test]
+    fn giant_virtual_repeat_intersection_is_safe_when_other_language_is_finite() {
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]);
+        let giant = Expr::Repeat {
+            expr: Box::new(body.clone()),
+            min: 3,
+            max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+        };
+        let finite = Expr::U8Seq(b"abcabc".to_vec());
+        let expression = Expr::Intersect {
+            expr: Box::new(giant.clone()),
+            intersect: Box::new(finite.clone()),
+        };
+        assert!(super::expression_large_repeats_are_deferred_exactly(
+            &expression
+        ));
+
+        let reversed = Expr::Intersect {
+            expr: Box::new(finite),
+            intersect: Box::new(giant.clone()),
+        };
+        assert!(super::expression_large_repeats_are_deferred_exactly(
+            &reversed
+        ));
+
+        let cyclic = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+            min: 0,
+            max: None,
+        };
+        let unsafe_expression = Expr::Intersect {
+            expr: Box::new(giant),
+            intersect: Box::new(cyclic),
+        };
+        assert!(
+            !super::expression_large_repeats_are_deferred_exactly(&unsafe_expression),
+            "a cyclic ordinary coordinate can keep the product alive through every giant repeat count",
+        );
+    }
+
+    #[test]
+    fn sparse_virtual_repeat_finite_product_does_not_flatten_repeat_state_ids() {
+        const LONG: usize = 65_536;
+        let mut base_dfa = DFA::new(LONG + 1);
+        base_dfa.ensure_group_capacity(1);
+        base_dfa.set_transitions_from_sorted_entries(0, vec![(b'a', LONG as u32)]);
+        let mut finalizers = crate::ds::bitset::BitSet::new(1);
+        finalizers.set(0);
+        base_dfa.overwrite_state_metadata(
+            LONG as u32,
+            finalizers,
+            crate::ds::bitset::BitSet::new(1),
+        );
+        let components = vec![
+            super::ProductComponent::VirtualBoundedRepeat {
+                base_dfa: Arc::new(base_dfa),
+                min: 1,
+                max: 1_000_000_000,
+            },
+            super::ProductComponent::VirtualFixedSequence {
+                byte_sets: Arc::from(
+                    vec![U8Set::single(b'a'); LONG].into_boxed_slice(),
+                ),
+                suffix_live: Arc::from(vec![true; LONG + 1].into_boxed_slice()),
+            },
+        ];
+        let (class_map, class_members) = super::compute_product_equivalence_classes(&components);
+        let class_transitions = super::build_product_class_transitions(&components, &class_map);
+        let (dfa, direct, trace) =
+            super::try_build_sparse_virtual_repeat_finite_intersection_product(
+                &components,
+                &class_members,
+                &class_transitions,
+                false,
+                false,
+            )
+            .expect("virtual repeat with finite coordinate should use sparse exact product");
+
+        // The synthetic base DFA has 65,537 states while the finite side
+        // drives 65,536 completed copies. The old flattened coordinate would
+        // need 65,536 * 65,537 = 4,295,032,832, beyond u32::MAX. The structural
+        // coordinate keeps only the actually reachable O(LONG) pair states.
+        assert!(direct);
+        assert!(trace.is_none());
+        assert_eq!(dfa.num_states(), LONG + 1);
+        let mut state = 0u32;
+        for _ in 0..LONG {
+            state = dfa.step(state, b'a').expect("accepted finite-prefix step");
+        }
+        assert!(dfa.finalizers(state).contains(0));
     }
 
     #[test]

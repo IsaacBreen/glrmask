@@ -2883,7 +2883,83 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_top_level_large_repeat_inside_generic_intersection_fails_closed() {
+    fn dynamic_top_level_large_repeat_inside_finite_intersection_stays_exact() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::Choice(vec![
+                            Expr::U8Seq(b"ab".to_vec()),
+                            Expr::U8Seq(b"c".to_vec()),
+                        ])),
+                        min: 3,
+                        max: Some(max),
+                    }),
+                    // `abcabc` has the unique body factorization
+                    // `ab · c · ab · c`, so it is accepted at count four.
+                    // The finite right coordinate bounds generic product
+                    // discovery independently of the giant repeat maximum.
+                    intersect: Box::new(Expr::U8Seq(b"abcabc".to_vec())),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"abcabc".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"abc".to_vec()),
+            (4, b"x".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(1_000_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(
+            !dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection(),
+            "this case should use the generic product's virtual repeat coordinate, not a runtime sidecar",
+        );
+        assert!(dynamic.inner.tokenizer.num_states() < 64);
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+
+        for sequence in [vec![0u32], vec![1u32, 2, 1, 2], vec![3u32, 3]] {
+            let mut dynamic_state = dynamic.start();
+            let mut oracle_state = oracle.start();
+            for token in sequence {
+                dynamic_state.commit_token(token).unwrap();
+                oracle_state.commit_token(token).unwrap();
+                assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+                assert_eq!(dynamic_state.mask(), oracle_state.mask());
+            }
+        }
+
+        let saved = dynamic.save();
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+        let mut loaded_state = loaded.start();
+        loaded_state.commit_token(0).unwrap();
+        assert!(loaded_state.is_accepting());
+    }
+
+    #[test]
+    fn dynamic_top_level_large_repeat_inside_cyclic_intersection_still_fails_closed() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -2897,19 +2973,20 @@ mod tests {
                 id: 0,
                 expr: Expr::Intersect {
                     expr: Box::new(Expr::Repeat {
-                        expr: Box::new(Expr::Choice(vec![
-                            Expr::U8Seq(b"ab".to_vec()),
-                            Expr::U8Seq(b"ac".to_vec()),
-                        ])),
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
                         min: 0,
                         max: Some(10_000),
                     }),
-                    intersect: Box::new(Expr::U8Seq(b"ab".to_vec())),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 0,
+                        max: None,
+                    }),
                 },
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"ab".to_vec()), (1, b"ac".to_vec())]);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar,
             &vocab,
