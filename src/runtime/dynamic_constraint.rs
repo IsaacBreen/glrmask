@@ -3000,7 +3000,181 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_nested_giant_with_virtual_other_component_fails_closed() {
+    fn dynamic_nested_giant_with_budgeted_other_repeat_materializes_exactly() {
+        use crate::automata::regex::Expr;
+        use crate::ds::u8set::U8Set;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |left_max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(left_max),
+                        },
+                        Expr::U8Seq(b"b".to_vec()),
+                    ])),
+                    // This root repeat is above the generic product's direct
+                    // threshold and would normally stay virtual. Its exact DFA
+                    // is nevertheless tiny enough for the lazy intersection's
+                    // explicitly budgeted ordinary side.
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                        min: 0,
+                        max: Some(100),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"ab".to_vec()),
+            (4, b"x".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(1_000_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(128),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(
+            dynamic.inner.tokenizer.num_states() < 512,
+            "the budgeted ordinary side must bound the lazy product independently of the giant max",
+        );
+        assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            (0..dynamic.inner.tokenizer.num_states() as u32)
+                .any(|state| dynamic.inner.tokenizer.has_compressed_transition_state(state)),
+            "this regression must exercise the compressed lazy-repeat intersection runtime",
+        );
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+
+        for sequence in [vec![2u32], vec![3u32], vec![1u32, 2], vec![0u32, 0, 2]] {
+            let mut dynamic_state = dynamic.start();
+            let mut oracle_state = oracle.start();
+            for token in sequence {
+                dynamic_state.commit_token(token).unwrap();
+                oracle_state.commit_token(token).unwrap();
+                assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+                assert_eq!(dynamic_state.mask(), oracle_state.mask());
+            }
+        }
+
+        let mut dynamic_boundary = dynamic.start();
+        let mut oracle_boundary = oracle.start();
+        for _ in 0..49 {
+            dynamic_boundary.commit_token(1).unwrap();
+            oracle_boundary.commit_token(1).unwrap();
+        }
+        assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
+        assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
+        assert!(!dynamic_boundary.is_accepting());
+
+        // At 98 leading 'a' bytes, one more 'a' is still live but another
+        // two-byte "aa" token would overshoot the right-hand 100-byte cap once
+        // the required trailing 'b' is included.
+        let mut dynamic_overrun = dynamic_boundary.clone();
+        let mut oracle_overrun = oracle_boundary.clone();
+        assert!(dynamic_overrun.commit_token(1).is_err());
+        assert!(oracle_overrun.commit_token(1).is_err());
+
+        dynamic_boundary.commit_token(0).unwrap();
+        oracle_boundary.commit_token(0).unwrap();
+        assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
+        assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
+        assert!(!dynamic_boundary.is_accepting());
+        dynamic_boundary.commit_token(2).unwrap();
+        oracle_boundary.commit_token(2).unwrap();
+        assert!(dynamic_boundary.is_accepting());
+        assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
+        assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
+
+        let saved = dynamic.save();
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+        assert!(
+            (0..loaded.inner.tokenizer.num_states() as u32)
+                .any(|state| loaded.inner.tokenizer.has_compressed_transition_state(state)),
+            "save/load must preserve the compressed lazy-repeat runtime",
+        );
+        let mut loaded_state = loaded.start();
+        let mut dynamic_state = dynamic.start();
+        let mut oracle_state = oracle.start();
+        loaded_state.commit_token(3).unwrap();
+        dynamic_state.commit_token(3).unwrap();
+        oracle_state.commit_token(3).unwrap();
+        assert!(loaded_state.is_accepting());
+        assert_eq!(loaded_state.is_accepting(), dynamic_state.is_accepting());
+        assert_eq!(loaded_state.is_accepting(), oracle_state.is_accepting());
+        assert_eq!(loaded_state.mask(), dynamic_state.mask());
+        assert_eq!(loaded_state.mask(), oracle_state.mask());
+    }
+
+    #[test]
+    fn dynamic_nested_giant_with_oversized_non_giant_other_still_fails_closed() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let mut long_body = vec![b'a'; 31];
+        long_body.push(b'b');
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Seq(vec![
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                            min: 0,
+                            max: Some(10_000),
+                        },
+                        Expr::U8Seq(b"b".to_vec()),
+                    ])),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(long_body)),
+                        min: 0,
+                        max: Some(4_095),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("nested large bounded repeat"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_nested_giant_with_cyclic_other_still_fails_closed() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -3021,14 +3195,10 @@ mod tests {
                         },
                         Expr::U8Seq(b"b".to_vec()),
                     ])),
-                    // A root bounded repeat above the direct-product threshold
-                    // becomes a VirtualBoundedRepeat coordinate rather than a
-                    // materialized DFA, so it cannot be the ordinary side of
-                    // the one-lazy-component special path.
                     intersect: Box::new(Expr::Repeat {
                         expr: Box::new(Expr::U8Seq(b"a".to_vec())),
                         min: 0,
-                        max: Some(100),
+                        max: None,
                     }),
                 },
             }],

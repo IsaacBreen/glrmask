@@ -2804,10 +2804,16 @@ fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> 
 }
 
 fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
+    if min > max {
+        return None;
+    }
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
-    let total_states = (max + 1).checked_mul(base_state_count)?;
+    let layers = max.checked_add(1)?;
+    let total_states = layers.checked_mul(base_state_count)?;
+    u32::try_from(total_states).ok()?;
+    let productive = productive_dfa_states(base_dfa);
     let mut dfa = DFA::new(total_states);
     dfa.ensure_group_capacity(1);
 
@@ -2819,7 +2825,7 @@ fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) ->
             if state_id == 0 && copies_done >= min {
                 finalizers.set(0);
             }
-            if copies_done < max {
+            if copies_done < max && productive[state_id] {
                 future.set(0);
             }
             dfa.overwrite_state_metadata(mapped_state, finalizers, future);
@@ -8789,7 +8795,11 @@ fn augment_product_dfa_from_seed_tuples(
                             class_active[class] = true;
                             used_classes.push(class);
                         }
-                        if component_dead_states[component] != Some(target) {
+                        let (accepting, future) =
+                            product_component_state_flags(&trace.components[component], target);
+                        if component_dead_states[component] != Some(target)
+                            && (accepting || future)
+                        {
                             class_buffers[class].push((component_id, target));
                         }
                     }
@@ -8844,6 +8854,20 @@ fn augment_product_dfa_from_seed_tuples(
         let mut byte_transitions = Vec::new();
         for &class in &used_classes {
             let next_tuple = class_buffers[class].clone();
+            // In a pure binary intersection, a byte transition is viable only
+            // when both component coordinates survive.  A materialized target
+            // with neither acceptance nor future is language-dead even if it
+            // is not the canonical full-byte sink, so dropping that coordinate
+            // must kill the whole product transition rather than leave the
+            // giant partner running alone through arbitrarily many layers.
+            if trace.components.len() == 2
+                && pure_binary_intersection(exclusions, intersections)
+                && next_tuple.len() != 2
+            {
+                class_buffers[class].clear();
+                class_active[class] = false;
+                continue;
+            }
             let (target, inserted) = add_product_tuple_state(
                 dfa,
                 trace,
@@ -11845,6 +11869,26 @@ fn compact_zero_min_repeat_is_accepting(
 /// shape. The helper is deliberately fail-closed: any transition requiring a
 /// genuine residual set returns `None`, and the general lazy product remains
 /// authoritative.
+fn select_lazy_zero_min_repeat_suffix_component(
+    expressions: &[Expr],
+) -> Option<(usize, LazyZeroMinRepeatSuffixComponent)> {
+    let giant_indices = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expr)| {
+            expression_contains_large_bounded_repeat(expr).then_some(index)
+        })
+        .collect::<SmallVec<[usize; 2]>>();
+    match giant_indices.as_slice() {
+        [index] => LazyZeroMinRepeatSuffixComponent::from_expr(&expressions[*index])
+            .map(|lazy| (*index, lazy)),
+        [] => expressions.iter().enumerate().find_map(|(index, expr)| {
+            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
+        }),
+        _ => None,
+    }
+}
+
 fn try_compile_compact_zero_min_repeat_intersection_runtime(
     plan: &ExclusionCompilePlan,
     profile_timing: bool,
@@ -11857,16 +11901,13 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     }
 
     let started_at = profile_timing.then(Instant::now);
-    let (lazy_index, lazy) = plan
-        .compiled_exprs
-        .iter()
-        .enumerate()
-        .find_map(|(index, expr)| {
-            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
-        })?;
+    let (lazy_index, lazy) =
+        select_lazy_zero_min_repeat_suffix_component(&plan.compiled_exprs)?;
     let other_index = 1 - lazy_index;
-    let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], false, true, None);
+    let other_component = compile_lazy_intersection_materialized_other_component(
+        &plan.compiled_exprs[other_index],
+        false,
+    )?;
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
     let (class_map, class_members) =
@@ -11895,7 +11936,9 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     while cursor < pairs.len() {
         let (lazy_state, other_state) = pairs[cursor];
         for &(class, other_target) in &other_transitions[other_state as usize] {
-            if other_dead == Some(other_target) {
+            if other_dead == Some(other_target)
+                || !single_group_dfa_state_is_live(other_dfa, other_target)
+            {
                 continue;
             }
             let representative = *class_members[class as usize].first()?;
@@ -11998,16 +12041,13 @@ fn try_compile_lazy_zero_min_repeat_intersection(
     }
 
     let started_at = profile_timing.then(Instant::now);
-    let (lazy_index, mut lazy) = plan
-        .compiled_exprs
-        .iter()
-        .enumerate()
-        .find_map(|(index, expr)| {
-            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
-        })?;
+    let (lazy_index, mut lazy) =
+        select_lazy_zero_min_repeat_suffix_component(&plan.compiled_exprs)?;
     let other_index = 1 - lazy_index;
-    let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true, None);
+    let other_component = compile_lazy_intersection_materialized_other_component(
+        &plan.compiled_exprs[other_index],
+        true,
+    )?;
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
 
@@ -12027,9 +12067,8 @@ fn try_compile_lazy_zero_min_repeat_intersection(
     }
 
     let mut pairs = vec![(0u32, 0u32)];
-    let other_state_count = other_dfa.num_states();
-    let mut state_by_lazy_other = vec![u32::MAX; lazy.num_states() * other_state_count];
-    state_by_lazy_other[0] = 0;
+    let mut state_by_lazy_other = FxHashMap::<(u32, u32), u32>::default();
+    state_by_lazy_other.insert((0, 0), 0);
     let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
     let discovery_started_at = profile_timing.then(Instant::now);
     let mut cursor = 0usize;
@@ -12042,7 +12081,9 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         };
         let mut row = Vec::with_capacity(other_transitions[other_state as usize].len());
         for &(class, other_target) in &other_transitions[other_state as usize] {
-            if other_dead == Some(other_target) {
+            if other_dead == Some(other_target)
+                || !single_group_dfa_state_is_live(other_dfa, other_target)
+            {
                 continue;
             }
             let representative = *class_members[class as usize].first()?;
@@ -12054,19 +12095,12 @@ fn try_compile_lazy_zero_min_repeat_intersection(
             } else {
                 (other_target, lazy_target)
             };
-            let required_cells = lazy.num_states().checked_mul(other_state_count)?;
-            if state_by_lazy_other.len() < required_cells {
-                state_by_lazy_other.resize(required_cells, u32::MAX);
-            }
-            let lookup_index = (lazy_target as usize)
-                .checked_mul(other_state_count)?
-                .checked_add(other_target as usize)?;
-            let existing = state_by_lazy_other[lookup_index];
-            let target = if existing != u32::MAX {
+            let lookup_key = (lazy_target, other_target);
+            let target = if let Some(&existing) = state_by_lazy_other.get(&lookup_key) {
                 existing
             } else {
                 let target = u32::try_from(pairs.len()).ok()?;
-                state_by_lazy_other[lookup_index] = target;
+                state_by_lazy_other.insert(lookup_key, target);
                 pairs.push(target_pair);
                 pending_class_transitions.push(Vec::new());
                 let added = dfa.add_state();
@@ -12130,31 +12164,27 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         .materialized_dfa()
         .map(DFA::num_states)?;
     let other_states = other_dfa.num_states();
-    let (components, left_states, right_states) = if lazy_index == 0 {
-        (vec![lazy_component, other_component], lazy_states, other_states)
+    let components = if lazy_index == 0 {
+        vec![lazy_component, other_component]
     } else {
-        (vec![other_component, lazy_component], other_states, lazy_states)
+        vec![other_component, lazy_component]
     };
     let component_ms = component_started_at
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let lookup_started_at = profile_timing.then(Instant::now);
-    let pair_cells = left_states.checked_mul(right_states)?;
-    let mut dense_lookup = vec![u32::MAX; pair_cells];
+    let mut sparse_lookup = FxHashMap::<ProductStateTuple, u32>::default();
+    sparse_lookup.reserve(pairs.len());
     for (state, &(left, right)) in pairs.iter().enumerate() {
-        let index = (left as usize)
-            .checked_mul(right_states)?
-            .checked_add(right as usize)?;
-        dense_lookup[index] = state as u32;
+        let mut tuple = ProductStateTuple::new();
+        tuple.push((0, left));
+        tuple.push((1, right));
+        sparse_lookup.insert(tuple, state as u32);
     }
     let trace = ProductBuildTrace {
         components,
         state_tuples: ProductStateTuples::DenseBinary(pairs),
-        state_lookup: ProductStateLookup::DenseBinary {
-            right_states,
-            state_by_pair: dense_lookup,
-            overflow: FxHashMap::default(),
-        },
+        state_lookup: ProductStateLookup::Hash(sparse_lookup),
         direct_single_visible_group: true,
     };
     let lookup_ms = lookup_started_at
@@ -12364,13 +12394,63 @@ fn large_repeat_is_safe_lazy_zero_min_suffix_component(expr: &Expr) -> bool {
     LazyZeroMinRepeatSuffixComponent::from_expr(expr).is_some()
 }
 
-fn non_giant_product_component_materializes(expr: &Expr) -> bool {
+const LAZY_INTERSECTION_OTHER_MATERIALIZED_STATE_BUDGET: usize = 100_000;
+const LAZY_INTERSECTION_OTHER_MATERIALIZED_TRANSITION_BUDGET: usize = 1_000_000;
+
+/// Compile the ordinary side of the lazy zero-min-repeat/suffix intersection
+/// lane without ever expanding a giant bounded repeat. The generic product
+/// compiler represents deterministic bounded roots with `VirtualBoundedRepeat`
+/// once their bound reaches the direct-repeat threshold, even when the exact
+/// materialized DFA would still be tiny. That representation choice should not
+/// force the lazy intersection lane to reject an otherwise cheap component.
+///
+/// Keep the ordinary coordinate independent of the giant repeat bound. Its
+/// accepted language must be finite, so its live DFA is acyclic and bounds the
+/// length of every synchronized product walk. For a non-giant virtual repeat,
+/// the new layered expansion is additionally limited by its exact
+/// `(max + 1) * base_states` footprint and a conservative
+/// `max * base_transitions` bound. Validation calls this same helper, so an
+/// expression cannot be admitted under a weaker proof than compilation uses.
+fn compile_lazy_intersection_materialized_other_component(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> Option<ProductComponent> {
     if expression_contains_large_bounded_repeat(expr) {
-        return false;
+        return None;
     }
-    compile_product_component_with_options(expr, true, true, None)
-        .materialized_dfa()
-        .is_some()
+    let component =
+        compile_product_component_with_options(expr, preserve_coordinates, true, None);
+    let component = match component {
+        component @ (ProductComponent::Materialized(_)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { .. }) => Some(component),
+        ProductComponent::VirtualBoundedRepeat {
+            base_dfa,
+            min,
+            max,
+        } => {
+            let total_states = (max as usize + 1).checked_mul(base_dfa.num_states())?;
+            let total_transitions = (max as usize).checked_mul(dfa_transition_count(&base_dfa))?;
+            if total_states > LAZY_INTERSECTION_OTHER_MATERIALIZED_STATE_BUDGET
+                || total_transitions > LAZY_INTERSECTION_OTHER_MATERIALIZED_TRANSITION_BUDGET
+            {
+                return None;
+            }
+            let mut dfa = build_bounded_repeat_dfa_from_base(
+                base_dfa.as_ref(),
+                min as usize,
+                max as usize,
+            )?;
+            dfa.ensure_group_capacity(1);
+            dfa.set_group_u8set(0, expr_u8set(expr));
+            Some(ProductComponent::Materialized(Arc::new(dfa)))
+        }
+        ProductComponent::VirtualFixedSequence { .. } => None,
+    }?;
+    product_component_has_finite_language(&component).then_some(component)
+}
+
+fn can_materialize_lazy_intersection_other_component(expr: &Expr) -> bool {
+    compile_lazy_intersection_materialized_other_component(expr, true).is_some()
 }
 
 /// Whether the language accepted by one already-materializable product
@@ -12382,14 +12462,16 @@ fn non_giant_product_component_materializes(expr: &Expr) -> bool {
 /// coordinate with an ordinary product coordinate.  If the ordinary language
 /// is finite, its live DAG bounds every product walk independently of the
 /// repeat's declared (possibly billion-scale) upper bound.
+fn single_group_dfa_state_is_live(dfa: &DFA, state: u32) -> bool {
+    dfa.finalizers(state).contains(0) || dfa.possible_future_group_ids(state).contains(0)
+}
+
 fn single_group_dfa_has_finite_language(dfa: &DFA) -> bool {
     if dfa.num_states() == 0 {
         return true;
     }
 
-    let is_live = |state: u32| {
-        dfa.finalizers(state).contains(0) || dfa.possible_future_group_ids(state).contains(0)
-    };
+    let is_live = |state: u32| single_group_dfa_state_is_live(dfa, state);
     if !is_live(0) {
         return true;
     }
@@ -12480,23 +12562,24 @@ pub fn expression_large_repeats_are_deferred_exactly(expr: &Expr) -> bool {
 
     // The existing lazy zero-min-repeat/suffix product can keep exactly one
     // giant component symbolic while the other coordinate is an ordinary
-    // materialized DFA. Other combinations (two lazy suffix components, or a
-    // lazy suffix paired with a top-level virtual repeat) currently miss that
-    // special path and can fall back to eager compilation. Do not claim those
-    // combinations are safe here.
+    // materialized DFA. A non-giant bounded root that the generic product would
+    // normally keep virtual is also allowed when the shared helper above proves
+    // its exact materialization fits the fixed state/transition budgets. Two
+    // genuinely symbolic giant coordinates still miss this special path and
+    // must remain fail-closed here.
     let components_are_safe = match (
         expression_contains_large_bounded_repeat(left),
         expression_contains_large_bounded_repeat(right),
     ) {
         (true, false) => {
             (large_repeat_is_safe_lazy_zero_min_suffix_component(left)
-                && non_giant_product_component_materializes(right))
+                && can_materialize_lazy_intersection_other_component(right))
                 || (virtual_bounded_repeat_spec(left).is_some()
                     && non_giant_product_component_has_finite_language(right))
         }
         (false, true) => {
             (large_repeat_is_safe_lazy_zero_min_suffix_component(right)
-                && non_giant_product_component_materializes(left))
+                && can_materialize_lazy_intersection_other_component(left))
                 || (virtual_bounded_repeat_spec(right).is_some()
                     && non_giant_product_component_has_finite_language(left))
         }
@@ -13220,6 +13303,10 @@ mod tests {
         let (lazy, trace) = super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
             .expect("eligible repeat intersection must compile lazily");
         assert_eq!(trace.state_tuples.len(), lazy.num_states());
+        assert!(matches!(
+            &trace.state_lookup,
+            super::ProductStateLookup::Hash(_)
+        ));
 
         for input in enumerate_inputs(b"[]abx", 9) {
             assert_eq!(
@@ -13227,6 +13314,178 @@ mod tests {
                 dfa_state_observation(&eager, 0, &input),
                 "lazy product differed for input {input:?}",
             );
+        }
+    }
+
+    #[test]
+    fn lazy_repeat_selector_prefers_the_unique_giant_operand() {
+        let component = |max| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(max),
+                },
+                byte_expr(b'b'),
+            ])
+        };
+
+        let non_giant = component(super::LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND);
+        let giant = component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND);
+        let (index, _) = super::select_lazy_zero_min_repeat_suffix_component(&[
+            non_giant.clone(),
+            giant.clone(),
+        ])
+        .expect("the unique giant lazy component must be selected");
+        assert_eq!(index, 1);
+
+        let (index, _) = super::select_lazy_zero_min_repeat_suffix_component(&[
+            giant.clone(),
+            non_giant,
+        ])
+        .expect("operand reversal must still select the unique giant component");
+        assert_eq!(index, 0);
+
+        assert!(
+            super::select_lazy_zero_min_repeat_suffix_component(&[
+                giant,
+                component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1),
+            ])
+            .is_none(),
+            "the one-lazy-component lane must not claim two giant coordinates",
+        );
+    }
+
+    fn finite_dfa_with_partial_nonlive_x_cycle() -> DFA {
+        // Language is exactly {"b"}. The x-edge enters a partial dead cycle
+        // rather than the canonical 256-byte sink, so product construction
+        // must use finalizer/future liveness rather than sink identity alone.
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, U8Set::from_bytes(b"bx"));
+        dfa.set_transitions_from_sorted_entries(0, vec![(b'b', 1), (b'x', 2)]);
+        dfa.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+
+        let mut start_future = crate::ds::bitset::BitSet::new(1);
+        start_future.set(0);
+        dfa.overwrite_state_metadata(
+            0,
+            crate::ds::bitset::BitSet::new(1),
+            start_future,
+        );
+        let mut accepting = crate::ds::bitset::BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(
+            1,
+            accepting,
+            crate::ds::bitset::BitSet::new(1),
+        );
+        dfa.overwrite_state_metadata(
+            2,
+            crate::ds::bitset::BitSet::new(1),
+            crate::ds::bitset::BitSet::new(1),
+        );
+        dfa
+    }
+
+    #[test]
+    fn lazy_giant_intersection_prunes_partial_nonlive_other_cycles() {
+        let giant = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'x')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            byte_expr(b'b'),
+        ]);
+        let ordinary = Expr::Dfa(Arc::new(finite_dfa_with_partial_nonlive_x_cycle()));
+
+        for reversed in [false, true] {
+            let expression = if reversed {
+                Expr::Intersect {
+                    expr: Box::new(ordinary.clone()),
+                    intersect: Box::new(giant.clone()),
+                }
+            } else {
+                Expr::Intersect {
+                    expr: Box::new(giant.clone()),
+                    intersect: Box::new(ordinary.clone()),
+                }
+            };
+            assert!(
+                super::expression_large_repeats_are_deferred_exactly(&expression),
+                "finite ordinary language should admit the lazy giant lane in either operand order",
+            );
+
+            let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+                std::slice::from_ref(&expression),
+            ));
+            let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+            let (mut lazy, mut trace) =
+                super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
+                    .expect("partial dead cycle must not reject the exact lazy product");
+            assert_eq!(lazy.num_states(), 2, "only start and accepted 'b' survive");
+            assert!(lazy.step(0, b'x').is_none());
+            assert!(matches!(
+                &trace.state_lookup,
+                super::ProductStateLookup::Hash(_)
+            ));
+
+            for input in [b"".as_slice(), b"b", b"x", b"xx", b"xb"] {
+                let semantic_observation = |dfa: &DFA| {
+                    let (_, accepting, future) = dfa_state_observation(dfa, 0, input);
+                    (accepting, future)
+                };
+                assert_eq!(
+                    semantic_observation(&lazy),
+                    semantic_observation(&eager),
+                    "lazy product differed for reversed={reversed} input={input:?}",
+                );
+            }
+
+            // Retained structural traces can be augmented from seed tuples.
+            // Seed an impossible residual containing the ordinary dead-cycle
+            // state and verify augmentation cannot turn it into a giant-only
+            // x-walk after the ordinary coordinate is pruned.
+            let ordinary_index = if reversed { 0usize } else { 1usize };
+            let mut seed = super::ProductStateTuple::new();
+            seed.push((0, if ordinary_index == 0 { 2 } else { 0 }));
+            seed.push((1, if ordinary_index == 1 { 2 } else { 0 }));
+            let seed_state = lazy.num_states() as u32;
+            super::augment_product_dfa_from_seed_tuples(
+                &mut lazy,
+                &mut trace,
+                &[seed],
+                &plan.exclusions,
+                &plan.intersections,
+            );
+            assert!(lazy.num_states() > seed_state as usize);
+            assert!(lazy.step(seed_state, b'x').is_none());
+
+            let compact = super::try_compile_compact_zero_min_repeat_intersection_runtime(
+                &plan,
+                false,
+            )
+            .expect("compact lazy lane should also prune the partial dead cycle");
+            let (compact_dfa, compact_segment) = compact.finish_runtime();
+            let compact = Tokenizer::from_parts_with_compressed_transitions(
+                compact_dfa,
+                1,
+                None,
+                compact_segment.into_iter().collect(),
+            );
+            let eager = Tokenizer::from_parts(eager, 1, None);
+            for input in [b"".as_slice(), b"b", b"x", b"xx", b"xb"] {
+                let semantic_observation = |tokenizer: &Tokenizer| {
+                    let (matches, futures, _) = tokenizer_observation(tokenizer, input);
+                    (matches, futures)
+                };
+                assert_eq!(
+                    semantic_observation(&compact),
+                    semantic_observation(&eager),
+                    "compact product differed for reversed={reversed} input={input:?}",
+                );
+            }
         }
     }
 
@@ -14284,6 +14543,115 @@ mod tests {
             state = dfa.step(state, b'a').expect("accepted finite-prefix step");
         }
         assert!(dfa.finalizers(state).contains(0));
+    }
+
+    #[test]
+    fn lazy_giant_intersection_materializes_only_budgeted_non_giant_repeat_side() {
+        let lazy_giant = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            byte_expr(b'b'),
+        ]);
+
+        // This root repeat is above the generic product's direct-repeat
+        // threshold, so it would normally be represented as a
+        // VirtualBoundedRepeat. Its exact DFA is still tiny, however, and the
+        // lazy intersection lane may materialize it under the shared budget.
+        let small_other = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 0,
+            max: Some(100),
+        };
+        assert!(super::expression_large_repeats_are_deferred_exactly(
+            &Expr::Intersect {
+                expr: Box::new(lazy_giant.clone()),
+                intersect: Box::new(small_other),
+            }
+        ));
+
+        // Stay one below the giant-repeat threshold so the right side remains
+        // nominally "non-giant", but make its exact bounded-repeat DFA exceed
+        // the 100k materialization budget. Validation must continue to fail
+        // closed instead of treating every non-giant repeat as cheap.
+        let oversized_other = Expr::Repeat {
+            expr: Box::new(Expr::U8Seq({
+                let mut bytes = vec![b'a'; 31];
+                bytes.push(b'b');
+                bytes
+            })),
+            min: 0,
+            max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND - 1),
+        };
+        assert!(
+            !super::expression_large_repeats_are_deferred_exactly(&Expr::Intersect {
+                expr: Box::new(lazy_giant),
+                intersect: Box::new(oversized_other),
+            }),
+            "a non-giant repeat whose exact DFA exceeds the fixed budget must remain fail-closed",
+        );
+
+        let cyclic_other = Expr::Repeat {
+            expr: Box::new(byte_expr(b'a')),
+            min: 0,
+            max: None,
+        };
+        let lazy_giant = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            byte_expr(b'b'),
+        ]);
+        assert!(
+            !super::expression_large_repeats_are_deferred_exactly(&Expr::Intersect {
+                expr: Box::new(lazy_giant),
+                intersect: Box::new(cyclic_other),
+            }),
+            "a cyclic ordinary coordinate can keep the giant lazy counter live through every layer",
+        );
+    }
+
+    #[test]
+    fn bounded_repeat_from_base_rejects_layer_and_state_id_overflow() {
+        let base = super::compile_expr_to_dfa(&byte_expr(b'a'));
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 2, 1).is_none(),
+            "an invalid repeat interval must fail closed",
+        );
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 0, usize::MAX).is_none(),
+            "max + 1 must fail closed instead of overflowing",
+        );
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 0, u32::MAX as usize).is_none(),
+            "layered state IDs must fit in u32",
+        );
+    }
+
+    #[test]
+    fn bounded_repeat_from_base_marks_only_productive_residuals_future_live() {
+        let mut base = DFA::new(3);
+        base.ensure_group_capacity(1);
+        base.set_transitions_from_sorted_entries(0, vec![(b'a', 1), (b'x', 2)]);
+        base.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        base.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+
+        let repeated = super::build_bounded_repeat_dfa_from_base(&base, 0, 2)
+            .expect("small repeat must materialize");
+        let dead = repeated.step(0, b'x').expect("dead residual remains represented");
+        assert!(
+            !repeated.possible_future_group_ids(dead).contains(0),
+            "a reachable base residual with no path to a finalizer must not advertise a repeat future",
+        );
+        let live = repeated.step(0, b'a').expect("accepted copy transition");
+        assert!(repeated.finalizers(live).contains(0));
+        assert!(repeated.possible_future_group_ids(live).contains(0));
     }
 
     #[test]
