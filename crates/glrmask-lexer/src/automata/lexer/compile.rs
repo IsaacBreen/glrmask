@@ -743,13 +743,13 @@ pub fn large_top_level_bounded_repeat_bound(expr: &Expr) -> Option<usize> {
     (*max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND).then_some(*max)
 }
 
-/// Exactly normalize two aligned zero-minimum unit-byte repeats.  Iteration
-/// boundaries coincide after every consumed byte, so language intersection
-/// distributes over the bodies and the two upper bounds combine by `min`.
+/// Exactly normalize two aligned unit-byte repeats. Iteration boundaries
+/// coincide after every consumed byte, so the byte language and repetition
+/// count intervals can be intersected independently.
 fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<Expr> {
     let Expr::Repeat {
         expr: left_body,
-        min: 0,
+        min: left_min,
         max: Some(left_max),
     } = unwrap_shared(left)
     else {
@@ -757,7 +757,7 @@ fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<
     };
     let Expr::Repeat {
         expr: right_body,
-        min: 0,
+        min: right_min,
         max: Some(right_max),
     } = unwrap_shared(right)
     else {
@@ -766,10 +766,22 @@ fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<
 
     let body = exact_unit_byte_language(left_body)?
         .intersection(&exact_unit_byte_language(right_body)?);
+    let min = (*left_min).max(*right_min);
+    let max = (*left_max).min(*right_max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    if body.is_empty() {
+        return Some(if min == 0 {
+            Expr::Epsilon
+        } else {
+            Expr::U8Class(U8Set::empty())
+        });
+    }
     Some(Expr::Repeat {
         expr: Box::new(Expr::U8Class(body)),
-        min: 0,
-        max: Some((*left_max).min(*right_max)),
+        min,
+        max: Some(max),
     })
 }
 
@@ -13745,6 +13757,75 @@ mod tests {
                 "factoring changed acceptance for {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn factors_aligned_nonzero_unit_repeat_intersection_exactly() {
+        let left = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 2,
+            max: Some(5),
+        };
+        let right = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+            min: 3,
+            max: Some(4),
+        };
+        let original = Expr::Intersect {
+            expr: Box::new(left),
+            intersect: Box::new(right),
+        };
+        let factored = factor_regex_expr(original.clone());
+        assert_eq!(
+            factored,
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::single(b'b'))),
+                min: 3,
+                max: Some(4),
+            },
+        );
+        for input in enumerate_inputs(b"abc", 6) {
+            assert_eq!(
+                terminal_matches(original.clone(), &input),
+                terminal_matches(factored.clone(), &input),
+                "nonzero aligned-unit factoring changed acceptance for {input:?}",
+            );
+        }
+
+        let disjoint = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: Some(2),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 3,
+                max: Some(4),
+            }),
+        };
+        assert_eq!(factor_regex_expr(disjoint), Expr::U8Class(U8Set::empty()));
+    }
+
+    #[test]
+    fn aligned_unit_empty_byte_intersection_normalizes_fully() {
+        let expression_for = |min| Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+        };
+        assert_eq!(factor_regex_expr(expression_for(0)), Expr::Epsilon);
+        assert_eq!(
+            factor_regex_expr(expression_for(1)),
+            Expr::U8Class(U8Set::empty()),
+        );
     }
 
     #[test]

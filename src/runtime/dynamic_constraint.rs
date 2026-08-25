@@ -2371,6 +2371,140 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_aligned_nonzero_unit_intersection_uses_arithmetic_runtime() {
+        use crate::automata::regex::Expr;
+        use crate::ds::u8set::U8Set;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |left_min, left_max, right_min, right_max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                        min: left_min,
+                        max: Some(left_max),
+                    }),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                        min: right_min,
+                        max: Some(right_max),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"b".to_vec()),
+            (1, b"bb".to_vec()),
+            (2, b"bbb".to_vec()),
+            (3, b"a".to_vec()),
+            (4, b"c".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(500_000_000, 1_000_000_000, 600_000_000, 900_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(5, 20, 10, 15),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+            "aligned one-byte intersection should factor to the arithmetic repeat runtime",
+        );
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+
+        let mut dynamic_state = dynamic.start();
+        let mut oracle_state = oracle.start();
+        for token in [2u32, 1, 0] {
+            dynamic_state.commit_token(token).unwrap();
+            oracle_state.commit_token(token).unwrap();
+            assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+            assert_eq!(dynamic_state.mask(), oracle_state.mask());
+        }
+
+        let saved = dynamic.save();
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert!(!loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn dynamic_giant_aligned_unit_empty_intersection_normalizes_before_validation() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |min| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min,
+                        max: Some(1_000_000_000),
+                    }),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                        min,
+                        max: Some(1_000_000_000),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+
+        for min in [0usize, 1] {
+            let dynamic =
+                crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+                    grammar_for(min),
+                    &vocab,
+                    crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+                )
+                .unwrap();
+            assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
+            assert!(
+                dynamic
+                    .inner
+                    .tokenizer
+                    .virtual_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                    .is_none(),
+                "empty/epsilon normalization should remove the giant repeat entirely",
+            );
+            let saved = dynamic.save();
+            let loaded = DynamicConstraint::load(&saved).unwrap();
+            assert_eq!(loaded.start().mask(), dynamic.start().mask());
+        }
+    }
+
+    #[test]
     fn dynamic_distinct_nonzero_min_giant_intersection_still_fails_closed() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
