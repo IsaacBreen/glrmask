@@ -18,6 +18,7 @@ use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
     VirtualBinaryRepeatIntersectionRuntime, VirtualStateAllocator,
 };
+use super::runtime_residual::VirtualResidualRuntime;
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
@@ -136,6 +137,11 @@ pub struct Tokenizer {
     /// allocated across all components.
     #[serde(default, skip)]
     pub(super) virtual_repeat_intersections: Vec<Arc<VirtualBinaryRepeatIntersectionRuntime>>,
+    /// General exact lazy regex residuals. Specialized repeat runtimes are
+    /// selected first; this is the compositional fallback for expressions that
+    /// should stay symbolic instead of being eagerly determinized.
+    #[serde(default, skip)]
+    pub(super) virtual_residuals: Vec<Arc<VirtualResidualRuntime>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -929,6 +935,7 @@ pub mod artifact_serde {
                 packed_compressed_transition_segments: Arc::from([]),
                 virtual_unit_repeat: None,
                 virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -956,6 +963,7 @@ pub mod artifact_serde {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -1667,6 +1675,7 @@ pub mod artifact_serde {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -2979,6 +2988,7 @@ pub mod artifact_serde {
             packed_compressed_transition_segments: Arc::from(packed_segments.into_boxed_slice()),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -3333,6 +3343,7 @@ pub mod artifact_serde {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures,
             matched_terminals_cache: OnceLock::new(),
@@ -3614,6 +3625,7 @@ pub mod compact_artifact_serde {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -4154,6 +4166,7 @@ mod packed_artifact_serde {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5251,6 +5264,7 @@ impl Tokenizer {
                 packed_compressed_transition_segments: Arc::from([]),
                 virtual_unit_repeat: None,
                 virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: self.exprs.clone(),
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -5391,6 +5405,7 @@ impl Tokenizer {
                 packed_compressed_transition_segments: Arc::from([]),
                 virtual_unit_repeat: None,
                 virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -5541,6 +5556,7 @@ impl Tokenizer {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5788,6 +5804,7 @@ impl Tokenizer {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5819,6 +5836,7 @@ impl Tokenizer {
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
             virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -6070,6 +6088,13 @@ impl Tokenizer {
     #[inline]
     pub fn state_has_epsilon_transitions(&self, state: u32) -> bool {
         if self
+            .virtual_residuals
+            .iter()
+            .any(|runtime| runtime.handles_state(state))
+        {
+            return false;
+        }
+        if self
             .virtual_repeat_intersections
             .iter()
             .any(|runtime| runtime.handles_state(state))
@@ -6105,6 +6130,13 @@ impl Tokenizer {
     #[inline]
     fn state_finalizers(&self, state: u32) -> &BitSet {
         if let Some(finalizers) = self
+            .virtual_residuals
+            .iter()
+            .find_map(|runtime| runtime.finalizers(state))
+        {
+            return finalizers;
+        }
+        if let Some(finalizers) = self
             .virtual_repeat_intersections
             .iter()
             .find_map(|runtime| runtime.finalizers(state))
@@ -6138,6 +6170,13 @@ impl Tokenizer {
 
     #[inline]
     fn state_futures(&self, state: u32) -> &BitSet {
+        if let Some(futures) = self
+            .virtual_residuals
+            .iter()
+            .find_map(|runtime| runtime.futures(state))
+        {
+            return futures;
+        }
         if let Some(futures) = self
             .virtual_repeat_intersections
             .iter()
@@ -7504,6 +7543,15 @@ impl Tokenizer {
 
     fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
         if let Some(transitions) = self
+            .virtual_residuals
+            .iter()
+            .find_map(|runtime| runtime.transitions(state))
+        {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::VirtualProduct(transitions.into_iter()),
+            };
+        }
+        if let Some(transitions) = self
             .virtual_repeat_intersections
             .iter()
             .find_map(|runtime| runtime.transitions(state))
@@ -8130,6 +8178,11 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        for runtime in &self.virtual_residuals {
+            if runtime.handles_state(state) {
+                return runtime.step(state, byte);
+            }
+        }
         for runtime in &self.virtual_repeat_intersections {
             if runtime.handles_state(state) {
                 return runtime.step(state, byte);
@@ -8161,6 +8214,7 @@ impl Tokenizer {
             || !self.packed_runtime_transition_segments.is_empty();
         if self.virtual_unit_repeat.is_none()
             && self.virtual_repeat_intersections.is_empty()
+            && self.virtual_residuals.is_empty()
             && !has_any_compressed
             && self.packed_runtime_metadata.is_none()
             && self.packed_runtime_metadata_segments.is_empty()
@@ -8226,6 +8280,13 @@ impl Tokenizer {
 
     #[inline]
     pub fn matched_terminals_slice(&self, state: u32) -> &[TerminalID] {
+        if let Some(finalizers) = self
+            .virtual_residuals
+            .iter()
+            .find_map(|runtime| runtime.finalizer_list(state))
+        {
+            return finalizers;
+        }
         if let Some(finalizers) = self
             .virtual_repeat_intersections
             .iter()
