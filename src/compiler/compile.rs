@@ -1,7 +1,9 @@
 pub(crate) use super::pipeline::{
     compile_owned,
     compile_owned_profiled_with_table_construction,
+    compile_owned_profiled_with_table_construction_and_hidden_special_token_ids,
     compile_owned_with_table_construction,
+    compile_owned_with_table_construction_and_hidden_special_token_ids,
     compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,

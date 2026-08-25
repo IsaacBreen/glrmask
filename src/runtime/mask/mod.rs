@@ -2823,6 +2823,60 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
+    /// Project one composed parser stack into a retained component. LR table
+    /// composition is a relation, not a bijection. The allocation-free view
+    /// path is exact only while every visited outer LR state has one private
+    /// preimage in this component. If a merged state has several preimages,
+    /// decline this fast path and let `fill_mask_dynamic` evaluate the composed
+    /// GLR table directly. Choosing a representative, or independently taking
+    /// the Cartesian product of per-state preimages, can invent private stacks
+    /// because ambiguity may be correlated across stack levels.
+    fn segmented_project_parser_gss(
+        &self,
+        component: &crate::runtime::SegmentedParserComponent,
+        global_tokenizer_state: u32,
+        top_first: &[u32],
+        acc: &TerminalsDisallowed,
+    ) -> Result<Option<(u32, ParserGSS)>, ()> {
+        let Some(local_tokenizer_state) =
+            self.segmented_local_tokenizer_state(component, global_tokenizer_state)
+        else {
+            return Ok(None);
+        };
+
+        let mut local_top_first = SmallVec::<[u32; 64]>::new();
+        for &global_parser_state in top_first {
+            match component.local_parser_states(global_parser_state) {
+                [] => break,
+                [local] => local_top_first.push(*local),
+                _ => return Err(()),
+            }
+        }
+
+        let mut local_disallowed = self.segmented_local_disallowed(component, acc);
+        if local_top_first.is_empty() {
+            // The synthetic component-union root contributes only from the
+            // outer parent view. Child entry itself belongs to boundary B.
+            if component.terminal_offset() != 0 {
+                return Ok(None);
+            }
+            if let Some(terminal) = component.root_disallowed_terminal {
+                local_disallowed =
+                    local_disallowed.with_insert(local_tokenizer_state, terminal);
+            }
+            return Ok(Some((
+                local_tokenizer_state,
+                ParserGSS::from_single_stack(Vec::new(), local_disallowed),
+            )));
+        }
+
+        local_top_first.reverse();
+        Ok(Some((
+            local_tokenizer_state,
+            ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed),
+        )))
+    }
+
     /// Exact common-case evaluator for a segmented component parser union.
     ///
     /// Each retained component keeps its original token/TSID coordinate and
@@ -2854,53 +2908,29 @@ impl<'a> ConstraintState<'a> {
         );
 
         for (&global_tokenizer_state, gss) in self.state.iter() {
-            let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                for (component_index, component) in
-                    overlay.segmented_parser_components.iter().enumerate()
-                {
-                    let Some(local_tokenizer_state) =
-                        self.segmented_local_tokenizer_state(component, global_tokenizer_state)
-                    else {
-                        continue;
-                    };
-
-                    let mut local_top_first = SmallVec::<[u32; 64]>::new();
-                    for &global_parser_state in top_first {
-                        let local = component
-                            .local_parser_state(global_parser_state)
-                            .unwrap_or(u32::MAX);
-                        if local == u32::MAX {
-                            break;
-                        }
-                        local_top_first.push(local);
-                    }
-                    let mut local_disallowed = self.segmented_local_disallowed(component, acc);
-                    let local_gss = if local_top_first.is_empty() {
-                        // The composed empty parser stack belongs to component
-                        // zero. Child entry is boundary language B, not the
-                        // standalone child root A_i. Scoped ignore at the
-                        // synthetic component root is suppressed through the
-                        // view metadata rather than by mutating the retained
-                        // source parser DWA.
-                        if component.terminal_offset() != 0 {
+            let mut projection_exact = true;
+            let traversal_complete =
+                gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                    for (component_index, component) in
+                        overlay.segmented_parser_components.iter().enumerate()
+                    {
+                        let projection = self.segmented_project_parser_gss(
+                            component,
+                            global_tokenizer_state,
+                            top_first,
+                            acc,
+                        );
+                        let Ok(Some((local_tokenizer_state, local_gss))) = projection else {
+                            if projection.is_err() {
+                                projection_exact = false;
+                            }
                             continue;
-                        }
-                        if let Some(terminal) = component.root_disallowed_terminal {
-                            local_disallowed = local_disallowed.with_insert(
-                                local_tokenizer_state,
-                                terminal,
-                            );
-                        }
-                        ParserGSS::from_single_stack(Vec::new(), local_disallowed)
-                    } else {
-                        local_top_first.reverse();
-                        ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed)
-                    };
-                    projected_states[component_index]
-                        .merge_insert(local_tokenizer_state, local_gss);
-                }
-            });
-            if !complete {
+                        };
+                        projected_states[component_index]
+                            .merge_insert(local_tokenizer_state, local_gss);
+                    }
+                });
+            if !traversal_complete || !projection_exact {
                 return false;
             }
         }

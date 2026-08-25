@@ -573,6 +573,8 @@ impl DynamicConstraint {
             deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
             token_bytes: payload.token_bytes,
             packed_token_bytes: None,
+            exact_bound_vocab_entries: std::sync::OnceLock::new(),
+            late_bind_vocab: std::sync::OnceLock::new(),
             internal_token_bytes: BTreeMap::new(),
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
@@ -623,6 +625,7 @@ impl DynamicConstraint {
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
             deferred_composition_metadata_blob: None,
+            deferred_composition_metadata: Default::default(),
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         };

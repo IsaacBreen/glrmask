@@ -3216,6 +3216,7 @@ fn compile_prepared_with_profile(
         GlrTableConstruction::ExperimentalCoreMerged,
         None,
         None,
+        None,
     )
 }
 
@@ -3225,6 +3226,7 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
     protected_shift_terminals: Option<Arc<Vec<u32>>>,
+    hidden_special_token_ids: Option<Arc<BTreeSet<u32>>>,
 ) -> (Constraint, CompilePhaseProfile) {
     // Synthetic lexer planning may certify a smaller exact tokenizer against
     // the vocabulary. Install the cross-crate certifier before planning on
@@ -4471,7 +4473,17 @@ fn compile_prepared_with_profile_and_table_construction(
 
         let finalize_started_at = Instant::now();
         let token_bytes = vocab.entries_arc();
-        let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
+        let all_special_token_terminals = collect_special_token_terminals(&prepared_grammar);
+        let special_token_terminals = hidden_special_token_ids.as_deref().map_or_else(
+            || all_special_token_terminals.clone(),
+            |hidden| {
+                all_special_token_terminals
+                    .iter()
+                    .filter(|special| !hidden.contains(&special.token_id))
+                    .cloned()
+                    .collect()
+            },
+        );
         let ignore_expr = prepared_grammar
             .ignore_terminal
             .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
@@ -4565,6 +4577,8 @@ fn compile_prepared_with_profile_and_table_construction(
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
             packed_token_bytes: None,
+            exact_bound_vocab_entries: std::sync::OnceLock::new(),
+            late_bind_vocab: std::sync::OnceLock::from((*vocab).clone()),
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
@@ -4615,9 +4629,29 @@ fn compile_prepared_with_profile_and_table_construction(
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
             deferred_composition_metadata_blob: None,
+            deferred_composition_metadata: Default::default(),
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         };
+        if let Some(hidden) = hidden_special_token_ids.as_deref() {
+            for &token_id in hidden {
+                let Some(slot) = constraint
+                    .original_token_to_internal
+                    .get_mut(token_id as usize)
+                else {
+                    continue;
+                };
+                let internal = *slot;
+                if internal == u32::MAX {
+                    continue;
+                }
+                *slot = u32::MAX;
+                if let Some(group) = constraint.internal_token_to_tokens.get_mut(internal as usize) {
+                    group.retain(|&token| token != token_id);
+                }
+            }
+        }
+
         if build_packed_parser_dwa {
             let packed_started_at = std::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
                 .is_some()
@@ -4645,6 +4679,7 @@ fn compile_prepared_with_profile_and_table_construction(
             caches.install(&mut constraint);
         }
         let mut constraint = finalize_constraint(constraint);
+        constraint.special_token_terminals = all_special_token_terminals;
         crate::runtime::compact_large_non_dwa_weight_runtime(&mut constraint);
         // Keep compiler-produced packed runtime storage in its owned form.
         // Converting it to a backed artifact representation here would perform
@@ -4996,6 +5031,29 @@ pub(crate) fn compile_owned_with_table_construction(
     constraint
 }
 
+pub(crate) fn compile_owned_with_table_construction_and_hidden_special_token_ids(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    hidden_special_token_ids: BTreeSet<u32>,
+) -> Constraint {
+    let start_nullable = grammar.start_is_nullable();
+    let prepared_grammar = prepare_grammar(grammar);
+    let (mut constraint, profile) = compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+        None,
+        None,
+        Some(Arc::new(hidden_special_token_ids)),
+    );
+    constraint.table.set_embedded_start_nullable(start_nullable);
+    if compile_profile_summary_enabled() || compile_top_profile_enabled() {
+        emit_compile_profile_summary(None, None, &profile);
+    }
+    constraint
+}
+
 pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal_names(
     grammar: GrammarDef,
     vocab: &Vocab,
@@ -5024,6 +5082,7 @@ pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal
         default_table_construction,
         None,
         Some(Arc::new(protected_shift_terminals)),
+        None,
     );
     constraint.table.set_embedded_start_nullable(start_nullable);
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
@@ -5042,6 +5101,7 @@ pub(crate) fn compile_prepared_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
         None,
         None,
     )
@@ -5066,6 +5126,7 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
         GlrTableConstruction::ExperimentalCoreMerged,
         Some(adaptive),
         None,
+        None,
     )
     .0;
     constraint
@@ -5085,6 +5146,31 @@ pub(crate) fn compile_owned_profiled(
     )
 }
 
+pub(crate) fn compile_owned_profiled_with_table_construction_and_hidden_special_token_ids(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    hidden_special_token_ids: BTreeSet<u32>,
+) -> (Constraint, CompilePhaseProfile) {
+    let start_nullable = grammar.start_is_nullable();
+    let total_started_at = Instant::now();
+    let prepare_started_at = Instant::now();
+    let prepared_grammar = prepare_grammar(grammar);
+    let prepare_ms = elapsed_ms(prepare_started_at);
+    let (mut constraint, mut profile) = compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+        None,
+        None,
+        Some(Arc::new(hidden_special_token_ids)),
+    );
+    constraint.table.set_embedded_start_nullable(start_nullable);
+    profile.prepare_ms = prepare_ms;
+    profile.total_ms = elapsed_ms(total_started_at);
+    (constraint, profile)
+}
+
 pub(crate) fn compile_owned_profiled_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
@@ -5100,6 +5186,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
         None,
         None,
     );

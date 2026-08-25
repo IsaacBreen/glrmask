@@ -92,6 +92,19 @@ impl Vocab {
         }
     }
 
+    /// Reuse an already-owned canonical token-byte map without copying every
+    /// token. This is an internal bridge for compiled constraints that need a
+    /// transient `Vocab` view during late composition.
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn from_entries_arc(entries: Arc<BTreeMap<u32, Vec<u8>>>) -> Self {
+        Self {
+            entries,
+            compiler_cache: Arc::new(VocabCompilerCache::default()),
+            max_token_byte_len: OnceLock::new(),
+        }
+    }
+
     /// Maximum byte length of any token in this vocabulary.
     ///
     /// Fresh vocabularies compute this while being constructed. Deserialized

@@ -4198,8 +4198,21 @@ impl SegmentedParserComponent {
     }
 
     #[inline]
+    pub(crate) fn local_parser_states(&self, outer: u32) -> &[u32] {
+        self.view.lrids.locals_for_outer(outer)
+    }
+
+    #[inline]
     pub(crate) fn local_parser_state(&self, outer: u32) -> Option<u32> {
-        self.view.lrids.to_local(outer)
+        match self.local_parser_states(outer) {
+            [local] => Some(*local),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn outer_parser_states(&self, local: u32) -> &[u32] {
+        self.view.lrids.outers_for_local(local)
     }
 
     #[inline]
@@ -4328,6 +4341,19 @@ impl DeferredCompositionMetadataBytes {
             } => &backing[*start..*start + *len],
         }
     }
+}
+
+/// Lazily decoded composition-only metadata shared by loaded constraints.
+/// Runtime masking never touches this cache; late binding initializes it once
+/// from `deferred_composition_metadata_blob` and then borrows the immutable
+/// contents directly without cloning the full `Constraint`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CompositionMetadataCache {
+    pub(crate) composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
+    pub(crate) composition_parser_characterizations_by_terminal:
+        Vec<Option<TerminalCharacterization>>,
+    pub(crate) composition_grammar_summary: Option<CompositionGrammarSummary>,
 }
 
 /// Compact metadata for an unresolved external-grammar slot.
@@ -4467,6 +4493,9 @@ pub struct Constraint {
     /// original compile. A later linker can append only the boundary-induced
     /// reductions/rereductions and recompile affected terminal templates,
     /// rather than re-solving the component's reduction closure from scratch.
+    /// Current artifacts omit this larger redundant cache: persisted raw
+    /// composition templates plus additive linker deltas are sufficient for
+    /// fast exact late binding.
     pub(crate) composition_parser_characterizations_by_terminal:
         Vec<Option<TerminalCharacterization>>,
     /// Composition-time grammar adjacency summary. Stored in the outer
@@ -4528,6 +4557,16 @@ pub struct Constraint {
     /// constraints own the same indexed representation alongside the source
     /// map used by compiler/composition code.
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
+    /// Runtime-only exact vocabulary identity established by a successful
+    /// packed-vs-canonical comparison during late binding. Loaded constraints
+    /// keep their packed token bytes; this cache lets repeated binds reuse the
+    /// exact proof and rebind clones to the canonical vocabulary Arc in O(1).
+    pub(crate) exact_bound_vocab_entries: OnceLock<Arc<BTreeMap<u32, Vec<u8>>>>,
+    /// Runtime-only shared late-bind vocabulary view. `Vocab` clones share
+    /// pure vocabulary-derived compiler indexes, so repeated binds do not
+    /// rebuild the same adjacent-byte/suffix indexes from identical token
+    /// bytes.
+    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
     // Compiler-side scratch/result metadata only. No runtime or composition
     // path reads this field; composition rebuilds the map for its result when
     // needed. Persisting it duplicated token bytes inside every constraint.
@@ -4678,6 +4717,10 @@ pub struct Constraint {
     /// loads keep this cold section backed by the artifact and materialize it
     /// only if the constraint is later used as a composition component.
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    /// Shared lazily decoded view of `deferred_composition_metadata_blob`.
+    /// This keeps ordinary load cold while allowing late binding to reuse the
+    /// metadata without manufacturing a mutable full-Constraint clone.
+    pub(crate) deferred_composition_metadata: OnceLock<Arc<CompositionMetadataCache>>,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through
@@ -4838,6 +4881,7 @@ pub(crate) struct ConstraintSerde {
     /// original compile. A later linker can append only the boundary-induced
     /// reductions/rereductions and recompile affected terminal templates,
     /// rather than re-solving the component's reduction closure from scratch.
+    /// Current artifacts deliberately omit this larger redundant cache.
     #[serde(skip, default)]
     pub(crate) composition_parser_characterizations_by_terminal:
         Vec<Option<TerminalCharacterization>>,
@@ -4917,6 +4961,15 @@ pub(crate) struct ConstraintSerde {
     /// map used by compiler/composition code.
     #[serde(skip, default)]
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
+    /// Runtime-only exact vocabulary identity established by a successful
+    /// packed-vs-canonical comparison during late binding. Loaded constraints
+    /// keep their packed token bytes; this cache lets repeated binds reuse the
+    /// exact proof and rebind clones to the canonical vocabulary Arc in O(1).
+    #[serde(skip, default)]
+    pub(crate) exact_bound_vocab_entries: OnceLock<Arc<BTreeMap<u32, Vec<u8>>>>,
+    /// Runtime-only shared late-bind vocabulary/index cache.
+    #[serde(skip, default)]
+    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
     // Compiler-side scratch/result metadata only. No runtime or composition
     // path reads this field; composition rebuilds the map for its result when
     // needed. Persisting it duplicated token bytes inside every constraint.
@@ -5116,6 +5169,8 @@ pub(crate) struct ConstraintSerde {
     /// only if the constraint is later used as a composition component.
     #[serde(skip, default)]
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    #[serde(skip, default)]
+    pub(crate) deferred_composition_metadata: OnceLock<Arc<CompositionMetadataCache>>,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through

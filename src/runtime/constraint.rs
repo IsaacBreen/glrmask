@@ -1095,24 +1095,34 @@ impl Constraint {
 
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
         let vocab_entries = vocab.entries_arc();
-        if Arc::ptr_eq(&self.token_bytes, &vocab_entries) {
+        if Arc::ptr_eq(&self.token_bytes, &vocab_entries)
+            || self
+                .exact_bound_vocab_entries
+                .get()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &vocab_entries))
+        {
             return true;
         }
-        if let Some(packed) = &self.packed_token_bytes {
+        let matches = if let Some(packed) = &self.packed_token_bytes {
             // Validate the supplied vocabulary directly. Do not manufacture a
             // second packed wire through a process-global cache: that made the
             // first load for a vocabulary pay work that every later benchmark
             // load got for free. PackedTokenBytes iteration is zero-copy, so a
-            // fresh load now pays only the actual exact comparison.
-            return packed.len() == vocab.entries_map().len()
+            // fresh load pays only the actual exact comparison once.
+            packed.len() == vocab.entries_map().len()
                 && packed.iter().eq(
                     vocab
                         .entries_map()
                         .iter()
                         .map(|(&token_id, bytes)| (token_id, bytes.as_slice())),
-                );
+                )
+        } else {
+            self.token_bytes.as_ref() == vocab.entries_map()
+        };
+        if matches {
+            let _ = self.exact_bound_vocab_entries.set(vocab_entries);
         }
-        self.token_bytes.as_ref() == vocab.entries_map()
+        matches
     }
 
     #[inline]
@@ -1150,6 +1160,14 @@ impl Constraint {
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
+            return Ok(());
+        }
+        if self
+            .exact_bound_vocab_entries
+            .get()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &entries))
+        {
+            self.token_bytes = entries;
             return Ok(());
         }
         if !self.token_bytes_match_vocab(vocab) {
@@ -10811,6 +10829,39 @@ mod dense_internal_token_mask_tests {
         assert!(Arc::ptr_eq(&constraint.token_bytes, &bound));
     }
     use crate::Vocab;
+
+    #[test]
+    fn loaded_constraint_caches_exact_vocab_identity_for_repeated_late_binding() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let compiled = Constraint::from_glrm_grammar(
+            "start start;\nt A ::= \"a\";\nnt start ::= A;\n",
+            &vocab,
+        )
+        .unwrap();
+        let loaded = Constraint::load(&compiled.save()).unwrap();
+        let entries = vocab.entries_arc();
+
+        assert!(loaded.packed_token_bytes.is_some());
+        assert!(loaded.exact_bound_vocab_entries.get().is_none());
+        assert!(loaded.token_bytes_match_vocab(&vocab));
+        assert!(
+            loaded
+                .exact_bound_vocab_entries
+                .get()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &entries)),
+        );
+
+        let mut clone = loaded.clone();
+        clone.bind_vocab_exact(&vocab).unwrap();
+        assert!(Arc::ptr_eq(&clone.token_bytes, &entries));
+        assert!(
+            loaded
+                .exact_bound_vocab_entries
+                .get()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &entries)),
+            "rebinding a clone must not consume or invalidate the parent's exact proof",
+        );
+    }
 
     #[test]
     fn empty_wide_frontier_lookup_does_not_materialize_deferred_dynamic_vocab() {

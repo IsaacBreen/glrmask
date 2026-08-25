@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
+    compile_owned_profiled_with_table_construction_and_hidden_special_token_ids,
     compile_owned_with_table_construction,
+    compile_owned_with_table_construction_and_hidden_special_token_ids,
     compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
@@ -221,6 +223,7 @@ fn compile_from_named_grammar(
     source_kind: &str,
     default_table_construction: GlrTableConstruction,
     end_token_ids: &[u32],
+    hidden_special_token_ids: &[u32],
 ) -> crate::Result<Constraint> {
     let import_started_at = std::time::Instant::now();
     let mut factored = factor_named_grammar(named);
@@ -229,11 +232,13 @@ fn compile_from_named_grammar(
     let import_ms = import_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() || compile_top_profile_enabled() {
+        let hidden_special_token_ids = hidden_special_token_ids.iter().copied().collect();
         let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {
-            compile_owned_profiled_with_table_construction(
+            compile_owned_profiled_with_table_construction_and_hidden_special_token_ids(
                 grammar,
                 vocab,
                 default_table_construction,
+                hidden_special_token_ids,
             )
         })?;
         constraint.table.set_embedded_end_token_ids(end_token_ids);
@@ -241,8 +246,14 @@ fn compile_from_named_grammar(
         return Ok(constraint);
     }
 
+    let hidden_special_token_ids = hidden_special_token_ids.iter().copied().collect();
     let mut constraint = crate::error::catch_internal_invariant(|| {
-        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+        compile_owned_with_table_construction_and_hidden_special_token_ids(
+            grammar,
+            vocab,
+            default_table_construction,
+            hidden_special_token_ids,
+        )
     })?;
     constraint.table.set_embedded_end_token_ids(end_token_ids);
     Ok(constraint)
@@ -652,6 +663,7 @@ impl Constraint {
                 "json_schema_dynamic_value",
                 GlrTableConstruction::LegacyRowBisim,
                 end_token_ids,
+                &[placeholder_token_id],
             )?;
             let placeholder_terminal = parent
                 .special_token_terminals
@@ -717,6 +729,7 @@ impl Constraint {
                 "json_schema_programmatic_value",
                 GlrTableConstruction::LegacyRowBisim,
                 &[],
+                &[value_token_id, condition_token_id],
             )?;
             let terminal_for = |token_id: u32| -> crate::Result<u32> {
                 parent
@@ -795,6 +808,7 @@ impl Constraint {
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
                 end_token_ids,
+                &[],
             )
         })
     }
@@ -888,12 +902,18 @@ impl Constraint {
                 )));
             }
 
+            let hidden_placeholder_token_ids = parsed
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.token_id)
+                .collect::<Vec<_>>();
             let mut parent = compile_from_named_grammar(
                 parsed.grammar,
                 vocab,
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
                 end_token_ids,
+                &hidden_placeholder_token_ids,
             )?;
             for (placeholder_token_id, binding_name) in unresolved_placeholders {
                 let mut matching_terminals = parent
@@ -1880,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn glrm_external_subgrammar_api_rejects_invalid_bindings() {
+    fn glrm_external_subgrammar_api_allows_unresolved_and_rejects_invalid_bindings() {
         let vocab = vocab(&["a"]);
         let child = Constraint::from_glrm_grammar(
             "start child; nt child ::= \"a\";",
@@ -1889,10 +1909,10 @@ mod tests {
         .unwrap();
         let source = "start document; extern grammar child; nt document ::= child;";
 
-        let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
-            .unwrap_err()
-            .to_string();
-        assert!(missing.contains("no compiled child"), "{missing}");
+        let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
+            .expect("an unbound extern grammar must survive as a late-binding slot");
+        assert_eq!(unresolved.late_grammar_slots.len(), 1);
+        assert_eq!(unresolved.late_grammar_slots[0].name, "child");
 
         let duplicate = Constraint::from_glrm_grammar_with_subgrammars(
             source,

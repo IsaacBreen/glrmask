@@ -186,13 +186,10 @@ impl<'a> ConstraintSpec<'a> {
 
     /// Compile this specification into a [`Constraint`](crate::Constraint).
     pub fn compile(&self) -> Result<RuntimeConstraint> {
-        let mut constraint = self.compile_static_uncached()?;
-        // A hybrid retains dynamic leaves. Do not make ordinary compilation pay
-        // the dynamic->static materialization cost merely to pre-cache save().
-        if !retains_dynamic_component(&constraint) {
-            constraint.cache_serialized_artifact_for_save();
-        }
-        Ok(constraint)
+        // Serialization is intentionally lazy. Compiling a reusable constraint
+        // must not silently pay the first-save cost or shift serialization work
+        // into build latency.
+        self.compile_static_uncached()
     }
 
     fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
@@ -659,6 +656,56 @@ fn compose_named_children(
     Ok(composition.constraint)
 }
 
+fn compose_named_shared_child(
+    parent: RuntimeConstraint,
+    name: &str,
+    child: Arc<RuntimeConstraint>,
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<RuntimeConstraint> {
+    let matching_terminals = parent
+        .late_grammar_slots
+        .iter()
+        .filter(|slot| slot.name == name)
+        .map(|slot| slot.terminal_id)
+        .collect::<Vec<_>>();
+    if matching_terminals.is_empty() {
+        return Ok(parent);
+    }
+
+    let remaining_parent_slots = parent
+        .late_grammar_slots
+        .iter()
+        .filter(|slot| slot.name != name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let input = CompiledSubgrammarInput {
+        placeholder_terminal: matching_terminals[0],
+        additional_placeholder_terminals: &matching_terminals[1..],
+        constraint: child.as_ref(),
+    };
+    let mut composition = crate::compiler::constraint_compose::compose_constraints_owned_parent_segmented_shared(
+        parent,
+        std::slice::from_ref(&input),
+        std::slice::from_ref(&child),
+        vocab,
+        boundary_backend,
+    )
+    .map_err(Error::Compilation)?;
+    composition.constraint.late_grammar_slots = remaining_parent_slots;
+    let terminal_offset = composition.terminal_offsets[1];
+    composition.constraint.late_grammar_slots.extend(
+        child
+            .late_grammar_slots
+            .iter()
+            .map(|slot| crate::runtime::LateGrammarSlot {
+                name: format!("{name}::{}", slot.name),
+                terminal_id: terminal_offset + slot.terminal_id,
+            }),
+    );
+    Ok(composition.constraint)
+}
+
 fn compile_static_source(
     grammar: &Grammar<'_>,
     vocab: &Vocab,
@@ -696,27 +743,39 @@ fn compile_dynamic_source(
 }
 
 fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
-    Vocab::new(
+    if let Some(vocab) = constraint.late_bind_vocab.get() {
+        return vocab.clone();
+    }
+    // Compiler-created constraints retain the canonical token-byte map and can
+    // expose it as an O(1) Vocab view. Loaded artifacts deliberately keep token
+    // bytes packed; only the uncommon path with no compiled child to borrow a
+    // vocabulary from has to materialize that packed map here.
+    let vocab = if !constraint.token_bytes.is_empty() || constraint.packed_token_bytes.is_none() {
+        Vocab::from_entries_arc(Arc::clone(&constraint.token_bytes))
+    } else {
+        Vocab::new(
         constraint
             .token_bytes_iter()
             .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
             .collect(),
-    )
+        )
+    };
+    let _ = constraint.late_bind_vocab.set(vocab.clone());
+    vocab
 }
 
-fn retains_dynamic_component(constraint: &RuntimeConstraint) -> bool {
-    if constraint.uses_dynamic_runtime() {
-        return true;
+fn binding_vocab(binding: &GrammarBinding<'_>, parent: &RuntimeConstraint) -> Vocab {
+    match binding {
+        GrammarBinding::StaticBorrowed(child) => constraint_vocab(child),
+        GrammarBinding::StaticOwned(child) => constraint_vocab(child),
+        // Source/spec children need a vocabulary before they can be compiled.
+        // Dynamic bindings may contain alternatives with packed storage, so
+        // keep the generic parent-derived fallback for those less common paths.
+        GrammarBinding::Source(_)
+        | GrammarBinding::Spec(_)
+        | GrammarBinding::DynamicBorrowed(_)
+        | GrammarBinding::DynamicOwned(_) => constraint_vocab(parent),
     }
-    constraint
-        .static_dynamic_overlay
-        .as_ref()
-        .is_some_and(|overlay| {
-            overlay
-                .segmented_parser_components
-                .iter()
-                .any(|component| retains_dynamic_component(component.constraint()))
-        })
 }
 
 fn require_late_grammar_slot(parents: &[RuntimeConstraint], name: &str) -> Result<()> {
@@ -762,20 +821,66 @@ where
     T: IntoGrammarBinding<'a>,
 {
     require_late_grammar_slot(std::slice::from_ref(parent), name)?;
-    let vocab = constraint_vocab(parent);
-    let boundary_backend = SegmentedBoundaryBackend::StaticParserDwa;
-    let children = prepare_late_child(
-        name,
-        child,
-        &vocab,
-        ChildCompileMode::Static,
-        boundary_backend,
-    )?;
-    let mut result = compose_named_children(parent.clone(), &children, &vocab, boundary_backend)?;
-    if !retains_dynamic_component(&result) {
-        result.cache_serialized_artifact_for_save();
+    let mut binding = child.into_grammar_binding();
+    // Prefer a supplied compiled child's canonical vocabulary Arc. A loaded
+    // parent stores token bytes packed; reconstructing a 100k+ entry Vocab from
+    // it on every bind can dwarf the link itself.
+    let vocab = binding_vocab(&binding, parent);
+    binding.bind_target(&vocab, name)?;
+    if !parent.token_bytes_match_vocab(&vocab) {
+        return Err(Error::Compilation(format!(
+            "external grammar {name:?} was built for an incompatible vocabulary",
+        )));
     }
-    Ok(result)
+    let mut owned_parent = parent.clone();
+    owned_parent
+        .bind_vocab_exact(&vocab)
+        .map_err(Error::Compilation)?;
+
+    // Static late linking keeps retained component parser artifacts and
+    // publishes an exact deterministic boundary parser B. DynamicConstraint
+    // uses the symbolic terminal-NWA backend instead; keeping static B
+    // deterministic preserves the low per-token runtime of Constraint.
+    let boundary_backend = SegmentedBoundaryBackend::StaticParserDwa;
+
+    // Preserve ownership when the caller gives us an owned/static compiled
+    // child. The segmented runtime stores Arc<Constraint>, so moving an owned
+    // child (or cloning an existing Arc) should never deep-copy its artifact.
+    match binding {
+        GrammarBinding::StaticOwned(shared) => compose_named_shared_child(
+            owned_parent,
+            name,
+            shared,
+            &vocab,
+            boundary_backend,
+        ),
+        GrammarBinding::Source(grammar) => {
+            let spec = ConstraintSpec::builder(grammar, &vocab)?.build()?;
+            let child = Arc::new(spec.compile_static_uncached()?);
+            compose_named_shared_child(owned_parent, name, child, &vocab, boundary_backend)
+        }
+        GrammarBinding::Spec(spec) => {
+            let child = Arc::new(spec.compile_static_uncached()?);
+            compose_named_shared_child(owned_parent, name, child, &vocab, boundary_backend)
+        }
+        GrammarBinding::StaticBorrowed(constraint) => {
+            // A borrowed child cannot outlive this call, while the returned
+            // composed constraint must own it. Pay exactly one ownership copy,
+            // then retain that copy by Arc instead of cloning it again inside
+            // segmented publication.
+            let child = Arc::new(constraint.clone());
+            compose_named_shared_child(owned_parent, name, child, &vocab, boundary_backend)
+        }
+        binding @ (GrammarBinding::DynamicBorrowed(_) | GrammarBinding::DynamicOwned(_)) => {
+            let compiled = binding.compile(&vocab, ChildCompileMode::Static)?;
+            let children = prepare_compiled_children(
+                vec![(name.to_owned(), compiled)],
+                &vocab,
+                boundary_backend,
+            )?;
+            compose_named_children(owned_parent, &children, &vocab, boundary_backend)
+        }
+    }
 }
 
 fn bind_dynamic_parent_grammar<'a, T>(
@@ -891,6 +996,55 @@ mod hybrid_tests {
     }
 
     #[test]
+    fn unresolved_grammar_sentinel_is_not_a_model_token_coordinate() {
+        // 32 model-token IDs make the first private sentinel ID 32, exactly one
+        // word beyond a one-word public mask. If the sentinel enters the
+        // runtime token quotient/cache this shape panics while building masks.
+        let vocab = Vocab::new(
+            (0u32..32)
+                .map(|token| (token, vec![token as u8]))
+                .collect(),
+        );
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start start; extern grammar child; nt start = child;"),
+            &vocab,
+        )
+        .unwrap();
+        assert!(parent.late_grammar_slots.iter().any(|slot| slot.name == "child"));
+        assert!(
+            parent.serialized_artifact_cache.is_none(),
+            "compile must not eagerly serialize/cache the artifact",
+        );
+        assert!(
+            parent
+                .internal_token_to_tokens
+                .iter()
+                .flatten()
+                .all(|&token| token < 32),
+            "compiler-private linker sentinel leaked into the model-token coordinate",
+        );
+        assert_eq!(parent.mask_len(), 1);
+        assert_eq!(parent.internal_token_count(), 1);
+        assert_eq!(parent.internal_token_groups().unwrap().len(), 1);
+        assert!(parent.internal_token_groups().unwrap()[0].is_empty());
+
+        // Current artifacts omit the explicit inverse token map, but the
+        // private empty linker class must survive through the serialized mask
+        // cache dimensions so later composition sees the same compiler
+        // coordinate without exposing a model token.
+        let loaded = RuntimeConstraint::load(&parent.save()).unwrap();
+        assert_eq!(loaded.internal_token_count(), 1);
+        assert_eq!(loaded.internal_token_groups().unwrap().len(), 1);
+        assert!(loaded.internal_token_groups().unwrap()[0].is_empty());
+        assert_eq!(loaded.mask_len(), 1);
+        assert_eq!(loaded.start().mask(), vec![0]);
+
+        let mask = parent.start().mask();
+        assert_eq!(mask.len(), 1);
+        assert_eq!(mask[0], 0, "unresolved grammar slot must not be traversable");
+    }
+
+    #[test]
     fn segmented_composition_preserves_supplied_component_backends() {
         let vocab = Vocab::new(vec![
             (0, b"x".to_vec()),
@@ -939,6 +1093,86 @@ mod hybrid_tests {
             assert_dynamic_boundary(&alternative);
         }
         let mut state = dynamic_with_static.start();
+        state.commit_token(2).unwrap();
+        assert!(state.is_accepting());
+    }
+
+    #[test]
+    fn static_late_binding_reuses_owned_child_arc_and_static_boundary() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = Arc::new(
+            RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap(),
+        );
+        let composed = parent
+            .bind_grammar("child", Arc::clone(&child))
+            .unwrap();
+        assert_static_boundary(&composed);
+        let overlay = composed
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("late binding must publish segmented runtime metadata");
+        assert_eq!(overlay.segmented_parser_components.len(), 2);
+        assert!(
+            Arc::ptr_eq(
+                overlay.segmented_parser_components[1].constraint_arc(),
+                &child,
+            ),
+            "owned/Arc child must be retained without a deep artifact clone",
+        );
+        let mut state = composed.start();
+        state.commit_token(2).unwrap();
+        assert!(state.is_accepting());
+    }
+
+    #[test]
+    fn loaded_static_late_bind_keeps_parent_parser_dwa_packed() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let compiled_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let loaded_parent = RuntimeConstraint::load(&compiled_parent.save()).unwrap();
+        assert!(loaded_parent.packed_parser_dwa.is_some());
+        let loaded_shell_states = loaded_parent.parser_dwa.num_states();
+
+        let child = Arc::new(
+            RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap(),
+        );
+        let composed = loaded_parent.bind_grammar("child", child).unwrap();
+        let overlay = composed
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("late binding must publish segmented runtime metadata");
+        let retained_parent = overlay.segmented_parser_components[0].constraint();
+        assert!(
+            retained_parent.packed_parser_dwa.is_some(),
+            "segmented late binding must retain the loaded parent's packed parser DWA",
+        );
+        assert_eq!(
+            retained_parent.parser_dwa.num_states(),
+            loaded_shell_states,
+            "segmented late binding must not replace the loaded parser-DWA shell with the expanded compiler DWA",
+        );
+
+        let mut state = composed.start();
         state.commit_token(2).unwrap();
         assert!(state.is_accepting());
     }
@@ -1118,6 +1352,28 @@ mod hybrid_tests {
                 String::from_utf8_lossy(bytes),
             );
         }
+    }
+
+    #[test]
+    fn static_late_bind_does_not_eagerly_serialize() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+        let bound = parent.bind_grammar("child", &child).unwrap();
+        assert!(
+            bound.serialized_artifact_cache.is_none(),
+            "late bind must not eagerly serialize/cache the composed artifact",
+        );
     }
 
     #[test]

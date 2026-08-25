@@ -1,7 +1,7 @@
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
-    BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows, InternalTokenBufMasks,
-    PackedInternalTokenBufMask,
+    BackedInternalTokenBufMasks, CompositionMetadataCache, ConstraintSerde, DenseBufMaskRows,
+    InternalTokenBufMasks, PackedInternalTokenBufMask,
 };
 use crate::automata::regex::Expr;
 use crate::ds::weight::Weight;
@@ -538,35 +538,40 @@ struct ConstraintCompositionMetadataRef<'a> {
         &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
 }
 
-#[derive(Deserialize)]
-struct ConstraintCompositionMetadata {
-    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
-    composition_parser_templates_by_terminal:
-        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
-    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
-}
-
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     if constraint.composition_reset_tokens_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
     {
         return Vec::new();
     }
-    // Parser templates and symbolic characterizations are redundant compiler
-    // caches: loaded composition can rebuild them exactly from the retained
-    // GLR table/rules. Reset-token rows and the compact grammar summary are
-    // cheap linker inputs, so preserve those without serializing megabytes of
-    // duplicate DFA/characterization state.
+    // Raw parser templates are a compact late-link cache: they let a loaded
+    // parent transport `Old` directly and compile only the additive boundary
+    // delta. Symbolic characterizations are several times larger and are not
+    // needed by the additive linker, so keep those rebuildable/omitted.
+    let flattened_templates = crate::compiler::constraint_compose::
+        flattened_composition_template_cache_for_serialization(constraint);
+    let composition_parser_templates_by_terminal = flattened_templates
+        .as_deref()
+        .unwrap_or(&constraint.composition_parser_templates_by_terminal);
     let raw = bincode::serialize(&ConstraintCompositionMetadataRef {
         composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
-        composition_parser_templates_by_terminal: &[],
+        composition_parser_templates_by_terminal,
         composition_parser_characterizations_by_terminal: &[],
         composition_grammar_summary: &constraint.composition_grammar_summary,
     })
     .expect("composition metadata serialization should succeed");
 
+    if raw.len() >= COMPOSITION_METADATA_COMPRESS_MIN_BYTES {
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL)
+            .expect("composition metadata compression should succeed");
+        if compressed.len() < raw.len() {
+            let mut out = Vec::with_capacity(COMPOSITION_METADATA_HEADER_LEN + compressed.len());
+            out.extend_from_slice(&COMPOSITION_METADATA_ZSTD_MAGIC);
+            out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+            out.extend_from_slice(&compressed);
+            return out;
+        }
+    }
     let mut out = Vec::with_capacity(COMPOSITION_METADATA_HEADER_LEN + raw.len());
     out.extend_from_slice(&COMPOSITION_METADATA_RAW_MAGIC);
     out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
@@ -602,10 +607,10 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     }
 }
 
-fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMetadata, String> {
+fn decode_composition_metadata(input: &[u8]) -> Result<CompositionMetadataCache, String> {
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
-        return Ok(ConstraintCompositionMetadata {
+        return Ok(CompositionMetadataCache {
             composition_reset_tokens_by_terminal: Vec::new(),
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
@@ -2563,32 +2568,81 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 impl Constraint {
-    /// Materialize and retain the canonical current-format artifact once a
-    /// compiler-owned constraint has reached its final serialized semantics.
-    /// Subsequent `save()` calls then use the same bulk-copy path as an
-    /// unchanged loaded constraint instead of re-encoding every section.
-    pub(crate) fn cache_serialized_artifact_for_save(&mut self) {
-        if self.serialized_artifact_cache.is_some() {
-            return;
+    pub(crate) fn composition_metadata_for_compilation(
+        &self,
+    ) -> Result<Option<&CompositionMetadataCache>, String> {
+        let Some(blob) = self.deferred_composition_metadata_blob.as_ref() else {
+            return Ok(None);
+        };
+        if self.deferred_composition_metadata.get().is_none() {
+            let started = std::time::Instant::now();
+            let decoded = std::sync::Arc::new(decode_composition_metadata(blob.as_slice())?);
+            let _ = self.deferred_composition_metadata.set(decoded);
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!(
+                    "[glrmask/profile][constraint_deferred_composition_metadata_decode] ms={:.3}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
         }
-        let bytes = self.save();
-        self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
+        Ok(self
+            .deferred_composition_metadata
+            .get()
+            .map(std::sync::Arc::as_ref))
+    }
+
+    pub(crate) fn composition_parser_templates_for_compilation(
+        &self,
+    ) -> Result<&[Option<crate::automata::unweighted_u32::dfa::DFA>], String> {
+        if !self.composition_parser_templates_by_terminal.is_empty() {
+            return Ok(&self.composition_parser_templates_by_terminal);
+        }
+        Ok(self
+            .composition_metadata_for_compilation()?
+            .map(|metadata| metadata.composition_parser_templates_by_terminal.as_slice())
+            .unwrap_or(&[]))
+    }
+
+    pub(crate) fn composition_reset_tokens_for_compilation(
+        &self,
+    ) -> Result<&[Vec<u32>], String> {
+        if !self.composition_reset_tokens_by_terminal.is_empty() {
+            return Ok(&self.composition_reset_tokens_by_terminal);
+        }
+        Ok(self
+            .composition_metadata_for_compilation()?
+            .map(|metadata| metadata.composition_reset_tokens_by_terminal.as_slice())
+            .unwrap_or(&[]))
+    }
+
+    pub(crate) fn composition_grammar_summary_for_compilation(
+        &self,
+    ) -> Result<Option<&crate::runtime::artifact::CompositionGrammarSummary>, String> {
+        if let Some(summary) = self.composition_grammar_summary.as_ref() {
+            return Ok(Some(summary));
+        }
+        Ok(self
+            .composition_metadata_for_compilation()?
+            .and_then(|metadata| metadata.composition_grammar_summary.as_ref()))
     }
 
     pub(crate) fn materialize_composition_metadata_for_compilation(
         &mut self,
     ) -> Result<(), String> {
-        let Some(blob) = self.deferred_composition_metadata_blob.clone() else {
+        let Some(_) = self.deferred_composition_metadata_blob.as_ref() else {
             return Ok(());
         };
-        let metadata = decode_composition_metadata(blob.as_slice())?;
+        let metadata = self
+            .composition_metadata_for_compilation()?
+            .expect("deferred composition metadata blob must decode")
+            .clone();
         self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
-        self.composition_parser_templates_by_terminal =
-            metadata.composition_parser_templates_by_terminal;
+        self.composition_parser_templates_by_terminal = metadata.composition_parser_templates_by_terminal;
         self.composition_parser_characterizations_by_terminal =
             metadata.composition_parser_characterizations_by_terminal;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
         self.deferred_composition_metadata_blob = None;
+        self.deferred_composition_metadata = Default::default();
         Ok(())
     }
 
@@ -4655,18 +4709,21 @@ mod tests {
     }
 
     #[test]
-    fn public_compile_primes_first_save_artifact() {
+    fn public_compile_keeps_first_save_lazy() {
         let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(
             crate::Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
             &vocab,
         )
         .unwrap();
-        let cached = constraint
-            .serialized_artifact_cache
-            .as_ref()
-            .expect("public static compile should prime the canonical artifact");
-        assert_eq!(constraint.save().as_slice(), cached.as_slice());
+        assert!(
+            constraint.serialized_artifact_cache.is_none(),
+            "public static compile must not shift first-save serialization work into build latency",
+        );
+        let first = constraint.save();
+        let second = constraint.save();
+        assert!(!first.is_empty());
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -4913,7 +4970,7 @@ mod tests {
     }
 
     #[test]
-    fn current_constraint_artifact_omits_rebuildable_composition_parser_templates() {
+    fn current_constraint_artifact_preserves_composition_parser_templates_lazily() {
         let constraint = tiny_constraint();
         assert_eq!(
             constraint.composition_parser_templates_by_terminal.len(),
@@ -4923,6 +4980,7 @@ mod tests {
             .composition_parser_templates_by_terminal
             .iter()
             .any(Option::is_some));
+        let expected = constraint.composition_parser_templates_by_terminal.clone();
         let mut loaded = Constraint::load(&constraint.save()).unwrap();
         assert!(loaded.composition_parser_templates_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
@@ -4930,10 +4988,7 @@ mod tests {
         loaded
             .materialize_composition_metadata_for_compilation()
             .unwrap();
-        // Templates are an acceleration cache, not semantic artifact state.
-        // Composition has exact fallback/rebuild paths when this cache is
-        // absent, so current artifacts deliberately do not persist it.
-        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        assert_eq!(loaded.composition_parser_templates_by_terminal, expected);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

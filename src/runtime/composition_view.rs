@@ -166,6 +166,119 @@ impl VirtualIdMap {
     }
 }
 
+
+/// Compact bidirectional many-to-many relation between composed LR states and
+/// one retained component's private LR states. Table composition may both
+/// split a local state into several outer states and merge several local states
+/// into one outer state, so LR coordinates are a relation rather than an ID map.
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualIdRelation {
+    outer_offsets: Arc<[u32]>,
+    outer_to_locals: Arc<[u32]>,
+    local_offsets: Arc<[u32]>,
+    local_to_outers: Arc<[u32]>,
+}
+
+impl VirtualIdRelation {
+    pub(crate) fn from_local_to_outers(
+        local_to_outers: &[Vec<u32>],
+        outer_len: usize,
+    ) -> Result<Self, String> {
+        if outer_len > u32::MAX as usize {
+            return Err("outer LR-state domain exceeds u32 coordinate".to_owned());
+        }
+        let mut outer_counts = vec![0u32; outer_len];
+        let mut local_offsets = Vec::with_capacity(local_to_outers.len() + 1);
+        let mut local_values = Vec::<u32>::new();
+        local_offsets.push(0u32);
+        for (local, targets) in local_to_outers.iter().enumerate() {
+            let mut targets = targets.clone();
+            targets.sort_unstable();
+            targets.dedup();
+            for outer in targets {
+                let count = outer_counts.get_mut(outer as usize).ok_or_else(|| {
+                    format!(
+                        "LR-state relation maps local state {local} to out-of-range outer state {outer} (outer_len={outer_len})"
+                    )
+                })?;
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| "outer LR-state relation count overflows u32".to_owned())?;
+                local_values.push(outer);
+            }
+            local_offsets.push(
+                u32::try_from(local_values.len())
+                    .map_err(|_| "LR-state relation exceeds u32 entries".to_owned())?,
+            );
+        }
+
+        let mut outer_offsets = Vec::with_capacity(outer_len + 1);
+        outer_offsets.push(0u32);
+        for count in outer_counts {
+            let next = outer_offsets
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .checked_add(count)
+                .ok_or_else(|| "outer LR-state relation offset overflows u32".to_owned())?;
+            outer_offsets.push(next);
+        }
+        let mut cursors = outer_offsets[..outer_len].to_vec();
+        let mut outer_values = vec![0u32; *outer_offsets.last().unwrap_or(&0) as usize];
+        for local in 0..local_to_outers.len() {
+            let start = local_offsets[local] as usize;
+            let end = local_offsets[local + 1] as usize;
+            for &outer in &local_values[start..end] {
+                let cursor = &mut cursors[outer as usize];
+                outer_values[*cursor as usize] = local as u32;
+                *cursor += 1;
+            }
+        }
+        Ok(Self {
+            outer_offsets: outer_offsets.into(),
+            outer_to_locals: outer_values.into(),
+            local_offsets: local_offsets.into(),
+            local_to_outers: local_values.into(),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn locals_for_outer(&self, outer: u32) -> &[u32] {
+        let index = outer as usize;
+        let Some((&start, &end)) = self
+            .outer_offsets
+            .get(index)
+            .zip(self.outer_offsets.get(index + 1))
+        else {
+            return &[];
+        };
+        &self.outer_to_locals[start as usize..end as usize]
+    }
+
+    #[inline]
+    pub(crate) fn outers_for_local(&self, local: u32) -> &[u32] {
+        let index = local as usize;
+        let Some((&start, &end)) = self
+            .local_offsets
+            .get(index)
+            .zip(self.local_offsets.get(index + 1))
+        else {
+            return &[];
+        };
+        &self.local_to_outers[start as usize..end as usize]
+    }
+
+    #[inline]
+    pub(crate) fn outer_domain_len(&self) -> usize {
+        self.outer_offsets.len().saturating_sub(1)
+    }
+
+    #[inline]
+    pub(crate) fn local_domain_len(&self) -> usize {
+        self.local_offsets.len().saturating_sub(1)
+    }
+}
+
 /// O(1) routing from an outer ID to one immediate child view.
 ///
 /// This is deliberately a route, not a claim that the child exclusively owns
@@ -223,7 +336,7 @@ pub(crate) struct ConstraintView {
     pub(crate) constraint: Arc<Constraint>,
     pub(crate) terminal_ids: VirtualIdMap,
     pub(crate) lexer_states: VirtualIdMap,
-    pub(crate) lrids: VirtualIdMap,
+    pub(crate) lrids: VirtualIdRelation,
 }
 
 impl ConstraintView {
@@ -231,16 +344,21 @@ impl ConstraintView {
         constraint: Arc<Constraint>,
         terminal_outer_base: u32,
         lexer_outer_base: u32,
-        outer_to_local_lrids: Vec<u32>,
+        local_to_outer_lrids: &[Vec<u32>],
+        outer_lr_len: usize,
     ) -> Result<Self, String> {
         let terminal_ids =
             VirtualIdMap::offset(terminal_outer_base, constraint.table.num_terminals)?;
         let lexer_states =
             VirtualIdMap::offset(lexer_outer_base, constraint.tokenizer.num_states())?;
-        let lrids = VirtualIdMap::dense_from_outer_to_local(
-            outer_to_local_lrids,
-            constraint.table.num_states,
-        )?;
+        if local_to_outer_lrids.len() != constraint.table.num_states as usize {
+            return Err(format!(
+                "component LR-state relation has {} local rows, expected {}",
+                local_to_outer_lrids.len(),
+                constraint.table.num_states,
+            ));
+        }
+        let lrids = VirtualIdRelation::from_local_to_outers(local_to_outer_lrids, outer_lr_len)?;
         Ok(Self {
             constraint,
             terminal_ids,
@@ -302,6 +420,24 @@ mod tests {
         assert_eq!(map.to_local(0), Some(0));
         assert_eq!(map.to_local(1), Some(0));
         assert_eq!(map.outer_ids_for_local(0).as_slice(), &[0u32, 1]);
+    }
+
+    #[test]
+    fn lr_relation_preserves_many_to_many_projection() {
+        let relation = VirtualIdRelation::from_local_to_outers(
+            &[vec![1, 3], vec![1], vec![2, 3]],
+            5,
+        )
+        .unwrap();
+        assert!(relation.locals_for_outer(0).is_empty());
+        assert_eq!(relation.locals_for_outer(1), &[0, 1]);
+        assert_eq!(relation.locals_for_outer(2), &[2]);
+        assert_eq!(relation.locals_for_outer(3), &[0, 2]);
+        assert_eq!(relation.outers_for_local(0), &[1, 3]);
+        assert_eq!(relation.outers_for_local(1), &[1]);
+        assert_eq!(relation.outers_for_local(2), &[2, 3]);
+        assert_eq!(relation.outer_domain_len(), 5);
+        assert_eq!(relation.local_domain_len(), 3);
     }
 
     #[test]

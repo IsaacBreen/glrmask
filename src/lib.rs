@@ -226,6 +226,18 @@ pub mod __private {
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
+        #[doc(hidden)]
+        fn compose_compiled_subgrammars_dynamic_boundary_tmp(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
+        #[doc(hidden)]
+        fn compose_compiled_subgrammars_dynamic_boundary_shared_tmp(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
         fn compose_compiled_subgrammars_shared(
             self,
             children: &[(&str, std::sync::Arc<Constraint>)],
@@ -335,6 +347,94 @@ pub mod __private {
             compose_constraints_owned_parent(self, &inputs, vocab)
                 .map(|composition| composition.constraint)
                 .map_err(Error::Compilation)
+        }
+
+        fn compose_compiled_subgrammars_dynamic_boundary_tmp(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented,
+            };
+            use std::collections::BTreeSet;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| Error::Compilation(format!(
+                        "parent has no subgrammar placeholder terminal {name:?}",
+                    )))? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent_segmented(
+                self,
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::DynamicTerminalNwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
+        }
+
+        fn compose_compiled_subgrammars_dynamic_boundary_shared_tmp(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented_shared,
+            };
+            use std::collections::BTreeSet;
+            use std::sync::Arc;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut shared = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for (name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| Error::Compilation(format!(
+                        "parent has no subgrammar placeholder terminal {name:?}",
+                    )))? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child.as_ref(),
+                });
+                shared.push(Arc::clone(child));
+            }
+            compose_constraints_owned_parent_segmented_shared(
+                self,
+                &inputs,
+                &shared,
+                vocab,
+                SegmentedBoundaryBackend::DynamicTerminalNwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
         }
 
         fn compose_compiled_subgrammars_shared(
