@@ -2212,6 +2212,84 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_billion_nonzero_min_unit_repeat_uses_arithmetic_runtime() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |min, max| GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min,
+                    max: Some(max),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(500_000_000, 1_000_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+            "one-byte nonzero-min repeats should use the O(1) arithmetic sidecar",
+        );
+
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(10, 20),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+        let mut dynamic_state = dynamic.start();
+        let mut oracle_state = oracle.start();
+        for token in [2u32, 1, 0] {
+            dynamic_state.commit_token(token).unwrap();
+            oracle_state.commit_token(token).unwrap();
+            assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+            assert_eq!(dynamic_state.mask(), oracle_state.mask());
+        }
+
+        let saved = dynamic.save();
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert!(!loaded.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+        );
+        let mut original_state = dynamic.start();
+        let mut loaded_state = loaded.start();
+        for token in [2u32, 1, 0] {
+            original_state.commit_token(token).unwrap();
+            loaded_state.commit_token(token).unwrap();
+            assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
+            assert_eq!(loaded_state.mask(), original_state.mask());
+        }
+    }
+
+    #[test]
     fn dynamic_distinct_nonzero_min_giant_intersection_still_fails_closed() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};

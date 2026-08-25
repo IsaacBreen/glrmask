@@ -1,5 +1,5 @@
-//! Exact runtime representation for a zero-minimum bounded repetition whose
-//! body consumes exactly one byte.
+//! Exact runtime representation for a bounded repetition whose body consumes
+//! exactly one byte.
 //!
 //! The physical tokenizer contains only its reset state. Reached positive
 //! repetition counts are encoded arithmetically in a disjoint logical-state
@@ -34,6 +34,7 @@ pub(super) fn virtual_unit_repeat_state_ids_fit(
 #[derive(Debug)]
 pub(super) struct VirtualZeroMinUnitRepeatRuntime {
     body: U8Set,
+    min: usize,
     max: usize,
     physical_state_count: u32,
     root_state: u32,
@@ -46,43 +47,84 @@ pub(super) struct VirtualZeroMinUnitRepeatRuntime {
 
 /// Exact finite-token projection for the arithmetic repeat coordinate.
 ///
-/// The full runtime state id is the consumed-byte count (`0` is the drained
-/// reset state).  The mask tokenizer keeps that reset state, one positive
-/// interior state, and an exact upper-bound tail.  This object is deliberately
-/// independent of any runtime interner: projection is closed-form.
+/// Positive exact states encode the consumed-byte count arithmetically after
+/// the physical-state prefix. The mask tokenizer keeps the physical states,
+/// finite lower/upper boundary stencils, and at most one deep class on each
+/// side. This object is deliberately independent of any runtime interner:
+/// projection is closed-form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct VirtualZeroMinUnitRepeatMaskProjection {
+    full_min: u32,
     full_max: u32,
-    horizon: u32,
     full_physical_state_count: u32,
-    mask_positive_state_count: u32,
+    mask_state_count: u32,
+    deep_lower_state: u32,
+    lower_start: u32,
+    lower_offset: u32,
+    interior_state: u32,
+    upper_start: u32,
+    upper_offset: u32,
 }
 
 impl VirtualZeroMinUnitRepeatMaskProjection {
     pub(super) fn new(
+        full_min: usize,
         full_max: usize,
         horizon: usize,
         full_physical_state_count: u32,
     ) -> Option<Self> {
+        let full_min = u32::try_from(full_min).ok()?;
         let full_max = u32::try_from(full_max).ok()?;
         let horizon = u32::try_from(horizon).ok()?;
-        // If the exact bound itself is already within the finite vocabulary
-        // horizon, retain it verbatim. Otherwise reserve state 0 for the
-        // drained reset, state 1 for the translation-invariant positive
-        // interior, and K+1 exact distances to the upper bound.
-        let mask_positive_state_count = if full_max <= horizon.saturating_add(1) {
-            full_max
+        if full_min > full_max || full_max == 0 {
+            return None;
+        }
+
+        // Positive exact counts are partitioned into four finite-horizon
+        // regions. Counts more than H copies below `min` form one deep-lower
+        // class; the next H counts are exact. Accepted counts more than H
+        // copies below `max` form one interior class; the final H+1 counts are
+        // exact. The lower/upper exact stencils may touch but never overlap in
+        // the state layout because lower states stop at min-1.
+        let lower_start = full_min.saturating_sub(horizon).max(1);
+        let lower_count = full_min.saturating_sub(lower_start);
+        let has_deep_lower = lower_start > 1;
+        let accepted_start = full_min.max(1);
+        let upper_start = full_max.saturating_sub(horizon).max(accepted_start);
+        let has_interior = accepted_start < upper_start;
+        let upper_count = full_max.checked_sub(upper_start)?.checked_add(1)?;
+
+        let mut next = full_physical_state_count;
+        let deep_lower_state = if has_deep_lower {
+            let state = next;
+            next = next.checked_add(1)?;
+            state
         } else {
-            horizon.checked_add(2)?
+            u32::MAX
         };
-        let mask_state_count = full_physical_state_count
-            .checked_add(mask_positive_state_count)?;
-        (mask_state_count <= VIRTUAL_STATE_LIMIT).then_some(Self {
+        let lower_offset = next;
+        next = next.checked_add(lower_count)?;
+        let interior_state = if has_interior {
+            let state = next;
+            next = next.checked_add(1)?;
+            state
+        } else {
+            u32::MAX
+        };
+        let upper_offset = next;
+        next = next.checked_add(upper_count)?;
+        (next <= VIRTUAL_STATE_LIMIT).then_some(Self {
+            full_min,
             full_max,
-            horizon,
             full_physical_state_count,
-            mask_positive_state_count,
+            mask_state_count: next,
+            deep_lower_state,
+            lower_start,
+            lower_offset,
+            interior_state,
+            upper_start,
+            upper_offset,
         })
     }
 
@@ -97,40 +139,35 @@ impl VirtualZeroMinUnitRepeatMaskProjection {
         if consumed > self.full_max {
             return None;
         }
-        if self.full_max == self.mask_positive_state_count {
+        if consumed < self.full_min {
+            if self.deep_lower_state != u32::MAX && consumed < self.lower_start {
+                return Some(self.deep_lower_state);
+            }
             return self
-                .full_physical_state_count
-                .checked_add(consumed.saturating_sub(1));
+                .lower_offset
+                .checked_add(consumed.checked_sub(self.lower_start)?);
         }
-        let remaining = self.full_max - consumed;
-        Some(if remaining > self.horizon {
-            self.full_physical_state_count
-        } else {
-            self.full_physical_state_count
-                .checked_add(self.mask_positive_state_count - 1 - remaining)?
-        })
+        if self.interior_state != u32::MAX && consumed < self.upper_start {
+            return Some(self.interior_state);
+        }
+        self.upper_offset
+            .checked_add(consumed.checked_sub(self.upper_start)?)
     }
 
     #[inline]
     pub fn mask_state_count(self) -> u32 {
-        self.full_physical_state_count + self.mask_positive_state_count
+        self.mask_state_count
     }
 
     pub fn multiplicities(self) -> Vec<usize> {
-        let mut counts = vec![1usize; self.full_physical_state_count as usize];
-        counts.resize(self.mask_state_count() as usize, 0);
-        if self.full_max == self.mask_positive_state_count {
-            counts[self.full_physical_state_count as usize..].fill(1);
-            return counts;
+        let mut counts = vec![1usize; self.mask_state_count() as usize];
+        if self.deep_lower_state != u32::MAX {
+            counts[self.deep_lower_state as usize] = self.lower_start.saturating_sub(1) as usize;
         }
-        // Positive full states with more than K bytes remaining form exactly
-        // the one interior class. The exact K..0 tail follows it.
-        counts[self.full_physical_state_count as usize] = self
-            .full_max
-            .saturating_sub(self.horizon)
-            .saturating_sub(1) as usize;
-        for count in &mut counts[self.full_physical_state_count as usize + 1..] {
-            *count = 1;
+        if self.interior_state != u32::MAX {
+            counts[self.interior_state as usize] = self
+                .upper_start
+                .saturating_sub(self.full_min.max(1)) as usize;
         }
         counts
     }
@@ -143,35 +180,68 @@ impl VirtualZeroMinUnitRepeatMaskProjection {
         {
             *slot = state as u32;
         }
-        if self.full_max == self.mask_positive_state_count {
-            for (state, slot) in unique[self.full_physical_state_count as usize..]
-                .iter_mut()
-                .enumerate()
-            {
-                *slot = self.full_physical_state_count + state as u32;
-            }
-            return unique;
+        if self.deep_lower_state != u32::MAX && self.lower_start == 2 {
+            unique[self.deep_lower_state as usize] = self.full_physical_state_count;
         }
-        let interior_count = self
-            .full_max
-            .saturating_sub(self.horizon)
-            .saturating_sub(1);
-        if interior_count == 1 {
-            unique[self.full_physical_state_count as usize] = self.full_physical_state_count;
+        for consumed in self.lower_start..self.full_min {
+            let mask_state = self.lower_offset + consumed - self.lower_start;
+            unique[mask_state as usize] = self.full_physical_state_count + consumed - 1;
         }
-        for mask_state in self.full_physical_state_count + 1..self.mask_state_count() {
-            let tail_index = mask_state - self.full_physical_state_count - 1;
-            let remaining = self.horizon - tail_index;
-            let consumed = self.full_max - remaining;
+        if self.interior_state != u32::MAX
+            && self.upper_start.saturating_sub(self.full_min.max(1)) == 1
+        {
+            unique[self.interior_state as usize] =
+                self.full_physical_state_count + self.full_min.max(1) - 1;
+        }
+        for consumed in self.upper_start..=self.full_max {
+            let mask_state = self.upper_offset + consumed - self.upper_start;
             unique[mask_state as usize] = self.full_physical_state_count + consumed - 1;
         }
         unique
+    }
+
+    #[inline]
+    pub(super) fn first_positive_state(self) -> Option<u32> {
+        let full_state = self.full_physical_state_count;
+        self.project(full_state)
+    }
+
+    #[inline]
+    pub(super) fn deep_lower_state(self) -> Option<u32> {
+        (self.deep_lower_state != u32::MAX).then_some(self.deep_lower_state)
+    }
+
+    #[inline]
+    pub(super) fn lower_range(self) -> std::ops::Range<u32> {
+        self.lower_offset..self.lower_offset + self.full_min.saturating_sub(self.lower_start)
+    }
+
+    #[inline]
+    pub(super) fn interior_state(self) -> Option<u32> {
+        (self.interior_state != u32::MAX).then_some(self.interior_state)
+    }
+
+    #[inline]
+    pub(super) fn upper_range(self) -> std::ops::Range<u32> {
+        self.upper_offset..self.mask_state_count
+    }
+
+    #[inline]
+    pub(super) fn full_consumed_for_exact_mask_state(self, state: u32) -> Option<u32> {
+        if self.lower_range().contains(&state) {
+            return Some(self.lower_start + state - self.lower_offset);
+        }
+        if self.upper_range().contains(&state) {
+            return Some(self.upper_start + state - self.upper_offset);
+        }
+        None
     }
 }
 
 impl VirtualZeroMinUnitRepeatRuntime {
     pub(super) fn new(
         body: U8Set,
+        min: usize,
         max: usize,
         terminal: TerminalID,
         num_terminals: u32,
@@ -180,6 +250,7 @@ impl VirtualZeroMinUnitRepeatRuntime {
     ) -> Option<Self> {
         if body.is_empty()
             || max == 0
+            || min > max
             || physical_state_count == 0
             || root_state >= physical_state_count
             || !virtual_unit_repeat_state_ids_fit(max, physical_state_count)
@@ -192,6 +263,7 @@ impl VirtualZeroMinUnitRepeatRuntime {
         let live = accepting.clone();
         Some(Self {
             body,
+            min,
             max,
             physical_state_count,
             root_state,
@@ -211,6 +283,11 @@ impl VirtualZeroMinUnitRepeatRuntime {
     #[inline]
     pub(super) fn max(&self) -> usize {
         self.max
+    }
+
+    #[inline]
+    pub(super) fn min(&self) -> usize {
+        self.min
     }
 
     #[inline]
@@ -270,13 +347,23 @@ impl VirtualZeroMinUnitRepeatRuntime {
 
     pub(super) fn finalizers(&self, state: u32) -> Option<&BitSet> {
         (state >= self.physical_state_count).then(|| {
-            if self.is_virtual_state(state) { &self.accepting } else { &self.dead }
+            if self
+                .consumed(state)
+                .is_some_and(|consumed| consumed >= self.min)
+            {
+                &self.accepting
+            } else {
+                &self.dead
+            }
         })
     }
 
     pub(super) fn finalizer_list(&self, state: u32) -> Option<&[TerminalID]> {
         (state >= self.physical_state_count).then(|| {
-            if self.is_virtual_state(state) {
+            if self
+                .consumed(state)
+                .is_some_and(|consumed| consumed >= self.min)
+            {
                 self.accepting_list.as_ref()
             } else {
                 &[]

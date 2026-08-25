@@ -6362,7 +6362,7 @@ impl Tokenizer {
             let expression = expressions
                 .get(entry.terminal as usize)
                 .ok_or_else(|| "serialized virtual unit terminal is out of range".to_owned())?;
-            let (body, max) = super::compile::virtual_zero_min_unit_repeat_descriptor(expression)
+            let (body, min, max) = super::compile::virtual_unit_repeat_descriptor(expression)
                 .ok_or_else(|| "serialized virtual unit runtime descriptor no longer matches terminal expression".to_owned())?;
             if self.terminal_byte_support(entry.terminal) != Some(body) {
                 return Err(
@@ -6391,6 +6391,7 @@ impl Tokenizer {
             }
             let runtime = VirtualZeroMinUnitRepeatRuntime::new(
                 body,
+                min,
                 max,
                 entry.terminal,
                 self.num_terminals,
@@ -6463,9 +6464,10 @@ impl Tokenizer {
         Ok(())
     }
 
-    pub(super) fn install_virtual_zero_min_unit_repeat(
+    pub(super) fn install_virtual_unit_repeat(
         &mut self,
         body: U8Set,
+        min: usize,
         max: usize,
     ) -> Option<()> {
         if !self.virtual_repeat_intersections.is_empty()
@@ -6476,7 +6478,7 @@ impl Tokenizer {
         {
             return None;
         }
-        let runtime = VirtualZeroMinUnitRepeatRuntime::new(body, max, 0, 1, 1, 0)?;
+        let runtime = VirtualZeroMinUnitRepeatRuntime::new(body, min, max, 0, 1, 1, 0)?;
         self.dfa.ensure_group_capacity(1);
         self.dfa.set_group_u8set(0, body);
         let mut futures = BitSet::new(1);
@@ -6488,15 +6490,24 @@ impl Tokenizer {
         Some(())
     }
 
+    pub(super) fn install_virtual_zero_min_unit_repeat(
+        &mut self,
+        body: U8Set,
+        max: usize,
+    ) -> Option<()> {
+        self.install_virtual_unit_repeat(body, 0, max)
+    }
+
     /// Add one exact arithmetic repeat as an NFA component beside the already
     /// materialized physical lexer components. The caller must have drained
     /// ordinary nullable terminals first: adding physical states afterward
     /// would collide with the arithmetic state interval which begins at the
     /// final physical state count recorded here.
     #[doc(hidden)]
-    pub fn install_virtual_zero_min_unit_repeat_component(
+    pub fn install_virtual_unit_repeat_component(
         &mut self,
         body: U8Set,
+        min: usize,
         max: usize,
         terminal: TerminalID,
     ) -> Option<()> {
@@ -6505,6 +6516,7 @@ impl Tokenizer {
             || terminal >= self.num_terminals
             || body.is_empty()
             || max == 0
+            || min > max
         {
             return None;
         }
@@ -6537,6 +6549,7 @@ impl Tokenizer {
 
         self.virtual_unit_repeat = Some(Arc::new(VirtualZeroMinUnitRepeatRuntime::new(
             body,
+            min,
             max,
             terminal,
             self.num_terminals,
@@ -6545,6 +6558,16 @@ impl Tokenizer {
         )?));
         self.invalidate_derived_caches();
         Some(())
+    }
+
+    #[doc(hidden)]
+    pub fn install_virtual_zero_min_unit_repeat_component(
+        &mut self,
+        body: U8Set,
+        max: usize,
+        terminal: TerminalID,
+    ) -> Option<()> {
+        self.install_virtual_unit_repeat_component(body, 0, max, terminal)
     }
 
     /// Add one exact lazy binary bounded-repeat intersection beside the
@@ -6686,16 +6709,17 @@ impl Tokenizer {
     }
 
     /// Build the ordinary finite DFA used only while generating one model-token
-    /// mask for an arithmetic zero-minimum unit repeat. Commit retains this
-    /// tokenizer's exact virtual counter; callers reproject that counter at the
-    /// beginning of every mask operation.
+    /// mask for an arithmetic unit repeat. Commit retains this tokenizer's
+    /// exact virtual counter; callers reproject that counter at the beginning
+    /// of every mask operation.
     #[doc(hidden)]
-    pub fn virtual_zero_min_unit_repeat_mask_tokenizer(
+    pub fn virtual_unit_repeat_mask_tokenizer(
         &self,
         horizon: usize,
     ) -> Option<(Tokenizer, VirtualZeroMinUnitRepeatMaskProjection)> {
         let runtime = self.virtual_unit_repeat.as_deref()?;
         let projection = VirtualZeroMinUnitRepeatMaskProjection::new(
+            runtime.min(),
             runtime.max(),
             horizon,
             runtime.physical_state_count(),
@@ -6708,27 +6732,55 @@ impl Tokenizer {
             let state = dfa.add_state();
             debug_assert_eq!(state, physical_state_count + offset);
         }
-        let first_positive = physical_state_count;
+        let first_positive = projection.first_positive_state()?;
         for byte in runtime.body().iter() {
             dfa.add_transition(runtime.root_state(), byte, first_positive);
         }
-        for offset in 0..positive_state_count.saturating_sub(1) {
-            let state = physical_state_count + offset;
-            for byte in runtime.body().iter() {
-                dfa.add_transition(state, byte, state + 1);
-            }
-        }
         for offset in 0..positive_state_count {
             let state = physical_state_count + offset;
+            let exact_consumed = projection.full_consumed_for_exact_mask_state(state);
+            let self_looping = projection.deep_lower_state() == Some(state)
+                || projection.interior_state() == Some(state);
+            if self_looping {
+                for byte in runtime.body().iter() {
+                    dfa.add_transition(state, byte, state);
+                }
+            } else if let Some(consumed) = exact_consumed
+                && consumed < runtime.max() as u32
+            {
+                let next_full_state = physical_state_count.checked_add(consumed)?;
+                let target = projection.project(next_full_state)?;
+                for byte in runtime.body().iter() {
+                    dfa.add_transition(state, byte, target);
+                }
+            }
+
             let mut finalizers = BitSet::new(self.num_terminals as usize);
-            finalizers.set(runtime.terminal() as usize);
+            let accepting = projection.interior_state() == Some(state)
+                || exact_consumed.is_some_and(|consumed| consumed >= runtime.min() as u32);
+            if accepting {
+                finalizers.set(runtime.terminal() as usize);
+            }
             let mut futures = BitSet::new(self.num_terminals as usize);
-            if offset + 1 < positive_state_count {
+            let live = self_looping
+                || exact_consumed.is_some_and(|consumed| consumed < runtime.max() as u32);
+            if live {
                 futures.set(runtime.terminal() as usize);
             }
             dfa.overwrite_state_metadata(state, finalizers, futures);
         }
         Some((Tokenizer::from_parts(dfa, self.num_terminals, None), projection))
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_zero_min_unit_repeat_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, VirtualZeroMinUnitRepeatMaskProjection)> {
+        let runtime = self.virtual_unit_repeat.as_deref()?;
+        (runtime.min() == 0)
+            .then(|| self.virtual_unit_repeat_mask_tokenizer(horizon))
+            .flatten()
     }
 
     fn restore_virtual_unit_repeat_runtime(&mut self) -> Result<(), String> {
@@ -6742,8 +6794,8 @@ impl Tokenizer {
             .iter()
             .enumerate()
             .filter_map(|(terminal, expression)| {
-                super::compile::virtual_zero_min_unit_repeat_descriptor(expression)
-                    .map(|(body, max)| (terminal as TerminalID, body, max))
+                super::compile::virtual_unit_repeat_descriptor(expression)
+                    .map(|(body, min, max)| (terminal as TerminalID, body, min, max))
             })
             .collect::<Vec<_>>();
         if descriptors.is_empty() {
@@ -6766,8 +6818,8 @@ impl Tokenizer {
         }
 
         let physical_state_count = self.num_states();
-        let mut restored = Vec::<(TerminalID, U8Set, usize, u32)>::new();
-        for (terminal, body, max) in descriptors {
+        let mut restored = Vec::<(TerminalID, U8Set, usize, usize, u32)>::new();
+        for (terminal, body, min, max) in descriptors {
             // The same one-byte repeat expression may deliberately have used
             // the repeat-product runtime when a hybrid proxy left too little
             // room below the reserved high state bit. Do not misidentify that
@@ -6780,7 +6832,7 @@ impl Tokenizer {
                 continue;
             }
             if physical_state_count == 1 && self.num_terminals == 1 && terminal == 0 {
-                restored.push((terminal, body, max, 0));
+                restored.push((terminal, body, min, max, 0));
                 continue;
             }
             let expected_future = {
@@ -6798,14 +6850,15 @@ impl Tokenizer {
                 .filter(|&state| self.state_futures(state) == &expected_future)
                 .collect::<Vec<_>>();
             if let [root] = candidates.as_slice() {
-                restored.push((terminal, body, max, *root));
+                restored.push((terminal, body, min, max, *root));
             }
         }
         let ([] | [_, _, ..]) = restored.as_slice() else {
-            let (terminal, body, max, root_state) = restored[0];
+            let (terminal, body, min, max, root_state) = restored[0];
             self.virtual_unit_repeat = Some(Arc::new(
                 VirtualZeroMinUnitRepeatRuntime::new(
                     body,
+                    min,
                     max,
                     terminal,
                     self.num_terminals,
@@ -9530,6 +9583,80 @@ mod tests {
             .unwrap();
         assert_eq!(billion.num_states(), 1);
         assert_eq!(billion_mask.num_states(), HORIZON as u32 + 3);
+    }
+
+    #[test]
+    fn virtual_nonzero_min_unit_repeat_projection_matches_exact_counter() {
+        use crate::automata::lexer::compile::build_virtual_unit_repeat_tokenizer;
+
+        const FULL_MIN: usize = 8;
+        const FULL_MAX: usize = 20;
+        const HORIZON: usize = 3;
+        let expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+            min: FULL_MIN,
+            max: Some(FULL_MAX),
+        };
+        let full = build_virtual_unit_repeat_tokenizer(&[expression]).unwrap();
+        let (mask, projection) = full.virtual_unit_repeat_mask_tokenizer(HORIZON).unwrap();
+
+        assert_eq!(full.num_states(), 1, "the exact counter must stay arithmetic");
+        assert!(projection.deep_lower_state().is_some());
+        assert!(projection.interior_state().is_some());
+
+        for full_state in 0..=FULL_MAX as u32 {
+            let mask_state = projection.project(full_state).unwrap();
+            assert_eq!(
+                full.matched_terminal_bitset(full_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ at exact state {full_state}",
+            );
+            assert_eq!(
+                full.possible_future_terminals(full_state),
+                mask.possible_future_terminals(mask_state),
+                "source futures differ at exact state {full_state}",
+            );
+
+            enumerate_bytes(b"ab", HORIZON, |input| {
+                let mut full_cursor = full_state;
+                let mut mask_cursor = mask_state;
+                for (offset, &byte) in input.iter().enumerate() {
+                    let full_next = full.get_transition(full_cursor, byte);
+                    let mask_next = mask.get_transition(mask_cursor, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        mask_next == u32::MAX,
+                        "liveness differs from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        full.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(mask_next),
+                        "finalizers differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    assert_eq!(
+                        full.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(mask_next),
+                        "futures differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    full_cursor = full_next;
+                    mask_cursor = mask_next;
+                }
+            });
+        }
+
+        let counts = projection.multiplicities();
+        assert_eq!(counts.iter().sum::<usize>(), FULL_MAX + 1);
+        let unique = projection.unique_full_states();
+        for (mask_state, &multiplicity) in counts.iter().enumerate() {
+            assert_eq!(
+                unique[mask_state] != u32::MAX,
+                multiplicity == 1,
+                "unique-full-state metadata disagrees at mask state {mask_state}",
+            );
+        }
     }
 
     #[test]

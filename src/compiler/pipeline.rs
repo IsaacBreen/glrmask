@@ -9,7 +9,7 @@ use range_set_blaze::RangeSetBlaze;
 use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_exact_partitioned_runtime_tokenizer,
-    build_virtual_zero_min_unit_repeat_tokenizer,
+    build_virtual_unit_repeat_tokenizer,
     build_regex,
     build_regex_partitioned,
     build_regex_partitioned_with_adaptive,
@@ -31,7 +31,7 @@ use crate::automata::lexer::compile::{
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
     virtual_binary_bounded_repeat_intersection_descriptor,
     virtual_large_bounded_repeat_descriptor,
-    virtual_zero_min_unit_repeat_descriptor,
+    virtual_unit_repeat_descriptor,
     virtual_zero_min_unit_repeat_fits_state_ids,
     DeferredPartitionedRegex,
 };
@@ -672,7 +672,7 @@ fn validate_dynamic_large_repeat_shapes(grammar: &GrammarDef) -> crate::Result<(
             giant_terminals.push(terminal as TerminalID);
         }
         if let Some(bound) = large_top_level_bounded_repeat_bound(expression) {
-            let supported = virtual_zero_min_unit_repeat_descriptor(expression).is_some()
+            let supported = virtual_unit_repeat_descriptor(expression).is_some()
                 || virtual_large_bounded_repeat_descriptor(expression).is_some();
             if !supported {
                 return Err(crate::Error::Compilation(format!(
@@ -724,10 +724,10 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         .map(terminal_expr)
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
-    if let Some(tokenizer) = build_virtual_zero_min_unit_repeat_tokenizer(&expressions) {
+    if let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions) {
         if compile_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][dynamic_tokenizer] path=virtual_zero_min_unit_repeat states={}",
+                "[glrmask/profile][dynamic_tokenizer] path=virtual_unit_repeat states={}",
                 tokenizer.num_states(),
             );
         }
@@ -743,9 +743,9 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         .iter()
         .enumerate()
         .filter_map(|(terminal, expression)| {
-            virtual_zero_min_unit_repeat_descriptor(expression)
-                .filter(|(_, max)| *max >= HYBRID_MIN_BOUND)
-                .map(|(body, max)| (terminal as TerminalID, body, max))
+            virtual_unit_repeat_descriptor(expression)
+                .filter(|(_, _, max)| *max >= HYBRID_MIN_BOUND)
+                .map(|(body, min, max)| (terminal as TerminalID, body, min, max))
         })
         .collect::<Vec<_>>();
     let virtual_candidates = expressions
@@ -792,7 +792,7 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     let profile_kind;
     let profile_bound;
     if virtual_candidates.len() == 1
-        && let Some((virtual_terminal, body, max)) = unit_candidates.into_iter().next()
+        && let Some((virtual_terminal, body, min, max)) = unit_candidates.into_iter().next()
     {
         let physical_state_count = u32::try_from(tokenizer.num_states())
             .ok()
@@ -800,9 +800,9 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
             .ok_or_else(|| build_error("physical tokenizer state-id overflow"))?;
         if virtual_zero_min_unit_repeat_fits_state_ids(max, physical_state_count) {
             tokenizer
-                .install_virtual_zero_min_unit_repeat_component(body, max, virtual_terminal)
+                .install_virtual_unit_repeat_component(body, min, max, virtual_terminal)
                 .ok_or_else(|| build_error("unit-repeat component installation failed"))?;
-            profile_kind = "hybrid_virtual_zero_min_unit_repeat";
+            profile_kind = "hybrid_virtual_unit_repeat";
             profile_bound = max;
         } else {
             let descriptor = virtual_large_bounded_repeat_descriptor(

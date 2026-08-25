@@ -548,13 +548,13 @@ pub fn virtual_zero_min_unit_repeat_fits_state_ids(
     virtual_unit_repeat_state_ids_fit(max, physical_state_count)
 }
 
-/// Recognize the exact standalone runtime lane after factoring. The body proof
+/// Recognize the exact arithmetic runtime lane after factoring. The body proof
 /// is syntactic and therefore fails closed for any variable-width repetition.
 #[doc(hidden)]
-pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize)> {
+pub fn virtual_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize, usize)> {
     let Expr::Repeat {
         expr: body,
-        min: 0,
+        min,
         max: Some(max),
     } = unwrap_shared(expr)
     else {
@@ -569,24 +569,39 @@ pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, us
         return None;
     }
     let bytes = exact_unit_byte_language(body)?;
-    (!bytes.is_empty() && *max > 0).then_some((bytes, *max))
+    (!bytes.is_empty() && *max > 0 && min <= max).then_some((bytes, *min, *max))
+}
+
+#[doc(hidden)]
+pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize)> {
+    let (body, min, max) = virtual_unit_repeat_descriptor(expr)?;
+    (min == 0).then_some((body, max))
 }
 
 /// Build the O(1)-storage physical tokenizer for the supported standalone
 /// repeat. Positive-length residuals are supplied by `Tokenizer`'s arithmetic
 /// virtual-state sidecar.
-pub fn build_virtual_zero_min_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
+pub fn build_virtual_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
     let [expression] = expressions else {
         return None;
     };
-    let (body, max) = virtual_zero_min_unit_repeat_descriptor(expression)?;
+    let (body, min, max) = virtual_unit_repeat_descriptor(expression)?;
     let mut tokenizer = Tokenizer::from_parts(
         DFA::new(1),
         1,
         Some(Arc::from(expressions.to_vec().into_boxed_slice())),
     );
-    tokenizer.install_virtual_zero_min_unit_repeat(body, max)?;
+    tokenizer.install_virtual_unit_repeat(body, min, max)?;
     Some(tokenizer)
+}
+
+
+pub fn build_virtual_zero_min_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
+    let [expression] = expressions else {
+        return None;
+    };
+    virtual_zero_min_unit_repeat_descriptor(expression)?;
+    build_virtual_unit_repeat_tokenizer(expressions)
 }
 
 const VIRTUAL_BINARY_REPEAT_MIN_BOUND: usize = 4_096;

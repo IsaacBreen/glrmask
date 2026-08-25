@@ -4753,7 +4753,7 @@ impl Constraint {
                 );
             } else if let Some((mask_tokenizer, projection)) = self
                 .tokenizer
-                .virtual_zero_min_unit_repeat_mask_tokenizer(max_token_len)
+                .virtual_unit_repeat_mask_tokenizer(max_token_len)
             {
                 if profile {
                     eprintln!(
