@@ -77,6 +77,7 @@ impl MatchedTerminalLists {
 pub enum VirtualTokenizerRuntimeKind {
     UnitRepeat,
     RepeatProduct,
+    ResidualExpr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -6263,7 +6264,9 @@ impl Tokenizer {
     #[doc(hidden)]
     pub fn virtual_runtime_metadata(&self) -> Vec<VirtualTokenizerRuntimeMetadata> {
         let mut metadata = Vec::with_capacity(
-            self.virtual_repeat_intersections.len() + usize::from(self.virtual_unit_repeat.is_some()),
+            self.virtual_repeat_intersections.len()
+                + self.virtual_residuals.len()
+                + usize::from(self.virtual_unit_repeat.is_some()),
         );
         if let Some(runtime) = self.virtual_unit_repeat.as_deref() {
             metadata.push(VirtualTokenizerRuntimeMetadata {
@@ -6275,6 +6278,13 @@ impl Tokenizer {
         metadata.extend(self.virtual_repeat_intersections.iter().map(|runtime| {
             VirtualTokenizerRuntimeMetadata {
                 kind: VirtualTokenizerRuntimeKind::RepeatProduct,
+                terminal: runtime.terminal(),
+                root_state: runtime.root_state(),
+            }
+        }));
+        metadata.extend(self.virtual_residuals.iter().map(|runtime| {
+            VirtualTokenizerRuntimeMetadata {
+                kind: VirtualTokenizerRuntimeKind::ResidualExpr,
                 terminal: runtime.terminal(),
                 root_state: runtime.root_state(),
             }
@@ -6336,6 +6346,7 @@ impl Tokenizer {
         self.restore_terminal_exprs_only(exprs)?;
         self.virtual_unit_repeat = None;
         self.virtual_repeat_intersections.clear();
+        self.virtual_residuals.clear();
         let Some(expressions) = self.exprs.as_deref() else {
             if metadata.is_empty() {
                 return Ok(());
@@ -6343,23 +6354,22 @@ impl Tokenizer {
             return Err("serialized virtual runtime metadata has no terminal expressions".to_owned());
         };
 
-        let expected_product_terminals = expressions
-            .iter()
-            .enumerate()
-            .filter_map(|(terminal, expression)| {
-                super::compile::virtual_binary_bounded_repeat_intersection_descriptor(expression)
-                    .or_else(|| super::compile::virtual_large_bounded_repeat_descriptor(expression))
-                    .map(|_| terminal as TerminalID)
-            })
-            .collect::<BTreeSet<_>>();
         let declared_terminals = metadata
             .iter()
             .map(|entry| entry.terminal)
             .collect::<BTreeSet<_>>();
-        if expected_product_terminals != declared_terminals {
+        let expected_virtual_terminals = expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, expression)| {
+                super::compile::expression_contains_large_bounded_repeat(expression)
+                    .then_some(terminal as TerminalID)
+            })
+            .collect::<BTreeSet<_>>();
+        if expected_virtual_terminals != declared_terminals {
             return Err(format!(
                 "serialized virtual runtime terminal ownership mismatch: expected {:?}, found {:?}",
-                expected_product_terminals, declared_terminals,
+                expected_virtual_terminals, declared_terminals,
             ));
         }
         if metadata.len() != declared_terminals.len() {
@@ -6456,6 +6466,78 @@ impl Tokenizer {
             return Ok(());
         }
 
+        if metadata
+            .iter()
+            .any(|entry| entry.kind == VirtualTokenizerRuntimeKind::ResidualExpr)
+        {
+            if metadata
+                .iter()
+                .any(|entry| entry.kind != VirtualTokenizerRuntimeKind::ResidualExpr)
+            {
+                return Err(
+                    "serialized residual runtime cannot coexist with another virtual runtime family"
+                        .to_owned(),
+                );
+            }
+            let allocator = Arc::new(
+                VirtualStateAllocator::new(physical_state_count).ok_or_else(|| {
+                    "serialized residual runtime has no virtual state-id namespace".to_owned()
+                })?,
+            );
+            let mut runtimes = Vec::with_capacity(metadata.len());
+            for entry in metadata {
+                let expression = expressions
+                    .get(entry.terminal as usize)
+                    .ok_or_else(|| "serialized residual terminal is out of range".to_owned())?;
+                if !super::compile::expression_supports_virtual_residual_runtime(expression) {
+                    return Err(format!(
+                        "serialized residual terminal {} is no longer supported by the residual runtime",
+                        entry.terminal,
+                    ));
+                }
+                let expected_support = super::compile::expr_u8set(expression);
+                if self.terminal_byte_support(entry.terminal) != Some(expected_support) {
+                    return Err(format!(
+                        "serialized residual terminal {} has inconsistent byte support",
+                        entry.terminal,
+                    ));
+                }
+                let runtime = Arc::new(
+                    VirtualResidualRuntime::new(
+                        expression,
+                        entry.terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        entry.root_state,
+                        Arc::clone(&allocator),
+                    )
+                    .ok_or_else(|| "serialized residual runtime metadata is invalid".to_owned())?,
+                );
+                let mut expected_future = BitSet::new(self.num_terminals as usize);
+                if runtime.root_has_future() {
+                    expected_future.set(entry.terminal as usize);
+                }
+                if self.state_futures(entry.root_state) != &expected_future {
+                    return Err(format!(
+                        "serialized residual root {} has inconsistent future metadata",
+                        entry.root_state,
+                    ));
+                }
+                if runtime.root_has_future()
+                    && !self.state_futures(start_state).contains(entry.terminal as usize)
+                {
+                    return Err(format!(
+                        "serialized residual terminal {} is missing from reset-state futures",
+                        entry.terminal,
+                    ));
+                }
+                runtimes.push(runtime);
+            }
+            self.virtual_residuals = runtimes;
+            self.invalidate_derived_caches();
+            return Ok(());
+        }
+
         let allocator = Arc::new(
             VirtualStateAllocator::new(physical_state_count)
                 .ok_or_else(|| "serialized virtual runtime has no state-id namespace".to_owned())?,
@@ -6523,6 +6605,7 @@ impl Tokenizer {
         max: usize,
     ) -> Option<()> {
         if !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
             || self.num_terminals != 1
             || self.num_states() != 1
             || self.dfa.has_epsilon_transitions()
