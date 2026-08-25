@@ -6311,6 +6311,19 @@ impl Tokenizer {
         Ok(())
     }
 
+    /// Attach compile-time terminal expressions without invoking legacy
+    /// structural virtual-runtime reconstruction. Fresh dynamic compilation
+    /// uses this before explicitly installing the selected virtual runtime
+    /// family, so ownership is deterministic rather than inferred from proxy
+    /// shape.
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_without_virtual_runtime(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_only(exprs)
+    }
+
     /// Restore virtual sidecars from explicit outer-artifact metadata. Unlike
     /// the legacy structural heuristic, this requires every virtualizable
     /// giant terminal to have exactly one declared runtime owner.
@@ -6552,6 +6565,7 @@ impl Tokenizer {
     ) -> Option<()> {
         if self.virtual_unit_repeat.is_some()
             || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
             || terminal >= self.num_terminals
             || body.is_empty()
             || max == 0
@@ -6632,6 +6646,7 @@ impl Tokenizer {
     ) -> Option<()> {
         if self.virtual_unit_repeat.is_some()
             || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
             || components.is_empty()
             || components.iter().any(|(descriptor, terminal)| {
                 *terminal >= self.num_terminals || descriptor.byte_support.is_empty()
@@ -6703,6 +6718,100 @@ impl Tokenizer {
         self.virtual_repeat_intersections = runtimes;
         self.invalidate_derived_caches();
         Some(())
+    }
+
+    /// Add general exact symbolic regex components beside the materialized
+    /// ordinary lexer. Every component shares one virtual-state allocator;
+    /// bounds inside `Expr::Repeat` never determine an allocation size.
+    #[doc(hidden)]
+    pub fn install_virtual_residual_components(
+        &mut self,
+        components: Vec<(Expr, TerminalID)>,
+    ) -> Option<()> {
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || components.is_empty()
+            || components
+                .iter()
+                .any(|(_, terminal)| *terminal >= self.num_terminals)
+        {
+            return None;
+        }
+        let mut seen_terminals = BTreeSet::new();
+        if components
+            .iter()
+            .any(|(_, terminal)| !seen_terminals.insert(*terminal))
+        {
+            return None;
+        }
+
+        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
+        let physical_state_count = existing_physical_state_count
+            .checked_add(u32::try_from(components.len()).ok()?)?;
+        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let mut pending = Vec::with_capacity(components.len());
+        for (index, (expression, terminal)) in components.into_iter().enumerate() {
+            let root_state = existing_physical_state_count
+                .checked_add(u32::try_from(index).ok()?)?;
+            let byte_support = super::compile::expr_u8set(&expression);
+            let runtime = Arc::new(VirtualResidualRuntime::new(
+                &expression,
+                terminal,
+                self.num_terminals,
+                physical_state_count,
+                root_state,
+                Arc::clone(&allocator),
+            )?);
+            pending.push((terminal, root_state, byte_support, runtime));
+        }
+
+        self.invalidate_derived_caches();
+        self.dfa.ensure_group_capacity(self.num_terminals as usize);
+        for &(terminal, expected_root, byte_support, _) in &pending {
+            self.dfa.set_group_u8set(terminal, byte_support);
+            let root_state = self.dfa.add_state();
+            debug_assert_eq!(root_state, expected_root);
+            self.dfa.add_epsilon_transition(self.start_state(), root_state);
+        }
+
+        let mut runtimes = Vec::with_capacity(pending.len());
+        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
+        for (terminal, root_state, _, runtime) in pending {
+            let mut root_futures = BitSet::new(self.num_terminals as usize);
+            if runtime.root_has_future() {
+                root_futures.set(terminal as usize);
+                start_futures.set(terminal as usize);
+            }
+            self.dfa.overwrite_state_metadata(
+                root_state,
+                BitSet::new(self.num_terminals as usize),
+                root_futures,
+            );
+            runtimes.push(runtime);
+        }
+        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
+        self.dfa.overwrite_state_metadata(
+            self.start_state(),
+            start_finalizers,
+            start_futures,
+        );
+        self.virtual_residuals = runtimes;
+        self.invalidate_derived_caches();
+        Some(())
+    }
+
+    #[doc(hidden)]
+    pub fn has_virtual_residual_runtime(&self) -> bool {
+        !self.virtual_residuals.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_residual_interned_state_count(&self) -> usize {
+        self.virtual_residuals
+            .iter()
+            .map(|runtime| runtime.interned_state_count())
+            .sum()
     }
 
     #[doc(hidden)]

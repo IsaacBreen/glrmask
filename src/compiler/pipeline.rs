@@ -23,10 +23,9 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
-    expression_large_repeats_are_deferred_exactly,
     expression_supports_deferred_dense_runtime,
+    expression_supports_virtual_residual_runtime,
     factor_regex_expr,
-    large_top_level_bounded_repeat_bound,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
     virtual_binary_bounded_repeat_intersection_descriptor,
@@ -665,52 +664,15 @@ fn validate_dynamic_large_repeat_shapes(grammar: &GrammarDef) -> crate::Result<(
         .map(terminal_expr)
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
-    let mut giant_terminals = Vec::new();
-    let mut virtual_giant_terminals = Vec::new();
     for (terminal, expression) in expressions.iter().enumerate() {
-        if expression_contains_large_bounded_repeat(expression) {
-            giant_terminals.push(terminal as TerminalID);
-        }
-        if let Some(bound) = large_top_level_bounded_repeat_bound(expression) {
-            let supported = virtual_unit_repeat_descriptor(expression).is_some()
-                || virtual_large_bounded_repeat_descriptor(expression).is_some();
-            if !supported {
-                return Err(crate::Error::Compilation(format!(
-                    "dynamic lexer cannot represent large bounded-repeat terminal {} with bound {} symbolically; refusing eager materialization",
-                    grammar.terminal_display_name(terminal as u32),
-                    bound,
-                )));
-            }
-            virtual_giant_terminals.push(terminal as TerminalID);
-            continue;
-        }
-
         if expression_contains_large_bounded_repeat(expression)
-            && virtual_binary_bounded_repeat_intersection_descriptor(expression).is_some()
-        {
-            virtual_giant_terminals.push(terminal as TerminalID);
-            continue;
-        }
-
-        if expression_contains_large_bounded_repeat(expression)
-            && !expression_large_repeats_are_deferred_exactly(expression)
+            && !expression_supports_virtual_residual_runtime(expression)
         {
             return Err(crate::Error::Compilation(format!(
-                "dynamic lexer cannot prove that nested large bounded repeat in terminal {} stays on an exact lazy runtime path; refusing eager materialization",
+                "dynamic lexer cannot represent large bounded repeat in terminal {} with the exact residual runtime; refusing eager materialization",
                 grammar.terminal_display_name(terminal as u32),
             )));
         }
-    }
-    if giant_terminals.len() > 1 && virtual_giant_terminals.len() != giant_terminals.len() {
-        return Err(crate::Error::Compilation(format!(
-            "dynamic lexer can combine multiple giant-repeat terminals only when every one has an exact virtual runtime descriptor; found {} ({})",
-            giant_terminals.len(),
-            giant_terminals
-                .iter()
-                .map(|&terminal| grammar.terminal_display_name(terminal))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )));
     }
     Ok(())
 }
@@ -724,6 +686,17 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         .map(terminal_expr)
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
+    let giant_terminals = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            expression_contains_large_bounded_repeat(expression)
+                .then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    if giant_terminals.is_empty() {
+        return Ok(None);
+    }
     if let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions) {
         if compile_profile_enabled() {
             eprintln!(
@@ -757,15 +730,62 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
                 .map(|descriptor| (terminal as TerminalID, descriptor))
         })
         .collect::<Vec<_>>();
-    if virtual_candidates.is_empty() {
-        return Ok(None);
-    }
+
+    let specialized_terminals = virtual_candidates
+        .iter()
+        .map(|(terminal, _)| *terminal)
+        .collect::<BTreeSet<_>>();
+    let all_giants_specialized = giant_terminals
+        .iter()
+        .all(|terminal| specialized_terminals.contains(terminal));
 
     let build_error = |detail: &str| {
         crate::Error::Compilation(format!(
             "validated giant-repeat tokenizer could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
         ))
     };
+
+    if !all_giants_specialized {
+        let mut proxy_expressions = expressions.clone();
+        for &terminal in &giant_terminals {
+            proxy_expressions[terminal as usize] = Expr::U8Class(U8Set::empty());
+        }
+        let terminal_labels = grammar
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(index, _)| grammar.terminal_display_name(index as u32))
+            .collect::<Vec<_>>();
+        let partition_ids = lexer_partition_ids(grammar);
+        let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+        let mut tokenizer = build_tokenizer_from_exprs_partitioned_impl(
+            &proxy_expressions,
+            Some(&terminal_labels),
+            &partition_ids,
+            Some(&residual_isolation_classes),
+            None,
+        );
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        tokenizer
+            .restore_terminal_exprs_without_virtual_runtime(Some(expressions.clone()))
+            .map_err(|detail| build_error(&format!("terminal expression restoration failed: {detail}")))?;
+        tokenizer
+            .install_virtual_residual_components(
+                giant_terminals
+                    .iter()
+                    .map(|&terminal| (expressions[terminal as usize].clone(), terminal))
+                    .collect(),
+            )
+            .ok_or_else(|| build_error("general residual component installation failed"))?;
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][dynamic_tokenizer] path=hybrid_virtual_residuals physical_states={} components={}",
+                tokenizer.num_states(),
+                giant_terminals.len(),
+            );
+        }
+        return Ok(Some(tokenizer));
+    }
 
     let mut proxy_expressions = expressions.clone();
     for (terminal, _) in &virtual_candidates {

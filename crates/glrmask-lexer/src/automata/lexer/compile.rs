@@ -15,6 +15,7 @@ use super::ast::Expr;
 use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
 };
+use super::runtime_residual::ResidualArena;
 use super::runtime_unit_repeat::virtual_unit_repeat_state_ids_fit;
 use super::tokenizer::{
     CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
@@ -1836,7 +1837,7 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     }
 }
 
-fn expr_u8set(expr: &Expr) -> U8Set {
+pub(crate) fn expr_u8set(expr: &Expr) -> U8Set {
     match expr {
         Expr::U8Seq(bytes) => U8Set::from_bytes(bytes),
         Expr::U8Class(set) => *set,
@@ -1858,6 +1859,15 @@ fn expr_u8set(expr: &Expr) -> U8Set {
         Expr::Shared(inner) => expr_u8set(inner),
         Expr::Epsilon => U8Set::empty(),
     }
+}
+
+/// Whether the general lazy residual runtime can represent this expression
+/// without first materializing its bounded repetitions. This is the generic
+/// dynamic correctness fallback; specialized virtual runtimes remain optional
+/// fast paths selected before it.
+#[doc(hidden)]
+pub fn expression_supports_virtual_residual_runtime(expr: &Expr) -> bool {
+    ResidualArena::from_expr(expr).is_some()
 }
 
 fn highest_power_of_two_leq(value: usize) -> usize {
