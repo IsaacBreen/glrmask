@@ -9,6 +9,7 @@ use range_set_blaze::RangeSetBlaze;
 use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_exact_partitioned_runtime_tokenizer,
+    build_virtual_zero_min_unit_repeat_tokenizer,
     build_regex,
     build_regex_partitioned,
     build_regex_partitioned_with_adaptive,
@@ -25,6 +26,8 @@ use crate::automata::lexer::compile::{
     factor_regex_expr,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
+    virtual_binary_bounded_repeat_intersection_descriptor,
+    virtual_zero_min_unit_repeat_descriptor,
     DeferredPartitionedRegex,
 };
 use crate::automata::lexer::regex::parse_regex;
@@ -77,6 +80,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 };
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
+use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::{Constraint, SpecialTokenTerminal};
 use crate::DynamicConstraint;
@@ -649,8 +653,112 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 /// construction up front. Keep the historical tokenizer policy for smaller
 /// grammars, where the more deterministic shape is useful at mask time.
 /// Explicit lexer env overrides continue to take precedence over this default.
+fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> Option<Tokenizer> {
+    const HYBRID_MIN_BOUND: usize = 4_096;
+
+    let expressions = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    if let Some(tokenizer) = build_virtual_zero_min_unit_repeat_tokenizer(&expressions) {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][dynamic_tokenizer] path=virtual_zero_min_unit_repeat states={}",
+                tokenizer.num_states(),
+            );
+        }
+        return Some(tokenizer);
+    }
+
+    // Hybrid lane: replace one pathological terminal with an impossible
+    // physical proxy, finish/drain the ordinary tokenizer, then attach either
+    // the O(1) arithmetic repeat or the lazily interned exact repeat-product
+    // component. All other terminals stay on their ordinary static runtime.
+    let unit_candidates = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            virtual_zero_min_unit_repeat_descriptor(expression)
+                .filter(|(_, max)| *max >= HYBRID_MIN_BOUND)
+                .map(|(body, max)| (terminal as TerminalID, body, max))
+        })
+        .collect::<Vec<_>>();
+    let product_candidates = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            virtual_binary_bounded_repeat_intersection_descriptor(expression)
+                .map(|descriptor| (terminal as TerminalID, descriptor))
+        })
+        .collect::<Vec<_>>();
+    if unit_candidates.len() + product_candidates.len() != 1 {
+        return None;
+    }
+    let virtual_terminal = unit_candidates
+        .first()
+        .map(|(terminal, _, _)| *terminal)
+        .or_else(|| product_candidates.first().map(|(terminal, _)| *terminal))?;
+
+    let mut proxy_expressions = expressions.clone();
+    proxy_expressions[virtual_terminal as usize] = Expr::U8Class(U8Set::empty());
+    let terminal_labels = grammar
+        .terminals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+        .collect::<Vec<_>>();
+    let partition_ids = lexer_partition_ids(grammar);
+    let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+    let mut tokenizer = build_tokenizer_from_exprs_partitioned_impl(
+        &proxy_expressions,
+        Some(&terminal_labels),
+        &partition_ids,
+        Some(&residual_isolation_classes),
+        None,
+    );
+    // Drain ordinary nullable terminals before reserving the arithmetic state
+    // interval. A second drain by the caller is then a no-op.
+    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    let profile_kind;
+    let profile_bound;
+    if let Some((_, body, max)) = unit_candidates.into_iter().next() {
+        tokenizer.install_virtual_zero_min_unit_repeat_component(body, max, virtual_terminal)?;
+        profile_kind = "hybrid_virtual_zero_min_unit_repeat";
+        profile_bound = max;
+    } else {
+        let (_, descriptor) = product_candidates.into_iter().next()?;
+        profile_bound = descriptor.left.max.max(descriptor.right.max) as usize;
+        tokenizer.install_virtual_binary_repeat_intersection_component(
+            descriptor,
+            virtual_terminal,
+        )?;
+        profile_kind = "hybrid_virtual_binary_repeat_intersection";
+    }
+    tokenizer
+        .restore_terminal_exprs(Some(expressions))
+        .ok()?;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][dynamic_tokenizer] path={} terminal={} physical_states={} bound={}",
+            profile_kind,
+            virtual_terminal,
+            tokenizer.num_states(),
+            profile_bound,
+        );
+    }
+    Some(tokenizer)
+}
+
 fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
+
+    // Select the virtual lane before any general regex/NFA construction: the
+    // latter is exactly where a huge bounded repeat would be materialized.
+    if let Some(tokenizer) = build_dynamic_virtual_tokenizer(grammar) {
+        return tokenizer;
+    }
 
     let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
         || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some()
@@ -4834,7 +4942,8 @@ fn compile_dynamic_owned_impl(
                 let started_at = Instant::now();
                 let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
                     .is_some();
-                let quotient_pair = quotient_enabled
+                let virtual_tokenizer = build_dynamic_virtual_tokenizer(&prepared_grammar);
+                let quotient_pair = (virtual_tokenizer.is_none() && quotient_enabled)
                     .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
                     .flatten()
                     .and_then(|plan| {
@@ -4846,6 +4955,7 @@ fn compile_dynamic_owned_impl(
                             true,
                         )
                     });
+                let has_virtual_runtime = virtual_tokenizer.is_some();
                 let (mut tokenizer, mask_tokenizer_quotient) = if let Some((
                     synthesized,
                     full,
@@ -4857,11 +4967,19 @@ fn compile_dynamic_owned_impl(
                         Some((synthesized, certified.full_to_synthesized)),
                     )
                 } else {
-                    let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
+                    let mut tokenizer = virtual_tokenizer
+                        .unwrap_or_else(|| build_dynamic_tokenizer(&prepared_grammar));
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                     (tokenizer, None)
                 };
-                if tokenizer.has_epsilon_transitions() {
+                // A virtual tokenizer's exact state space is intentionally
+                // larger than its materialized DFA state array. The ordinary
+                // subset-construction helper is defined only over that
+                // materialized domain, so running it here would discard (or
+                // mis-handle) the arithmetic residual component. Keep the
+                // symbolic runtime authoritative and determinize only fully
+                // materialized tokenizers.
+                if !has_virtual_runtime && tokenizer.has_epsilon_transitions() {
                     let source_states = tokenizer.num_states();
                     let source_transitions = tokenizer.transition_count();
                     let source_state_limit = std::env::var(

@@ -1384,6 +1384,13 @@ impl<'a> DynamicConstraintState<'a> {
 mod tests {
     use super::*;
 
+    fn token_allowed(mask: &[u32], token_id: u32) -> bool {
+        let word = token_id as usize / 32;
+        let bit = token_id % 32;
+        mask.get(word)
+            .is_some_and(|bits| bits & (1u32 << bit) != 0)
+    }
+
     fn compressed_lark_grammar(source: &str) -> crate::grammar::flat::GrammarDef {
         let mut named = crate::import::lark::parse_lark_to_named_uncompressed(source).unwrap();
         assert!(crate::grammar::right_linear::compress_large_right_linear_grammar(
@@ -1465,6 +1472,310 @@ mod tests {
         );
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
+    }
+
+    #[test]
+    fn dynamic_virtual_unit_repeat_save_load_round_trip() {
+        let vocab = Vocab::new(vec![
+            (0, b"b".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"aaa".to_vec()),
+            (4, b"baaa".to_vec()),
+            (5, b"baaaaa".to_vec()),
+            (6, b"x".to_vec()),
+        ]);
+        let grammar = r#"
+            start start;
+            t A ::= /a{0,1000000000}/;
+            t B ::= 'b';
+            nt start ::= B A;
+        "#;
+        let constraint = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        assert!(
+            constraint
+                .inner
+                .tokenizer
+                .virtual_zero_min_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+        );
+
+        let bytes = constraint.save();
+        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_zero_min_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+            "load must reconstruct the exact arithmetic lexer sidecar",
+        );
+        assert_eq!(constraint.start().mask(), loaded.start().mask());
+
+        let mut original_state = constraint.start();
+        let mut loaded_state = loaded.start();
+        original_state.commit_token(4).unwrap();
+        loaded_state.commit_token(4).unwrap();
+        assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
+        assert_eq!(original_state.mask(), loaded_state.mask());
+    }
+
+    fn variable_width_repeat_intersection_grammar(
+        left_max: usize,
+        right_max: usize,
+    ) -> crate::grammar::flat::GrammarDef {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let left_body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bb".to_vec()),
+        ]);
+        let right_body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ]);
+        GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(left_body),
+                        min: 0,
+                        max: Some(left_max),
+                    }),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(right_body),
+                        min: 0,
+                        max: Some(right_max),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        }
+    }
+
+    fn variable_width_repeat_intersection_vocab() -> Vocab {
+        Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"bb".to_vec()),
+            (2, b"abb".to_vec()),
+            (3, b"aabb".to_vec()),
+            (4, b"bbbb".to_vec()),
+            (5, b"ab".to_vec()),
+            (6, b"b".to_vec()),
+            (7, b"x".to_vec()),
+        ])
+    }
+
+    #[test]
+    fn dynamic_billion_by_billion_repeat_intersection_is_lazy_end_to_end() {
+        let vocab = variable_width_repeat_intersection_vocab();
+        let grammar = variable_width_repeat_intersection_grammar(
+            1_000_000_000,
+            900_000_000,
+        );
+        let constraint = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            variable_width_repeat_intersection_grammar(32, 32),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(constraint.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        assert!(
+            constraint.inner.tokenizer.num_states() < 32,
+            "physical tokenizer must not scale with either billion-sized bound",
+        );
+        assert!(
+            constraint
+                .inner
+                .tokenizer
+                .virtual_binary_repeat_intersection_interned_state_count()
+                <= 4,
+            "build-time exact residual discovery must stay constant and independent of N*M",
+        );
+        let mask_tokenizer = constraint
+            .inner
+            .dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .expect("lazy exact product must install a finite mask tokenizer");
+        assert!(
+            mask_tokenizer.num_states() < 2_000,
+            "mask tokenizer must scale with vocab horizon/body DFAs, not N*M",
+        );
+
+        let start_mask = constraint.start().mask();
+        assert_eq!(
+            start_mask,
+            oracle.start().mask(),
+            "far from either upper bound, the billion-scale lazy lexer must have the same finite-vocabulary observations as a materialized 32x32 oracle",
+        );
+        assert!(!token_allowed(&start_mask, 7), "x cannot begin either repeat language");
+
+        let mut state = constraint.start();
+        let mut oracle_state = oracle.start();
+        state.commit_token(2).unwrap(); // "abb" = "a" + "bb"
+        oracle_state.commit_token(2).unwrap();
+        assert!(state.is_accepting());
+        let after = state.mask();
+        assert_eq!(after, oracle_state.mask());
+        assert!(
+            constraint
+                .inner
+                .tokenizer
+                .virtual_binary_repeat_intersection_interned_state_count()
+                < 32,
+            "a short commit must discover only a short exact residual path",
+        );
+    }
+
+    #[test]
+    fn dynamic_repeat_intersection_matches_materialized_boundary_oracle() {
+        let vocab = variable_width_repeat_intersection_vocab();
+        let grammar = variable_width_repeat_intersection_grammar(4, 5);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar.clone(),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        let ordinary = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
+
+        let mut dynamic_state = dynamic.start();
+        let mut ordinary_state = ordinary.start();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        dynamic_state.commit_token(2).unwrap();
+        ordinary_state.commit_token(2).unwrap();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        dynamic_state.commit_token(1).unwrap();
+        ordinary_state.commit_token(1).unwrap();
+        assert_eq!(dynamic_state.is_accepting(), ordinary_state.is_accepting());
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+    }
+
+    #[test]
+    fn dynamic_virtual_repeat_intersection_save_load_round_trip() {
+        let vocab = variable_width_repeat_intersection_vocab();
+        let constraint = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            variable_width_repeat_intersection_grammar(1_000_000_000, 900_000_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        assert!(constraint.inner.tokenizer.has_virtual_binary_repeat_intersection());
+
+        let bytes = constraint.save();
+        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        assert!(
+            loaded.inner.tokenizer.has_virtual_binary_repeat_intersection(),
+            "load must reconstruct the lazy exact product sidecar",
+        );
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_binary_repeat_intersection_interned_state_count()
+                <= 4,
+            "load-time residual reconstruction must stay constant and independent of N*M",
+        );
+        assert_eq!(constraint.start().mask(), loaded.start().mask());
+
+        let mut original_state = constraint.start();
+        let mut loaded_state = loaded.start();
+        original_state.commit_token(2).unwrap();
+        loaded_state.commit_token(2).unwrap();
+        assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
+        assert_eq!(original_state.mask(), loaded_state.mask());
+    }
+
+    #[test]
+    fn dynamic_virtual_repeat_intersection_rejects_dead_common_prefix() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"ab".to_vec())),
+                        min: 0,
+                        max: Some(1_000_000_000),
+                    }),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"ac".to_vec())),
+                        min: 0,
+                        max: Some(900_000_000),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"ac".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+        let constraint = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        let oracle_grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"ab".to_vec())),
+                        min: 0,
+                        max: Some(8),
+                    }),
+                    intersect: Box::new(Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"ac".to_vec())),
+                        min: 0,
+                        max: Some(8),
+                    }),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            oracle_grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        assert!(constraint.inner.tokenizer.has_virtual_binary_repeat_intersection());
+        let mask = constraint.start().mask();
+        assert_eq!(mask, oracle.start().mask());
+        assert!(
+            !token_allowed(&mask, 0),
+            "the common first byte 'a' is dead: left requires b next while right requires c",
+        );
+        assert!(mask.iter().all(|&word| word == 0));
     }
 
     #[test]

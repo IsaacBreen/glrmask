@@ -12,6 +12,9 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
 
 use super::ast::Expr;
+use super::runtime_repeat_product::{
+    VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+};
 use super::tokenizer::{
     CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
 };
@@ -515,6 +518,136 @@ fn factor_choice_literals(options: &[Expr]) -> Option<Expr> {
     ]))
 }
 
+/// Return the exact byte language of an expression which consumes precisely
+/// one byte.  Keeping this proof deliberately syntactic makes the aligned
+/// repeat-intersection rewrite fail closed for variable-width bodies.
+fn exact_unit_byte_language(expr: &Expr) -> Option<U8Set> {
+    match unwrap_shared(expr) {
+        Expr::U8Seq(bytes) if bytes.len() == 1 => Some(U8Set::single(bytes[0])),
+        Expr::U8Class(bytes) => Some(*bytes),
+        Expr::Choice(options) => {
+            let mut bytes = U8Set::empty();
+            for option in options {
+                bytes |= exact_unit_byte_language(option)?;
+            }
+            Some(bytes)
+        }
+        Expr::Intersect { expr, intersect } => Some(
+            exact_unit_byte_language(expr)?.intersection(&exact_unit_byte_language(intersect)?),
+        ),
+        _ => None,
+    }
+}
+
+/// Recognize the exact standalone runtime lane after factoring. The body proof
+/// is syntactic and therefore fails closed for any variable-width repetition.
+#[doc(hidden)]
+pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize)> {
+    let Expr::Repeat {
+        expr: body,
+        min: 0,
+        max: Some(max),
+    } = unwrap_shared(expr)
+    else {
+        return None;
+    };
+    let bytes = exact_unit_byte_language(body)?;
+    (!bytes.is_empty() && *max > 0).then_some((bytes, *max))
+}
+
+/// Build the O(1)-storage physical tokenizer for the supported standalone
+/// repeat. Positive-length residuals are supplied by `Tokenizer`'s arithmetic
+/// virtual-state sidecar.
+pub fn build_virtual_zero_min_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
+    let [expression] = expressions else {
+        return None;
+    };
+    let (body, max) = virtual_zero_min_unit_repeat_descriptor(expression)?;
+    let mut tokenizer = Tokenizer::from_parts(
+        DFA::new(1),
+        1,
+        Some(Arc::from(expressions.to_vec().into_boxed_slice())),
+    );
+    tokenizer.install_virtual_zero_min_unit_repeat(body, max)?;
+    Some(tokenizer)
+}
+
+const VIRTUAL_BINARY_REPEAT_MIN_BOUND: usize = 4_096;
+
+fn virtual_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> {
+    let Expr::Repeat {
+        expr: body,
+        min,
+        max: Some(max),
+    } = unwrap_shared(expr)
+    else {
+        return None;
+    };
+    // The finite mask quotient below currently proves the upper-bound-only
+    // case. Keep nonzero lower bounds on the ordinary exact compiler until the
+    // analogous lower-bound stencil is implemented and certified.
+    if *min != 0 || *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND || min > max {
+        return None;
+    }
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(body, None)?;
+    Some(VirtualBoundedRepeatSpec {
+        base_dfa,
+        min: u32::try_from(*min).ok()?,
+        max: u32::try_from(*max).ok()?,
+    })
+}
+
+/// Recognize an exact pure intersection whose two large bounded-repeat
+/// coordinates can remain symbolic at runtime. Each body must be deterministic,
+/// non-nullable and prefix-free; that makes `(completed copies, body state)` a
+/// complete residual coordinate for each side.
+#[doc(hidden)]
+pub fn virtual_binary_bounded_repeat_intersection_descriptor(
+    expr: &Expr,
+) -> Option<VirtualBinaryRepeatIntersectionDescriptor> {
+    let Expr::Intersect { expr, intersect } = unwrap_shared(expr) else {
+        return None;
+    };
+    let left = virtual_bounded_repeat_spec(expr)?;
+    let right = virtual_bounded_repeat_spec(intersect)?;
+    let byte_support = expr_u8set(expr).intersection(&expr_u8set(intersect));
+    (!byte_support.is_empty()).then_some(VirtualBinaryRepeatIntersectionDescriptor {
+        left,
+        right,
+        byte_support,
+    })
+}
+
+/// Exactly normalize two aligned zero-minimum unit-byte repeats.  Iteration
+/// boundaries coincide after every consumed byte, so language intersection
+/// distributes over the bodies and the two upper bounds combine by `min`.
+fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<Expr> {
+    let Expr::Repeat {
+        expr: left_body,
+        min: 0,
+        max: Some(left_max),
+    } = unwrap_shared(left)
+    else {
+        return None;
+    };
+    let Expr::Repeat {
+        expr: right_body,
+        min: 0,
+        max: Some(right_max),
+    } = unwrap_shared(right)
+    else {
+        return None;
+    };
+
+    let body = exact_unit_byte_language(left_body)?
+        .intersection(&exact_unit_byte_language(right_body)?);
+    Some(Expr::Repeat {
+        expr: Box::new(Expr::U8Class(body)),
+        min: 0,
+        max: Some((*left_max).min(*right_max)),
+    })
+}
+
 pub fn factor_regex_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Seq(parts) => {
@@ -559,10 +692,16 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             expr: Box::new(factor_regex_expr(*expr)),
             exclude: Box::new(factor_regex_expr(*exclude)),
         },
-        Expr::Intersect { expr, intersect } => Expr::Intersect {
-            expr: Box::new(factor_regex_expr(*expr)),
-            intersect: Box::new(factor_regex_expr(*intersect)),
-        },
+        Expr::Intersect { expr, intersect } => {
+            let expr = factor_regex_expr(*expr);
+            let intersect = factor_regex_expr(*intersect);
+            factor_aligned_unit_repeat_intersection(&expr, &intersect).unwrap_or_else(|| {
+                Expr::Intersect {
+                    expr: Box::new(expr),
+                    intersect: Box::new(intersect),
+                }
+            })
+        }
         Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
@@ -3814,6 +3953,8 @@ impl Regex {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -11340,7 +11481,12 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     let mut pairs = vec![start];
     let mut accepting = vec![compact_zero_min_repeat_is_accepting(&lazy, start_lazy)
         && other_dfa.finalizers(0).contains(0)];
-    let mut row_offsets = Vec::<u32>::with_capacity(lazy.max.saturating_add(3));
+    // The whole point of this runtime form is that storage is proportional to
+    // reachable product residuals, not to the syntactic repetition bound.
+    // Reserving `max` here made a billion-bound repeat try to reserve billions
+    // of offsets even when only a handful of residuals survive the intersecting
+    // automaton.
+    let mut row_offsets = Vec::<u32>::new();
     row_offsets.push(0);
     let mut row_classes = Vec::<u8>::new();
     let mut row_targets = Vec::<u32>::new();
@@ -11865,7 +12011,8 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Lexer, DFA};
+    use super::super::dfa::DFA;
+    use super::super::Lexer;
     use super::{
         build_regex,
         build_regex_local_small_product,
@@ -11904,6 +12051,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -12484,6 +12633,42 @@ mod tests {
                 "compact runtime product differed for input {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn compact_zero_min_repeat_runtime_does_not_allocate_from_billion_bound() {
+        let repeat_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(1_000_000_000),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        // The intersecting coordinate bounds the reachable residual product to
+        // a tiny set. Construction must therefore scale with those reachable
+        // residuals, not with the syntactic billion-count upper bound.
+        let filter_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(7),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(repeat_component),
+            intersect: Box::new(filter_component),
+        };
+        let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+        let compact = super::try_compile_compact_zero_min_repeat_intersection_runtime(
+            &plan,
+            false,
+        )
+        .expect("eligible billion-bound repeat intersection must stay compact");
+        assert!(compact.num_states() < 128);
     }
 
     #[test]
@@ -13215,6 +13400,82 @@ mod tests {
     }
 
     #[test]
+    fn factors_aligned_zero_min_unit_repeat_intersection_exactly() {
+        let word = U8Set::from_bytes(
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_",
+        );
+        let letters =
+            U8Set::from_bytes(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(word)),
+                min: 0,
+                max: Some(1_000_000_000),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(letters)),
+                min: 0,
+                max: Some(700_000_000),
+            }),
+        };
+
+        assert_eq!(
+            factor_regex_expr(expression),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(letters)),
+                min: 0,
+                max: Some(700_000_000),
+            },
+        );
+    }
+
+    #[test]
+    fn aligned_unit_repeat_intersection_factoring_preserves_small_language() {
+        let left = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 0,
+            max: Some(3),
+        };
+        let right = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+            min: 0,
+            max: Some(2),
+        };
+        let original = Expr::Intersect {
+            expr: Box::new(left),
+            intersect: Box::new(right),
+        };
+        let factored = factor_regex_expr(original.clone());
+
+        for input in enumerate_inputs(b"abc", 4) {
+            assert_eq!(
+                terminal_matches(original.clone(), &input),
+                terminal_matches(factored.clone(), &input),
+                "factoring changed acceptance for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn aligned_repeat_intersection_rewrite_fails_closed_for_variable_width_body() {
+        let variable_width = Expr::Choice(vec![byte_expr(b'a'), Expr::U8Seq(b"aa".to_vec())]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(variable_width),
+                min: 0,
+                max: Some(100),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(100),
+            }),
+        };
+
+        assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+    }
+
+    #[test]
     fn nested_exclude_in_exclusion_branch_compiles() {
         let nested_residual = Expr::Exclude {
             expr: Box::new(byte_choice(b"ab")),
@@ -13271,6 +13532,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13319,6 +13582,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13367,6 +13632,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13437,6 +13704,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13582,6 +13851,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13649,6 +13920,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13805,6 +14078,8 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersection: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),

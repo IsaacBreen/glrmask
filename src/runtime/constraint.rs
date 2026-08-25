@@ -4728,10 +4728,49 @@ impl Constraint {
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
+        if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
+            let max_token_len = self
+                .token_bytes
+                .values()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0);
+            if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_binary_repeat_intersection_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_repeat_intersection exact_states=lazy mask_states={} horizon={}",
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab.set_virtual_repeat_intersection_mask_projection(
+                    mask_tokenizer,
+                    projection,
+                );
+            } else if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_zero_min_unit_repeat_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_unit_repeat full_states=arithmetic mask_states={} horizon={}",
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab
+                    .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
+            }
+        }
         let bounded_sets_started_at = profile.then(std::time::Instant::now);
-        let (bounded16, bounded64) = self
-            .tokenizer
-            .precompute_bounded_observation_safe_byte_sets();
+        let observation_tokenizer = dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        let (bounded16, bounded64) =
+            observation_tokenizer.precompute_bounded_observation_safe_byte_sets();
         let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
         let bounded_state_count = bounded_sets.state_count();
         let bounded_unique_set_count = bounded_sets.unique_set_count();
