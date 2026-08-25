@@ -693,11 +693,15 @@ fn factor_same_body_nonzero_repeat_intersection(left: &Expr, right: &Expr) -> Op
 struct DelimitedLiteralRepeatShape<'a> {
     prefix: Vec<u8>,
     body: &'a Expr,
+    min: usize,
     max: usize,
     suffix: Vec<u8>,
 }
 
-fn delimited_literal_zero_min_repeat_shape(expr: &Expr) -> Option<DelimitedLiteralRepeatShape<'_>> {
+const DELIMITED_REPEAT_SUFFIX_MERGED_STATE_BUDGET: usize = 100_000;
+const DELIMITED_REPEAT_SUFFIX_MERGED_TRANSITION_BUDGET: usize = 1_000_000;
+
+fn delimited_literal_repeat_shape(expr: &Expr) -> Option<DelimitedLiteralRepeatShape<'_>> {
     fn literal_bytes(parts: &[Expr]) -> Option<Vec<u8>> {
         let mut bytes = Vec::new();
         for part in parts {
@@ -724,7 +728,7 @@ fn delimited_literal_zero_min_repeat_shape(expr: &Expr) -> Option<DelimitedLiter
     let repeat_index = repeat_index?;
     let Expr::Repeat {
         expr: body,
-        min: 0,
+        min,
         max: Some(max),
     } = unwrap_shared(&parts[repeat_index])
     else {
@@ -738,12 +742,13 @@ fn delimited_literal_zero_min_repeat_shape(expr: &Expr) -> Option<DelimitedLiter
     Some(DelimitedLiteralRepeatShape {
         prefix,
         body,
+        min: *min,
         max: *max,
         suffix,
     })
 }
 
-/// Exactly factor two zero-minimum bounded repeats with a shared literal
+/// Exactly factor two bounded repeats with a shared literal
 /// prefix/body and an unambiguous literal suffix boundary. A certified
 /// prefix-free body is an instantaneous code. If the first suffix byte cannot
 /// begin any productive body word, both parses must leave the repeated body at
@@ -758,8 +763,8 @@ fn factor_same_body_delimited_literal_repeat_suffix_intersection(
     left: &Expr,
     right: &Expr,
 ) -> Option<Expr> {
-    let left = delimited_literal_zero_min_repeat_shape(left)?;
-    let right = delimited_literal_zero_min_repeat_shape(right)?;
+    let left = delimited_literal_repeat_shape(left)?;
+    let right = delimited_literal_repeat_shape(right)?;
     if (left.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
         && right.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
         || left.prefix != right.prefix
@@ -780,11 +785,44 @@ fn factor_same_body_delimited_literal_repeat_suffix_intersection(
         return None;
     }
 
+    let min = left.min.max(right.min);
+    let max = left.max.min(right.max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
     if left.suffix != right.suffix {
         return Some(Expr::U8Class(U8Set::empty()));
     }
 
-    let max = left.max.min(right.max);
+    // The theorem is exact for arbitrary minima, but a giant positive-minimum
+    // repeat followed by a suffix does not yet have its own symbolic runtime
+    // lane. Keep that still-giant result as the original intersection instead
+    // of turning a safely rejected shape into a later eager compile. If the
+    // merged upper bound is ordinary, explicitly bound the layered DFA that
+    // the rewrite can cause rather than treating the giant threshold itself as
+    // a memory budget.
+    if max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND {
+        if min != 0 {
+            return None;
+        }
+    } else if max != 0 {
+        let layers = max.checked_add(1)?;
+        let states = layers
+            .checked_mul(base_dfa.num_states())?
+            .checked_add(left.prefix.len())?
+            .checked_add(left.suffix.len())?;
+        let transitions = max
+            .checked_mul(dfa_transition_count(&base_dfa))?
+            .checked_add(layers)?
+            .checked_add(left.prefix.len())?
+            .checked_add(left.suffix.len())?;
+        if states > DELIMITED_REPEAT_SUFFIX_MERGED_STATE_BUDGET
+            || transitions > DELIMITED_REPEAT_SUFFIX_MERGED_TRANSITION_BUDGET
+        {
+            return None;
+        }
+    }
+
     let mut parts = Vec::with_capacity(3);
     if !left.prefix.is_empty() {
         parts.push(Expr::U8Seq(left.prefix));
@@ -792,7 +830,7 @@ fn factor_same_body_delimited_literal_repeat_suffix_intersection(
     if max != 0 {
         parts.push(Expr::Repeat {
             expr: Box::new((*left.body).clone()),
-            min: 0,
+            min,
             max: Some(max),
         });
     }
@@ -3009,14 +3047,21 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
-    let repeat_state_count = (max + 1).checked_mul(base_state_count)?;
+    let layers = max.checked_add(1)?;
+    let repeat_state_count = layers.checked_mul(base_state_count)?;
     let suffix_len = suffix_bytes.len();
-    let total_states = repeat_state_count + suffix_len;
+    let total_states = repeat_state_count.checked_add(suffix_len)?;
+    u32::try_from(total_states).ok()?;
+    let productive = productive_dfa_states(&base_dfa);
 
-    // Safety check: first suffix byte must NOT appear in start-state transitions
-    // of the base DFA, otherwise the DFA would be nondeterministic at accepting
-    // positions (ambiguity between continuing the repeat and starting the suffix).
-    if base_states[0].transitions.get(suffix_bytes[0]).is_some() {
+    // The suffix boundary is ambiguous only when its first byte can begin a
+    // body word. A syntactic start transition into an unproductive residual is
+    // irrelevant to the body language and may be discarded below.
+    if base_states[0]
+        .transitions
+        .get(suffix_bytes[0])
+        .is_some_and(|&target| productive[target as usize])
+    {
         return None;
     }
 
@@ -3032,7 +3077,7 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
             let mut future = crate::ds::bitset::BitSet::new(1);
 
             let is_accepting_pos = state_id == 0 && copies_done >= min;
-            if copies_done < max || is_accepting_pos {
+            if (copies_done < max && productive[state_id]) || is_accepting_pos {
                 future.set(0);
             }
             dfa.overwrite_state_metadata(mapped_state, finalizers, future);
@@ -3053,6 +3098,9 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
             let extra = if is_accepting_pos { 1 } else { 0 };
             let mut transitions = Vec::with_capacity(state.transitions.len() + extra);
             for (byte, &target) in state.transitions.iter() {
+                if !productive[target as usize] {
+                    continue;
+                }
                 let mapped_target = if !base_dfa.finalizers(target).is_empty() {
                     ((copies_done + 1) * base_state_count) as u32
                 } else {
@@ -12844,6 +12892,7 @@ mod tests {
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
+    use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
     use crate::Vocab;
     use rand::rngs::StdRng;
@@ -14766,6 +14815,70 @@ mod tests {
     }
 
     #[test]
+    fn bounded_repeat_suffix_ignores_unproductive_delimiter_transition() {
+        let body = byte_expr(b'a');
+        let mut supplied_base = DFA::new(3);
+        supplied_base.ensure_group_capacity(1);
+        supplied_base.set_transitions_from_sorted_entries(0, vec![(b'a', 1), (b'x', 2)]);
+        supplied_base.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        supplied_base.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+
+        let mut cache = super::RepeatBaseDfaCache::default();
+        cache.insert(body.clone(), Arc::new(supplied_base));
+        let parts = vec![
+            Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 0,
+                max: Some(2),
+            },
+            byte_expr(b'x'),
+        ];
+        let (with_dead_edge, _) = super::build_bounded_repeat_with_suffix_dfa_with_cache(
+            &parts,
+            Some(&cache),
+        )
+        .expect("an unproductive body edge on the suffix byte is not a boundary ambiguity");
+
+        let clean_parts = vec![
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 0,
+                max: Some(2),
+            },
+            byte_expr(b'x'),
+        ];
+        let clean = super::build_bounded_repeat_with_suffix_dfa(&clean_parts)
+            .expect("clean prefix-free repeat+suffix must use the direct builder")
+            .0;
+        for input in enumerate_inputs(b"ax", 4) {
+            assert_eq!(
+                dfa_accepts(&with_dead_edge, &input),
+                dfa_accepts(&clean, &input),
+                "dropping an unproductive body transition changed the repeat+suffix language for {input:?}",
+            );
+        }
+        let suffix_target = with_dead_edge
+            .step(0, b'x')
+            .expect("the delimiter must enter the suffix, not the dead body residual");
+        assert!(with_dead_edge.finalizers(suffix_target).contains(0));
+
+        let overflowing = vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(usize::MAX),
+            },
+            byte_expr(b'x'),
+        ];
+        assert!(
+            super::build_bounded_repeat_with_suffix_dfa(&overflowing).is_none(),
+            "repeat+suffix layer arithmetic must fail closed on max + 1 overflow",
+        );
+    }
+
+    #[test]
     fn factors_same_body_giant_repeats_with_unique_literal_suffix_boundary() {
         let body = factor_regex_expr(Expr::Choice(vec![
             Expr::U8Seq(b"a".to_vec()),
@@ -14828,6 +14941,93 @@ mod tests {
                 "unexpected common word for uniquely delimited suffixes: {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn delimited_repeat_suffix_factoring_handles_only_safe_nonzero_min_results() {
+        let giant = super::VIRTUAL_BINARY_REPEAT_MIN_BOUND;
+        let component = |min, max, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min,
+                    max: Some(max),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        let disjoint_counts = Expr::Intersect {
+            expr: Box::new(component(5, giant, b"b")),
+            intersect: Box::new(component(1, 3, b"b")),
+        };
+        assert_eq!(
+            factor_regex_expr(disjoint_counts),
+            Expr::U8Class(U8Set::empty()),
+            "unique body/suffix boundaries make disjoint count intervals exactly empty",
+        );
+
+        let different_suffixes = Expr::Intersect {
+            expr: Box::new(component(2, giant, b"b")),
+            intersect: Box::new(component(3, giant + 1, b"c")),
+        };
+        assert_eq!(
+            factor_regex_expr(different_suffixes),
+            Expr::U8Class(U8Set::empty()),
+            "different uniquely-delimited literals are disjoint even with positive minima",
+        );
+
+        let bounded_merge = Expr::Intersect {
+            expr: Box::new(component(2, giant, b"b")),
+            intersect: Box::new(component(3, 7, b"b")),
+        };
+        assert_eq!(
+            factor_regex_expr(bounded_merge),
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 3,
+                    max: Some(7),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ]),
+            "a positive-minimum merged interval is safe when its upper bound is ordinary",
+        );
+
+        let unsupported_giant_result = Expr::Intersect {
+            expr: Box::new(component(2, giant + 1, b"b")),
+            intersect: Box::new(component(3, giant, b"b")),
+        };
+        assert!(
+            matches!(
+                factor_regex_expr(unsupported_giant_result),
+                Expr::Intersect { .. }
+            ),
+            "do not rewrite to a positive-minimum giant repeat+suffix before that shape has an exact runtime lane",
+        );
+
+        let long_body = Expr::U8Seq(vec![b'a'; 32]);
+        let large_ordinary = |min, max| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(long_body.clone()),
+                    min,
+                    max: Some(max),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ])
+        };
+        let over_budget_ordinary_result = Expr::Intersect {
+            expr: Box::new(large_ordinary(0, giant)),
+            intersect: Box::new(large_ordinary(0, giant - 1)),
+        };
+        assert!(
+            matches!(
+                factor_regex_expr(over_budget_ordinary_result),
+                Expr::Intersect { .. }
+            ),
+            "a sub-threshold merged repeat must still remain unfactored when its exact layered DFA exceeds the explicit budget",
+        );
     }
 
     #[test]

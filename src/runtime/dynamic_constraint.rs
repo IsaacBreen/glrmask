@@ -3269,6 +3269,46 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_positive_min_giant_suffix_with_disjoint_counts_factors_to_empty() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let component = |min, max| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min,
+                    max: Some(max),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ])
+        };
+        let grammar = GrammarDef {
+            start: 0,
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Intersect {
+                    expr: Box::new(component(5, 10_000)),
+                    intersect: Box::new(component(1, 3)),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        assert!(dynamic.start().mask().iter().all(|&word| word == 0));
+    }
+
+    #[test]
     fn dynamic_multiple_giant_terminals_share_exact_virtual_runtime() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
