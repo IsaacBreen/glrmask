@@ -1054,8 +1054,14 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Ok(id);
         }
         self.check_growth(self.configs.len(), 1)?;
-        let id = self.configs.len() as u32;
-        debug_assert!(id < DYNAMIC_NFA_RAW_CONFIG_TAG);
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err(
+                "dynamic lexer configuration-id namespace exhausted below raw-state tag"
+                    .to_owned(),
+            );
+        }
+        let id = u32::try_from(self.configs.len())
+            .map_err(|_| "dynamic lexer configuration-id overflow".to_owned())?;
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
         self.transitions.push(None);
@@ -3350,7 +3356,6 @@ fn walk_interned_dynamic_trie_range(
 
 #[inline]
 fn dynamic_config_matches_projection(
-    vocab: &DynamicMaskVocab,
     lexer_scan_cache: &DynamicNfaScanCache<'_>,
     tokenizer_config: u32,
     expected: &[u32],
@@ -3360,9 +3365,11 @@ fn dynamic_config_matches_projection(
     }
     let mut projected = SmallVec::<[u32; 16]>::new();
     for index in 0..lexer_scan_cache.config_len(tokenizer_config) {
-        projected.push(vocab.mask_projection_state(
-            lexer_scan_cache.config_state(tokenizer_config, index),
-        ));
+        // `DynamicNfaScanCache::new_for_mask` already executes over the mask
+        // tokenizer when one exists. Its configuration states are therefore
+        // already in the finite projection coordinate and must not be
+        // projected a second time.
+        projected.push(lexer_scan_cache.config_state(tokenizer_config, index));
     }
     projected.sort_unstable();
     projected.dedup();
@@ -3398,7 +3405,6 @@ fn dynamic_config_projection_certifies_subtree(
                 continue;
             }
             if !dynamic_config_matches_projection(
-                    vocab,
                     lexer_scan_cache,
                     branch.tokenizer_config,
                     certificate.projected_config.as_ref(),
@@ -4074,9 +4080,12 @@ fn fill_mask_dynamic_impl(
             ) {
                 stats.duplicate_branches += 1;
             }
+            // Projection accelerators below are indexed in the tokenizer used
+            // by `lexer_scan_cache`, i.e. the finite mask coordinate when one
+            // exists. Keep this remembered source in that same coordinate.
             sole_root_source_state = match sole_root_source_state {
-                None => Some(tokenizer_state),
-                Some(existing) if existing == tokenizer_state => Some(existing),
+                None => Some(projected_tokenizer_state),
+                Some(existing) if existing == projected_tokenizer_state => Some(existing),
                 Some(_) => Some(u32::MAX),
             };
         }

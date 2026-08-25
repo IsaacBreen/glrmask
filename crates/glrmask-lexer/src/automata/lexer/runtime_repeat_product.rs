@@ -6,6 +6,7 @@
 //! component residuals.  We intern product residuals only when runtime input
 //! reaches them; the two regex bounds never determine an allocation size.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
@@ -19,6 +20,40 @@ use crate::grammar::flat::TerminalID;
 
 const VIRTUAL_STATE_LIMIT: u32 = 1 << 31;
 const DEAD_TRANSITION: u32 = u32::MAX;
+/// Exact future-liveness analysis works on the Cartesian product of the two
+/// repeat-body DFAs. Keep that grammar-derived product bounded as well: giant
+/// repeat counts must never be replaced by a different accidental OOM vector.
+const MAX_BODY_PRODUCT_STATES: usize = 65_536;
+/// The finite one-token quotient is an optimization, not the authoritative
+/// lexer. Refuse pathological horizons/future stencils before they can turn a
+/// lazy giant repeat back into a large eager allocation; callers fall back to
+/// exact dynamic scanning when projection construction returns `None`.
+const MAX_MASK_PROJECTION_STATES: usize = 262_144;
+
+/// Shared allocator for exact virtual tokenizer-state handles. Multiple lazy
+/// repeat products in one tokenizer share one allocator, so their lazily
+/// interned state IDs can never collide even when their residuals are reached
+/// in an arbitrary interleaving at runtime.
+#[derive(Debug)]
+pub(super) struct VirtualStateAllocator {
+    next: AtomicU32,
+}
+
+impl VirtualStateAllocator {
+    pub(super) fn new(first: u32) -> Option<Self> {
+        (first < VIRTUAL_STATE_LIMIT).then(|| Self {
+            next: AtomicU32::new(first),
+        })
+    }
+
+    fn allocate(&self) -> Option<u32> {
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                (next < VIRTUAL_STATE_LIMIT).then(|| next + 1)
+            })
+            .ok()
+    }
+}
 
 #[derive(Debug, Clone)]
 #[doc(hidden)]
@@ -87,6 +122,7 @@ impl VirtualBinaryRepeatIntersectionMaskProjection {
 struct LazyProductStore {
     states: Vec<ProductResidual>,
     state_by_residual: FxHashMap<ProductResidual, u32>,
+    state_index: FxHashMap<u32, u32>,
     transitions: Vec<SmallVec<[(u8, u32); 8]>>,
     root_transitions: SmallVec<[(u8, u32); 8]>,
 }
@@ -106,6 +142,7 @@ pub(super) struct VirtualBinaryRepeatIntersectionRuntime {
     terminal: TerminalID,
     physical_state_count: u32,
     root_state: u32,
+    state_allocator: Arc<VirtualStateAllocator>,
     accepting: BitSet,
     live: BitSet,
     dead: BitSet,
@@ -130,6 +167,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         num_terminals: u32,
         physical_state_count: u32,
         root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
     ) -> Option<Self> {
         if descriptor.byte_support.is_empty()
             || terminal >= num_terminals
@@ -155,6 +193,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             terminal,
             physical_state_count,
             root_state,
+            state_allocator,
             accepting,
             live,
             dead: BitSet::new(num_terminals as usize),
@@ -202,7 +241,10 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         let left_states = left.base_dfa.num_states();
         let right_states = right.base_dfa.num_states();
         let pair_count = left_states.checked_mul(right_states)?;
-        if pair_count == 0 || pair_count > u32::MAX as usize {
+        if pair_count == 0
+            || pair_count > u32::MAX as usize
+            || pair_count > MAX_BODY_PRODUCT_STATES
+        {
             return None;
         }
 
@@ -342,7 +384,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         if state == self.root_state {
             return Some(self.initial_residual());
         }
-        let index = state.checked_sub(self.physical_state_count)? as usize;
+        let index = *store.state_index.get(&state)? as usize;
         store.states.get(index).copied()
     }
 
@@ -358,13 +400,13 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             return Some(state);
         }
         let index = u32::try_from(store.states.len()).ok()?;
-        let state = self.physical_state_count.checked_add(index)?;
-        if state >= VIRTUAL_STATE_LIMIT {
-            return None;
-        }
+        let state = self.state_allocator.allocate().expect(
+            "exact virtual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
+        );
         store.states.push(residual);
         store.transitions.push(SmallVec::new());
         store.state_by_residual.insert(residual, state);
+        store.state_index.insert(state, index);
         Some(state)
     }
 
@@ -486,7 +528,20 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         // is the merged deep-interior class and self-loops on copy completion.
         let far = self.future_requirement_cap.checked_add(horizon)?;
         let physical_state_count = self.physical_state_count;
-        if dfa.num_states() as u32 != physical_state_count || self.left.min != 0 || self.right.min != 0 {
+        if (dfa.num_states() as u32) < physical_state_count
+            || self.left.min != 0
+            || self.right.min != 0
+        {
+            return None;
+        }
+
+        let boundary_side = usize::try_from(far).ok()?.checked_add(1)?;
+        let boundary_seed_states = boundary_side.checked_mul(boundary_side)?;
+        if dfa
+            .num_states()
+            .checked_add(boundary_seed_states)?
+            > MAX_MASK_PROJECTION_STATES
+        {
             return None;
         }
 
@@ -533,6 +588,9 @@ impl VirtualBinaryRepeatIntersectionRuntime {
                 let target = if let Some(&target) = state_by_residual.get(&next) {
                     target
                 } else {
+                    if dfa.num_states() >= MAX_MASK_PROJECTION_STATES {
+                        return None;
+                    }
                     let target = dfa.add_state();
                     state_by_residual.insert(next, target);
                     queue.push_back(next);
@@ -577,7 +635,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             return false;
         }
         let store = self.store.lock().unwrap();
-        (state - self.physical_state_count) < store.states.len() as u32
+        store.state_index.contains_key(&state)
     }
 
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
@@ -589,7 +647,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
                 .iter()
                 .find_map(|&(cached_byte, target)| (cached_byte == byte).then_some(target))
         } else {
-            let index = (state - self.physical_state_count) as usize;
+            let index = *store.state_index.get(&state)? as usize;
             store.transitions[index]
                 .iter()
                 .find_map(|&(cached_byte, target)| (cached_byte == byte).then_some(target))
@@ -605,7 +663,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         if state == self.root_state {
             store.root_transitions.push((byte, target));
         } else {
-            let index = (state - self.physical_state_count) as usize;
+            let index = *store.state_index.get(&state)? as usize;
             store.transitions[index].push((byte, target));
         }
         (target != DEAD_TRANSITION).then_some(target)

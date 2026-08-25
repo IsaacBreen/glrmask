@@ -2383,7 +2383,7 @@ pub(crate) struct DynamicMaskVocab {
     mask_tokenizer: Option<Arc<Tokenizer>>,
     full_to_mask_state: Arc<[u32]>,
     virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
-    virtual_repeat_intersection_projection: Option<VirtualBinaryRepeatIntersectionMaskProjection>,
+    virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
 }
 
 impl DynamicMaskVocab {
@@ -2444,7 +2444,7 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2488,7 +2488,7 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2515,7 +2515,7 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2559,7 +2559,7 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2791,7 +2791,7 @@ impl DynamicMaskVocab {
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(full_to_mask_state);
         self.virtual_unit_repeat_projection = None;
-        self.virtual_repeat_intersection_projection = None;
+        self.virtual_repeat_intersection_projections.clear();
     }
 
     pub(crate) fn set_virtual_unit_repeat_mask_projection(
@@ -2806,7 +2806,7 @@ impl DynamicMaskVocab {
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
         self.virtual_unit_repeat_projection = Some(projection);
-        self.virtual_repeat_intersection_projection = None;
+        self.virtual_repeat_intersection_projections.clear();
     }
 
     pub(crate) fn set_virtual_repeat_intersection_mask_projection(
@@ -2814,10 +2814,19 @@ impl DynamicMaskVocab {
         tokenizer: Tokenizer,
         projection: VirtualBinaryRepeatIntersectionMaskProjection,
     ) {
+        self.set_virtual_repeat_intersections_mask_projection(tokenizer, vec![projection]);
+    }
+
+    pub(crate) fn set_virtual_repeat_intersections_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
+    ) {
+        debug_assert!(!projections.is_empty());
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
         self.virtual_unit_repeat_projection = None;
-        self.virtual_repeat_intersection_projection = Some(projection);
+        self.virtual_repeat_intersection_projections = projections;
     }
 
     /// Preserve mask-only quotient metadata when a deferred dynamic-vocabulary
@@ -2831,13 +2840,13 @@ impl DynamicMaskVocab {
         self.mask_tokenizer = source.mask_tokenizer.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
         self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
-        self.virtual_repeat_intersection_projection =
-            source.virtual_repeat_intersection_projection.clone();
+        self.virtual_repeat_intersection_projections =
+            source.virtual_repeat_intersection_projections.clone();
     }
 
     pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
         if self.virtual_unit_repeat_projection.is_some()
-            || self.virtual_repeat_intersection_projection.is_some()
+            || !self.virtual_repeat_intersection_projections.is_empty()
         {
             // This compact structural projection is rebuilt from the exact
             // virtual tokenizer and bound vocabulary after load. The legacy
@@ -2856,11 +2865,22 @@ impl DynamicMaskVocab {
 
     #[inline]
     pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
-        if let Some(projection) = self.virtual_repeat_intersection_projection.as_ref() {
-            return projection.project(full_state).unwrap_or(full_state);
+        if !self.virtual_repeat_intersection_projections.is_empty() {
+            for projection in &self.virtual_repeat_intersection_projections {
+                if let Some(projected) = projection.project(full_state) {
+                    return projected;
+                }
+            }
+            panic!(
+                "exact virtual tokenizer state {full_state} has no owning finite-mask projection"
+            );
         }
         if let Some(projection) = self.virtual_unit_repeat_projection {
-            return projection.project(full_state).unwrap_or(full_state);
+            return projection.project(full_state).unwrap_or_else(|| {
+                panic!(
+                    "exact arithmetic tokenizer state {full_state} has no owning finite-mask projection"
+                )
+            });
         }
         self.full_to_mask_state
             .get(full_state as usize)
@@ -2870,7 +2890,7 @@ impl DynamicMaskVocab {
 
     pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
         let tokenizer = self.mask_tokenizer.as_ref()?;
-        if self.virtual_repeat_intersection_projection.is_some() {
+        if !self.virtual_repeat_intersection_projections.is_empty() {
             // The exact product state domain is populated lazily, so no finite
             // global full-state multiplicity table exists. Optimizations that
             // require such a table must simply decline.
@@ -2895,7 +2915,7 @@ impl DynamicMaskVocab {
     /// represented by `u32::MAX`.
     pub(crate) fn mask_projection_unique_full_states(&self) -> Option<Vec<u32>> {
         let tokenizer = self.mask_tokenizer.as_ref()?;
-        if self.virtual_repeat_intersection_projection.is_some() {
+        if !self.virtual_repeat_intersection_projections.is_empty() {
             return None;
         }
         if let Some(projection) = self.virtual_unit_repeat_projection {
@@ -2920,11 +2940,12 @@ impl DynamicMaskVocab {
         Some(unique)
     }
 
+    /// Lookup by a state in the active mask-tokenizer coordinate. Callers that
+    /// hold an exact committed tokenizer state must project it first.
     pub(crate) fn self_loop_projection(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_by_source.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -2932,11 +2953,11 @@ impl DynamicMaskVocab {
         self.self_loop_projections.get(index as usize)
     }
 
+    /// H64 alias lookup in the active mask-tokenizer coordinate.
     pub(crate) fn self_loop_projection_alias_h64(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_alias_h64.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -2944,11 +2965,11 @@ impl DynamicMaskVocab {
         self.self_loop_projections.get(index as usize)
     }
 
+    /// Vocabulary alias lookup in the active mask-tokenizer coordinate.
     pub(crate) fn self_loop_projection_alias_vocab(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_alias_vocab.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -3093,7 +3114,7 @@ impl Default for DynamicMaskVocab {
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 }

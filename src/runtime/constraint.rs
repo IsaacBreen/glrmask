@@ -4737,16 +4737,17 @@ impl Constraint {
                 .unwrap_or(0);
             if let Some((mask_tokenizer, projection)) = self
                 .tokenizer
-                .virtual_binary_repeat_intersection_mask_tokenizer(max_token_len)
+                .virtual_binary_repeat_intersections_mask_tokenizer(max_token_len)
             {
                 if profile {
                     eprintln!(
-                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_repeat_intersection exact_states=lazy mask_states={} horizon={}",
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_repeat_intersection exact_states=lazy components={} mask_states={} horizon={}",
+                        projection.len(),
                         mask_tokenizer.num_states(),
                         max_token_len,
                     );
                 }
-                dynamic_mask_vocab.set_virtual_repeat_intersection_mask_projection(
+                dynamic_mask_vocab.set_virtual_repeat_intersections_mask_projection(
                     mask_tokenizer,
                     projection,
                 );
