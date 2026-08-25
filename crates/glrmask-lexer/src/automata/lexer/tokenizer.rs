@@ -9145,6 +9145,75 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_min_repeat_product_rejects_unsynchronized_manual_descriptor() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let left = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(b"a".to_vec())));
+        let right = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(b"aa".to_vec())));
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::single(b'a'),
+            left: VirtualBoundedRepeatSpec {
+                base_dfa: left,
+                min: 4,
+                max: 4,
+            },
+            right: VirtualBoundedRepeatSpec {
+                base_dfa: right,
+                min: 1,
+                max: 1,
+            },
+        };
+        let mut tokenizer = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        let before_states = tokenizer.num_states();
+        assert!(
+            tokenizer
+                .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+                .is_none()
+        );
+        assert_eq!(tokenizer.num_states(), before_states);
+        assert!(!tokenizer.has_virtual_binary_repeat_intersection());
+    }
+
+    #[test]
+    fn nonzero_min_repeat_product_rejects_empty_body_language() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let empty_body = Expr::Seq(vec![
+            Expr::U8Class(U8Set::empty()),
+            Expr::U8Seq(b"a".to_vec()),
+        ]);
+        let base = Arc::new(compile_terminal_expr_dfa(&empty_body));
+        assert!(!base.possible_future_group_ids(0).contains(0));
+        let spec = VirtualBoundedRepeatSpec {
+            base_dfa: Arc::clone(&base),
+            min: 1,
+            max: 10_000,
+        };
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::single(b'a'),
+            left: spec.clone(),
+            right: spec,
+        };
+        let mut tokenizer = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        let before_states = tokenizer.num_states();
+        assert!(
+            tokenizer
+                .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+                .is_none()
+        );
+        assert_eq!(tokenizer.num_states(), before_states);
+        assert!(!tokenizer.has_virtual_binary_repeat_intersection());
+    }
+
+    #[test]
     fn lazy_binary_repeat_mask_projection_is_exact_within_vocab_horizon() {
         use crate::automata::lexer::compile::compile_terminal_expr_dfa;
         use crate::automata::lexer::runtime_repeat_product::{
@@ -9207,6 +9276,114 @@ mod tests {
                 exact.matched_terminal_bitset(exact_state),
                 mask.matched_terminal_bitset(mask_state),
                 "source finalizers differ after prefix {prefix:?}",
+            );
+
+            enumerate_bytes(b"abcx", HORIZON, |suffix| {
+                let mut full = exact_state;
+                let mut projected = mask_state;
+                for (offset, &byte) in suffix.iter().enumerate() {
+                    let full_next = exact.get_transition(full, byte);
+                    let projected_next = mask.get_transition(projected, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        projected_next == u32::MAX,
+                        "liveness differs after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        exact.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(projected_next),
+                        "finalizers differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    assert_eq!(
+                        exact.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(projected_next),
+                        "futures differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    full = full_next;
+                    projected = projected_next;
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn synchronized_nonzero_min_repeat_projection_matches_materialized_oracle() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        const HORIZON: usize = 3;
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]);
+        let expression = Expr::Repeat {
+            expr: Box::new(body.clone()),
+            min: 6,
+            max: Some(9),
+        };
+        let mut ordinary = tokenizer_from_exprs(vec![expression]);
+        ordinary.isolate_start_state_and_drain_nullable_terminals();
+
+        let base = Arc::new(compile_terminal_expr_dfa(&body));
+        let spec = VirtualBoundedRepeatSpec {
+            base_dfa: base,
+            min: 6,
+            max: 9,
+        };
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::from_bytes(b"abc"),
+            left: spec.clone(),
+            right: spec,
+        };
+        let mut exact = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        exact.isolate_start_state_and_drain_nullable_terminals();
+        exact
+            .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+            .unwrap();
+        let (mask, projection) = exact
+            .virtual_binary_repeat_intersection_mask_tokenizer(HORIZON)
+            .unwrap();
+
+        enumerate_bytes(b"abcx", 10, |input| {
+            let (_, ordinary_matches) = semantic_exec(&ordinary, input);
+            let (_, exact_matches) = semantic_exec(&exact, input);
+            assert_eq!(
+                exact_matches, ordinary_matches,
+                "nonzero-min lazy repeat changed exact matches on {input:?}",
+            );
+        });
+
+        let exact_root = exact
+            .epsilon_closure_states(&[exact.initial_state()])
+            .into_iter()
+            .find(|&state| state != exact.initial_state())
+            .unwrap();
+        enumerate_bytes(b"abc", 8, |prefix| {
+            let mut exact_state = exact_root;
+            for &byte in prefix {
+                let next = exact.get_transition(exact_state, byte);
+                if next == u32::MAX {
+                    return;
+                }
+                exact_state = next;
+            }
+            let mask_state = projection
+                .project(exact_state)
+                .expect("every synchronized exact residual must have a finite projection");
+            assert_eq!(
+                exact.matched_terminal_bitset(exact_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ after prefix {prefix:?}",
+            );
+            assert_eq!(
+                exact.possible_future_terminals(exact_state),
+                mask.possible_future_terminals(mask_state),
+                "source futures differ after prefix {prefix:?}",
             );
 
             enumerate_bytes(b"abcx", HORIZON, |suffix| {

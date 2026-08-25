@@ -600,10 +600,7 @@ fn virtual_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> 
     else {
         return None;
     };
-    // The finite mask quotient below currently proves the upper-bound-only
-    // case. Keep nonzero lower bounds on the ordinary exact compiler until the
-    // analogous lower-bound stencil is implemented and certified.
-    if *min != 0 || *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND || min > max {
+    if *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND || min > max {
         return None;
     }
     // The body is compiled below in order to prove the deterministic,
@@ -622,6 +619,11 @@ fn virtual_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> 
     })
 }
 
+fn virtual_zero_min_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> {
+    let spec = virtual_bounded_repeat_spec(expr)?;
+    (spec.min == 0).then_some(spec)
+}
+
 /// Recognize an exact pure intersection whose two large bounded-repeat
 /// coordinates can remain symbolic at runtime. Each body must be deterministic,
 /// non-nullable and prefix-free; that makes `(completed copies, body state)` a
@@ -633,8 +635,8 @@ pub fn virtual_binary_bounded_repeat_intersection_descriptor(
     let Expr::Intersect { expr, intersect } = unwrap_shared(expr) else {
         return None;
     };
-    let left = virtual_bounded_repeat_spec(expr)?;
-    let right = virtual_bounded_repeat_spec(intersect)?;
+    let left = virtual_zero_min_bounded_repeat_spec(expr)?;
+    let right = virtual_zero_min_bounded_repeat_spec(intersect)?;
     let byte_support = expr_u8set(expr).intersection(&expr_u8set(intersect));
     (!byte_support.is_empty()).then_some(VirtualBinaryRepeatIntersectionDescriptor {
         left,
@@ -643,7 +645,7 @@ pub fn virtual_binary_bounded_repeat_intersection_descriptor(
     })
 }
 
-/// Recognize one large zero-minimum bounded repetition whose body admits the
+/// Recognize one large bounded repetition whose body admits the
 /// exact symbolic repeat coordinate used by the lazy product runtime.
 ///
 /// The runtime already implements the exact language intersection of two

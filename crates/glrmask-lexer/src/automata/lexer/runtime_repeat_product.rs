@@ -85,6 +85,10 @@ struct ProductResidual {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MaskRepeatResidual {
+    /// Copies still required to satisfy the lower bound, truncated at the
+    /// finite-token lower-bound horizon. The top value is the deep prefix
+    /// class: one model token cannot reach acceptance from it.
+    required: u32,
     /// Remaining copies, truncated at `horizon + 1`; the top value means
     /// "farther than one vocabulary token can reach".
     remaining: u32,
@@ -102,6 +106,7 @@ struct MaskProductResidual {
 pub struct VirtualBinaryRepeatIntersectionMaskProjection {
     runtime: Arc<VirtualBinaryRepeatIntersectionRuntime>,
     far: u32,
+    lower_far: u32,
     mask_state_by_residual: Arc<FxHashMap<MaskProductResidual, u32>>,
 }
 
@@ -113,7 +118,9 @@ impl VirtualBinaryRepeatIntersectionMaskProjection {
         }
         let store = self.runtime.store.lock().unwrap();
         let exact = self.runtime.residual_for_state_locked(&store, full_state)?;
-        let projected = self.runtime.mask_residual(exact, self.far);
+        let projected = self
+            .runtime
+            .mask_residual(exact, self.far, self.lower_far);
         self.mask_state_by_residual.get(&projected).copied()
     }
 }
@@ -169,6 +176,9 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         root_state: u32,
         state_allocator: Arc<VirtualStateAllocator>,
     ) -> Option<Self> {
+        let synchronized_self_repeat = descriptor.left.min == descriptor.right.min
+            && descriptor.left.max == descriptor.right.max
+            && Arc::ptr_eq(&descriptor.left.base_dfa, &descriptor.right.base_dfa);
         if descriptor.byte_support.is_empty()
             || terminal >= num_terminals
             || physical_state_count == 0
@@ -178,6 +188,18 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             || descriptor.right.min > descriptor.right.max
             || descriptor.left.base_dfa.num_states() == 0
             || descriptor.right.base_dfa.num_states() == 0
+            || !descriptor
+                .left
+                .base_dfa
+                .possible_future_group_ids(0)
+                .contains(0)
+            || !descriptor
+                .right
+                .base_dfa
+                .possible_future_group_ids(0)
+                .contains(0)
+            || ((descriptor.left.min != 0 || descriptor.right.min != 0)
+                && !synchronized_self_repeat)
         {
             return None;
         }
@@ -327,6 +349,19 @@ impl VirtualBinaryRepeatIntersectionRuntime {
     }
 
     fn residual_has_future(&self, residual: ProductResidual) -> bool {
+        if self.is_synchronized_nonzero_repeat() {
+            if residual.left != residual.right {
+                return false;
+            }
+            let component = residual.left;
+            return component.completed < self.left.max
+                && (component.body_state == 0
+                    || self
+                        .left
+                        .base_dfa
+                        .possible_future_group_ids(component.body_state)
+                        .contains(0));
+        }
         let Some(index) = self.pair_index(residual.left.body_state, residual.right.body_state)
         else {
             return false;
@@ -340,6 +375,18 @@ impl VirtualBinaryRepeatIntersectionRuntime {
 
     pub(super) fn root_has_future(&self) -> bool {
         self.residual_has_future(self.initial_residual())
+    }
+
+    #[inline]
+    fn is_synchronized_self_repeat(&self) -> bool {
+        self.left.min == self.right.min
+            && self.left.max == self.right.max
+            && Arc::ptr_eq(&self.left.base_dfa, &self.right.base_dfa)
+    }
+
+    #[inline]
+    fn is_synchronized_nonzero_repeat(&self) -> bool {
+        self.left.min != 0 && self.is_synchronized_self_repeat()
     }
 
     #[inline]
@@ -448,18 +495,28 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         spec: &VirtualBoundedRepeatSpec,
         residual: RepeatResidual,
         far: u32,
+        lower_far: u32,
     ) -> MaskRepeatResidual {
         MaskRepeatResidual {
+            required: spec
+                .min
+                .saturating_sub(residual.completed)
+                .min(lower_far),
             remaining: spec.max.saturating_sub(residual.completed).min(far),
             body_state: residual.body_state,
         }
     }
 
     #[inline]
-    fn mask_residual(&self, residual: ProductResidual, far: u32) -> MaskProductResidual {
+    fn mask_residual(
+        &self,
+        residual: ProductResidual,
+        far: u32,
+        lower_far: u32,
+    ) -> MaskProductResidual {
         MaskProductResidual {
-            left: Self::mask_component(&self.left, residual.left, far),
-            right: Self::mask_component(&self.right, residual.right, far),
+            left: Self::mask_component(&self.left, residual.left, far, lower_far),
+            right: Self::mask_component(&self.right, residual.right, far, lower_far),
         }
     }
 
@@ -467,6 +524,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         spec: &VirtualBoundedRepeatSpec,
         residual: MaskRepeatResidual,
         far: u32,
+        lower_far: u32,
         byte: u8,
     ) -> Option<MaskRepeatResidual> {
         if residual.remaining == 0 {
@@ -474,12 +532,20 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         }
         let target = spec.base_dfa.step(residual.body_state, byte)?;
         if spec.base_dfa.finalizers(target).contains(0) {
+            let required = if residual.required == 0 {
+                0
+            } else if residual.required == lower_far {
+                lower_far
+            } else {
+                residual.required.checked_sub(1)?
+            };
             let remaining = if residual.remaining == far {
                 far
             } else {
                 residual.remaining.checked_sub(1)?
             };
             return Some(MaskRepeatResidual {
+                required,
                 remaining,
                 body_state: 0,
             });
@@ -488,6 +554,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             return None;
         }
         Some(MaskRepeatResidual {
+            required: residual.required,
             remaining: residual.remaining,
             body_state: target,
         })
@@ -497,16 +564,39 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         &self,
         residual: MaskProductResidual,
         far: u32,
+        lower_far: u32,
         byte: u8,
     ) -> Option<MaskProductResidual> {
         Some(MaskProductResidual {
-            left: Self::step_mask_component(&self.left, residual.left, far, byte)?,
-            right: Self::step_mask_component(&self.right, residual.right, far, byte)?,
+            left: Self::step_mask_component(&self.left, residual.left, far, lower_far, byte)?,
+            right: Self::step_mask_component(
+                &self.right,
+                residual.right,
+                far,
+                lower_far,
+                byte,
+            )?,
         })
     }
 
     fn mask_accepting(residual: MaskProductResidual) -> bool {
-        residual.left.body_state == 0 && residual.right.body_state == 0
+        residual.left.required == 0
+            && residual.right.required == 0
+            && residual.left.body_state == 0
+            && residual.right.body_state == 0
+    }
+
+    fn mask_residual_has_future(&self, residual: MaskProductResidual) -> bool {
+        if self.is_synchronized_nonzero_repeat() {
+            return residual.left == residual.right && residual.left.remaining > 0;
+        }
+        let Some(index) = self.pair_index(residual.left.body_state, residual.right.body_state)
+        else {
+            return false;
+        };
+        self.future_requirements[index].iter().any(|&(left, right)| {
+            left <= residual.left.remaining && right <= residual.right.remaining
+        })
     }
 
     /// Build the finite observation DFA used for one model-token walk.
@@ -521,51 +611,102 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         num_terminals: u32,
     ) -> Option<(DFA, VirtualBinaryRepeatIntersectionMaskProjection)> {
         let horizon = u32::try_from(horizon).ok()?;
+        let synchronized_nonzero = self.is_synchronized_nonzero_repeat();
+        let lower_far = horizon.checked_add(1)?;
         // `future_requirement_cap` bounds a cycle-free witness for every live
         // body-state pair. Keep another `horizon` copies exact so a model token
         // can consume at most `horizon` non-nullable repetitions and still end
         // in a state whose unbounded future observation is exact. The top value
         // is the merged deep-interior class and self-loops on copy completion.
-        let far = self.future_requirement_cap.checked_add(horizon)?;
+        //
+        // A synchronized self-product has one exact repeat counter, so its
+        // future language depends only on whether upper budget remains. It
+        // therefore needs only the same one-token margin on both lower and
+        // upper boundaries, independent of body-product requirement costs.
+        let far = if synchronized_nonzero {
+            lower_far
+        } else {
+            self.future_requirement_cap.checked_add(horizon)?
+        };
         let physical_state_count = self.physical_state_count;
-        if (dfa.num_states() as u32) < physical_state_count
-            || self.left.min != 0
-            || self.right.min != 0
-        {
+        if (dfa.num_states() as u32) < physical_state_count {
             return None;
         }
-
-        let boundary_side = usize::try_from(far).ok()?.checked_add(1)?;
-        let boundary_seed_states = boundary_side.checked_mul(boundary_side)?;
-        if dfa
-            .num_states()
-            .checked_add(boundary_seed_states)?
-            > MAX_MASK_PROJECTION_STATES
-        {
+        if (self.left.min != 0 || self.right.min != 0) && !synchronized_nonzero {
             return None;
         }
 
         // Every exact committed residual must have a projection, including
         // upper-tail states that are not reachable from the reset-side `far`
-        // class. Seed every remaining-count pair at a copy boundary; BFS then
-        // adds exactly the partial-body residuals reachable from those seeds.
+        // class. For a general zero-minimum product, seed every remaining-count
+        // pair at a copy boundary. For a synchronized nonzero-minimum repeat,
+        // only one counter is reachable, so seed the finite lower/upper stencils
+        // on that diagonal instead of allocating a quadratic cross-product.
         let mut state_by_residual = FxHashMap::<MaskProductResidual, u32>::default();
         let mut queue = VecDeque::<MaskProductResidual>::new();
-        for left_remaining in 0..=far {
-            for right_remaining in 0..=far {
-                let residual = MaskProductResidual {
-                    left: MaskRepeatResidual {
-                        remaining: left_remaining,
+        if synchronized_nonzero {
+            let stencil_side = usize::try_from(lower_far).ok()?.checked_add(1)?;
+            let boundary_seed_upper_bound = stencil_side.checked_mul(2)?.checked_add(1)?;
+            if dfa
+                .num_states()
+                .checked_add(boundary_seed_upper_bound)?
+                > MAX_MASK_PROJECTION_STATES
+            {
+                return None;
+            }
+            let mut seed_completed = |completed: u32, dfa: &mut DFA| {
+                let exact = ProductResidual {
+                    left: RepeatResidual {
+                        completed,
                         body_state: 0,
                     },
-                    right: MaskRepeatResidual {
-                        remaining: right_remaining,
+                    right: RepeatResidual {
+                        completed,
                         body_state: 0,
                     },
                 };
+                let residual = self.mask_residual(exact, far, lower_far);
+                if state_by_residual.contains_key(&residual) {
+                    return Some(());
+                }
                 let state = dfa.add_state();
                 state_by_residual.insert(residual, state);
                 queue.push_back(residual);
+                Some(())
+            };
+            seed_completed(0, &mut dfa)?;
+            for distance in 0..=lower_far {
+                seed_completed(self.left.min.saturating_sub(distance), &mut dfa)?;
+                seed_completed(self.left.max.saturating_sub(distance), &mut dfa)?;
+            }
+        } else {
+            let boundary_side = usize::try_from(far).ok()?.checked_add(1)?;
+            let boundary_seed_states = boundary_side.checked_mul(boundary_side)?;
+            if dfa
+                .num_states()
+                .checked_add(boundary_seed_states)?
+                > MAX_MASK_PROJECTION_STATES
+            {
+                return None;
+            }
+            for left_remaining in 0..=far {
+                for right_remaining in 0..=far {
+                    let residual = MaskProductResidual {
+                        left: MaskRepeatResidual {
+                            required: 0,
+                            remaining: left_remaining,
+                            body_state: 0,
+                        },
+                        right: MaskRepeatResidual {
+                            required: 0,
+                            remaining: right_remaining,
+                            body_state: 0,
+                        },
+                    };
+                    let state = dfa.add_state();
+                    state_by_residual.insert(residual, state);
+                    queue.push_back(residual);
+                }
             }
         }
 
@@ -575,14 +716,14 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             if Self::mask_accepting(residual) {
                 finalizers.set(self.terminal as usize);
             }
-            dfa.overwrite_state_metadata(
-                state,
-                finalizers,
-                BitSet::new(num_terminals as usize),
-            );
+            let mut futures = BitSet::new(num_terminals as usize);
+            if synchronized_nonzero && self.mask_residual_has_future(residual) {
+                futures.set(self.terminal as usize);
+            }
+            dfa.overwrite_state_metadata(state, finalizers, futures);
 
             for byte in self.byte_support.iter() {
-                let Some(next) = self.step_mask_residual(residual, far, byte) else {
+                let Some(next) = self.step_mask_residual(residual, far, lower_far, byte) else {
                     continue;
                 };
                 let target = if let Some(&target) = state_by_residual.get(&next) {
@@ -608,20 +749,27 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             let Some(next) = self.step_residual(exact_root, byte) else {
                 continue;
             };
-            let next = self.mask_residual(next, far);
+            let next = self.mask_residual(next, far, lower_far);
             let target = *state_by_residual.get(&next)?;
             dfa.add_transition(self.root_state, byte, target);
         }
 
-        // Exact graph reachability on the finite quotient supplies future bits;
-        // do not approximate intersection liveness from the two components.
-        dfa.recompute_possible_futures();
+        // Existing zero-minimum products retain their exact graph-derived
+        // future metadata. The synchronized nonzero-minimum quotient cannot
+        // use graph liveness because its deep-lower class intentionally
+        // self-loops for one-token observation even though acceptance may lie
+        // beyond that finite horizon; those futures were assigned analytically
+        // above instead.
+        if !synchronized_nonzero {
+            dfa.recompute_possible_futures();
+        }
 
         Some((
             dfa,
             VirtualBinaryRepeatIntersectionMaskProjection {
                 runtime: Arc::clone(self),
                 far,
+                lower_far,
                 mask_state_by_residual: Arc::new(state_by_residual),
             },
         ))
