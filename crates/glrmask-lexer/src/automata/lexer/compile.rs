@@ -690,6 +690,116 @@ fn factor_same_body_nonzero_repeat_intersection(left: &Expr, right: &Expr) -> Op
     })
 }
 
+struct DelimitedLiteralRepeatShape<'a> {
+    prefix: Vec<u8>,
+    body: &'a Expr,
+    max: usize,
+    suffix: Vec<u8>,
+}
+
+fn delimited_literal_zero_min_repeat_shape(expr: &Expr) -> Option<DelimitedLiteralRepeatShape<'_>> {
+    fn literal_bytes(parts: &[Expr]) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for part in parts {
+            match unwrap_shared(part) {
+                Expr::U8Seq(chunk) => bytes.extend_from_slice(chunk),
+                Expr::Epsilon => {}
+                _ => return None,
+            }
+        }
+        Some(bytes)
+    }
+
+    let Expr::Seq(parts) = unwrap_shared(expr) else {
+        return None;
+    };
+    let mut repeat_index = None;
+    for (index, part) in parts.iter().enumerate() {
+        if matches!(unwrap_shared(part), Expr::Repeat { max: Some(_), .. }) {
+            if repeat_index.replace(index).is_some() {
+                return None;
+            }
+        }
+    }
+    let repeat_index = repeat_index?;
+    let Expr::Repeat {
+        expr: body,
+        min: 0,
+        max: Some(max),
+    } = unwrap_shared(&parts[repeat_index])
+    else {
+        return None;
+    };
+    let prefix = literal_bytes(&parts[..repeat_index])?;
+    let suffix = literal_bytes(&parts[repeat_index + 1..])?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(DelimitedLiteralRepeatShape {
+        prefix,
+        body,
+        max: *max,
+        suffix,
+    })
+}
+
+/// Exactly factor two zero-minimum bounded repeats with a shared literal
+/// prefix/body and an unambiguous literal suffix boundary. A certified
+/// prefix-free body is an instantaneous code. If the first suffix byte cannot
+/// begin any productive body word, both parses must leave the repeated body at
+/// the same code-word boundary and therefore at the same repetition count.
+/// The remaining exact literal suffixes can then be compared directly.
+///
+/// Keep this focused on giant repeat+suffix shapes. The rewrite deliberately
+/// refuses suffixes whose first byte can begin another body word: e.g.
+/// `a*ab ∩ a*b` overlaps through a one-copy count shift and must remain a real
+/// intersection.
+fn factor_same_body_delimited_literal_repeat_suffix_intersection(
+    left: &Expr,
+    right: &Expr,
+) -> Option<Expr> {
+    let left = delimited_literal_zero_min_repeat_shape(left)?;
+    let right = delimited_literal_zero_min_repeat_shape(right)?;
+    if (left.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+        && right.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+        || left.prefix != right.prefix
+        || unwrap_shared(left.body) != unwrap_shared(right.body)
+        || expression_contains_large_bounded_repeat(left.body)
+    {
+        return None;
+    }
+
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(left.body, None)?;
+    let productive = productive_dfa_states(&base_dfa);
+    let suffix_can_start_body = |suffix: &[u8]| {
+        base_dfa
+            .step(0, suffix[0])
+            .is_some_and(|target| productive[target as usize])
+    };
+    if suffix_can_start_body(&left.suffix) || suffix_can_start_body(&right.suffix) {
+        return None;
+    }
+
+    if left.suffix != right.suffix {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+
+    let max = left.max.min(right.max);
+    let mut parts = Vec::with_capacity(3);
+    if !left.prefix.is_empty() {
+        parts.push(Expr::U8Seq(left.prefix));
+    }
+    if max != 0 {
+        parts.push(Expr::Repeat {
+            expr: Box::new((*left.body).clone()),
+            min: 0,
+            max: Some(max),
+        });
+    }
+    parts.push(Expr::U8Seq(left.suffix));
+    Some(seq_from_parts(parts))
+}
+
 /// Recognize an exact pure intersection whose two large bounded-repeat
 /// coordinates can remain symbolic at runtime. Each body must be deterministic,
 /// non-nullable and prefix-free; that makes `(completed copies, body state)` a
@@ -832,7 +942,8 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
         Expr::Intersect { expr, intersect } => {
             let expr = factor_regex_expr(*expr);
             let intersect = factor_regex_expr(*intersect);
-            factor_aligned_unit_repeat_intersection(&expr, &intersect)
+            factor_same_body_delimited_literal_repeat_suffix_intersection(&expr, &intersect)
+                .or_else(|| factor_aligned_unit_repeat_intersection(&expr, &intersect))
                 .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
                 .unwrap_or_else(|| Expr::Intersect {
                     expr: Box::new(expr),
@@ -14652,6 +14763,126 @@ mod tests {
         let live = repeated.step(0, b'a').expect("accepted copy transition");
         assert!(repeated.finalizers(live).contains(0));
         assert!(repeated.possible_future_group_ids(live).contains(0));
+    }
+
+    #[test]
+    fn factors_same_body_giant_repeats_with_unique_literal_suffix_boundary() {
+        let body = factor_regex_expr(Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]));
+        let component = |max, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::U8Seq(b"[".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body.clone()),
+                    min: 0,
+                    max: Some(max),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        let shared_suffix = Expr::Intersect {
+            expr: Box::new(component(
+                super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 7,
+                b"]abca",
+            )),
+            intersect: Box::new(component(
+                super::VIRTUAL_BINARY_REPEAT_MIN_BOUND,
+                b"]abca",
+            )),
+        };
+        assert_eq!(
+            factor_regex_expr(shared_suffix),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"[".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body.clone()),
+                    min: 0,
+                    max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+                },
+                Expr::U8Seq(b"]abca".to_vec()),
+            ]),
+        );
+
+        let disjoint_suffixes = Expr::Intersect {
+            expr: Box::new(component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND, b"]")),
+            intersect: Box::new(component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 3, b"}")),
+        };
+        assert_eq!(
+            factor_regex_expr(disjoint_suffixes),
+            Expr::U8Class(U8Set::empty()),
+        );
+
+        // A small materialized analogue is a cheap semantic oracle for the
+        // variable-width prefix-free body: no byte string can satisfy the two
+        // different uniquely-delimited suffixes.
+        let small_left = component(3, b"]");
+        let small_right = component(4, b"}");
+        let small_left = compile_product_component_dfa(&small_left);
+        let small_right = compile_product_component_dfa(&small_right);
+        for input in enumerate_inputs(b"[abc]}", 6) {
+            assert!(
+                !(dfa_accepts(&small_left, &input) && dfa_accepts(&small_right, &input)),
+                "unexpected common word for uniquely delimited suffixes: {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn delimited_repeat_suffix_factoring_rejects_count_shift_and_non_code_bodies() {
+        let giant = super::VIRTUAL_BINARY_REPEAT_MIN_BOUND;
+        let repeat = |body, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(body),
+                    min: 0,
+                    max: Some(giant),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        // The left suffix begins with 'a', which can start another body word.
+        // Indeed a*ab and a*b overlap by shifting one repetition across the
+        // suffix boundary, so the algebraic rewrite must not fire.
+        let shifted = Expr::Intersect {
+            expr: Box::new(repeat(byte_expr(b'a'), b"ab")),
+            intersect: Box::new(repeat(byte_expr(b'a'), b"b")),
+        };
+        assert!(matches!(factor_regex_expr(shifted), Expr::Intersect { .. }));
+
+        // Structural body equality is not enough: {a, aa} is not prefix-free,
+        // so a byte string can carry different factor counts before the same
+        // delimiter. Keep the original intersection when the code proof fails.
+        let ambiguous = Expr::Choice(vec![byte_expr(b'a'), Expr::U8Seq(b"aa".to_vec())]);
+        let non_code = Expr::Intersect {
+            expr: Box::new(repeat(ambiguous.clone(), b"b")),
+            intersect: Box::new(repeat(ambiguous, b"b")),
+        };
+        assert!(matches!(factor_regex_expr(non_code), Expr::Intersect { .. }));
+
+        // Even identical arbitrary prefix languages cannot in general be
+        // cancelled from an intersection. This rewrite only accepts one fixed
+        // literal prefix byte string.
+        let nonliteral_prefix = Expr::Choice(vec![Expr::Epsilon, byte_expr(b'p')]);
+        let prefixed = |suffix: &[u8]| {
+            Expr::Seq(vec![
+                nonliteral_prefix.clone(),
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(giant),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+        let nonliteral = Expr::Intersect {
+            expr: Box::new(prefixed(b"b")),
+            intersect: Box::new(prefixed(b"c")),
+        };
+        assert!(matches!(factor_regex_expr(nonliteral), Expr::Intersect { .. }));
     }
 
     #[test]

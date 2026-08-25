@@ -3218,7 +3218,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_two_nested_large_repeat_components_fail_closed() {
+    fn dynamic_two_nested_large_repeat_components_with_disjoint_delimiters_factor_to_empty() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
@@ -3247,17 +3247,25 @@ mod tests {
             }],
             ..GrammarDef::default()
         };
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
             grammar,
             &vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         )
-        .unwrap_err();
+        .unwrap();
+        let start_mask = dynamic.start().mask();
         assert!(
-            error.to_string().contains("nested large bounded repeat"),
-            "unexpected error: {error}",
+            start_mask.iter().all(|&word| word == 0),
+            "different uniquely-delimited literal suffixes make the intersection empty",
         );
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert_eq!(loaded.start().mask(), start_mask);
     }
 
     #[test]
