@@ -46,7 +46,7 @@ impl VirtualStateAllocator {
         })
     }
 
-    fn allocate(&self) -> Option<u32> {
+    pub(super) fn allocate(&self) -> Option<u32> {
         self.next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 (next < VIRTUAL_STATE_LIMIT).then(|| next + 1)

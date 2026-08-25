@@ -6,13 +6,16 @@
 //! proportion to `max`.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
 
 use super::ast::Expr;
 use super::dfa::DFA;
+use super::runtime_repeat_product::VirtualStateAllocator;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
+use crate::grammar::flat::TerminalID;
 
 pub(crate) type ResidualId = u32;
 
@@ -46,7 +49,6 @@ pub(crate) struct ResidualArena {
 }
 
 const TRANSITION_UNKNOWN: u32 = u32::MAX;
-const LIVENESS_STATE_LIMIT: usize = 1_000_000;
 
 impl ResidualArena {
     pub(crate) fn from_expr(expr: &Expr) -> Option<(Self, ResidualId)> {
@@ -447,9 +449,6 @@ impl ResidualArena {
         let mut queue = VecDeque::from([id]);
         seen.insert(id, ());
         while let Some(state) = queue.pop_front() {
-            if seen.len() > LIVENESS_STATE_LIMIT {
-                return Err("dynamic residual liveness exceeded its exact work ceiling".to_owned());
-            }
             for byte in 0u16..=255 {
                 let target = self
                     .step(state, byte as u8)
@@ -468,6 +467,183 @@ impl ResidualArena {
         }
         self.nonempty_cache[id as usize] = Some(false);
         Ok(false)
+    }
+}
+
+#[derive(Debug)]
+struct ResidualRuntimeStore {
+    arena: ResidualArena,
+    root: ResidualId,
+    state_by_residual: FxHashMap<ResidualId, u32>,
+    residual_by_state: FxHashMap<u32, ResidualId>,
+}
+
+/// Exact general symbolic tokenizer component. The regex upper bounds live in
+/// `ResidualNode::Repeat`; this store grows only when runtime bytes discover a
+/// new canonical language residual.
+#[derive(Debug)]
+pub(super) struct VirtualResidualRuntime {
+    terminal: TerminalID,
+    physical_state_count: u32,
+    root_state: u32,
+    state_allocator: Arc<VirtualStateAllocator>,
+    accepting: BitSet,
+    live: BitSet,
+    dead: BitSet,
+    accepting_list: Box<[TerminalID]>,
+    store: Mutex<ResidualRuntimeStore>,
+}
+
+impl VirtualResidualRuntime {
+    pub(super) fn new(
+        expr: &Expr,
+        terminal: TerminalID,
+        num_terminals: u32,
+        physical_state_count: u32,
+        root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
+    ) -> Option<Self> {
+        if terminal >= num_terminals
+            || physical_state_count == 0
+            || root_state >= physical_state_count
+        {
+            return None;
+        }
+        let (mut arena, root) = ResidualArena::from_expr(expr)?;
+        // Force exact root liveness now. Specialized runtimes are selected
+        // before this fallback, so pathological Boolean products keep their
+        // dedicated implementations rather than surprising the first mask.
+        let root_live = arena.has_future(root).ok()?;
+        if !root_live && !arena.is_nullable(root) {
+            return None;
+        }
+        let mut accepting = BitSet::new(num_terminals as usize);
+        accepting.set(terminal as usize);
+        let live = accepting.clone();
+        Some(Self {
+            terminal,
+            physical_state_count,
+            root_state,
+            state_allocator,
+            accepting,
+            live,
+            dead: BitSet::new(num_terminals as usize),
+            accepting_list: vec![terminal].into_boxed_slice(),
+            store: Mutex::new(ResidualRuntimeStore {
+                arena,
+                root,
+                state_by_residual: FxHashMap::default(),
+                residual_by_state: FxHashMap::default(),
+            }),
+        })
+    }
+
+    pub(super) fn terminal(&self) -> TerminalID {
+        self.terminal
+    }
+
+    pub(super) fn root_state(&self) -> u32 {
+        self.root_state
+    }
+
+    pub(super) fn physical_state_count(&self) -> u32 {
+        self.physical_state_count
+    }
+
+    fn residual_for_state(store: &ResidualRuntimeStore, root_state: u32, state: u32) -> Option<ResidualId> {
+        if state == root_state {
+            Some(store.root)
+        } else {
+            store.residual_by_state.get(&state).copied()
+        }
+    }
+
+    fn intern_locked(&self, store: &mut ResidualRuntimeStore, residual: ResidualId) -> Option<u32> {
+        if residual == store.root {
+            return Some(self.root_state);
+        }
+        if let Some(&state) = store.state_by_residual.get(&residual) {
+            return Some(state);
+        }
+        let state = self.state_allocator.allocate().expect(
+            "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
+        );
+        store.state_by_residual.insert(residual, state);
+        store.residual_by_state.insert(state, residual);
+        Some(state)
+    }
+
+    pub(super) fn handles_state(&self, state: u32) -> bool {
+        if state == self.root_state {
+            return true;
+        }
+        if state < self.physical_state_count {
+            return false;
+        }
+        self.store.lock().unwrap().residual_by_state.contains_key(&state)
+    }
+
+    pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        let mut store = self.store.lock().unwrap();
+        let residual = Self::residual_for_state(&store, self.root_state, state)?;
+        let target = store.arena.step(residual, byte)?;
+        if store.arena.is_empty(target) {
+            return None;
+        }
+        let nullable = store.arena.is_nullable(target);
+        let future = store.arena.has_future(target).ok()?;
+        if !nullable && !future {
+            return None;
+        }
+        self.intern_locked(&mut store, target)
+    }
+
+    fn observation(&self, state: u32) -> Option<(bool, bool)> {
+        let mut store = self.store.lock().unwrap();
+        let residual = Self::residual_for_state(&store, self.root_state, state)?;
+        // Match the existing virtual-runtime convention: the physical proxy
+        // root is the drained zero-byte configuration and must not emit a
+        // terminal match before any input is consumed.
+        let accepting = state != self.root_state && store.arena.is_nullable(residual);
+        let future = store.arena.has_future(residual).ok()?;
+        Some((accepting, future))
+    }
+
+    pub(super) fn root_has_future(&self) -> bool {
+        self.observation(self.root_state)
+            .is_some_and(|(_, future)| future)
+    }
+
+    pub(super) fn finalizers(&self, state: u32) -> Option<&BitSet> {
+        let (accepting, _) = self.observation(state)?;
+        Some(if accepting { &self.accepting } else { &self.dead })
+    }
+
+    pub(super) fn finalizer_list(&self, state: u32) -> Option<&[TerminalID]> {
+        let (accepting, _) = self.observation(state)?;
+        Some(if accepting { self.accepting_list.as_ref() } else { &[] })
+    }
+
+    pub(super) fn futures(&self, state: u32) -> Option<&BitSet> {
+        let (_, future) = self.observation(state)?;
+        Some(if future { &self.live } else { &self.dead })
+    }
+
+    pub(super) fn transitions(&self, state: u32) -> Option<Vec<(u8, u32)>> {
+        if !self.handles_state(state) {
+            return None;
+        }
+        let mut out = Vec::new();
+        for byte in 0u16..=255 {
+            if let Some(target) = self.step(state, byte as u8) {
+                out.push((byte as u8, target));
+            }
+        }
+        Some(out)
+    }
+
+    pub(super) fn interned_state_count(&self) -> usize {
+        self.store.lock().unwrap().state_by_residual.len()
     }
 }
 
