@@ -14,5 +14,6 @@ pub(crate) mod regex;
 pub mod runtime_unit_repeat;
 #[doc(hidden)]
 pub mod runtime_repeat_product;
+pub(crate) mod runtime_residual;
 
 pub use tokenizer::Lexer;
