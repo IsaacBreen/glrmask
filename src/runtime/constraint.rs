@@ -4728,6 +4728,15 @@ impl Constraint {
         if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
             return Vec::new();
         }
+        if self.tokenizer.has_virtual_residual_runtime() {
+            // Residual runtimes leave the finite physical DFA domain after
+            // their physical root. An observation quotient over only raw DFA
+            // states cannot certify those lazily-created virtual residuals,
+            // and attempting to traverse them as raw-state indices would make
+            // the finite quotient construction invalid. Dynamic masking keeps
+            // virtual residual state identity exact instead.
+            return Vec::new();
+        }
 
         // This quotient exists to split a parser-visible terminal back out of
         // a broad lexer residual that also carries unrelated futures. Restrict

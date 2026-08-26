@@ -1849,6 +1849,13 @@ mod tests {
         let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
         assert!(
+            !dynamic
+                .inner
+                .dynamic_mask_vocab_for_runtime()
+                .has_terminal_observation_classes(),
+            "physical terminal-observation quotients must stay disabled for virtual residual runtimes",
+        );
+        assert!(
             dynamic
                 .inner
                 .tokenizer
@@ -1882,6 +1889,13 @@ mod tests {
         assert!(!accepts(&too_long));
 
         let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            !loaded
+                .inner
+                .dynamic_mask_vocab_for_runtime()
+                .has_terminal_observation_classes(),
+            "save/load must not attach a physical observation quotient to a virtual residual runtime",
+        );
         assert!(
             loaded
                 .inner
