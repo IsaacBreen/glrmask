@@ -4,11 +4,13 @@ use super::table::{
     Action,
     AdmissionPolicy,
     GLRTable,
+    GlrTableConstruction,
     GuardedShiftCellIndex,
     GuardedStackShift,
     StackShift,
     StackShiftGuard,
 };
+use super::table::row::{ActionRow, GotoRow};
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
@@ -95,6 +97,295 @@ pub trait ParserActionProvider {
     fn control_symbols(&self, _state: u32, _out: &mut SmallVec<[Self::Symbol; 4]>) {}
 
     fn state_count_hint(&self) -> usize;
+}
+
+fn scoped_provider_nonterminal(
+    ids: &mut BTreeMap<(u32, u32), u32>,
+    scope: u32,
+    local: u32,
+) -> Result<u32, String> {
+    if let Some(&id) = ids.get(&(scope, local)) {
+        return Ok(id);
+    }
+    let id = u32::try_from(ids.len())
+        .map_err(|_| "scoped provider nonterminal coordinate overflow".to_owned())?;
+    ids.insert((scope, local), id);
+    Ok(id)
+}
+
+fn materialize_scoped_local_action<P: ParserActionProvider>(
+    provider: &P,
+    scope: u32,
+    action: &Action,
+    nonterminals: &mut BTreeMap<(u32, u32), u32>,
+) -> Result<Action, String> {
+    let scoped = |state| {
+        provider
+            .scope_state(scope, state)
+            .ok_or_else(|| format!("provider cannot scope local state {state} in scope {scope}"))
+    };
+    Ok(match action {
+        Action::Shift(target, replace) => Action::Shift(scoped(*target)?, *replace),
+        Action::StackShifts(shifts) => Action::StackShifts(
+            shifts
+                .iter()
+                .map(|shift| {
+                    Ok(StackShift {
+                        pop: shift.pop,
+                        pushes: shift
+                            .pushes
+                            .iter()
+                            .map(|&state| scoped(state))
+                            .collect::<Result<Vec<_>, String>>()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(
+            shifts
+                .iter()
+                .map(|shift| {
+                    Ok(GuardedStackShift {
+                        guards: shift
+                            .guards
+                            .iter()
+                            .map(|guard| {
+                                Ok(StackShiftGuard {
+                                    pop: guard.pop,
+                                    states: guard
+                                        .states
+                                        .iter()
+                                        .map(|&state| scoped(state))
+                                        .collect::<Result<Vec<_>, String>>()?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                        pop: shift.pop,
+                        pushes: shift
+                            .pushes
+                            .iter()
+                            .map(|&state| scoped(state))
+                            .collect::<Result<Vec<_>, String>>()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Action::Reduce(nonterminal, len) => Action::Reduce(
+            scoped_provider_nonterminal(nonterminals, scope, *nonterminal)?,
+            *len,
+        ),
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => Action::Split {
+            shift: shift
+                .map(|(target, replace)| -> Result<(u32, bool), String> {
+                    Ok((scoped(target)?, replace))
+                })
+                .transpose()?,
+            reduces: reduces
+                .iter()
+                .map(|&(nonterminal, len)| {
+                    Ok((
+                        scoped_provider_nonterminal(nonterminals, scope, nonterminal)?,
+                        len,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            accept: *accept,
+        },
+        Action::Accept => Action::Accept,
+        Action::ReplaceShifts(targets) => Action::ReplaceShifts(
+            targets
+                .iter()
+                .map(|&target| scoped(target))
+                .collect::<Result<Vec<_>, String>>()?
+                .into(),
+        ),
+        Action::Skip => Action::Skip,
+    })
+}
+
+fn materialize_scoped_provided_action<P: ParserActionProvider>(
+    provider: &P,
+    provided: &ProvidedAction<'_>,
+    nonterminals: &mut BTreeMap<(u32, u32), u32>,
+) -> Result<Action, String> {
+    match &provided.action {
+        ProvidedActionRef::Local { scope, action } => {
+            materialize_scoped_local_action(provider, *scope, action, nonterminals)
+        }
+        ProvidedActionRef::Identity => Ok(Action::Skip),
+        ProvidedActionRef::Call {
+            parent_target,
+            child_start,
+            replace,
+        } => Ok(Action::StackShifts(vec![StackShift {
+            pop: u32::from(*replace),
+            pushes: vec![*parent_target, *child_start],
+        }])),
+        ProvidedActionRef::Return { pop } => Ok(Action::StackShifts(vec![StackShift {
+            pop: *pop,
+            pushes: Vec::new(),
+        }])),
+    }
+}
+
+/// Materialize the exact stack semantics of a scoped action provider into a
+/// temporary ordinary GLR table, then eliminate the provider's zero-width
+/// controls. The resulting state alphabet is exactly the provider's `u32`
+/// coordinate; it does not reconstruct or depend on a composed/materialized LR
+/// state space.
+///
+/// `terminal_symbols[t]` lists the provider symbols represented by ordinary
+/// terminal `t`. Multiple entries are permitted only when they induce the same
+/// action from a state (the normal alias case). Each semantic provider control
+/// symbol receives one temporary terminal shared across all states so reductions
+/// can continue through goto on that same control. Additional nullable FINISH
+/// alternatives use private branch terminals, allowing them to coexist exactly
+/// with local EOF work without requiring a new `Action` variant.
+pub fn materialize_control_eliminated_scoped_provider_table<P>(
+    provider: &P,
+    terminal_symbols: &[SmallVec<[ScopedParserSymbol; 4]>],
+) -> Result<GLRTable, String>
+where
+    P: ParserActionProvider<Symbol = ScopedParserSymbol>,
+{
+    let state_count = provider.state_count_hint();
+    let num_states = u32::try_from(state_count)
+        .map_err(|_| "scoped provider state coordinate overflow".to_owned())?;
+    let ordinary_terminals = u32::try_from(terminal_symbols.len())
+        .map_err(|_| "scoped provider terminal coordinate overflow".to_owned())?;
+    let mut rows = (0..state_count)
+        .map(|_| Vec::<(TerminalID, Action)>::new())
+        .collect::<Vec<_>>();
+    let mut nonterminals = BTreeMap::<(u32, u32), u32>::new();
+    let mut skip_terminals = BTreeSet::<TerminalID>::new();
+
+    for state in 0..num_states {
+        for (terminal, symbols) in terminal_symbols.iter().enumerate() {
+            let terminal = terminal as u32;
+            let mut materialized = None::<Action>;
+            for &symbol in symbols {
+                let Some(provided) = provider.action(state, symbol) else {
+                    continue;
+                };
+                if !provided.extra_stack_shifts.is_empty() {
+                    return Err(format!(
+                        "ordinary provider symbol {symbol:?} unexpectedly carries extra control stack shifts"
+                    ));
+                }
+                let action =
+                    materialize_scoped_provided_action(provider, &provided, &mut nonterminals)?;
+                if let Some(existing) = materialized.as_ref() {
+                    if existing != &action {
+                        return Err(format!(
+                            "ordinary terminal {terminal} has distinct provider actions in state {state}"
+                        ));
+                    }
+                } else {
+                    materialized = Some(action);
+                }
+            }
+            if let Some(action) = materialized {
+                if matches!(action, Action::Skip) {
+                    skip_terminals.insert(terminal);
+                }
+                rows[state as usize].push((terminal, action));
+            }
+        }
+    }
+
+    // A semantic control symbol must keep one terminal ID across every state.
+    // In particular, a FINISH/ENTRY reduction continues by looking up the same
+    // terminal after its goto; assigning IDs per cell would cut that reduction
+    // chain before the eventual RETURN/CALL action.
+    let mut provider_controls = Vec::<ScopedParserSymbol>::new();
+    for state in 0..num_states {
+        let mut symbols = SmallVec::<[ScopedParserSymbol; 4]>::new();
+        provider.control_symbols(state, &mut symbols);
+        for symbol in symbols {
+            if !provider_controls.contains(&symbol) {
+                provider_controls.push(symbol);
+            }
+        }
+    }
+    let provider_control_count = u32::try_from(provider_controls.len())
+        .map_err(|_| "scoped provider control-terminal coordinate overflow".to_owned())?;
+    let mut next_control = ordinary_terminals
+        .checked_add(provider_control_count)
+        .ok_or_else(|| "scoped provider control-terminal coordinate overflow".to_owned())?;
+    let mut control_terminals = (ordinary_terminals..next_control).collect::<BTreeSet<_>>();
+
+    for state in 0..num_states {
+        for (control_index, &symbol) in provider_controls.iter().enumerate() {
+            let Some(provided) = provider.action(state, symbol) else {
+                continue;
+            };
+            let primary =
+                materialize_scoped_provided_action(provider, &provided, &mut nonterminals)?;
+            let terminal = ordinary_terminals + control_index as u32;
+            rows[state as usize].push((terminal, primary));
+            for shift in provided.extra_stack_shifts {
+                let terminal = next_control;
+                next_control = next_control.checked_add(1).ok_or_else(|| {
+                    "scoped provider control-terminal coordinate overflow".to_owned()
+                })?;
+                control_terminals.insert(terminal);
+                rows[state as usize].push((terminal, Action::StackShifts(vec![shift])));
+            }
+        }
+    }
+
+    let mut goto_pairs = nonterminals
+        .iter()
+        .map(|(&(scope, local), &global)| (global, scope, local))
+        .collect::<Vec<_>>();
+    goto_pairs.sort_unstable();
+    let goto = (0..num_states)
+        .map(|state| {
+            GotoRow::from_iter(goto_pairs.iter().filter_map(|&(global, scope, local)| {
+                provider
+                    .goto_target(scope, state, local)
+                    .map(|target| (global, target))
+            }))
+        })
+        .collect::<Vec<_>>();
+    let action = rows
+        .into_iter()
+        .map(ActionRow::from_iter)
+        .collect::<Vec<_>>();
+    let mut table = GLRTable {
+        action,
+        goto,
+        num_states,
+        num_terminals: next_control,
+        num_rules: 0,
+        rules: Vec::new(),
+        nonterminal_display_names: Vec::new(),
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        control_terminals,
+        skip_terminals,
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_unconditional_advance_rows();
+    table.rebuild_guarded_shift_index();
+    table.eliminate_control_terminals_exact()?;
+    // Private controls are gone from every action row. Shrink the externally
+    // visible terminal domain back to the real composed terminal coordinate so
+    // downstream parser-DWA compilation sees exactly its existing alphabet.
+    table.num_terminals = ordinary_terminals;
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_unconditional_advance_rows();
+    table.rebuild_guarded_shift_index();
+    Ok(table)
 }
 
 /// Zero-remap adapter for an ordinary standalone table.
@@ -5420,6 +5711,9 @@ mod tests {
     use super::{
         DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol,
         ScopedSubgrammarLink, close_provider_control_stacks,
+        advance_provider_control_closed_stacks,
+        materialize_control_eliminated_scoped_provider_table,
+        ParserActionProvider,
         advance_concrete_stacks_reference,
         advance_stacks_with_provider,
         advance_stacks_disjoint_top_terminals_bounded,
@@ -5449,6 +5743,7 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
+    use smallvec::SmallVec;
 
     #[test]
     fn disjoint_component_provider_parses_across_link_without_composed_table() {
@@ -5529,6 +5824,213 @@ mod tests {
             },
         );
         assert_eq!(finished.single_top_value(), Some(p2));
+    }
+
+    #[test]
+    fn materialized_scoped_provider_table_preserves_call_return_stack_language() {
+        let slot = 0;
+        let parent_tail = 1;
+        let child_token = 0;
+        let parent = build_test_table(
+            3,
+            2,
+            &[
+                &[(slot, Action::Shift(1, false))],
+                &[(parent_tail, Action::Shift(2, false))],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+        let child = build_test_table(
+            2,
+            1,
+            &[
+                &[(child_token, Action::Shift(1, false))],
+                &[(EOF, Action::Accept)],
+            ],
+            &[&[], &[]],
+        );
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: false,
+        }];
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
+        let p0 = provider.scoped_state(0, 0).unwrap();
+        let p2 = provider.scoped_state(0, 2).unwrap();
+        let terminal_symbols = vec![
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 1,
+                terminal: child_token,
+            }]),
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: parent_tail,
+            }]),
+        ];
+        let table = materialize_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+        )
+        .unwrap();
+        assert!(table.control_terminals.is_empty());
+        assert_eq!(table.num_states, provider.state_count_hint() as u32);
+        assert_eq!(table.num_terminals, terminal_symbols.len() as u32);
+
+        let start = ParserGSS::from_single_stack(vec![p0], TerminalsDisallowed::new());
+        let provider_after_child = advance_provider_control_closed_stacks(
+            &provider,
+            &close_provider_control_stacks(&provider, &start),
+            terminal_symbols[0][0],
+        );
+        let table_after_child = advance_stacks(&table, &start, 0);
+        assert!(!provider_after_child.is_empty());
+        assert!(!table_after_child.is_empty());
+
+        let provider_finished = advance_provider_control_closed_stacks(
+            &provider,
+            &provider_after_child,
+            terminal_symbols[1][0],
+        );
+        let table_finished = advance_stacks(&table, &table_after_child, 1);
+        assert!(!provider_finished.is_empty());
+        assert!(!table_finished.is_empty());
+        assert_eq!(table_finished.single_top_value(), Some(p2));
+    }
+
+    #[test]
+    fn materialized_scoped_provider_table_preserves_midword_call_and_return() {
+        let x = 0;
+        let slot = 1;
+        let z = 2;
+        let y = 0;
+        let child_nt = 0;
+        let parent = build_test_table(
+            4,
+            3,
+            &[
+                &[(x, Action::Shift(1, false))],
+                &[(slot, Action::Shift(2, false))],
+                &[(z, Action::Shift(3, false))],
+                &[],
+            ],
+            &[&[], &[], &[], &[]],
+        );
+        let child = build_test_table(
+            3,
+            1,
+            &[
+                &[(y, Action::Shift(1, false))],
+                &[(EOF, Action::Reduce(child_nt, 1))],
+                &[(EOF, Action::Accept)],
+            ],
+            &[&[(child_nt, (2, false))], &[], &[]],
+        );
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: false,
+        }];
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
+        let p0 = provider.scoped_state(0, 0).unwrap();
+        let p3 = provider.scoped_state(0, 3).unwrap();
+        let terminal_symbols = vec![
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: x,
+            }]),
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 1,
+                terminal: y,
+            }]),
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: z,
+            }]),
+        ];
+        let table = materialize_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+        )
+        .unwrap();
+
+        let mut provider_stack =
+            ParserGSS::from_single_stack(vec![p0], TerminalsDisallowed::new());
+        let mut table_stack = provider_stack.clone();
+        for (terminal, symbol) in terminal_symbols.iter().enumerate() {
+            provider_stack = advance_provider_control_closed_stacks(
+                &provider,
+                &provider_stack,
+                symbol[0],
+            );
+            table_stack = advance_stacks(&table, &table_stack, terminal as u32);
+            assert!(!provider_stack.is_empty(), "provider rejected terminal {terminal}");
+            assert!(!table_stack.is_empty(), "table rejected terminal {terminal}");
+        }
+        assert_eq!(
+            normalized_concrete_stacks(&provider_stack),
+            normalized_concrete_stacks(&table_stack),
+            "provider/table visible-word result diverged",
+        );
+        assert_eq!(table_stack.single_top_value(), Some(p3));
+    }
+
+    #[test]
+    fn materialized_scoped_provider_table_preserves_nullable_finish_branch() {
+        let slot = 0;
+        let tail = 1;
+        let parent = build_test_table(
+            3,
+            2,
+            &[
+                &[(slot, Action::Shift(1, false))],
+                &[(tail, Action::Shift(2, false))],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+        let child = build_test_table(1, 0, &[&[]], &[&[]]);
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: true,
+        }];
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
+        let p0 = provider.scoped_state(0, 0).unwrap();
+        let p2 = provider.scoped_state(0, 2).unwrap();
+        let terminal_symbols = vec![SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+            component: 0,
+            terminal: tail,
+        }])];
+        let table = materialize_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+        )
+        .unwrap();
+        let start = ParserGSS::from_single_stack(vec![p0], TerminalsDisallowed::new());
+        let provider_finished = advance_provider_control_closed_stacks(
+            &provider,
+            &close_provider_control_stacks(&provider, &start),
+            terminal_symbols[0][0],
+        );
+        let table_finished = advance_stacks(&table, &start, 0);
+        assert_eq!(
+            normalized_concrete_stacks(&provider_finished),
+            normalized_concrete_stacks(&table_finished),
+        );
+        assert_eq!(table_finished.single_top_value(), Some(p2));
     }
 
     #[test]

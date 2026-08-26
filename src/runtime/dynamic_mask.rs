@@ -185,58 +185,6 @@ fn replay_pending_with_terminal(
 
 
 
-#[inline]
-fn overlay_branch_can_finish_with_repair(
-    constraint: &Constraint,
-    branch: &DynamicBranch,
-    lexer_scan_cache: &DynamicNfaScanCache<'_>,
-    traversal_cache: &mut DynamicTraversalCache,
-) -> bool {
-    if branch.repair_used {
-        return true;
-    }
-    let materialized = if branch.pending_terminals.is_empty() {
-        None
-    } else {
-        let Some(gss) = replay_pending_terminals(
-            constraint,
-            &branch.gss,
-            &branch.pending_terminals,
-            traversal_cache,
-        ) else {
-            return false;
-        };
-        Some(gss)
-    };
-    let gss = materialized.as_ref().unwrap_or(&branch.gss);
-    for config_index in 0..lexer_scan_cache.config_len(branch.tokenizer_config) {
-        let tokenizer_state = lexer_scan_cache.config_state(branch.tokenizer_config, config_index);
-        for terminal in constraint.tokenizer.possible_future_terminals_iter(tokenizer_state) {
-            let next_component = overlay_terminal_component(constraint, terminal);
-            let switched = branch.last_component != DYNAMIC_NO_COMPONENT
-                && next_component != DYNAMIC_NO_COMPONENT
-                && branch.last_component != next_component;
-            let terminal_repairs = constraint
-                .static_dynamic_overlay
-                .as_ref()
-                .and_then(|metadata| metadata.repair_terminals.get(terminal as usize))
-                .copied()
-                .unwrap_or(false);
-            if (switched || terminal_repairs)
-                && parser_terminal_admissible_cached(
-                    constraint,
-                    terminal,
-                    gss,
-                    traversal_cache,
-                )
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[derive(Clone)]
 struct DynamicBranch {
     tokenizer_config: u32,
@@ -517,17 +465,13 @@ impl DynamicRecognizerStateCache {
                     )
             };
             token_boundary_allowed |= boundary_allowed;
-            let repair_boundary_allowed = if branch.repair_used {
-                boundary_allowed
-            } else {
-                branch.initial_prune_guard.allows_token_boundary()
-                    && overlay_branch_can_finish_with_repair(
-                        constraint,
-                        branch,
-                        lexer_scan_cache,
-                        traversal_cache,
-                    )
-            };
+            // B is the language of this *complete model token* that actually
+            // used composed-only behavior. A prefix that could cross a linker
+            // after more bytes must keep its trie descendants live, but it is
+            // not itself a B token. In particular this prevents a scoped
+            // ignore from being accepted merely because some longer token
+            // beginning with the same bytes later enters another component.
+            let repair_boundary_allowed = branch.repair_used && boundary_allowed;
             repair_token_boundary_allowed |= repair_boundary_allowed;
 
             if collect_subtree_loops

@@ -871,6 +871,7 @@ fn install_published_static_boundary_shards(
 
 fn install_dynamic_direct_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
+    boundary_tokens_by_start_component: Option<&[Vec<u32>]>,
 ) {
     overlay.segmented_boundary_shards.clear();
     for component in &mut overlay.segmented_parser_components {
@@ -883,7 +884,9 @@ fn install_dynamic_direct_boundary_shards(
                 &overlay.segmented_parser_components[component_index],
             ),
             accepts_empty_stack: component_index == 0,
-            candidate_tokens: None,
+            candidate_tokens: boundary_tokens_by_start_component
+                .and_then(|rows| rows.get(component_index))
+                .map(|tokens| Arc::<[u32]>::from(tokens.clone())),
             backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
         };
         overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
@@ -894,6 +897,7 @@ fn install_dynamic_direct_boundary_shards(
 fn append_dynamic_direct_boundary_shards_for_unselected(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     static_components: &BitSet,
+    boundary_tokens_by_start_component: Option<&[Vec<u32>]>,
 ) {
     for component_index in 0..overlay.segmented_parser_components.len() {
         if static_components.contains(component_index) {
@@ -905,7 +909,9 @@ fn append_dynamic_direct_boundary_shards_for_unselected(
                 &overlay.segmented_parser_components[component_index],
             ),
             accepts_empty_stack: component_index == 0,
-            candidate_tokens: None,
+            candidate_tokens: boundary_tokens_by_start_component
+                .and_then(|rows| rows.get(component_index))
+                .map(|tokens| Arc::<[u32]>::from(tokens.clone())),
             backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
         };
         overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
@@ -2374,6 +2380,7 @@ fn publish_static_boundary_shard_work(
     table: &crate::compiler::glr::table::GLRTable,
     composed_tsid_count: usize,
 ) -> Result<PublishedStaticBoundaryShard, String> {
+    let effective_table = work.parser.parser_table_override().cloned();
     let (positive, id_map, _template_cache) = work.parser.materialize_positive_parser(table)?;
     positive.ensure_positive()?;
     if id_map.num_tsids() as usize != composed_tsid_count {
@@ -2386,15 +2393,18 @@ fn publish_static_boundary_shard_work(
     // Keep the component/common TSID coordinate exactly. Per-shard TSID
     // quotienting would require one large raw-state -> private-TSID vector per
     // shard; the composed constraint already owns the authoritative scalar map.
-    let parser_dwa = positive.into_runtime_dwa(table);
+    let parser_dwa = positive.into_runtime_dwa(effective_table.as_deref().unwrap_or(table));
     ensure_positive_runtime_parser_dwa(&parser_dwa)?;
     Ok(PublishedStaticBoundaryShard {
         start_component: work.start_component,
         candidate_tokens: work.candidate_tokens,
         boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
-            parser_dwa,
+            // Provider-native v25 static shards are compiled directly in the
+            // recursive leaf coordinate. Keep the legacy/materialized slot
+            // empty; v25 wire serialization persists `recursive_parser_dwa`.
+            parser_dwa: DWA::new(0, 0),
             compact_parser_dwa: None,
-            recursive_parser_dwa: None,
+            recursive_parser_dwa: Some(parser_dwa),
             uses_composed_tsid_coordinate: true,
             tokenizer_state_to_tsid: Vec::new(),
             internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
@@ -3116,6 +3126,64 @@ fn build_boundary_terminal_trie_work(
 
 
 impl BoundaryParserWork {
+    fn set_parser_table_override(
+        &mut self,
+        table: Arc<crate::compiler::glr::table::GLRTable>,
+    ) -> Result<(), String> {
+        match self {
+            Self::DeferredTerminalCount {
+                num_terminals,
+                templates,
+                parser_table_override,
+                ..
+            } => {
+                if table.num_terminals != *num_terminals {
+                    return Err(format!(
+                        "parser-table override terminal domain mismatch: table={} boundary={}",
+                        table.num_terminals, *num_terminals,
+                    ));
+                }
+                // Parser templates encode stack effects, so they belong to the
+                // parser-state coordinate just as much as the table itself.
+                // Re-characterize exactly the terminal subset already selected
+                // by boundary discovery; reusing materialized-table templates
+                // with a recursive provider table would mix two stack alphabets.
+                let mut selected = vec![false; *num_terminals as usize];
+                for &terminal in templates.by_terminal.keys() {
+                    let Some(slot) = selected.get_mut(terminal as usize) else {
+                        return Err(format!(
+                            "boundary template terminal {terminal} lies outside parser domain {num_terminals}"
+                        ));
+                    };
+                    *slot = true;
+                }
+                let characterizations = characterize_selected_terminals_for_terminal_count(
+                    &table,
+                    *num_terminals,
+                    &selected,
+                );
+                *templates = Templates::from_characterizations(&characterizations);
+                *parser_table_override = Some(table);
+                Ok(())
+            }
+            _ => Err(
+                "parser-table override requires deferred count-only boundary work".to_owned(),
+            ),
+        }
+    }
+
+    fn parser_table_override(
+        &self,
+    ) -> Option<&Arc<crate::compiler::glr::table::GLRTable>> {
+        match self {
+            Self::DeferredTerminalCount {
+                parser_table_override,
+                ..
+            } => parser_table_override.as_ref(),
+            _ => None,
+        }
+    }
+
     fn materialize_terminal_trie(
         self,
     ) -> Result<(
@@ -17915,6 +17983,7 @@ fn build_static_dynamic_overlay_metadata(
             segmented_parser_links: Vec::new(),
             segmented_parser_state_offsets: Vec::new(),
             recursive_parser_layout: Default::default(),
+            recursive_states_by_materialized_state: Default::default(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
             segmented_component_union_root_dispatch: Vec::new(),
@@ -20624,34 +20693,10 @@ fn compose_constraints_owned_parent_impl(
         let segment_prepare_ms = segment_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
         let (mut source_constraints, child_clone_ms) = child_clone_result;
         let boundary_candidate = boundary_positive_result?;
-        let static_shard_publish_started_at = Instant::now();
-        let published_static_boundary_shards = static_boundary_shard_work
-            .unwrap_or_default()
-            .into_par_iter()
-            .map(|work| {
-                publish_static_boundary_shard_work(
-                    work,
-                    &result.constraint.table,
-                    id_num_tsids as usize,
-                )
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let static_shard_publish_ms =
-            static_shard_publish_started_at.elapsed().as_secs_f64() * 1000.0;
-        if compose_profile_enabled() && partitioned_static_boundary_complete {
-            eprintln!(
-                "[glrmask/profile][constraint_static_boundary_shards] shards={} parser_states={} parser_transitions={} publish_ms={static_shard_publish_ms:.3}",
-                published_static_boundary_shards.len(),
-                published_static_boundary_shards
-                    .iter()
-                    .map(|shard| shard.boundary.parser_dwa.num_states() as usize)
-                    .sum::<usize>(),
-                published_static_boundary_shards
-                    .iter()
-                    .map(|shard| shard.boundary.parser_dwa.num_transitions() as usize)
-                    .sum::<usize>(),
-            );
-        }
+        // Static shard parser work must be compiled in the same recursive leaf
+        // coordinate used by the live provider. Keep the terminal-side work
+        // pending until segmented wrapper metadata has been installed below.
+        let mut pending_static_boundary_shards = static_boundary_shard_work.unwrap_or_default();
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_segment_clone] cloned_children={} parser_states={} overlapped=true total_ms={child_clone_ms:.3}",
@@ -20823,6 +20868,7 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
+            recursive_states_by_materialized_state: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -21053,10 +21099,56 @@ fn compose_constraints_owned_parent_impl(
             // Dynamic composition has no composition-specific B artifact. The
             // zero-cost trigger level is conservative, so every starting
             // component initially falls back to one exact direct dynamic walk.
-            install_dynamic_direct_boundary_shards(overlay);
+            install_dynamic_direct_boundary_shards(
+                overlay,
+                boundary_tokens_by_start_component.as_deref(),
+            );
             overlay.segmented_boundary_parser = None;
             overlay.segmented_boundary_terminal_trie = None;
         }
+
+        let published_static_boundary_shards = if partitioned_static_boundary_complete {
+            let recursive_table = result
+                .constraint
+                .recursive_control_eliminated_parser_table()?
+                .expect("partitioned static boundary requires recursive provider table");
+            for work in &mut pending_static_boundary_shards {
+                work.parser
+                    .set_parser_table_override(Arc::clone(&recursive_table))?;
+            }
+            let static_shard_publish_started_at = Instant::now();
+            let published = pending_static_boundary_shards
+                .into_par_iter()
+                .map(|work| {
+                    publish_static_boundary_shard_work(
+                        work,
+                        &result.constraint.table,
+                        id_num_tsids as usize,
+                    )
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let static_shard_publish_ms =
+                static_shard_publish_started_at.elapsed().as_secs_f64() * 1000.0;
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_static_boundary_shards] shards={} parser_states={} parser_transitions={} publish_ms={static_shard_publish_ms:.3}",
+                    published.len(),
+                    published
+                        .iter()
+                        .filter_map(|shard| shard.boundary.recursive_parser_dwa.as_ref())
+                        .map(|dwa| dwa.num_states() as usize)
+                        .sum::<usize>(),
+                    published
+                        .iter()
+                        .filter_map(|shard| shard.boundary.recursive_parser_dwa.as_ref())
+                        .map(|dwa| dwa.num_transitions() as usize)
+                        .sum::<usize>(),
+                );
+            }
+            published
+        } else {
+            Vec::new()
+        };
 
         if partitioned_static_boundary_complete {
             let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
@@ -21066,13 +21158,23 @@ fn compose_constraints_owned_parent_impl(
             overlay.segmented_boundary_terminal_trie = None;
             install_published_static_boundary_shards(overlay, published_static_boundary_shards)?;
             if let Some(static_components) = static_boundary_components {
-                append_dynamic_direct_boundary_shards_for_unselected(overlay, static_components);
+                append_dynamic_direct_boundary_shards_for_unselected(
+                    overlay,
+                    static_components,
+                    boundary_tokens_by_start_component.as_deref(),
+                );
             }
         }
-        if partitioned_static_boundary_complete {
-            result.constraint.rebuild_recursive_static_boundary_views()?;
-        }
+
         if result.constraint.uses_compact_segmented_parser_runtime() {
+            // Establish the single materialized -> recursive late-composition
+            // oracle before discarding the historical per-component
+            // projections. This must happen for dynamic-only compositions too:
+            // a compiled child can itself be bound beneath another parent.
+            result
+                .constraint
+                .recursive_parser_layout_for_pending_root()?
+                .expect("compact segmented runtime must have a recursive parser layout");
             // Recursive wrapper intervals are now the authoritative component
             // ownership coordinate. The materialized composed-state dispatch
             // was useful only to certify the transitional deterministic-union
@@ -21085,6 +21187,7 @@ fn compose_constraints_owned_parent_impl(
                 .segmented_component_union_root_dispatch
                 .clear();
             result.constraint.clear_recursive_legacy_boundary_start_states();
+            result.constraint.clear_recursive_legacy_parser_state_projections();
         }
 
         if compose_profile_enabled() {
@@ -21241,6 +21344,7 @@ fn compose_constraints_owned_parent_impl(
                     segmented_parser_links: Vec::new(),
                     segmented_parser_state_offsets: Vec::new(),
                     recursive_parser_layout: Default::default(),
+            recursive_states_by_materialized_state: Default::default(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
                     segmented_component_union_root_dispatch: Vec::new(),
@@ -21308,6 +21412,7 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
+            recursive_states_by_materialized_state: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -24953,19 +25058,20 @@ constraint: &third,
             link.return_pop,
             subgrammar_child_return_pop(&child.table, rules).unwrap(),
         );
-        let tables = crate::runtime::SegmentedParserComponentTables::new(
-            &overlay.segmented_parser_components,
-        );
-        let provider = crate::compiler::glr::parser::DisjointComponentActionProvider::with_state_offsets(
-            &tables,
-            &overlay.segmented_parser_links,
-            &overlay.segmented_parser_state_offsets,
-        )
-        .unwrap();
-        assert_eq!(provider.scoped_state(0, 0), Some(0));
+        let layout = composed
+            .recursive_parser_layout()
+            .unwrap()
+            .expect("segmented runtime must derive the recursive parser coordinate");
+        assert_eq!(layout.links.len(), 1);
+        assert_eq!(layout.links[0].parent_component, 0);
+        assert_eq!(layout.links[0].child_component, 1);
+        assert_eq!(layout.links[0].child_start, 0);
+        assert!(layout.links[0].child_start_nullable);
+        assert_eq!(layout.leaf_state_offsets[0], 0);
         assert_eq!(
-            provider.scoped_state(1, 0),
-            Some(overlay.segmented_parser_state_offsets[1]),
+            layout.leaf_state_offsets[1],
+            layout.leaves[0].state_count,
+            "child root must be expressed in the contiguous recursive leaf coordinate",
         );
     }
 

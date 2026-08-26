@@ -4705,6 +4705,14 @@ impl Tokenizer {
             parent_terminal_offset, 0,
             "owned-parent tokenizer composition requires the parent terminal domain to start at zero",
         );
+        // Fast-loaded tokenizers may keep finalizer/future/epsilon metadata in
+        // packed runtime storage while retaining only the structural DFA
+        // skeleton.  This function mutates the parent's epsilon graph in
+        // place, so leaving packed metadata authoritative would hide every new
+        // child edge (and can make the start state look like a pure dispatcher
+        // even when its byte transitions still live in packed storage).
+        // Materialize metadata only; byte-transition rows remain packed.
+        parent.materialize_runtime_metadata_for_structural_mutation();
         let total_terminals = std::iter::once((&parent, parent_terminal_offset))
             .chain(children.iter().copied())
             .map(|(tokenizer, terminal_offset)| {
@@ -4718,11 +4726,6 @@ impl Tokenizer {
             .chain(children.iter().copied())
             .collect::<Vec<_>>();
         let merged_exprs = Self::merged_terminal_exprs(&expr_components, total_terminals);
-
-        if let Some(metadata) = parent.packed_runtime_metadata.as_ref() {
-            parent.packed_runtime_metadata =
-                Some(metadata.rebased_terminals(parent_terminal_offset, total_terminals));
-        }
 
         let mut merged_byte_transition_count = parent.transition_count();
         let mut merged_epsilon_transition_count = parent.dfa.epsilon_transition_count();
@@ -5841,6 +5844,69 @@ impl Tokenizer {
             || !self.packed_runtime_transition_segments.is_empty()
     }
 
+    /// Move packed observation/epsilon metadata back into the structural DFA
+    /// without expanding packed byte-transition rows. This is needed before a
+    /// tokenizer is structurally mutated: packed metadata is otherwise the
+    /// authoritative source for epsilon closure and would shadow newly added
+    /// DFA epsilon edges.
+    fn materialize_runtime_metadata_for_structural_mutation(&mut self) {
+        if let Some(metadata) = self.packed_runtime_metadata.take() {
+            for state in 0..metadata.state_count {
+                let finalizers = metadata
+                    .finalizers(state)
+                    .expect("packed tokenizer metadata covers every state")
+                    .clone();
+                let futures = metadata
+                    .futures(state)
+                    .expect("packed tokenizer metadata covers every state")
+                    .clone();
+                self.dfa.overwrite_state_metadata(state, finalizers, futures);
+                for &target in metadata.epsilon_targets(state) {
+                    let already_present = self
+                        .dfa
+                        .states()
+                        .get(state as usize)
+                        .is_some_and(|row| row.epsilon_transitions.contains(&target));
+                    if !already_present {
+                        self.dfa.add_epsilon_transition(state, target);
+                    }
+                }
+            }
+        }
+
+        let segments = std::mem::take(&mut self.packed_runtime_metadata_segments);
+        for segment in segments.iter() {
+            for local_state in 0..segment.metadata.state_count {
+                let state = segment.state_offset + local_state;
+                let finalizers = segment
+                    .metadata
+                    .finalizers(local_state)
+                    .expect("packed tokenizer metadata segment covers every state")
+                    .clone();
+                let futures = segment
+                    .metadata
+                    .futures(local_state)
+                    .expect("packed tokenizer metadata segment covers every state")
+                    .clone();
+                self.dfa.overwrite_state_metadata(state, finalizers, futures);
+                for &local_target in segment.metadata.epsilon_targets(local_state) {
+                    let target = segment
+                        .state_offset
+                        .checked_add(local_target)
+                        .expect("packed tokenizer epsilon target overflow");
+                    let already_present = self
+                        .dfa
+                        .states()
+                        .get(state as usize)
+                        .is_some_and(|row| row.epsilon_transitions.contains(&target));
+                    if !already_present {
+                        self.dfa.add_epsilon_transition(state, target);
+                    }
+                }
+            }
+        }
+    }
+
     fn materialized_dfa(&self) -> DFA {
         let mut dfa = self.dfa.clone();
         if let Some(packed) = &self.packed_runtime_transitions {
@@ -6565,15 +6631,16 @@ impl Tokenizer {
     /// predicate is based on the live reset shape rather than a whole-DFA scan.
     pub fn deterministic_dispatch_roots(&self) -> Option<&[u32]> {
         let start = self.dfa.states().get(self.start_state() as usize)?;
-        if start.epsilon_transitions.len() < 2 || !start.transitions.is_empty() {
+        if start.epsilon_transitions.len() < 2
+            || self.transitions_from(self.start_state()).next().is_some()
+        {
             return None;
         }
-        if start.epsilon_transitions.iter().any(|&root| {
-            self.dfa
-                .states()
-                .get(root as usize)
-                .is_none_or(|state| !state.epsilon_transitions.is_empty())
-        }) {
+        if start
+            .epsilon_transitions
+            .iter()
+            .any(|&root| self.state_has_epsilon_transitions(root))
+        {
             return None;
         }
         Some(&start.epsilon_transitions)
@@ -8768,6 +8835,97 @@ mod tests {
         let right_accept = offsets[1] + 1;
         assert_eq!(merged.matched_terminals_slice(right_accept), &[1]);
         assert!(merged.initial_byte_frontiers()[b'b' as usize].contains(&right_accept));
+    }
+
+    #[test]
+    fn owned_parent_union_preserves_fast_loaded_parent_root_and_new_epsilon_child() {
+        fn one_byte(byte: u8) -> Tokenizer {
+            let mut dfa = DFA::new(2);
+            dfa.ensure_group_capacity(1);
+            dfa.add_transition(0, byte, 1);
+            let mut accepting = BitSet::new(1);
+            accepting.set(0);
+            dfa.overwrite_state_metadata(1, accepting, BitSet::new(1));
+            dfa.recompute_possible_futures();
+            Tokenizer::from_parts(dfa, 1, None)
+        }
+
+        let parent = one_byte(b'<');
+        let left = one_byte(b'a');
+        let (half, _) = Tokenizer::disjoint_union_with_owned_parent(parent, 0, &[(&left, 1)]);
+        let wire = artifact_serde::to_fast_bytes(&half);
+        let mut loaded = artifact_serde::from_fast_bytes(&wire).expect("fast tokenizer roundtrip");
+        assert!(loaded.packed_runtime_transitions.is_some());
+
+        // Tiny tokenizers normally keep metadata in the DFA after TKF2 load,
+        // while large TKS3 artifacts use the packed metadata representation
+        // that originally exposed this bug. Install the equivalent packed
+        // metadata explicitly so this focused regression exercises the same
+        // precedence rules without constructing a 100k-state tokenizer.
+        let state_count = loaded.dfa.num_states();
+        assert!(state_count <= u8::MAX as usize);
+        let finalizer_rows = (0..state_count)
+            .map(|state| loaded.dfa.finalizers(state as u32).clone())
+            .collect::<Vec<_>>();
+        let finalizer_lists = finalizer_rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|terminal| terminal as TerminalID)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .collect::<Vec<_>>();
+        let future_rows = (0..state_count)
+            .map(|state| loaded.dfa.possible_future_group_ids(state as u32).clone())
+            .collect::<Vec<_>>();
+        let mut epsilon_states = Vec::new();
+        let mut epsilon_offsets = vec![0u32];
+        let mut epsilon_targets = Vec::new();
+        for (state, row) in loaded.dfa.states().iter().enumerate() {
+            if row.epsilon_transitions.is_empty() {
+                continue;
+            }
+            epsilon_states.push(state as u32);
+            epsilon_targets.extend_from_slice(&row.epsilon_transitions);
+            epsilon_offsets.push(epsilon_targets.len() as u32);
+        }
+        loaded.packed_runtime_metadata = Some(Arc::new(PackedTokenizerMetadata {
+            state_count: state_count as u32,
+            finalizer_row_ids: PackedRowIds::U8(Arc::from(
+                (0..state_count as u8).collect::<Vec<_>>().into_boxed_slice(),
+            )),
+            finalizer_rows: Arc::from(finalizer_rows.into_boxed_slice()),
+            finalizer_lists: Arc::from(finalizer_lists.into_boxed_slice()),
+            future_row_ids: PackedRowIds::U8(Arc::from(
+                (0..state_count as u8).collect::<Vec<_>>().into_boxed_slice(),
+            )),
+            future_rows: Arc::from(future_rows.into_boxed_slice()),
+            epsilon_states: Arc::from(epsilon_states.into_boxed_slice()),
+            epsilon_offsets: Arc::from(epsilon_offsets.into_boxed_slice()),
+            epsilon_targets: Arc::from(epsilon_targets.into_boxed_slice()),
+        }));
+
+        let right = one_byte(b'b');
+        let (nested, offsets) =
+            Tokenizer::disjoint_union_with_owned_parent(loaded, 0, &[(&right, 2)]);
+        assert_eq!(offsets[0], 0);
+        assert_eq!(nested.deterministic_reset_states().as_slice(), &[0]);
+        assert!(
+            nested.packed_runtime_transitions.is_some(),
+            "structural mutation must not expand the loaded parent's packed byte rows",
+        );
+
+        for (input, terminal) in [(b"<".as_slice(), 0), (b"a", 1), (b"b", 2)] {
+            let result = nested.execute_from_state(input, nested.initial_state_id());
+            assert!(
+                result
+                    .matches
+                    .iter()
+                    .any(|matched| matched.id == terminal && matched.width == 1),
+                "missing terminal {terminal} for {input:?}: {result:?}",
+            );
+        }
     }
 
     #[test]

@@ -1858,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_live_parser_expands_static_nested_component_via_boundary_preimage() {
+    fn recursive_live_parser_expands_static_nested_component_with_native_boundary() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
             (1, b"[".to_vec()),
@@ -2424,6 +2424,129 @@ mod tests {
     }
 
     #[test]
+    fn v25_loaded_composed_child_rebinds_via_recursive_late_composition_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"<".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b">".to_vec()),
+            (4, b"<ab>".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar left; extern grammar right; nt document = \"<\" left right \">\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let left = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start left; nt left = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let right = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start right; nt right = \"b\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        let half = parent
+            .bind_grammar_dynamic_boundary("left", &left)
+            .unwrap();
+        let half_overlay = half.static_dynamic_overlay.as_ref().unwrap();
+        assert!(half_overlay
+            .segmented_parser_components
+            .iter()
+            .all(|component| component.global_to_local_parser_state.is_empty()));
+        assert_eq!(
+            half_overlay
+                .recursive_states_by_materialized_state
+                .get()
+                .unwrap()
+                .len(),
+            half.table.num_states as usize,
+        );
+
+        let loaded_half = RuntimeConstraint::load(&half.save()).unwrap();
+        let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
+        assert!(loaded_half_overlay
+            .segmented_parser_components
+            .iter()
+            .all(|component| component.global_to_local_parser_state.is_empty()));
+        assert_eq!(
+            loaded_half_overlay
+                .recursive_states_by_materialized_state
+                .get()
+                .unwrap()
+                .len(),
+            loaded_half.table.num_states as usize,
+        );
+        assert_eq!(
+            half_overlay
+                .recursive_states_by_materialized_state
+                .get()
+                .unwrap()
+                .as_ref(),
+            loaded_half_overlay
+                .recursive_states_by_materialized_state
+                .get()
+                .unwrap()
+                .as_ref(),
+        );
+
+        let fresh_full = half
+            .bind_grammar_dynamic_boundary("right", &right)
+            .unwrap();
+        let loaded_full = loaded_half
+            .bind_grammar_dynamic_boundary("right", &right)
+            .unwrap();
+        let fresh_start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
+            vec![0],
+            crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
+        );
+        let loaded_start = fresh_start.clone();
+        let fresh_closed = fresh_full
+            .close_compact_segmented_parser(&fresh_start)
+            .unwrap();
+        let loaded_closed = loaded_full
+            .close_compact_segmented_parser(&loaded_start)
+            .unwrap();
+        assert!(fresh_closed.semantically_eq(&loaded_closed, 4096).unwrap());
+        for terminal in 0..fresh_full.table.num_terminals {
+            let fresh_advanced = fresh_full
+                .advance_compact_segmented_parser(&fresh_closed, terminal)
+                .unwrap();
+            let loaded_advanced = loaded_full
+                .advance_compact_segmented_parser(&loaded_closed, terminal)
+                .unwrap();
+            assert!(
+                fresh_advanced
+                    .semantically_eq(&loaded_advanced, 4096)
+                    .unwrap(),
+                "recursive parser advance differs for terminal {terminal}",
+            );
+        }
+        for constraint in [&fresh_full, &loaded_full] {
+            let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
+            assert!(overlay
+                .segmented_parser_components
+                .iter()
+                .all(|component| component.global_to_local_parser_state.is_empty()));
+            let mut split = constraint.start();
+            for token in [0, 1, 2, 3] {
+                assert_ne!(split.mask()[0] & (1 << token), 0);
+                split.commit_token(token).unwrap();
+            }
+            assert!(split.is_accepting());
+
+            let mut fused = constraint.start();
+            assert_ne!(fused.mask()[0] & (1 << 4), 0);
+            fused.commit_token(4).unwrap();
+            assert!(fused.is_accepting());
+        }
+    }
+
+    #[test]
     fn recursive_parser_reference_preserves_nested_nullable_wrapper_return() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
@@ -2575,7 +2698,7 @@ mod tests {
                 assert_eq!(
                     restored.mask(),
                     expected.mask(),
-                    "v24 restored static shards differ before {tokens:?} token {token}",
+                    "restored static shards differ before {tokens:?} token {token}",
                 );
                 sharded.commit_token(token).unwrap();
                 restored.commit_token(token).unwrap();
@@ -2699,10 +2822,10 @@ mod tests {
         loaded_child.materialize_parser_dwa_for_compilation().unwrap();
         assert_eq!(loaded_parent.parser_dwa, parent_dwa);
         assert_eq!(loaded_child.parser_dwa, child_dwa);
-        for constraint in [&bound, &loaded] {
+        for (kind, constraint) in [("source", &bound), ("loaded", &loaded)] {
             let mut actual = constraint.start();
             let mut expected = monolithic.start();
-            assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(actual.mask(), expected.mask(), "{kind} initial mask");
             for token in [1, 0, 2, 3, 1, 4] {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();

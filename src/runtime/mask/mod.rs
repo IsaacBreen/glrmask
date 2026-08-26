@@ -2933,37 +2933,38 @@ impl<'a> ConstraintState<'a> {
 
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                // Deterministic union-root final = union of component start
-                // finals. Preserve the branch-local disallowed accumulator in
-                // each component coordinate.
-                for (component_index, component) in
-                    overlay.segmented_parser_components.iter().enumerate()
-                {
-                    let local_tokenizer_states =
-                        self.segmented_local_tokenizer_states(component, global_tokenizer_state);
-                    if local_tokenizer_states.is_empty() {
-                        continue;
-                    }
-                    let local_disallowed = self.segmented_local_disallowed(component, acc);
-                    // An empty projected parser stack is the component-root
-                    // coordinate in the segmented union.  In particular, do
-                    // not seed a retained dynamic child with its standalone
-                    // initial language here: reaching the child is a boundary
-                    // event owned by B, not part of the child's local A mask.
-                    for local_tokenizer_state in local_tokenizer_states {
-                        let mut branch_disallowed = local_disallowed.clone();
-                        if let Some(terminal) = component.root_disallowed_terminal {
-                            branch_disallowed = branch_disallowed.with_insert(
+                // The old materialized segmented union had one synthetic root
+                // whose final language was the union of every component start
+                // final.  The recursive provider coordinate has no such root:
+                // state 0 is the real root leaf state, and CALL is the only way
+                // to make a child active.  Seeding all component roots here in
+                // the recursive runtime would therefore leak a child's scoped
+                // ignore into its parent before the CALL.
+                if !self.constraint.uses_compact_segmented_parser_runtime() {
+                    for (component_index, component) in
+                        overlay.segmented_parser_components.iter().enumerate()
+                    {
+                        let local_tokenizer_states = self
+                            .segmented_local_tokenizer_states(component, global_tokenizer_state);
+                        if local_tokenizer_states.is_empty() {
+                            continue;
+                        }
+                        let local_disallowed = self.segmented_local_disallowed(component, acc);
+                        for local_tokenizer_state in local_tokenizer_states {
+                            let mut branch_disallowed = local_disallowed.clone();
+                            if let Some(terminal) = component.root_disallowed_terminal {
+                                branch_disallowed = branch_disallowed.with_insert(
+                                    local_tokenizer_state,
+                                    terminal,
+                                );
+                            }
+                            let root_gss =
+                                ParserGSS::from_single_stack(Vec::new(), branch_disallowed);
+                            projected_states[component_index].merge_insert(
                                 local_tokenizer_state,
-                                terminal,
+                                root_gss,
                             );
                         }
-                        let root_gss =
-                            ParserGSS::from_single_stack(Vec::new(), branch_disallowed);
-                        projected_states[component_index].merge_insert(
-                            local_tokenizer_state,
-                            root_gss,
-                        );
                     }
                 }
 
@@ -3364,6 +3365,20 @@ impl<'a> ConstraintState<'a> {
                             continue;
                         }
                         needs_direct_dynamic = true;
+                        if let Some(tokens) = shard.candidate_tokens.as_deref() {
+                            // The boundary-discovery set is the exact outer
+                            // domain of B for this start component: tokens in
+                            // A never need the composed walker, and tokens not
+                            // in this set cannot cross a linker boundary.
+                            // TriggerDetail is only an accelerator inside that
+                            // domain, so a missing trigger must not broaden B
+                            // to the whole composed mask (which is unsound for
+                            // scoped ignores).
+                            for &token in tokens {
+                                set_original_mask_bit(&mut direct_candidates, token);
+                            }
+                            continue;
+                        }
                         let trigger = &component.constraint.boundary_trigger;
                         match trigger {
                             crate::runtime::BoundaryTrigger::Tokens(tokens) => {

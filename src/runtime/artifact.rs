@@ -4453,6 +4453,13 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// the existing `LeveledGSS<u32, ...>` action provider.
     #[serde(skip, default)]
     pub(crate) recursive_parser_layout: OnceLock<Arc<RecursiveParserLayout>>,
+    /// Exact late-composition oracle from this constraint's materialized LR
+    /// states into its own recursive provider coordinate. This is derived once
+    /// while the legacy per-component projections are still available (or
+    /// restored directly by the v25 wire format), then reused whenever this
+    /// already-composed constraint is embedded under another wrapper.
+    #[serde(skip, default)]
+    pub(crate) recursive_states_by_materialized_state: OnceLock<Arc<Vec<Vec<u32>>>>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.
@@ -4635,9 +4642,10 @@ pub(crate) struct SegmentedBoundaryParser {
     #[serde(skip, default)]
     pub(crate) compact_parser_dwa:
         Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
-    /// Runtime-only exact preimage of `parser_dwa` onto the recursive leaf
-    /// parser-state coordinate. The legacy/materialized DWA remains the wire
-    /// representation so v24 save/load compatibility is unchanged.
+    /// Provider-native static boundary parser in the recursive leaf parser-state
+    /// coordinate. New v25 compositions compile and serialize this coordinate
+    /// directly. Legacy v24 static boundaries retain only `parser_dwa` and stay
+    /// on their materialized runtime when loaded.
     #[serde(skip, default)]
     pub(crate) recursive_parser_dwa: Option<DWA>,
     /// New static boundary shards are compiled directly in the authoritative

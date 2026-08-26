@@ -19,6 +19,7 @@ use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::glr::parser::{
     DisjointComponentActionProvider, ParserComponentTableSource, ParserGSS, ScopedParserSymbol,
     advance_provider_control_closed_stacks, close_provider_control_stacks,
+    materialize_control_eliminated_scoped_provider_table,
     stack_may_advance_on_with_provider, stacks_finished_with_provider,
 };
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity};
@@ -1780,6 +1781,57 @@ impl Constraint {
             .static_dynamic_overlay
             .as_ref()
             .expect("recursive segmented parser tree requires overlay");
+
+        // Once a composed constraint has established its own recursive
+        // coordinate, late composition no longer needs to replay the old
+        // materialized -> immediate-component projections. The persisted v25
+        // oracle is expressed from this node's materialized table directly to
+        // its own recursive coordinate; embedding under a parent merely adds
+        // this subtree's contiguous base offset.
+        if let Some(oracle) = overlay.recursive_states_by_materialized_state.get() {
+            if oracle.len() != self.table.num_states as usize {
+                return Err(format!(
+                    "recursive parser late-composition oracle has {} rows for {} materialized states",
+                    oracle.len(),
+                    self.table.num_states,
+                ));
+            }
+            let Some(local_states) = oracle.get(materialized_state as usize) else {
+                return Ok(());
+            };
+            let mut subtree_start = u32::MAX;
+            let mut subtree_end = 0u32;
+            for leaf in leaves
+                .iter()
+                .filter(|leaf| leaf.component_path.starts_with(component_path.as_slice()))
+            {
+                subtree_start = subtree_start.min(leaf.state_offset);
+                subtree_end = subtree_end.max(
+                    leaf.state_offset
+                        .checked_add(leaf.state_count)
+                        .ok_or_else(|| "recursive parser subtree span overflow".to_owned())?,
+                );
+            }
+            if subtree_start == u32::MAX {
+                return Err("recursive parser oracle target has no subtree layout".to_owned());
+            }
+            let subtree_states = subtree_end - subtree_start;
+            for &local_state in local_states {
+                if local_state >= subtree_states {
+                    return Err(format!(
+                        "recursive parser oracle state {local_state} lies outside subtree domain {subtree_states}",
+                    ));
+                }
+                let state = subtree_start
+                    .checked_add(local_state)
+                    .ok_or_else(|| "recursive parser-state coordinate overflow".to_owned())?;
+                if !out.contains(&state) {
+                    out.push(state);
+                }
+            }
+            return Ok(());
+        }
+
         for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
             let Some(&local_state) = component
                 .global_to_local_parser_state
@@ -1911,6 +1963,8 @@ impl Constraint {
             terminal_targets.push(targets);
         }
         let mut materialized_states_by_recursive_state = vec![Vec::new(); next as usize];
+        let mut recursive_states_by_materialized_state =
+            Vec::with_capacity(self.table.num_states as usize);
         for materialized_state in 0..self.table.num_states {
             let mut recursive_states = SmallVec::<[u32; 4]>::new();
             self.append_recursive_states_for_materialized_state(
@@ -1920,17 +1974,36 @@ impl Constraint {
                 &leaves,
                 &mut recursive_states,
             )?;
-            for recursive_state in recursive_states {
+            recursive_states.sort_unstable();
+            recursive_states.dedup();
+            for &recursive_state in &recursive_states {
                 if let Some(row) = materialized_states_by_recursive_state
                     .get_mut(recursive_state as usize)
                 {
                     row.push(materialized_state);
+                } else {
+                    return Err(format!(
+                        "recursive parser state {recursive_state} lies outside derived domain {next}",
+                    ));
                 }
             }
+            recursive_states_by_materialized_state.push(recursive_states.into_vec());
         }
         for row in &mut materialized_states_by_recursive_state {
             row.sort_unstable();
             row.dedup();
+        }
+        if let Some(existing) = overlay.recursive_states_by_materialized_state.get() {
+            if existing.as_ref() != &recursive_states_by_materialized_state {
+                return Err(
+                    "recursive parser late-composition oracle disagrees with derived layout"
+                        .to_owned(),
+                );
+            }
+        } else {
+            let _ = overlay
+                .recursive_states_by_materialized_state
+                .set(Arc::new(recursive_states_by_materialized_state));
         }
         let layout = Arc::new(RecursiveParserLayout {
             component_offsets,
@@ -1974,101 +2047,43 @@ impl Constraint {
         self.build_recursive_parser_layout_root_expanded().map(Some)
     }
 
-    fn parser_dwa_recursive_symbol_preimage(
-        source: &DWA,
-        layout: &RecursiveParserLayout,
-    ) -> DWA {
-        let mut nwa = crate::automata::weighted_u32::nwa::NWA::new(0, 0);
-        for _ in 0..source.num_states() {
-            nwa.add_state();
-        }
-        nwa.set_start_states(vec![source.start_state()]);
-        for (state_id, state) in source.states().iter().enumerate() {
-            if let Some(final_weight) = state.final_weight.as_ref() {
-                nwa.set_final_weight(state_id as u32, final_weight.clone());
-            }
-            for (recursive_state, materialized_states) in layout
-                .materialized_states_by_recursive_state
-                .iter()
-                .enumerate()
-            {
-                if materialized_states.is_empty() {
-                    continue;
-                }
-                let mut by_target = BTreeMap::<u32, Weight>::new();
-                for &materialized_state in materialized_states {
-                    let label = encode_positive_label(materialized_state);
-                    let Some((target, weight)) = state
-                        .transitions
-                        .get(&label)
-                        .or_else(|| state.transitions.get(&DEFAULT_LABEL))
-                    else {
-                        continue;
-                    };
-                    by_target
-                        .entry(*target)
-                        .and_modify(|existing| *existing = existing.union(weight))
-                        .or_insert_with(|| weight.clone());
-                }
-                for (target, weight) in by_target {
-                    if !weight.is_empty() {
-                        nwa.add_transition(
-                            state_id as u32,
-                            encode_positive_label(recursive_state as u32),
-                            target,
-                            weight,
-                        );
-                    }
-                }
-            }
-        }
-        crate::compiler::stages::parser_dwa::normalize_weighted_parser_stack_nwa_for_parser_state_count(
-            layout.total_states,
-            &nwa,
-        )
-    }
-
-    /// Rebuild runtime-only static-B views in the recursive endpoint parser
-    /// coordinate while leaving the materialized-table DWA untouched as the
-    /// v24 wire/compiler oracle.
-    pub(crate) fn rebuild_recursive_static_boundary_views(&mut self) -> Result<(), String> {
+    /// Exact ordinary-terminal GLR table for compiler-side analyses that still
+    /// consume a table rather than a `ParserActionProvider`. Its parser-state
+    /// alphabet is the live recursive leaf coordinate; CALL/RETURN are first
+    /// encoded as private controls and then eliminated exactly.
+    pub(crate) fn recursive_control_eliminated_parser_table(
+        &self,
+    ) -> Result<Option<Arc<GLRTable>>, String> {
         let Some(layout) = self.recursive_parser_layout_for_pending_root()? else {
-            return Ok(());
+            return Ok(None);
         };
-        let Some(overlay) = self.static_dynamic_overlay.as_mut() else {
-            return Ok(());
+        let tables = RecursiveSegmentedParserTables {
+            root: self,
+            layout: &layout,
         };
-        for component in &mut overlay.segmented_parser_components {
-            let Some(shard) = component.boundary.as_mut() else {
-                continue;
-            };
-            let super::artifact::SegmentedBoundaryShardBackend::StaticParser(boundary) =
-                &shard.backend
-            else {
-                continue;
-            };
-            // The compact legacy boundary representation has no generic DWA
-            // body to take a symbol preimage of. Keep that optional experiment
-            // on the old coordinate until it receives its own exact transport.
-            if boundary.compact_parser_dwa.is_some() {
-                continue;
-            }
-            let recursive = Self::parser_dwa_recursive_symbol_preimage(
-                &boundary.parser_dwa,
-                &layout,
-            );
-            let mut rebuilt = boundary.as_ref().clone();
-            rebuilt.recursive_parser_dwa = Some(recursive);
-            shard.backend = super::artifact::SegmentedBoundaryShardBackend::StaticParser(
-                Arc::new(rebuilt),
-            );
-        }
-        overlay.segmented_boundary_shards = overlay
-            .segmented_parser_components
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &layout.links,
+            &layout.leaf_state_offsets,
+        )?;
+        let terminal_symbols = layout
+            .terminal_targets
             .iter()
-            .filter_map(|component| component.boundary.clone())
-            .collect();
-        Ok(())
+            .map(|targets| {
+                targets
+                    .iter()
+                    .map(|&(component, terminal)| ScopedParserSymbol::Terminal {
+                        component,
+                        terminal,
+                    })
+                    .collect::<SmallVec<[ScopedParserSymbol; 4]>>()
+            })
+            .collect::<Vec<_>>();
+        let table = materialize_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+        )?;
+        Ok(Some(Arc::new(table)))
     }
 
     /// Drop the materialized-table start-state ownership sets once recursive
@@ -2091,6 +2106,22 @@ impl Constraint {
             .iter()
             .filter_map(|component| component.boundary.clone())
             .collect();
+    }
+
+    /// Drop the materialized composed-table -> immediate-component parser
+    /// projections after every runtime consumer has moved to recursive wrapper
+    /// ownership. v25 stores recursive B directly; v24 legacy static B remains
+    /// on the materialized runtime and therefore retains these projections.
+    pub(crate) fn clear_recursive_legacy_parser_state_projections(&mut self) {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return;
+        }
+        let Some(overlay) = self.static_dynamic_overlay.as_mut() else {
+            return;
+        };
+        for component in &mut overlay.segmented_parser_components {
+            component.global_to_local_parser_state.clear();
+        }
     }
 
     fn recursive_parser_symbols_for_global_terminal(
