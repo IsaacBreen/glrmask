@@ -7267,15 +7267,19 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    let small_queue_result = commit_bytes_small_queue_fast_path(
-        constraint,
-        state,
-        bytes,
-        &mut bufs.reusable_tokenizer_exec,
-        &mut bufs.small_queue,
-        &mut bufs.admission_cache,
-        &mut bufs.prune_tokenizer_exec,
-    );
+    let small_queue_result = if constraint.uses_compact_segmented_parser_runtime() {
+        None
+    } else {
+        commit_bytes_small_queue_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.small_queue,
+            &mut bufs.admission_cache,
+            &mut bufs.prune_tokenizer_exec,
+        )
+    };
     if let Some(result) = small_queue_result {
         if debug_path {
             eprintln!("[glrmask/debug][commit_path] small_queue states={}", state.len());
@@ -7283,7 +7287,9 @@ fn commit_bytes_impl_inner(
         return result;
     }
 
-    if let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes) {
+    if !constraint.uses_compact_segmented_parser_runtime()
+        && let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes)
+    {
         if debug_path {
             eprintln!("[glrmask/debug][commit_path] full_width states={}", state.len());
         }
