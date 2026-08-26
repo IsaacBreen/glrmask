@@ -16,7 +16,8 @@ pub(crate) use artifact::{
     BoundaryTerminalNwaTransition, BoundaryTerminalTrieNode, CompositionGrammarSummary,
     BoundaryTrigger, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
     FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedBoundaryTerminalTrie,
-    SegmentedBoundaryShard, SegmentedBoundaryShardBackend, SegmentedParserComponent, LateGrammarSlot,
+    SegmentedBoundaryShard, SegmentedBoundaryShardBackend, SegmentedParserComponent,
+    SegmentedParserLink, LateGrammarSlot,
     SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
 pub(crate) use artifact::token_bytes_artifact_serde::PackedTokenBytes;

@@ -477,7 +477,7 @@ impl<'a> CompiledSubgrammarInput<'a> {
 fn build_segmented_parser_links(
     children: &[CompiledSubgrammarInput<'_>],
     child_rules: &[&[crate::grammar::flat::Rule]],
-) -> Result<Vec<crate::runtime::artifact::SegmentedParserLink>, String> {
+) -> Result<Vec<crate::runtime::SegmentedParserLink>, String> {
     if children.len() != child_rules.len() {
         return Err("child/rule count mismatch while building segmented parser links".to_owned());
     }
@@ -491,7 +491,7 @@ fn build_segmented_parser_links(
             .map_err(|_| "segmented parser component index overflow".to_owned())?;
         let return_pop = subgrammar_child_return_pop(&child.constraint.table, rules)?;
         for slot_terminal in child.placeholder_terminals() {
-            links.push(crate::runtime::artifact::SegmentedParserLink {
+            links.push(crate::runtime::SegmentedParserLink {
                 parent_component: 0,
                 slot_terminal,
                 child_component,
@@ -21136,6 +21136,7 @@ fn compose_constraints_owned_parent_impl(
                     repair_terminals: vec![false; num_terminals],
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
+                    segmented_parser_links: Vec::new(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
                     segmented_component_union_root_dispatch: Vec::new(),

@@ -18,7 +18,7 @@ pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 pub use compose::{
     ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
     compose_subgrammar_tables_explicit, compose_subgrammar_tables_explicit_with_rules,
-    compose_subgrammar_tables_with_rules,
+    compose_subgrammar_tables_with_rules, subgrammar_child_return_pop,
 };
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
