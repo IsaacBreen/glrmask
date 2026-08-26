@@ -3730,13 +3730,13 @@ fn oversized_pattern_properties_overlap_check_broadens() {
 
 
 #[test]
-fn large_pattern_max_length_is_dropped_when_disabled() {
+fn legacy_pattern_max_length_disable_cannot_weaken_schema_language() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "0");
 
     let schema = json!({
         "type": "string",
-        "pattern": "^[a]+$",
+        "pattern": "^(?:a|bb)+$",
         "maxLength": 80
     });
 
@@ -3746,9 +3746,23 @@ fn large_pattern_max_length_is_dropped_when_disabled() {
         .iter()
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
+    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
+        panic!("expected exact pattern/length intersection: {:?}", rule.expr);
+    };
+    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
+        panic!("expected exact decoded-length envelope: {:?}", intersect);
+    };
+    assert!(regex.contains("{0,80}"), "{regex}");
 
-    assert!(matches!(rule.expr, GrammarExpr::RawRegex(_)), "{:?}", rule.expr);
-    lower(&grammar).unwrap();
+    let mut at_limit = Vec::from([b'"']);
+    at_limit.extend(std::iter::repeat_n(b'a', 80));
+    at_limit.push(b'"');
+    assert!(schema_accepts_bytes(&schema, &at_limit));
+
+    let mut too_long = Vec::from([b'"']);
+    too_long.extend(std::iter::repeat_n(b'a', 81));
+    too_long.push(b'"');
+    assert!(!schema_accepts_bytes(&schema, &too_long));
 }
 
 

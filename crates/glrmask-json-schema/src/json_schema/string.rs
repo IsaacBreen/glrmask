@@ -284,9 +284,7 @@ impl<'a> Lowerer<'a> {
         if recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some() {
             return Ok(None);
         }
-        if !self.should_split_bounded_string(schema.min_length, max_length)
-            || !self.config.preserve_pattern_max_length
-        {
+        if !self.should_split_bounded_string(schema.min_length, max_length) {
             return Ok(None);
         }
 
@@ -397,10 +395,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let preprocessed = preprocess_ascii_shorthand(pattern);
-        let preserved_max = schema.max_length.filter(|_| {
-            pattern_matches_any_string(&preprocessed) || self.config.preserve_pattern_max_length
-        });
-        analyze_complex_anchored_pattern(&preprocessed, schema.min_length, preserved_max)
+        analyze_complex_anchored_pattern(&preprocessed, schema.min_length, schema.max_length)
     }
 
     fn lower_complex_anchored_pattern_expr(
@@ -558,7 +553,6 @@ impl<'a> Lowerer<'a> {
         let mut length_clamped_pattern = None;
         if let (Some(pattern), Some(max_length)) =
             (schema.pattern.as_deref(), schema.max_length)
-            && self.config.preserve_pattern_max_length
         {
             let preprocessed = preprocess_ascii_shorthand(pattern);
             if let Some(relation) = pattern_length_envelope_relation(
@@ -631,7 +625,6 @@ impl<'a> Lowerer<'a> {
                 &self.json_string_char_regex(),
                 schema.min_length,
                 schema.max_length,
-                self.config.preserve_pattern_max_length,
             ) {
                 constraints.push(quoted_string_body_regex(&length_bound_body));
             }
@@ -2603,7 +2596,6 @@ fn cheap_pattern_length_bound_body_regex(
     string_char_regex: &str,
     min: usize,
     max: Option<usize>,
-    preserve_pattern_max_length: bool,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -2620,24 +2612,16 @@ fn cheap_pattern_length_bound_body_regex(
         // pattern already proves every match lies inside the sibling length
         // interval. The latter intersection is semantically redundant and can
         // be omitted exactly.
-        if preserve_pattern_max_length {
-            if matches!(
-                pattern_length_envelope_relation(&pattern, min, max),
-                Some(PatternLengthEnvelopeRelation::Redundant)
-            ) {
-                return None;
-            }
-            return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
+        if matches!(
+            pattern_length_envelope_relation(&pattern, min, max),
+            Some(PatternLengthEnvelopeRelation::Redundant)
+        ) {
+            return None;
         }
+        return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
     }
 
-    // Historical compatibility mode: keep only the cheap lower bound when the
-    // caller explicitly disables patterned max-length preservation.
-    if min > 0 {
-        return Some(bounded_json_string_body_regex(string_char_regex, min, None));
-    }
-
-    None
+    (min > 0).then(|| bounded_json_string_body_regex(string_char_regex, min, None))
 }
 
 fn fixed_decoded_pattern_length(hir: &Hir) -> Option<usize> {
