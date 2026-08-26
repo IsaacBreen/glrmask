@@ -367,7 +367,7 @@ pub enum LegacyScopedParserSymbol {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ScopedSubgrammarLink {
+pub struct LegacyScopedSubgrammarLink {
     pub parent_component: u32,
     pub slot_terminal: TerminalID,
     pub child_component: u32,
@@ -382,14 +382,14 @@ pub struct ScopedSubgrammarLink {
 pub struct ScopedTableActionProvider<'a> {
     components: Vec<&'a GLRTable>,
     state_offsets: Vec<u32>,
-    links: Vec<ScopedSubgrammarLink>,
+    links: Vec<LegacyScopedSubgrammarLink>,
     total_states: u32,
 }
 
 impl<'a> ScopedTableActionProvider<'a> {
     pub fn new(
         components: Vec<&'a GLRTable>,
-        links: Vec<ScopedSubgrammarLink>,
+        links: Vec<LegacyScopedSubgrammarLink>,
     ) -> Result<Self, String> {
         let mut state_offsets = Vec::with_capacity(components.len());
         let mut total_states = 0u32;
