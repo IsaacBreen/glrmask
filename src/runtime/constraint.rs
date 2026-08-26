@@ -2035,6 +2035,7 @@ impl Constraint {
             total_tokenizer_states: next_tokenizer_state,
             leaf_terminal_offsets,
             total_leaf_terminals: next_leaf_terminal,
+            outer_terminal_count: self.table.num_terminals,
             tokenizer_future_scoped: (0..next_tokenizer_state)
                 .map(|_| OnceLock::new())
                 .collect(),
@@ -2290,8 +2291,8 @@ impl Constraint {
     pub(crate) fn recursive_runtime_terminal_count(&self) -> Option<usize> {
         let layout = self.recursive_parser_layout_ref()?;
         usize::try_from(
-            self.table
-                .num_terminals
+            layout
+                .outer_terminal_count
                 .checked_add(layout.total_leaf_terminals)?,
         )
         .ok()
@@ -2309,8 +2310,8 @@ impl Constraint {
         if local_terminal >= leaf_constraint.table.num_terminals {
             return None;
         }
-        self.table
-            .num_terminals
+        layout
+            .outer_terminal_count
             .checked_add(*layout.leaf_terminal_offsets.get(leaf_index)?)?
             .checked_add(local_terminal)
     }
@@ -2321,7 +2322,7 @@ impl Constraint {
         runtime_terminal: u32,
     ) -> Option<(usize, TerminalID)> {
         let layout = self.recursive_parser_layout_ref()?;
-        let scoped = runtime_terminal.checked_sub(self.table.num_terminals)?;
+        let scoped = runtime_terminal.checked_sub(layout.outer_terminal_count)?;
         if scoped >= layout.total_leaf_terminals {
             return None;
         }

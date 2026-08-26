@@ -4411,6 +4411,10 @@ pub(crate) struct RecursiveParserLayout {
     /// leaf-local -> outer -> leaf-local round trip.
     pub(crate) leaf_terminal_offsets: Vec<u32>,
     pub(crate) total_leaf_terminals: u32,
+    /// Size of the transitional outer/global terminal prefix at layout-build
+    /// time. Live recursive terminal IDs use this immutable tag boundary and
+    /// therefore do not need to consult the materialized outer table again.
+    pub(crate) outer_terminal_count: u32,
     /// Lazily mapped future-terminal support in the live runtime terminal
     /// coordinate for each scoped leaf tokenizer state.
     pub(crate) tokenizer_future_scoped: Vec<OnceLock<BitSet>>,

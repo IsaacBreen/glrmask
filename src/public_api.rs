@@ -1874,7 +1874,29 @@ mod tests {
             no_outer_tokenizer.tokenizer_has_epsilon_transitions =
                 root.tokenizer_has_epsilon_transitions;
         }
-        for constraint in [&bound, &loaded, &no_trigger, &no_outer_tokenizer] {
+        let mut no_outer_table = loaded.clone();
+        {
+            // Force all recursive derived views while the compiler-oracle table
+            // is still present, then replace the outer materialized table with
+            // the intact root leaf table. Live recursive execution must use the
+            // leaf/provider coordinate rather than outer LR actions/states.
+            no_outer_table.recursive_parser_layout().unwrap().unwrap();
+            let root = no_outer_table
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_components[0]
+                .constraint
+                .clone();
+            no_outer_table.table = root.table.clone();
+        }
+        for constraint in [
+            &bound,
+            &loaded,
+            &no_trigger,
+            &no_outer_tokenizer,
+            &no_outer_table,
+        ] {
             let mut pending = vec![Vec::<u32>::new()];
             while let Some(path) = pending.pop() {
                 let mut actual = constraint.start();
@@ -2011,7 +2033,19 @@ mod tests {
         assert!(bound.uses_compact_segmented_parser_runtime());
 
         let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
-        for constraint in [&bound, &loaded] {
+        let mut no_outer_table = loaded.clone();
+        {
+            no_outer_table.recursive_parser_layout().unwrap().unwrap();
+            let root = no_outer_table
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_components[0]
+                .constraint
+                .clone();
+            no_outer_table.table = root.table.clone();
+        }
+        for constraint in [&bound, &loaded, &no_outer_table] {
             let mut state = constraint.start();
             state.commit_token(0).unwrap();
             let mask = state.mask();
