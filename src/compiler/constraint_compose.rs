@@ -20655,6 +20655,8 @@ fn compose_constraints_owned_parent_impl(
                 two_dwa_runtime_requested,
                 &parser_default_domains,
                 id_num_tsids,
+                merged_ignores.canonical,
+                &merged_ignores.aliases,
             );
             let handle = early_boundary_positive
                 .take()
