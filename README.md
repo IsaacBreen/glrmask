@@ -2,7 +2,7 @@
 
 <!-- Generated from GUIDE.md. Edit that file, then run `python scripts/sync-guide.py`. -->
 
-GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
+GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for fast next-token mask computation with extremely low tail latency, even for complex grammars.
 
 > **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
 

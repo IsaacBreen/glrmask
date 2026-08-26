@@ -1,4 +1,4 @@
-GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
+GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for fast next-token mask computation with extremely low tail latency, even for complex grammars.
 
 > **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
 
@@ -198,6 +198,26 @@ let mut state = constraint.start();
 ```
 
 `ConstraintSpecBuilder::bind_grammar(...)` accepts a `Grammar`, `ConstraintSpec`, `Constraint`, or `DynamicConstraint` child.
+
+If the parent grammar is expensive and the child changes frequently, compile the parent with its `extern grammar` left unresolved, cache that `Constraint`, and bind compiled children later:
+
+```rust
+let mut parent = Constraint::compile(
+    Grammar::glrm(
+        "glrm 1; extern grammar payload; start document; nt document = payload;",
+    ),
+    &vocab,
+)?;
+
+let child_a = Constraint::compile(Grammar::json_schema(schema_a), &vocab)?;
+let child_b = Constraint::compile(Grammar::json_schema(schema_b), &vocab)?;
+
+let with_a = parent.bind_grammar("payload", &child_a, &vocab)?;
+let with_b = parent.bind_grammar("payload", &child_b, &vocab)?;
+# Ok::<(), glrmask::Error>(())
+```
+
+The parent remains reusable. It can also be saved and loaded before binding; late binding consumes loaded parser automata and pooled weights directly from their packed representation, while small composition metadata is decoded lazily. A child passed to `Constraint::bind_grammar(...)` must already have all of its own external grammars bound.
 
 ## Grammar formats
 
