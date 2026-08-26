@@ -598,7 +598,7 @@ impl ResidualArena {
 struct ResidualRuntimeStore {
     arena: ResidualArena,
     root: ResidualId,
-    state_by_residual: FxHashMap<ResidualId, u32>,
+    state_by_residual: Vec<u32>,
     residual_by_state: FxHashMap<u32, ResidualId>,
 }
 
@@ -645,6 +645,8 @@ impl VirtualResidualRuntime {
         // an exactly empty nonempty-language is still a valid lexer component
         // and is represented by a proxy root with no future.
         let root_live = arena.has_future(root).ok()?;
+        let mut state_by_residual = vec![u32::MAX; root as usize + 1];
+        state_by_residual[root as usize] = root_state;
         let mut accepting = BitSet::new(num_terminals as usize);
         accepting.set(terminal as usize);
         let live = accepting.clone();
@@ -663,7 +665,7 @@ impl VirtualResidualRuntime {
             store: Mutex::new(ResidualRuntimeStore {
                 arena,
                 root,
-                state_by_residual: FxHashMap::default(),
+                state_by_residual,
                 residual_by_state: FxHashMap::default(),
             }),
         })
@@ -690,10 +692,12 @@ impl VirtualResidualRuntime {
     }
 
     fn intern_locked(&self, store: &mut ResidualRuntimeStore, residual: ResidualId) -> Option<u32> {
-        if residual == store.root {
-            return Some(self.root_state);
+        let residual_index = residual as usize;
+        if store.state_by_residual.len() <= residual_index {
+            store.state_by_residual.resize(residual_index + 1, u32::MAX);
         }
-        if let Some(&state) = store.state_by_residual.get(&residual) {
+        let state = store.state_by_residual[residual_index];
+        if state != u32::MAX {
             return Some(state);
         }
         let state = self.state_allocator.allocate().expect(
@@ -702,7 +706,7 @@ impl VirtualResidualRuntime {
         self.state_owners
             .register_virtual(state, self.runtime_index)
             .expect("residual virtual state owner index must follow shared allocator");
-        store.state_by_residual.insert(residual, state);
+        store.state_by_residual[residual_index] = state;
         store.residual_by_state.insert(state, residual);
         Some(state)
     }
@@ -802,7 +806,7 @@ impl VirtualResidualRuntime {
     }
 
     pub(super) fn interned_state_count(&self) -> usize {
-        self.store.lock().unwrap().state_by_residual.len()
+        self.store.lock().unwrap().residual_by_state.len()
     }
 }
 
