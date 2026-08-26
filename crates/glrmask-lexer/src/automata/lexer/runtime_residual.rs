@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::ast::Expr;
 use super::dfa::DFA;
@@ -398,53 +398,16 @@ impl ResidualArena {
         }
     }
 
-    /// Exact existence of a positive-length word accepted from one embedded
-    /// DFA residual. Do not trust `possible_future_group_ids` here: `Expr::Dfa`
-    /// can be constructed directly, and its graph can be valid even when the
-    /// derived future metadata has not been recomputed by the caller.
-    fn dfa_has_nonempty_word(dfa: &DFA, start: &[u32]) -> bool {
-        let mut seen = FxHashSet::<u32>::default();
-        let mut queue = VecDeque::<u32>::new();
-
-        let enqueue_after_byte =
-            |target: u32, seen: &mut FxHashSet<u32>, queue: &mut VecDeque<u32>| -> bool {
-                for state in dfa.epsilon_closure(&[target]) {
-                    if !dfa.finalizers(state).is_empty() {
-                        return true;
-                    }
-                    if seen.insert(state) {
-                        queue.push_back(state);
-                    }
-                }
-                false
-            };
-
-        seen.extend(start.iter().copied());
-        for &state in start {
-            for (_, &target) in dfa.states()[state as usize].transitions.iter() {
-                if enqueue_after_byte(target, &mut seen, &mut queue) {
-                    return true;
-                }
-            }
-        }
-
-        while let Some(state) = queue.pop_front() {
-            for (_, &target) in dfa.states()[state as usize].transitions.iter() {
-                if enqueue_after_byte(target, &mut seen, &mut queue) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     fn has_nonempty_fast(&mut self, id: ResidualId) -> Option<bool> {
         match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => Some(false),
             ResidualNode::Literal { .. } | ResidualNode::Class(_) => Some(true),
-            ResidualNode::Dfa { dfa, states } => {
-                Some(Self::dfa_has_nonempty_word(dfa.as_ref(), states.as_ref()))
-            }
+            // `Expr::Dfa` is allowed to carry stale derived future metadata,
+            // so there is no metadata-only fast proof here. Let the ordinary
+            // bounded derivative reachability below answer this exactly; that
+            // keeps arbitrary embedded-DFA graphs under the same hard work
+            // ceilings as every other non-structural residual.
+            ResidualNode::Dfa { .. } => None,
             ResidualNode::Choice(parts) => {
                 let mut unknown = false;
                 for &part in parts.iter() {
