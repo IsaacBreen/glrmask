@@ -1859,7 +1859,22 @@ mod tests {
                     crate::runtime::BoundaryTrigger::None;
             }
         }
-        for constraint in [&bound, &loaded, &no_trigger] {
+        let mut no_outer_tokenizer = loaded.clone();
+        {
+            let root = no_outer_tokenizer
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_components[0]
+                .constraint
+                .clone();
+            no_outer_tokenizer.tokenizer = root.tokenizer.clone();
+            no_outer_tokenizer.tokenizer_fast_transitions =
+                root.tokenizer_fast_transitions.clone();
+            no_outer_tokenizer.tokenizer_has_epsilon_transitions =
+                root.tokenizer_has_epsilon_transitions;
+        }
+        for constraint in [&bound, &loaded, &no_trigger, &no_outer_tokenizer] {
             let mut pending = vec![Vec::<u32>::new()];
             while let Some(path) = pending.pop() {
                 let mut actual = constraint.start();
