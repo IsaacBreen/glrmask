@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ast::Expr;
 use super::dfa::DFA;
@@ -552,9 +552,9 @@ impl ResidualArena {
             return Ok(value);
         }
 
-        let mut seen = FxHashMap::<ResidualId, ()>::default();
+        let mut seen = FxHashSet::<ResidualId>::default();
         let mut queue = VecDeque::from([id]);
-        seen.insert(id, ());
+        seen.insert(id);
         let mut transitions = 0usize;
         while let Some(state) = queue.pop_front() {
             let first_bytes = self
@@ -579,7 +579,7 @@ impl ResidualArena {
                     self.nonempty_cache[id as usize] = Some(true);
                     return Ok(true);
                 }
-                if seen.insert(target, ()).is_none() {
+                if seen.insert(target) {
                     if seen.len() > state_budget {
                         return Err(format!(
                             "dynamic residual liveness exceeded state budget ({state_budget})"
