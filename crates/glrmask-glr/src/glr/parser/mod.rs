@@ -5254,12 +5254,10 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
 #[cfg(test)]
 mod tests {
     use super::{
-        DisjointComponentActionProvider, GLRTableActionProvider, ParserGSS, ScopedParserSymbol,
+        DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol,
         ScopedSubgrammarLink, close_provider_control_stacks,
         advance_concrete_stacks_reference,
         advance_stacks_with_provider,
-        close_control_stacks,
-        close_control_stacks_with_provider,
         advance_stacks_disjoint_top_terminals_bounded,
         normalized_concrete_stacks,
         advance_stacks,
@@ -5287,7 +5285,6 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
-    use smallvec::SmallVec;
 
     #[test]
     fn disjoint_component_provider_parses_across_link_without_composed_table() {
