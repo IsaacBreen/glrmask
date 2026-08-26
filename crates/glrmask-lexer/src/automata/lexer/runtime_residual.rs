@@ -640,11 +640,13 @@ impl VirtualResidualRuntime {
             return None;
         }
         let (mut arena, root) = ResidualArena::from_expr(expr)?;
-        // Force exact root liveness now under the general resource ceiling.
-        // A hard Boolean case that exceeds the ceiling rejects installation;
-        // an exactly empty nonempty-language is still a valid lexer component
-        // and is represented by a proxy root with no future.
-        let root_live = arena.has_future(root).ok()?;
+        // Root metadata follows the same contract as every other residual:
+        // cheap structural proofs are exact, while hard Boolean liveness is a
+        // conservative `true`. Dynamic mask/commit resolve that uncertainty
+        // through `exact_has_future` at their fallible residual boundaries.
+        // Do not make construction solve a potentially expensive emptiness
+        // problem merely to populate an infallible tokenizer metadata bit.
+        let root_live = arena.conservative_has_future(root);
         let mut state_by_residual = vec![u32::MAX; root as usize + 1];
         state_by_residual[root as usize] = root_state;
         let mut accepting = BitSet::new(num_terminals as usize);
@@ -970,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_boolean_root_is_a_valid_dead_proxy() {
+    fn empty_boolean_root_is_conservative_until_exact_boundary_check() {
         let a_star = || Expr::Repeat {
             expr: Box::new(bytes(b"a")),
             min: 0,
@@ -984,9 +986,41 @@ mod tests {
         let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
         let runtime =
             VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
-        assert!(!runtime.root_has_future());
-        assert!(runtime.step(1, b'a').is_none());
-        assert!(runtime.transitions(1).unwrap().is_empty());
-        assert!(!runtime.futures(1).unwrap().contains(0));
+        assert!(runtime.root_has_future());
+        assert!(runtime.futures(1).unwrap().contains(0));
+        assert_eq!(runtime.exact_has_future(1).unwrap(), Some(false));
+        assert_eq!(
+            runtime.step(1, b'a'),
+            Some(1),
+            "a syntactically continuing dead Boolean residual may remain as a conservative proxy until exact boundary pruning",
+        );
+    }
+
+    #[test]
+    fn runtime_construction_does_not_force_boolean_liveness_search() {
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 100,
+                max: Some(100),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"aa")),
+                min: 50,
+                max: Some(50),
+            }),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
+        let runtime =
+            VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
+        assert!(runtime.root_has_future());
+
+        let store = runtime.store.lock().unwrap();
+        assert_eq!(
+            store.arena.nonempty_cache[store.root as usize],
+            None,
+            "constructing the runtime must not eagerly solve a hard Boolean liveness problem",
+        );
     }
 }
