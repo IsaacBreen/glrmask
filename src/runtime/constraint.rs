@@ -1978,6 +1978,38 @@ impl Constraint {
             )?;
             terminal_targets.push(targets);
         }
+        let mut leaf_terminal_globals = Vec::with_capacity(leaves.len());
+        for leaf in &leaves {
+            let constraint = self
+                .constraint_at_recursive_component_path(&leaf.component_path)
+                .ok_or_else(|| {
+                    format!(
+                        "recursive terminal leaf path {:?} does not resolve to a constraint",
+                        leaf.component_path,
+                    )
+                })?;
+            leaf_terminal_globals.push(
+                (0..constraint.table.num_terminals)
+                    .map(|_| SmallVec::<[TerminalID; 2]>::new())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for (global_terminal, targets) in terminal_targets.iter().enumerate() {
+            let global_terminal = global_terminal as TerminalID;
+            for &(leaf_index, local_terminal) in targets {
+                let aliases = leaf_terminal_globals
+                    .get_mut(leaf_index as usize)
+                    .and_then(|row| row.get_mut(local_terminal as usize))
+                    .ok_or_else(|| {
+                        format!(
+                            "recursive terminal target leaf={leaf_index} local={local_terminal} lies outside derived leaf terminal domain",
+                        )
+                    })?;
+                if !aliases.contains(&global_terminal) {
+                    aliases.push(global_terminal);
+                }
+            }
+        }
         let mut materialized_states_by_recursive_state = vec![Vec::new(); next as usize];
         let mut recursive_states_by_materialized_state =
             Vec::with_capacity(self.table.num_states as usize);
@@ -2029,6 +2061,7 @@ impl Constraint {
             total_tokenizer_states: next_tokenizer_state,
             links,
             terminal_targets,
+            leaf_terminal_globals,
             materialized_states_by_recursive_state,
             total_states: next,
         });
@@ -2112,6 +2145,90 @@ impl Constraint {
             leaf_index,
             constraint.runtime_commit_initial_state(),
         )
+    }
+
+    #[inline]
+    pub(crate) fn recursive_leaf_constraint(&self, leaf_index: usize) -> Option<&Constraint> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        self.constraint_at_recursive_component_path(&leaf.component_path)
+    }
+
+    #[inline]
+    pub(crate) fn recursive_global_terminals_for_leaf_terminal(
+        &self,
+        leaf_index: usize,
+        local_terminal: TerminalID,
+    ) -> Option<SmallVec<[TerminalID; 2]>> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        Some(
+            layout
+                .leaf_terminal_globals
+                .get(leaf_index)?
+                .get(local_terminal as usize)?
+                .clone(),
+        )
+    }
+
+    #[inline]
+    pub(crate) fn recursive_parser_leaf_state(
+        &self,
+        scoped_state: u32,
+    ) -> Option<(usize, u32)> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        if scoped_state >= layout.total_states {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let local_state = scoped_state.checked_sub(leaf.state_offset)?;
+        (local_state < leaf.state_count).then_some((leaf_index, local_state))
+    }
+
+    /// Split a recursive parser language by the leaf owning each live stack
+    /// top. `LeveledGSS::isolate` prunes only the selected top branch, so the
+    /// original lower-stack and accumulator correlations remain intact. This is
+    /// the exact bridge needed when a zero-width CALL/RETURN closure changes the
+    /// active lexer scope after one terminal commits.
+    pub(crate) fn partition_recursive_parser_gss_by_active_leaf(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<SmallVec<[(usize, ParserGSS); 4]>> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        if gss.is_empty() {
+            return Some(SmallVec::new());
+        }
+        let tops = gss.peek_values();
+        if tops.is_empty() {
+            // A non-empty parser language with an empty stack has no active
+            // component to own a tokenizer continuation. Parser runtime stacks
+            // are rooted, so treat this as an invalid recursive frontier rather
+            // than guessing a scope.
+            return None;
+        }
+        let mut partitions = SmallVec::<[(usize, ParserGSS); 4]>::new();
+        for top in tops {
+            let (leaf_index, _) = self.recursive_parser_leaf_state(top)?;
+            let branch = gss.isolate(Some(top));
+            if branch.is_empty() {
+                continue;
+            }
+            if let Some((_, existing)) = partitions
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == leaf_index)
+            {
+                *existing = existing.merge(&branch);
+            } else {
+                partitions.push((leaf_index, branch));
+            }
+        }
+        partitions.sort_unstable_by_key(|(leaf_index, _)| *leaf_index);
+        Some(partitions)
     }
 
     /// Exact ordinary-terminal GLR table for compiler-side analyses that still

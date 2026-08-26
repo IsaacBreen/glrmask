@@ -295,6 +295,61 @@ pub(super) fn execute_tokenizer_from_state_small(
     result
 }
 
+/// Execute one tokenizer lane in the recursive leaf coordinate while keeping
+/// the current outer terminal IDs as a temporary commit-facing facade. Byte
+/// transitions, epsilon closure, longest-match choice, and continuation states
+/// all come exclusively from the intact leaf tokenizer; the outer union
+/// tokenizer is not consulted.
+pub(super) fn execute_recursive_tokenizer_from_state_small(
+    constraint: &Constraint,
+    bytes: &[u8],
+    scoped_start_state: u32,
+) -> Option<TokenizerExecResult> {
+    let (leaf_index, local_start_state) =
+        constraint.recursive_tokenizer_leaf_state(scoped_start_state)?;
+    let leaf = constraint.recursive_leaf_constraint(leaf_index)?;
+    debug_assert!(
+        !leaf.uses_compact_segmented_parser_runtime(),
+        "recursive tokenizer layout leaves must be intact runtime constraints",
+    );
+    let local = execute_tokenizer_from_state_small(leaf, bytes, local_start_state);
+    let mut result = TokenizerExecResult {
+        end_state: TokenizerStateSet::new(),
+        matches: Vec::with_capacity(local.matches.len()),
+    };
+    for local_end_state in local.end_state {
+        let scoped = constraint.recursive_tokenizer_scoped_state(leaf_index, local_end_state)?;
+        if !result.end_state.contains(&scoped) {
+            result.end_state.push(scoped);
+        }
+    }
+    for matched in local.matches {
+        let scoped_end_state =
+            constraint.recursive_tokenizer_scoped_state(leaf_index, matched.end_state)?;
+        let globals = constraint
+            .recursive_global_terminals_for_leaf_terminal(leaf_index, matched.id)?;
+        for global_terminal in globals {
+            if let Some(existing) = result
+                .matches
+                .iter_mut()
+                .find(|existing| existing.id == global_terminal)
+            {
+                if matched.width >= existing.width {
+                    existing.width = matched.width;
+                    existing.end_state = scoped_end_state;
+                }
+            } else {
+                result.matches.push(crate::automata::lexer::tokenizer::TokenizerMatch {
+                    id: global_terminal,
+                    width: matched.width,
+                    end_state: scoped_end_state,
+                });
+            }
+        }
+    }
+    Some(result)
+}
+
 pub(super) fn execute_tokenizer_from_state_small_into(
     constraint: &Constraint,
     bytes: &[u8],

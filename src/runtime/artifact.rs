@@ -4411,6 +4411,12 @@ pub(crate) struct RecursiveParserLayout {
     /// This keeps terminal routing out of the commit hot path while the
     /// tokenizer still uses the composed terminal coordinate.
     pub(crate) terminal_targets: Vec<SmallVec<[(u32, TerminalID); 4]>>,
+    /// Exact inverse of `terminal_targets`, grouped by recursive leaf and then
+    /// leaf-local terminal. This is transitional routing metadata for the
+    /// tokenizer migration: a leaf tokenizer can scan entirely in its local
+    /// coordinate and expose the corresponding outer terminal aliases without
+    /// consulting the union tokenizer.
+    pub(crate) leaf_terminal_globals: Vec<Vec<SmallVec<[TerminalID; 2]>>>,
     /// Exact preimage relation from one recursive runtime parser-state symbol
     /// to the materialized composed-table parser-state symbols it represents.
     /// This is used only to transport legacy/compiler-oracle parser languages

@@ -7893,11 +7893,94 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Constraint as Constraint, Vocab};
+    use crate::{Constraint as Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
 
     type CanonicalCommitState =
         Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
+
+    #[test]
+    fn recursive_scoped_tokenizer_exec_uses_only_the_active_leaf() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"!".to_vec()),
+            (3, b"Xa!".to_vec()),
+        ]);
+        let child = Constraint::compile(
+            Grammar::glrm("glrm 1; start child; t A = \"a\"; nt child = A;"),
+            &vocab,
+        )
+        .unwrap();
+        let parent = Constraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let local_x = parent
+            .terminal_display_names
+            .iter()
+            .position(|name| name == "X")
+            .unwrap() as u32;
+        let local_a = child
+            .terminal_display_names
+            .iter()
+            .position(|name| name == "A")
+            .unwrap() as u32;
+        let bound = parent.bind_grammar("child", child).unwrap();
+        let loaded = Constraint::load(bound.save()).unwrap();
+        for constraint in [&bound, &loaded] {
+            let layout = constraint.recursive_parser_layout().unwrap().unwrap();
+            assert_eq!(layout.leaves.len(), 2);
+            let global_x = layout
+                .terminal_targets
+                .iter()
+                .position(|targets| targets.contains(&(0, local_x)))
+                .unwrap() as u32;
+            let global_a = layout
+                .terminal_targets
+                .iter()
+                .position(|targets| targets.contains(&(1, local_a)))
+                .unwrap() as u32;
+
+            let root_reset = constraint.recursive_tokenizer_reset_state(0).unwrap();
+            let root_x = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
+                constraint,
+                b"X",
+                root_reset,
+            )
+            .unwrap();
+            assert!(root_x.matches.iter().any(|matched| matched.id == global_x));
+            assert!(root_x.end_state.iter().all(|&state| {
+                constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 0
+            }));
+            let root_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
+                constraint,
+                b"a",
+                root_reset,
+            )
+            .unwrap();
+            assert!(
+                root_a.matches.iter().all(|matched| matched.id != global_a),
+                "child terminal leaked from inactive leaf: {:?}",
+                root_a.matches,
+            );
+
+            let child_reset = constraint.recursive_tokenizer_reset_state(1).unwrap();
+            let child_a = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
+                constraint,
+                b"a",
+                child_reset,
+            )
+            .unwrap();
+            assert!(child_a.matches.iter().any(|matched| matched.id == global_a));
+            assert!(child_a.end_state.iter().all(|&state| {
+                constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 1
+            }));
+        }
+    }
 
     fn canonical_commit_state(
         state: &ParserStateMap,

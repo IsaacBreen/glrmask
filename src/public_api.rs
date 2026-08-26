@@ -2238,6 +2238,16 @@ mod tests {
                     + middle_parent_tokenizer_states
                     + leaf_tokenizer_states,
             );
+            for (global_terminal, targets) in layout.terminal_targets.iter().enumerate() {
+                for &(leaf_index, local_terminal) in targets {
+                    assert!(
+                        layout.leaf_terminal_globals[leaf_index as usize]
+                            [local_terminal as usize]
+                            .contains(&(global_terminal as u32)),
+                        "terminal routing inverse lost global={global_terminal} leaf={leaf_index} local={local_terminal}",
+                    );
+                }
+            }
             let tokenizer_counts = [
                 outer_parent_tokenizer_states,
                 middle_parent_tokenizer_states,
@@ -2266,6 +2276,49 @@ mod tests {
                     ),
                 );
             }
+            assert!(layout.leaves[1].state_count >= 2);
+            let root_top = layout.leaves[0].state_offset;
+            let middle_top_a = layout.leaves[1].state_offset;
+            let middle_top_b = middle_top_a + 1;
+            let leaf_top = layout.leaves[2].state_offset;
+            let acc0 = crate::compiler::glr::accumulator::TerminalsDisallowed::new()
+                .with_insert(10, 20);
+            let acc1 = crate::compiler::glr::accumulator::TerminalsDisallowed::new()
+                .with_insert(11, 21);
+            let acc2 = crate::compiler::glr::accumulator::TerminalsDisallowed::new()
+                .with_insert(12, 22);
+            let acc3 = crate::compiler::glr::accumulator::TerminalsDisallowed::new()
+                .with_insert(13, 23);
+            let mixed = crate::compiler::glr::parser::ParserGSS::from_stacks(&[
+                (vec![root_top], acc0.clone()),
+                (vec![root_top, middle_top_a], acc1.clone()),
+                (vec![root_top, middle_top_b], acc2.clone()),
+                (vec![root_top, leaf_top], acc3.clone()),
+            ]);
+            let partitions = constraint
+                .partition_recursive_parser_gss_by_active_leaf(&mixed)
+                .expect("recursive GSS must partition by active tokenizer leaf");
+            assert_eq!(
+                partitions.iter().map(|(leaf, _)| *leaf).collect::<Vec<_>>(),
+                vec![0, 1, 2],
+            );
+            let mut middle_stacks = partitions[1].1.to_stacks(16).unwrap();
+            middle_stacks.sort_by_key(|(stack, _)| *stack.last().unwrap());
+            assert_eq!(
+                middle_stacks,
+                vec![
+                    (vec![root_top, middle_top_a], acc1),
+                    (vec![root_top, middle_top_b], acc2),
+                ],
+            );
+            assert_eq!(
+                partitions[0].1.to_stacks(16).unwrap(),
+                vec![(vec![root_top], acc0)],
+            );
+            assert_eq!(
+                partitions[2].1.to_stacks(16).unwrap(),
+                vec![(vec![root_top, leaf_top], acc3)],
+            );
             assert_eq!(constraint.recursive_parser_state_span().unwrap(), layout.total_states);
             assert_eq!(layout.links.len(), 2);
             assert!(layout
