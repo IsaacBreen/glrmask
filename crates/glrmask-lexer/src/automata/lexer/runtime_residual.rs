@@ -619,11 +619,9 @@ impl VirtualResidualRuntime {
         let (mut arena, root) = ResidualArena::from_expr(expr)?;
         // Force exact root liveness now under the general resource ceiling.
         // A hard Boolean case that exceeds the ceiling rejects installation;
-        // it is never reinterpreted as an empty language.
+        // an exactly empty nonempty-language is still a valid lexer component
+        // and is represented by a proxy root with no future.
         let root_live = arena.has_future(root).ok()?;
-        if !root_live {
-            return None;
-        }
         let mut accepting = BitSet::new(num_terminals as usize);
         accepting.set(terminal as usize);
         let live = accepting.clone();
@@ -692,6 +690,9 @@ impl VirtualResidualRuntime {
     }
 
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        if state == self.root_state && !self.root_has_future {
+            return None;
+        }
         let mut store = self.store.lock().unwrap();
         let residual = Self::residual_for_state(&store, self.root_state, state)?;
         let target = store.arena.step(residual, byte)?;
@@ -903,5 +904,24 @@ mod tests {
         let accepting = runtime.step(1, b'c').unwrap();
         assert!(runtime.finalizers(accepting).unwrap().contains(0));
         assert_eq!(runtime.exact_has_future(accepting).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn empty_boolean_root_is_a_valid_dead_proxy() {
+        let a_star = || Expr::Repeat {
+            expr: Box::new(bytes(b"a")),
+            min: 0,
+            max: None,
+        };
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![a_star(), bytes(b"b")])),
+            intersect: Box::new(Expr::Seq(vec![a_star(), bytes(b"c")])),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let runtime = VirtualResidualRuntime::new(&expr, 0, 1, 2, 1, allocator).unwrap();
+        assert!(!runtime.root_has_future());
+        assert!(runtime.step(1, b'a').is_none());
+        assert!(runtime.transitions(1).unwrap().is_empty());
+        assert!(!runtime.futures(1).unwrap().contains(0));
     }
 }
