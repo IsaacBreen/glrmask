@@ -2597,7 +2597,7 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
     let observation_cache_enabled =
         std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
             && vocab.has_terminal_observation_classes()
-            && !state.constraint.tokenizer.has_virtual_residual_runtime()
+            && !state.constraint.tokenizer.has_any_virtual_runtime()
             // Static/dynamic composition can defer parser terminals and repair
             // component switches. Those observations are not represented by
             // the ordinary singleton parser-admission proof below.

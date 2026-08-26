@@ -4821,7 +4821,11 @@ impl Tokenizer {
         config_limit: usize,
         transition_work_limit: usize,
     ) -> Option<(Box<[u32]>, usize, usize)> {
-        if terminal >= self.num_terminals || config_limit == 0 || transition_work_limit == 0 {
+        if self.has_any_virtual_runtime()
+            || terminal >= self.num_terminals
+            || config_limit == 0
+            || transition_work_limit == 0
+        {
             return None;
         }
 
@@ -7364,6 +7368,13 @@ impl Tokenizer {
         self.virtual_residuals = runtimes;
         self.invalidate_derived_caches();
         Some(())
+    }
+
+    #[doc(hidden)]
+    pub fn has_any_virtual_runtime(&self) -> bool {
+        self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
     }
 
     #[doc(hidden)]
@@ -9948,6 +9959,29 @@ mod tests {
         let target = tokenizer.get_transition(root, b'a');
         assert_ne!(target, u32::MAX);
         assert_eq!(tokenizer.matched_terminals_iter(target).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn exact_terminal_observation_partition_declines_virtual_state_space() {
+        let mut tokenizer = tokenizer_from_exprs(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Class(U8Set::empty()),
+        ]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        tokenizer
+            .install_virtual_zero_min_unit_repeat_component(
+                U8Set::single(b'a'),
+                1_000_000_000,
+                1,
+            )
+            .unwrap();
+        assert!(tokenizer.has_any_virtual_runtime());
+        assert!(
+            tokenizer
+                .exact_terminal_observation_partition(1, 10_000, 1_000_000)
+                .is_none(),
+            "a raw-state observation quotient cannot certify lazily allocated virtual states",
+        );
     }
 
     #[test]
