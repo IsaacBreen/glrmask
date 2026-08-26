@@ -33,7 +33,8 @@ const PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION: u16 = 19;
 const PREVIOUS_COMBINED_CONSTRAINT_VERSION: u16 = 20;
 const PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION: u16 = 21;
 const PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION: u16 = 22;
-const CONSTRAINT_VERSION: u16 = 23;
+const PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION: u16 = 23;
+const CONSTRAINT_VERSION: u16 = 24;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -57,6 +58,8 @@ const V22_SECTION_MAGIC: [u8; 4] = *b"S22\0";
 const V22_SECTION_HEADER_LEN: usize = V22_SECTION_MAGIC.len() + 11 * 8;
 const V23_SECTION_MAGIC: [u8; 4] = *b"S23\0";
 const V23_SECTION_HEADER_LEN: usize = V23_SECTION_MAGIC.len() + 11 * 8;
+const V24_SECTION_MAGIC: [u8; 4] = *b"S24\0";
+const V24_SECTION_HEADER_LEN: usize = V24_SECTION_MAGIC.len() + 11 * 8;
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
     PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
@@ -74,6 +77,7 @@ fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION
             | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
             | PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION
             | PREVIOUS_COMBINED_CONSTRAINT_VERSION
@@ -2293,9 +2297,75 @@ struct SegmentedRuntimeArtifactV23 {
 }
 
 #[derive(Serialize)]
+struct SegmentedParserComponentV24Ref<'a> {
+    constraint_artifact: Vec<u8>,
+    tokenizer_state_offset: u32,
+    terminal_offset: u32,
+    global_terminal_aliases: &'a [(u32, u32)],
+    root_entry_terminals: &'a crate::ds::bitset::BitSet,
+    root_disallowed_terminal: Option<u32>,
+    global_to_local_parser_state: &'a [u32],
+}
+
+#[derive(Deserialize)]
+struct SegmentedParserComponentV24 {
+    constraint_artifact: Vec<u8>,
+    tokenizer_state_offset: u32,
+    terminal_offset: u32,
+    global_terminal_aliases: Vec<(u32, u32)>,
+    root_entry_terminals: crate::ds::bitset::BitSet,
+    root_disallowed_terminal: Option<u32>,
+    global_to_local_parser_state: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct SegmentedParserLinkV24Ref {
+    parent_component: u32,
+    slot_terminal: u32,
+    child_component: u32,
+    child_start: u32,
+    return_pop: u32,
+    child_start_nullable: bool,
+}
+
+#[derive(Deserialize)]
+struct SegmentedParserLinkV24 {
+    parent_component: u32,
+    slot_terminal: u32,
+    child_component: u32,
+    child_start: u32,
+    return_pop: u32,
+    child_start_nullable: bool,
+}
+
+#[derive(Serialize)]
+struct SegmentedRuntimeArtifactV24Ref<'a> {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV24Ref<'a>>,
+    segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
+    segmented_parser_state_offsets: &'a [u32],
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: &'a [u32],
+    boundary_shards: Vec<SegmentedBoundaryShardV23Ref<'a>>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedRuntimeArtifactV24 {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV24>,
+    segmented_parser_links: Vec<SegmentedParserLinkV24>,
+    segmented_parser_state_offsets: Vec<u32>,
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: Vec<u32>,
+    boundary_shards: Vec<SegmentedBoundaryShardV23>,
+}
+
+#[derive(Serialize)]
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
-    segmented_runtime: Option<SegmentedRuntimeArtifactV23Ref<'a>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV24Ref<'a>>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     packed_dwa_dense_mask_ids: &'a [u32],
     packed_dwa_dense_mask_rows: &'a [u64],
@@ -2303,6 +2373,15 @@ struct ConstraintArtifactCurrentRuntimeRef<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
+    terminal_live_states: Vec<Vec<u32>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV24>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    packed_dwa_dense_mask_ids: Vec<u32>,
+    packed_dwa_dense_mask_rows: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV23Runtime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV23>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
@@ -2338,6 +2417,7 @@ struct DecodedConstraintRuntime {
     segmented_runtime_v20: Option<SegmentedRuntimeArtifactV20>,
     segmented_runtime_v22: Option<SegmentedRuntimeArtifactV22>,
     segmented_runtime_v23: Option<SegmentedRuntimeArtifactV23>,
+    segmented_runtime_v24: Option<SegmentedRuntimeArtifactV24>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     packed_dwa_dense_masks: Option<(Vec<u32>, Vec<u64>)>,
 }
@@ -2394,7 +2474,7 @@ fn boundary_terminal_trie_v22_ref(
 
 fn segmented_runtime_artifact_ref(
     constraint: &Constraint,
-) -> Option<SegmentedRuntimeArtifactV23Ref<'_>> {
+) -> Option<SegmentedRuntimeArtifactV24Ref<'_>> {
     let overlay = constraint.static_dynamic_overlay.as_ref()?;
     if overlay.segmented_parser_components.is_empty()
         && overlay.segmented_boundary_shards.is_empty()
@@ -2406,10 +2486,11 @@ fn segmented_runtime_artifact_ref(
     let components = overlay
         .segmented_parser_components
         .iter()
-        .map(|component| SegmentedParserComponentV22Ref {
+        .map(|component| SegmentedParserComponentV24Ref {
             constraint_artifact: component.constraint.save(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
+            global_terminal_aliases: &component.global_terminal_aliases,
             root_entry_terminals: &component.root_entry_terminals,
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: &component.global_to_local_parser_state,
@@ -2467,10 +2548,25 @@ fn segmented_runtime_artifact_ref(
         shards
     };
 
-    Some(SegmentedRuntimeArtifactV23Ref {
+    let segmented_parser_links = overlay
+        .segmented_parser_links
+        .iter()
+        .map(|link| SegmentedParserLinkV24Ref {
+            parent_component: link.parent_component,
+            slot_terminal: link.slot_terminal,
+            child_component: link.child_component,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        })
+        .collect();
+
+    Some(SegmentedRuntimeArtifactV24Ref {
         materialized_static_component_parser: None,
         materialized_static_parser_state_domain_labels: Vec::new(),
         components,
+        segmented_parser_links,
+        segmented_parser_state_offsets: &overlay.segmented_parser_state_offsets,
         segmented_mask_authoritative: overlay.segmented_mask_authoritative,
         segmented_component_union_root_dispatch: &overlay.segmented_component_union_root_dispatch,
         boundary_shards,
@@ -2982,6 +3078,103 @@ fn restore_segmented_runtime_v23(
     Ok(())
 }
 
+fn restore_segmented_runtime_v24(
+    constraint: &mut Constraint,
+    runtime: SegmentedRuntimeArtifactV24,
+) -> crate::Result<()> {
+    let SegmentedRuntimeArtifactV24 {
+        materialized_static_component_parser,
+        materialized_static_parser_state_domain_labels,
+        components,
+        segmented_parser_links,
+        segmented_parser_state_offsets,
+        segmented_mask_authoritative,
+        segmented_component_union_root_dispatch,
+        boundary_shards,
+    } = runtime;
+
+    let mut aliases_by_component = Vec::with_capacity(components.len());
+    let components_v23 = components
+        .into_iter()
+        .map(|component| {
+            aliases_by_component.push(component.global_terminal_aliases);
+            SegmentedParserComponentV22 {
+                constraint_artifact: component.constraint_artifact,
+                tokenizer_state_offset: component.tokenizer_state_offset,
+                terminal_offset: component.terminal_offset,
+                root_entry_terminals: component.root_entry_terminals,
+                root_disallowed_terminal: component.root_disallowed_terminal,
+                global_to_local_parser_state: component.global_to_local_parser_state,
+            }
+        })
+        .collect();
+
+    restore_segmented_runtime_v23(
+        constraint,
+        SegmentedRuntimeArtifactV23 {
+            materialized_static_component_parser,
+            materialized_static_parser_state_domain_labels,
+            components: components_v23,
+            segmented_mask_authoritative,
+            segmented_component_union_root_dispatch,
+            boundary_shards,
+        },
+    )?;
+
+    let global_terminal_count = constraint.table.num_terminals;
+    let overlay = constraint
+        .static_dynamic_overlay
+        .as_mut()
+        .expect("v24 segmented runtime restore must create overlay metadata");
+    if aliases_by_component.len() != overlay.segmented_parser_components.len() {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized v24 component-alias count mismatch".to_owned(),
+        ));
+    }
+    for (index, (component, aliases)) in overlay
+        .segmented_parser_components
+        .iter_mut()
+        .zip(aliases_by_component)
+        .enumerate()
+    {
+        if aliases.iter().any(|&(global, local)| {
+            global >= global_terminal_count || local >= component.constraint.table.num_terminals
+        }) {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "serialized v24 component {index} contains an invalid terminal alias"
+            )));
+        }
+        component.global_terminal_aliases = aliases;
+    }
+
+    let links = segmented_parser_links
+        .into_iter()
+        .map(|link| crate::runtime::SegmentedParserLink {
+            parent_component: link.parent_component,
+            slot_terminal: link.slot_terminal,
+            child_component: link.child_component,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        })
+        .collect::<Vec<_>>();
+    overlay.segmented_parser_links = links;
+    overlay.segmented_parser_state_offsets = segmented_parser_state_offsets;
+
+    if !overlay.segmented_parser_links.is_empty() || !overlay.segmented_parser_state_offsets.is_empty() {
+        let tables = crate::runtime::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        crate::compiler::glr::parser::DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .map_err(crate::GlrMaskError::Serialization)?;
+    }
+    Ok(())
+}
+
 fn restore_segmented_runtime_v20(
     constraint: &mut Constraint,
     runtime: SegmentedRuntimeArtifactV20,
@@ -3375,6 +3568,80 @@ fn v20_sections(
         return Err("invalid v20 constraint section lengths".to_owned());
     }
     let mut pos = V20_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
+fn v24_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V24_SECTION_HEADER_LEN || !payload.starts_with(&V24_SECTION_MAGIC) {
+        return Err("invalid v24 constraint section header".to_owned());
+    }
+    let mut pos = V24_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v23 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v23 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V24_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v24 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v24 constraint section lengths".to_owned());
+    }
+    let mut pos = V24_SECTION_HEADER_LEN;
     let mut next = |len: usize| {
         let section = &payload[pos..pos + len];
         pos += len;
@@ -4366,7 +4633,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V23_SECTION_HEADER_LEN
+            + V24_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -4393,7 +4660,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V23_SECTION_HEADER_LEN
+            + V24_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -4413,7 +4680,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V23_SECTION_HEADER_LEN
+        let payload_len = V24_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -4445,7 +4712,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V23_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V24_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -4454,8 +4721,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V23_SECTION_MAGIC.len()].copy_from_slice(&V23_SECTION_MAGIC);
-            pos += V23_SECTION_MAGIC.len();
+            header[pos..pos + V24_SECTION_MAGIC.len()].copy_from_slice(&V24_SECTION_MAGIC);
+            pos += V24_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -4654,7 +4921,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V23_SECTION_MAGIC);
+        bytes.extend_from_slice(&V24_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -4785,6 +5052,7 @@ impl Constraint {
                 | PREVIOUS_COMBINED_CONSTRAINT_VERSION
                 | PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION
                 | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
+                | PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -4909,6 +5177,22 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v24_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v23_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -5157,7 +5441,42 @@ impl Constraint {
                                                 terminal_live_states: runtime.terminal_live_states,
                                                 segmented_runtime_v20: None,
                                                 segmented_runtime_v22: None,
+                                                segmented_runtime_v23: None,
+                                                segmented_runtime_v24: runtime.segmented_runtime,
+                                                dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                packed_dwa_dense_masks,
+                                            })
+                                        })
+                                    } else if version == PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION {
+                                        bincode::deserialize::<ConstraintArtifactV23Runtime>(
+                                            runtime_section,
+                                        )
+                                        .and_then(|runtime| {
+                                            let packed_dwa_dense_masks = if runtime
+                                                .packed_dwa_dense_mask_ids
+                                                .is_empty()
+                                            {
+                                                if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                                    return Err(bincode::Error::new(
+                                                        bincode::ErrorKind::Custom(
+                                                            "packed DWA dense-mask slab has rows but no ids"
+                                                                .to_owned(),
+                                                        ),
+                                                    ));
+                                                }
+                                                None
+                                            } else {
+                                                Some((
+                                                    runtime.packed_dwa_dense_mask_ids,
+                                                    runtime.packed_dwa_dense_mask_rows,
+                                                ))
+                                            };
+                                            Ok(DecodedConstraintRuntime {
+                                                terminal_live_states: runtime.terminal_live_states,
+                                                segmented_runtime_v20: None,
+                                                segmented_runtime_v22: None,
                                                 segmented_runtime_v23: runtime.segmented_runtime,
+                                                segmented_runtime_v24: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 packed_dwa_dense_masks,
                                             })
@@ -5191,6 +5510,7 @@ impl Constraint {
                                                 segmented_runtime_v20: None,
                                                 segmented_runtime_v22: runtime.segmented_runtime,
                                                 segmented_runtime_v23: None,
+                                                segmented_runtime_v24: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 packed_dwa_dense_masks,
                                             })
@@ -5224,6 +5544,7 @@ impl Constraint {
                                                 segmented_runtime_v20: runtime.segmented_runtime,
                                                 segmented_runtime_v22: None,
                                                 segmented_runtime_v23: None,
+                                                segmented_runtime_v24: None,
                                                 dynamic_mask_vocab: None,
                                                 packed_dwa_dense_masks,
                                             })
@@ -5237,6 +5558,7 @@ impl Constraint {
                                             segmented_runtime_v20: runtime.segmented_runtime,
                                             segmented_runtime_v22: None,
                                             segmented_runtime_v23: None,
+                                            segmented_runtime_v24: None,
                                             dynamic_mask_vocab: None,
                                             packed_dwa_dense_masks: None,
                                         })
@@ -5249,6 +5571,7 @@ impl Constraint {
                                             segmented_runtime_v20: None,
                                             segmented_runtime_v22: None,
                                             segmented_runtime_v23: None,
+                                            segmented_runtime_v24: None,
                                             dynamic_mask_vocab: None,
                                             packed_dwa_dense_masks: None,
                                         })
@@ -5787,6 +6110,9 @@ impl Constraint {
                 }
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v23 {
                     restore_segmented_runtime_v23(&mut constraint, segmented_runtime)?;
+                }
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v24 {
+                    restore_segmented_runtime_v24(&mut constraint, segmented_runtime)?;
                 }
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
