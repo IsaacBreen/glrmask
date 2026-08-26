@@ -24684,6 +24684,20 @@ constraint: &third,
             link.return_pop,
             subgrammar_child_return_pop(&child.table, rules).unwrap(),
         );
+        let tables = crate::runtime::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        let provider = crate::compiler::glr::parser::DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .unwrap();
+        assert_eq!(provider.scoped_state(0, 0), Some(0));
+        assert_eq!(
+            provider.scoped_state(1, 0),
+            Some(overlay.segmented_parser_state_offsets[1]),
+        );
     }
 
     #[test]
