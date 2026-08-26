@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ast::Expr;
-use super::compile::compile_terminal_expr_dfa;
+use super::compile::{compile_terminal_expr_dfa, expression_contains_large_bounded_repeat};
 use super::dfa::DFA;
 use super::runtime_repeat_product::{VirtualRuntimeStateOwners, VirtualStateAllocator};
 use crate::ds::bitset::BitSet;
@@ -961,6 +961,16 @@ impl BoundedCodeIntersectionOracle {
                 expr: Box::new(expr),
                 intersect: Box::new(intersect),
             })?;
+        // The oracle is a sidecar for avoiding giant-repeat materialization, so
+        // its own proof construction must never eagerly materialize a giant
+        // bounded repeat hidden inside either finite coordinate. The outer
+        // envelope repeat is represented by the relation-doubling counter and
+        // is intentionally not part of this check.
+        if expression_contains_large_bounded_repeat(&pattern_expr)
+            || expression_contains_large_bounded_repeat(&body_expr)
+        {
+            return None;
+        }
         let pattern = Arc::new(compile_terminal_expr_dfa(&pattern_expr));
         let body = Arc::new(compile_terminal_expr_dfa(&body_expr));
         if pattern.num_states() == 0
@@ -1454,18 +1464,15 @@ impl VirtualResidualRuntime {
         let root_oracle_coordinate = liveness_oracle
             .as_ref()
             .map(BoundedCodeIntersectionOracle::root_coordinate);
-        // Root metadata follows the same contract as every other residual:
-        // cheap structural proofs are exact, while hard Boolean liveness is a
-        // conservative `true`. Dynamic mask/commit resolve that uncertainty
-        // through `exact_has_future` at their fallible residual boundaries.
-        // Do not make construction solve a potentially expensive emptiness
-        // problem merely to populate an infallible tokenizer metadata bit.
-        // Keep the infallible tokenizer metadata contract unchanged even when
-        // this runtime has an exact liveness sidecar.  Artifacts serialize the
-        // conservative root future bit, while dynamic mask/commit call
-        // `exact_has_future` at their fallible boundary.  In particular, do
-        // not turn installing a new proof oracle into an artifact-version
-        // change.
+        // Keep the physical proxy root's serialized future bit conservative.
+        // Old artifacts and load-time validation use that physical metadata, so
+        // installing an exact liveness sidecar must not silently change the wire
+        // contract. At runtime `observation()` overlays an exact future bit for
+        // residuals carrying a certified bounded-code coordinate; uncertified
+        // Boolean residuals retain the conservative bit and are resolved through
+        // the fallible `exact_has_future` boundary. Construction therefore does
+        // not run the generic potentially expensive emptiness solver merely to
+        // populate serialized proxy metadata.
         let root_live = arena.conservative_has_future(root);
         let mut state_by_residual = vec![u32::MAX; root as usize + 1];
         state_by_residual[root as usize] = root_state;
@@ -2281,6 +2288,51 @@ mod tests {
             )),
         };
         assert!(BoundedCodeIntersectionOracle::from_expr(&suffix_ambiguous).is_none());
+    }
+
+    #[test]
+    fn bounded_code_oracle_does_not_materialize_nested_giant_repeats() {
+        let pattern = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::all())),
+                min: 0,
+                max: None,
+            },
+            bytes(b">"),
+        ]);
+        let giant_body = Expr::Repeat {
+            expr: Box::new(bytes(b"a")),
+            min: 4_096,
+            max: Some(4_096),
+        };
+        let body_giant = Expr::Intersect {
+            expr: Box::new(pattern),
+            intersect: Box::new(bounded_code_envelope_with_body(giant_body, 0, 5_000)),
+        };
+        assert!(BoundedCodeIntersectionOracle::from_expr(&body_giant).is_none());
+
+        // A giant bounded repeat can also hide inside the independently
+        // compiled pattern operand. Even when simplification could make a
+        // particular example cheap (epsilon repeated many times), the oracle
+        // must not rely on eagerly discovering that after materialization.
+        let giant_pattern = Expr::Choice(vec![
+            Expr::Seq(vec![
+                bytes(b"<"),
+                Expr::Repeat {
+                    expr: Box::new(Expr::Epsilon),
+                    min: 0,
+                    max: Some(4_096),
+                },
+                bytes(b">"),
+            ]),
+            bytes(b"x"),
+        ]);
+        let pattern_giant = Expr::Intersect {
+            expr: Box::new(giant_pattern),
+            intersect: Box::new(bounded_code_envelope_expr(0, 5_000)),
+        };
+        assert!(BoundedCodeIntersectionOracle::from_expr(&pattern_giant).is_none());
     }
 
     #[test]

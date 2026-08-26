@@ -7387,11 +7387,12 @@ impl Tokenizer {
             .count()
     }
 
-    /// Exact liveness at a dynamic token boundary. Ordinary and specialized
-    /// tokenizer states already carry exact future metadata. General symbolic
-    /// residuals deliberately expose a conservative infallible future bitset,
-    /// so they are resolved through their bounded exact derivative search here.
-    /// Resource exhaustion is an error rather than a false dead/live answer.
+    /// Exact liveness at a dynamic token boundary. Ordinary, specialized, and
+    /// certified bounded-code residual states already expose exact future
+    /// metadata. Other general symbolic residuals deliberately expose a
+    /// conservative infallible future bitset, so this boundary resolves them
+    /// through the bounded exact derivative search. Resource exhaustion is an
+    /// error rather than a false dead/live answer.
     #[doc(hidden)]
     pub fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
         if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
