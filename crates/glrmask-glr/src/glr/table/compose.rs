@@ -1655,7 +1655,8 @@ mod tests {
     use crate::compiler::glr::parser::{
         DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol, ScopedSubgrammarLink,
         advance_control_closed_stacks, advance_stacks_with_provider, close_control_stacks,
-        close_provider_control_stacks,
+        close_provider_control_stacks, stack_may_advance_on, stack_may_advance_on_with_provider,
+        stacks_finished, stacks_finished_with_provider,
     };
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::from_glrm;
@@ -2038,6 +2039,22 @@ mod tests {
                     TerminalsDisallowed::new(),
                 ),
             );
+            let root_eof = ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: EOF,
+            };
+            assert_eq!(
+                stacks_finished(&explicit.table, &explicit_stack),
+                stacks_finished_with_provider(&provider, &scoped_stack, root_eof),
+                "explicit/scoped finished mismatch before word {word:?}",
+            );
+            for &(global_terminal, scoped_symbol) in &visible {
+                assert_eq!(
+                    stack_may_advance_on(&explicit.table, &explicit_stack, global_terminal),
+                    stack_may_advance_on_with_provider(&provider, &scoped_stack, scoped_symbol),
+                    "explicit/scoped admission mismatch before word {word:?} for global terminal {global_terminal}",
+                );
+            }
             for &index in word {
                 let (global_terminal, scoped_symbol) = visible[index as usize];
                 explicit_stack =

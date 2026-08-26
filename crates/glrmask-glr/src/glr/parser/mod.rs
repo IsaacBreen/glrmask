@@ -4402,6 +4402,49 @@ pub fn close_provider_control_stacks<P: ParserActionProvider>(
     closure
 }
 
+/// Advance one visible/provider symbol from a control-closed frontier and
+/// restore zero-width closure afterwards.
+pub fn advance_provider_control_closed_stacks<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+    symbol: P::Symbol,
+) -> ParserGSS {
+    let advanced = advance_stacks_with_provider(provider, stack.clone(), symbol);
+    close_provider_control_stacks(provider, &advanced)
+}
+
+/// Exact semantic admission through the provider. This is deliberately the
+/// reference implementation; provider-specific row/guard fast paths can replace
+/// it later without changing the contract.
+pub fn stack_may_advance_on_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+    symbol: P::Symbol,
+) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+    let closed = close_provider_control_stacks(provider, stack);
+    !advance_stacks_with_provider(provider, closed, symbol).is_empty()
+}
+
+/// Provider equivalent of `stacks_finished`: after zero-width closure, report
+/// whether any top has an action on the caller-supplied outer EOF symbol.
+pub fn stacks_finished_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+    eof_symbol: P::Symbol,
+) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+    let closed = close_provider_control_stacks(provider, stack);
+    closed
+        .peek_values()
+        .into_iter()
+        .any(|state| provider.action(state, eof_symbol).is_some())
+}
+
 /// Provider equivalent of linker-control closure. The caller supplies the
 /// zero-width symbols explicitly; composition providers therefore do not need
 /// to manufacture a global terminal coordinate merely for control actions.
