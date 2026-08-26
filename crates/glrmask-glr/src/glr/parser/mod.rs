@@ -14,6 +14,7 @@ use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualS
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 
@@ -29,6 +30,72 @@ pub use profile::{
 };
 
 pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
+
+/// Action/goto source for parser states whose runtime IDs need not be the
+/// local IDs stored in one concrete [`GLRTable`]. The provider may borrow a
+/// local action when it contains no remapped state IDs, or return an owned
+/// action with its state-bearing fields translated into the runtime coordinate.
+/// `scope` is opaque provider metadata carried with reductions so goto lookup
+/// can stay in the table that produced the reduction.
+pub struct ProvidedAction<'a> {
+    pub action: Cow<'a, Action>,
+    pub scope: u32,
+}
+
+pub trait ParserActionProvider {
+    type Symbol: Copy;
+
+    fn action(&self, state: u32, symbol: Self::Symbol) -> Option<ProvidedAction<'_>>;
+
+    fn goto_target(
+        &self,
+        scope: u32,
+        goto_from: u32,
+        nonterminal: u32,
+    ) -> Option<(u32, bool)>;
+
+    fn state_count_hint(&self) -> usize;
+}
+
+/// Zero-remap adapter used both as a reference implementation and as the
+/// migration bridge for ordinary standalone tables.
+pub struct GLRTableActionProvider<'a> {
+    table: &'a GLRTable,
+}
+
+impl<'a> GLRTableActionProvider<'a> {
+    #[inline]
+    pub fn new(table: &'a GLRTable) -> Self {
+        Self { table }
+    }
+}
+
+impl ParserActionProvider for GLRTableActionProvider<'_> {
+    type Symbol = TerminalID;
+
+    #[inline]
+    fn action(&self, state: u32, symbol: TerminalID) -> Option<ProvidedAction<'_>> {
+        self.table.action(state, symbol).map(|action| ProvidedAction {
+            action: Cow::Borrowed(action),
+            scope: 0,
+        })
+    }
+
+    #[inline]
+    fn goto_target(
+        &self,
+        _scope: u32,
+        goto_from: u32,
+        nonterminal: u32,
+    ) -> Option<(u32, bool)> {
+        self.table.goto_target(goto_from, nonterminal)
+    }
+
+    #[inline]
+    fn state_count_hint(&self) -> usize {
+        self.table.num_states as usize
+    }
+}
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
@@ -3869,6 +3936,111 @@ fn advance_nondeterministically_profiled(
     }
 }
 
+
+/// Canonical provider-driven GLR advance. This deliberately uses no table-
+/// specific fast paths: it is the semantic bridge for scoped composition and
+/// a differential oracle against the existing optimized `GLRTable` path.
+pub fn advance_stacks_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    mut closure: ParserGSS,
+    symbol: P::Symbol,
+) -> ParserGSS {
+    let mut shifted = ParserGSS::empty();
+
+    loop {
+        let mut next = ParserGSS::empty();
+
+        for state in closure.peek_values() {
+            let Some(provided) = provider.action(state, symbol) else {
+                continue;
+            };
+            let action = provided.action.as_ref();
+            let isolated = closure.isolate(Some(state));
+
+            match action {
+                Action::GuardedStackShifts(shifts) => {
+                    merge_into(
+                        &mut shifted,
+                        apply_guarded_stack_shifts(isolated.clone(), shifts, None),
+                    );
+                }
+                _ => {
+                    action.for_each_stack_shift(|pop, pushes| {
+                        let branch = push_states(isolated.popn(pop as isize), pushes);
+                        merge_into(&mut shifted, branch);
+                    });
+                }
+            }
+
+            action.for_each_reduce(|nt, len| {
+                for (goto_from, base) in
+                    reduce_sources_from_isolated(&isolated, len as usize)
+                {
+                    let Some((target, is_replace)) =
+                        provider.goto_target(provided.scope, goto_from, nt)
+                    else {
+                        continue;
+                    };
+                    let branch = if is_replace {
+                        base.popn(1).push(target)
+                    } else {
+                        base.push(target)
+                    };
+                    merge_into(&mut next, branch);
+                }
+            });
+        }
+
+        if next.is_empty() {
+            return shifted;
+        }
+        closure = next;
+    }
+}
+
+/// Provider equivalent of linker-control closure. The caller supplies the
+/// zero-width symbols explicitly; composition providers therefore do not need
+/// to manufacture a global terminal coordinate merely for control actions.
+pub fn close_control_stacks_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+    controls: &[P::Symbol],
+) -> ParserGSS
+where
+    P::Symbol: std::fmt::Debug,
+{
+    if controls.is_empty() || stack.is_empty() {
+        return stack.clone();
+    }
+
+    let mut closure = stack.clone();
+    let pass_limit = provider
+        .state_count_hint()
+        .saturating_mul(controls.len().max(1))
+        .saturating_add(2);
+    for _ in 0..pass_limit {
+        let mut additions = ParserGSS::empty();
+        for &control in controls {
+            merge_into(
+                &mut additions,
+                advance_stacks_with_provider(provider, closure.clone(), control),
+            );
+        }
+        if additions.is_empty() {
+            return closure;
+        }
+        let next = closure.merge(&additions);
+        if next == closure {
+            return closure;
+        }
+        closure = next;
+    }
+    panic!(
+        "provider control closure did not converge: states={} controls={controls:?}",
+        provider.state_count_hint(),
+    );
+}
+
 fn advance_nondeterministically(
     table: &GLRTable,
     mut closure: ParserGSS,
@@ -4678,8 +4850,12 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
 #[cfg(test)]
 mod tests {
     use super::{
+        GLRTableActionProvider,
         ParserGSS,
         advance_concrete_stacks_reference,
+        advance_stacks_with_provider,
+        close_control_stacks,
+        close_control_stacks_with_provider,
         advance_stacks_disjoint_top_terminals_bounded,
         normalized_concrete_stacks,
         advance_stacks,
@@ -4707,6 +4883,100 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
+
+    #[test]
+    fn provider_reference_matches_table_reduce_then_shift() {
+        let token = 0;
+        let nt = 0;
+        let table = build_test_table(
+            4,
+            1,
+            &[
+                &[],
+                &[(token, Action::Reduce(nt, 1))],
+                &[(token, Action::Shift(3, false))],
+                &[],
+            ],
+            &[&[(nt, (2, false))], &[], &[], &[]],
+        );
+        let before = ParserGSS::from_single_stack(
+            vec![0, 1],
+            TerminalsDisallowed::new(),
+        );
+        let expected = advance_stacks(&table, &before, token);
+        let actual = advance_stacks_with_provider(
+            &GLRTableActionProvider::new(&table),
+            before,
+            token,
+        );
+        assert_eq!(
+            normalized_concrete_stacks(&actual),
+            normalized_concrete_stacks(&expected),
+        );
+    }
+
+    #[test]
+    fn provider_reference_matches_table_stack_and_guarded_shifts() {
+        let token = 0;
+        for action in [
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![2, 3],
+            }]),
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: Vec::new(),
+                pop: 1,
+                pushes: vec![2, 3],
+            }]),
+        ] {
+            let table = build_test_table(
+                4,
+                1,
+                &[&[], &[(token, action)], &[], &[]],
+                &[&[], &[], &[], &[]],
+            );
+            let before = ParserGSS::from_single_stack(
+                vec![0, 1],
+                TerminalsDisallowed::new(),
+            );
+            let expected = advance_stacks(&table, &before, token);
+            let actual = advance_stacks_with_provider(
+                &GLRTableActionProvider::new(&table),
+                before,
+                token,
+            );
+            assert_eq!(
+                normalized_concrete_stacks(&actual),
+                normalized_concrete_stacks(&expected),
+            );
+        }
+    }
+
+    #[test]
+    fn provider_control_closure_matches_table_closure() {
+        let control = 0;
+        let mut table = build_test_table(
+            2,
+            1,
+            &[&[(control, Action::Shift(1, false))], &[]],
+            &[&[], &[]],
+        );
+        table.control_terminals.insert(control);
+        let before = ParserGSS::from_single_stack(
+            vec![0],
+            TerminalsDisallowed::new(),
+        );
+        let expected = close_control_stacks(&table, &before);
+        let actual = close_control_stacks_with_provider(
+            &GLRTableActionProvider::new(&table),
+            &before,
+            &[control],
+        );
+        assert_eq!(
+            normalized_concrete_stacks(&actual),
+            normalized_concrete_stacks(&expected),
+        );
+    }
 
     #[test]
     fn uniform_deterministic_frontier_preserves_divergent_lower_prefixes() {
