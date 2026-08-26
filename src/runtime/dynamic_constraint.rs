@@ -1828,6 +1828,72 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_bounded_pattern_uses_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"\\".to_vec()),
+            (5, b"u".to_vec()),
+            (6, b"0".to_vec()),
+            (7, b"6".to_vec()),
+            (8, b"1".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^[a]+$",
+            "minLength": 2,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "the importer-generated pattern/length intersection must carry the certified prefix-code liveness oracle",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""a""#));
+        assert!(accepts(br#""aa""#));
+        assert!(
+            accepts(br#""\u0061\u0061""#),
+            "two escaped spellings of decoded 'a' must count as two JSON characters",
+        );
+        assert!(!accepts(br#""ab""#));
+
+        let mut at_limit = Vec::with_capacity(5002);
+        at_limit.push(b'"');
+        at_limit.extend(std::iter::repeat_n(b'a', 5000));
+        at_limit.push(b'"');
+        assert!(accepts(&at_limit));
+
+        let mut too_long = Vec::with_capacity(5003);
+        too_long.push(b'"');
+        too_long.extend(std::iter::repeat_n(b'a', 5001));
+        too_long.push(b'"');
+        assert!(!accepts(&too_long));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the certified liveness oracle from the retained terminal expression",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
     fn dynamic_constraint_save_load_round_trip() {
         let vocab = vocab();
         let constraint = DynamicConstraint::from_glrm_grammar(

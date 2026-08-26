@@ -7379,6 +7379,14 @@ impl Tokenizer {
             .sum()
     }
 
+    #[doc(hidden)]
+    pub fn virtual_residual_bounded_code_liveness_oracle_count(&self) -> usize {
+        self.virtual_residuals
+            .iter()
+            .filter(|runtime| runtime.has_bounded_code_liveness_oracle())
+            .count()
+    }
+
     /// Exact liveness at a dynamic token boundary. Ordinary and specialized
     /// tokenizer states already carry exact future metadata. General symbolic
     /// residuals deliberately expose a conservative infallible future bitset,
