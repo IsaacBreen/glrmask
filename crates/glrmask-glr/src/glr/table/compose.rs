@@ -110,6 +110,29 @@ fn child_root_nonterminal_from_rules(rules: &[Rule]) -> Result<NonterminalID, St
     }
 }
 
+
+/// Return the standalone child's exact zero-width return pop depth used by
+/// subgrammar composition. This derives the invariant from the child's own LR
+/// start/root goto rather than from any composed/global state coordinate.
+pub fn subgrammar_child_return_pop(
+    table: &GLRTable,
+    rules: &[Rule],
+) -> Result<u32, String> {
+    let child_start = 0u32;
+    let child_root = child_root_nonterminal_from_rules(rules)?;
+    let child_accept = accept_state(table)?;
+    let Some(&(root_target, root_replace)) = table.goto[child_start as usize].get(&child_root)
+    else {
+        return Err("child start row has no goto for its root nonterminal".to_owned());
+    };
+    if root_target != child_accept {
+        return Err(format!(
+            "child root goto targets state {root_target}, expected accept state {child_accept}",
+        ));
+    }
+    Ok(if root_replace { 1 } else { 2 })
+}
+
 fn ensure_epsilon_rule(rules: &mut Vec<Rule>, nonterminal: NonterminalID) {
     if !rules
         .iter()

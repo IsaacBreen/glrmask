@@ -4379,6 +4379,21 @@ pub(crate) enum ConstraintRuntimeBackend {
     Dynamic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentedParserLink {
+    /// Component whose local slot terminal performs the zero-width call.
+    pub(crate) parent_component: u32,
+    /// Parent-local placeholder terminal; never a rebased/global terminal ID.
+    pub(crate) slot_terminal: u32,
+    pub(crate) child_component: u32,
+    /// Child-local start LR state. Currently zero for compiled constraints, but
+    /// retained explicitly so the provider contract does not depend on that.
+    pub(crate) child_start: u32,
+    /// Number of child-side states removed when local EOF reaches Accept.
+    pub(crate) return_pop: u32,
+    pub(crate) child_start_nullable: bool,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StaticDynamicOverlayMetadata {
     /// Global terminal-id offsets for the transported composition components.
@@ -4402,6 +4417,11 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// components into one parser DWA but retain dynamic/hybrid components.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+    /// Explicit local-coordinate calls between the wrappers above. This is the
+    /// semantic relation consumed by the compact parser-action provider; it is
+    /// intentionally scoped to this composition level only.
+    #[serde(skip, default)]
+    pub(crate) segmented_parser_links: Vec<SegmentedParserLink>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.

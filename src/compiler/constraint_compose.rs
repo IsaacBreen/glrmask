@@ -82,6 +82,7 @@ use crate::compiler::constraint_possible_matches::{
 use crate::compiler::glr::table::{
     Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput,
     compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
+    subgrammar_child_return_pop,
 };
 use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
@@ -471,6 +472,36 @@ impl<'a> CompiledSubgrammarInput<'a> {
         std::iter::once(self.placeholder_terminal)
             .chain(self.additional_placeholder_terminals.iter().copied())
     }
+}
+
+fn build_segmented_parser_links(
+    children: &[CompiledSubgrammarInput<'_>],
+    child_rules: &[&[crate::grammar::flat::Rule]],
+) -> Result<Vec<crate::runtime::artifact::SegmentedParserLink>, String> {
+    if children.len() != child_rules.len() {
+        return Err("child/rule count mismatch while building segmented parser links".to_owned());
+    }
+    let link_count = children
+        .iter()
+        .map(|child| 1 + child.additional_placeholder_terminals.len())
+        .sum();
+    let mut links = Vec::with_capacity(link_count);
+    for (child_index, (child, rules)) in children.iter().zip(child_rules).enumerate() {
+        let child_component = u32::try_from(child_index + 1)
+            .map_err(|_| "segmented parser component index overflow".to_owned())?;
+        let return_pop = subgrammar_child_return_pop(&child.constraint.table, rules)?;
+        for slot_terminal in child.placeholder_terminals() {
+            links.push(crate::runtime::artifact::SegmentedParserLink {
+                parent_component: 0,
+                slot_terminal,
+                child_component,
+                child_start: 0,
+                return_pop,
+                child_start_nullable: child.constraint.table.embedded_start_nullable(),
+            });
+        }
+    }
+    Ok(links)
 }
 
 pub(crate) struct ConstraintComposition {
@@ -17825,6 +17856,7 @@ fn build_static_dynamic_overlay_metadata(
             repair_terminals,
             non_parent_only_parser_states,
             segmented_parser_components: Vec::new(),
+            segmented_parser_links: Vec::new(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
             segmented_component_union_root_dispatch: Vec::new(),
@@ -19550,6 +19582,10 @@ fn compose_constraints_owned_parent_impl(
         .iter()
         .map(|child| child.constraint.retained_table_rules())
         .collect::<Result<Vec<_>, String>>()?;
+    let segmented_parser_links = segmented_runtime_requested
+        .then(|| build_segmented_parser_links(children, &child_rules))
+        .transpose()?
+        .unwrap_or_default();
     let components_have_no_runtime_product = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -20707,6 +20743,7 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
+                segmented_parser_links: Vec::new(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -20716,6 +20753,7 @@ fn compose_constraints_owned_parent_impl(
             }
         });
         overlay.segmented_parser_components = segmented_components;
+        overlay.segmented_parser_links = segmented_parser_links.clone();
         overlay.segmented_mask_authoritative = explicit_segmented_boundary.is_some();
         if let Some(dispatch) = deterministic_root_dispatch {
             overlay.segmented_component_union_root_dispatch = dispatch;
@@ -21107,6 +21145,7 @@ fn compose_constraints_owned_parent_impl(
                 }
             });
             overlay.segmented_parser_components = segmented_components;
+            overlay.segmented_parser_links = segmented_parser_links.clone();
             if compose_profile_enabled() {
                 eprintln!(
                     "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true",
@@ -21160,6 +21199,7 @@ fn compose_constraints_owned_parent_impl(
                 repair_terminals: vec![false; num_terminals],
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
+                segmented_parser_links: Vec::new(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -24511,6 +24551,27 @@ constraint: &third,
         .unwrap()
         .constraint;
 
+        let overlay = segmented
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("segmented composition should retain component wrapper metadata");
+        assert_eq!(overlay.segmented_parser_links.len(), 2);
+        assert_eq!(
+            overlay
+                .segmented_parser_links
+                .iter()
+                .map(|link| link.slot_terminal)
+                .collect::<Vec<_>>(),
+            vec![left, right],
+        );
+        for link in &overlay.segmented_parser_links {
+            assert_eq!(link.parent_component, 0);
+            assert_eq!(link.child_component, 1);
+            assert_eq!(link.child_start, 0);
+            assert!(!link.child_start_nullable);
+            assert!(matches!(link.return_pop, 1 | 2));
+        }
+
         let valid = b"<ab>ab!";
         let mut expected = monolithic.start();
         let mut actual = composed.start();
@@ -24546,6 +24607,56 @@ constraint: &third,
             assert_eq!(actual.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting());
         }
+    }
+
+    #[test]
+    fn segmented_parser_links_preserve_nullable_child_local_coordinates() {
+        let vocab = byte_vocab();
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "<" SUB ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let slot = terminal(&parent, "SUB");
+        let composed = compose_constraints_owned_parent_segmented(
+            parent,
+            &[CompiledSubgrammarInput {
+                placeholder_terminal: slot,
+                additional_placeholder_terminals: &[],
+                constraint: &child,
+            }],
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .unwrap()
+        .constraint;
+        let overlay = composed.static_dynamic_overlay.as_ref().unwrap();
+        let [link] = overlay.segmented_parser_links.as_slice() else {
+            panic!("expected one local parser link");
+        };
+        assert_eq!(link.parent_component, 0);
+        assert_eq!(link.slot_terminal, slot);
+        assert_eq!(link.child_component, 1);
+        assert_eq!(link.child_start, 0);
+        assert!(link.child_start_nullable);
+        let rules = child.retained_table_rules().unwrap();
+        assert_eq!(
+            link.return_pop,
+            subgrammar_child_return_pop(&child.table, rules).unwrap(),
+        );
     }
 
     #[test]
