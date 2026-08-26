@@ -1842,7 +1842,7 @@ mod tests {
         ]);
         let schema = r#"{
             "type": "string",
-            "pattern": "^[a]+$",
+            "pattern": "^(?:a|bb)+$",
             "minLength": 2,
             "maxLength": 5000
         }"#;
@@ -1904,7 +1904,7 @@ mod tests {
         ]);
         let schema = r#"{
             "type": "string",
-            "pattern": "^é+$",
+            "pattern": "^(?:é|xx)+$",
             "minLength": 2,
             "maxLength": 5000
         }"#;
