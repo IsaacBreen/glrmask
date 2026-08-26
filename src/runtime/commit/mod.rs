@@ -6837,11 +6837,35 @@ fn commit_bytes_impl(
     bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
     expand_runtime_product_states(constraint, state);
-    let result = commit_bytes_impl_inner(constraint, state, bytes, bufs);
-    if result.is_ok() {
-        coalesce_uniform_runtime_source_states(constraint, state);
+    commit_bytes_impl_inner(constraint, state, bytes, bufs)?;
+
+    // General symbolic residuals expose a conservative infallible future bit
+    // during the inner commit so ordinary parser/lexer machinery can remain
+    // unchanged. Before accepting the token, resolve every non-reset lexer key
+    // through the bounded exact residual-liveness query. A hard Boolean case
+    // that exceeds the work ceiling is an error, never a false live/dead bit.
+    if constraint.tokenizer.has_virtual_residual_runtime() {
+        let initial = constraint.runtime_commit_initial_state();
+        let mut dead = Vec::<u32>::new();
+        for &tokenizer_state in state.keys() {
+            if tokenizer_state != initial
+                && !constraint
+                    .tokenizer
+                    .exact_dynamic_state_has_future(tokenizer_state)?
+            {
+                dead.push(tokenizer_state);
+            }
+        }
+        if !dead.is_empty() {
+            state.retain(|tokenizer_state, _| dead.binary_search(tokenizer_state).is_err());
+        }
+        if state.is_empty() {
+            return Err("commit rejected: no valid parser states remain".to_owned());
+        }
     }
-    result
+
+    coalesce_uniform_runtime_source_states(constraint, state);
+    Ok(())
 }
 
 fn commit_bytes_impl_inner(

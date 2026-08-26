@@ -461,8 +461,11 @@ impl DynamicRecognizerStateCache {
         let mut subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
         let mut repair_token_boundary_allowed = false;
         let mut repair_subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
-        let collect_subtree_loops = self.branches[state_index].len() == 1
-            || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX;
+        let collect_subtree_loops = !lexer_scan_cache
+            .tokenizer()
+            .has_virtual_residual_runtime()
+            && (self.branches[state_index].len() == 1
+                || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX);
         for branch in &self.branches[state_index] {
             if !branch.initial_prune_guard.allows_token_boundary() {
                 continue;
@@ -1175,10 +1178,16 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     fn residual_config(&mut self, config: u32) -> Result<Option<u32>, String> {
         if self.deterministic {
-            return Ok((!self.tokenizer.is_end(config)).then_some(config));
+            return Ok(self
+                .tokenizer
+                .exact_dynamic_state_has_future(config)?
+                .then_some(config));
         }
         if let Some(state) = Self::raw_config_state(config) {
-            return Ok((!self.tokenizer.is_end(state)).then_some(config));
+            return Ok(self
+                .tokenizer
+                .exact_dynamic_state_has_future(state)?
+                .then_some(config));
         }
         let config_index = config as usize;
         let cached = self.residual_configs[config_index];
@@ -1186,11 +1195,12 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
         }
 
-        let residual_states = self.configs[config_index]
-            .iter()
-            .copied()
-            .filter(|&state| !self.tokenizer.is_end(state))
-            .collect::<Vec<_>>();
+        let mut residual_states = Vec::new();
+        for &state in self.configs[config_index].iter() {
+            if self.tokenizer.exact_dynamic_state_has_future(state)? {
+                residual_states.push(state);
+            }
+        }
         let residual = if residual_states.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
         } else if residual_states.len() == self.configs[config_index].len() {
@@ -2125,6 +2135,9 @@ fn raw_self_loop_subtree(
     config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
     traversal_cache: &mut DynamicTraversalCache,
 ) -> RawSelfLoopSubtree {
+    if scan_cache.tokenizer().has_virtual_residual_runtime() {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
     if !initial_prune_guard.is_passed() {
         return RawSelfLoopSubtree::CannotSkip;
     }
@@ -2261,6 +2274,9 @@ fn bounded_observation_branch_certificate(
             return false;
         }};
     }
+    if lexer_scan_cache.tokenizer().has_virtual_residual_runtime() {
+        reject!("virtual_residual_runtime");
+    }
     if branch.tokenizer_config == initial_config
     {
         reject!("initial_config");
@@ -2364,6 +2380,9 @@ fn process_interned_dynamic_trie_node(
 ) -> bool {
     let branch_count = recognizer.branches(recognizer_state).len();
     let subtree_tokens = trie.subtree_tokens(node_id);
+    let allow_skip_certificates = !lexer_scan_cache
+        .tokenizer()
+        .has_virtual_residual_runtime();
 
     // A precomputed trie-aware projection can be reused after the walk has
     // entered its source state, provided projection construction reached this
@@ -2372,7 +2391,10 @@ fn process_interned_dynamic_trie_node(
     // `source_reentry_safe_subtrees` is deliberately stricter than the root
     // projection's ordinary `safe_subtrees`: it makes the suffix-language
     // reuse independent of how the runtime reached this node.
-    if !require_repair_used && subtree_tokens.len() >= dynamic_projection_reentry_min_tokens() {
+    if allow_skip_certificates
+        && !require_repair_used
+        && subtree_tokens.len() >= dynamic_projection_reentry_min_tokens()
+    {
         for branch in recognizer.branches(recognizer_state) {
         if !branch.fresh_reset
             && branch.pending_terminals.is_empty()
@@ -2417,7 +2439,7 @@ fn process_interned_dynamic_trie_node(
     // commonly has many literal loops *and* a counter-advancing family of
     // observation-equivalent transitions, and the latter is what lets us skip
     // the whole partition.
-    if !require_repair_used {
+    if allow_skip_certificates && !require_repair_used {
         if let Some(bounded_branches) = bounded_branches.as_ref() {
             let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node_id));
             let horizon = trie.subtree_max_byte_len(node_id);
@@ -3456,7 +3478,11 @@ fn walk_interned_dynamic_trie(
 ) -> Result<(), String> {
     let mut recognizer = DynamicRecognizerStateCache::new();
     let root_state = recognizer.intern(root_branches.clone());
-    let pre_match_projection = if let [branch] = root_branches.as_slice()
+    let allow_skip_certificates = !lexer_scan_cache
+        .tokenizer()
+        .has_virtual_residual_runtime();
+    let pre_match_projection = if allow_skip_certificates
+        && let [branch] = root_branches.as_slice()
         && !branch.fresh_reset
         && branch.pending_terminals.is_empty()
         && branch.initial_prune_guard.is_passed()
@@ -3491,13 +3517,14 @@ fn walk_interned_dynamic_trie(
         stats.recognizer_transition_misses = recognizer.transition_misses;
         return Ok(());
     }
-    if projections.iter().any(|(projection, admissible_future_mask)| {
+    if allow_skip_certificates
+        && (projections.iter().any(|(projection, admissible_future_mask)| {
         projection.subtree_common_future_mask(0) & *admissible_future_mask != 0
     }) || alias_projections_vocab
         .iter()
         .any(|(projection, admissible_future_mask)| {
             projection.subtree_common_future_mask(0) & *admissible_future_mask != 0
-        })
+        }))
     {
         stats.subtree_marks += 1;
         stats.subtree_mark_tokens += trie.subtree_tokens(0).len();
@@ -3643,7 +3670,8 @@ fn walk_interned_dynamic_trie(
                 continue;
             }
         }
-        if projections
+        if allow_skip_certificates
+            && projections
             .iter()
             .any(|(projection, _)| projection.subtree_is_safe(edge.child))
         {
@@ -3657,7 +3685,8 @@ fn walk_interned_dynamic_trie(
         // trie. They are therefore valid for every token length, but only for
         // the common-future certificate (not source-specific safe/re-entry
         // fields from the canonical projection).
-        if alias_projections_vocab
+        if allow_skip_certificates
+            && alias_projections_vocab
             .iter()
             .any(|(projection, admissible_future_mask)| {
                 projection.subtree_common_future_mask(edge.child)

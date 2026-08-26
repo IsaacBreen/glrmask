@@ -6897,6 +6897,20 @@ impl Tokenizer {
             .sum()
     }
 
+    /// Exact liveness at a dynamic token boundary. Ordinary and specialized
+    /// tokenizer states already carry exact future metadata. General symbolic
+    /// residuals deliberately expose a conservative infallible future bitset,
+    /// so they are resolved through their bounded exact derivative search here.
+    /// Resource exhaustion is an error rather than a false dead/live answer.
+    pub(crate) fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
+        for runtime in &self.virtual_residuals {
+            if let Some(future) = runtime.exact_has_future(state)? {
+                return Ok(future);
+            }
+        }
+        Ok(!self.is_end(state))
+    }
+
     #[doc(hidden)]
     pub fn has_virtual_binary_repeat_intersection(&self) -> bool {
         !self.virtual_repeat_intersections.is_empty()

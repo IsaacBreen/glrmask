@@ -43,12 +43,15 @@ pub(crate) struct ResidualArena {
     ids: FxHashMap<ResidualNode, ResidualId>,
     nullable: Vec<bool>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
+    first_bytes_cache: Vec<Option<U8Set>>,
     nonempty_cache: Vec<Option<bool>>,
     empty: ResidualId,
     epsilon: ResidualId,
 }
 
 const TRANSITION_UNKNOWN: u32 = u32::MAX;
+const DEFAULT_LIVENESS_STATE_BUDGET: usize = 262_144;
+const DEFAULT_LIVENESS_TRANSITION_BUDGET: usize = 4_194_304;
 
 impl ResidualArena {
     pub(crate) fn from_expr(expr: &Expr) -> Option<(Self, ResidualId)> {
@@ -57,6 +60,7 @@ impl ResidualArena {
             ids: FxHashMap::default(),
             nullable: Vec::new(),
             transitions: Vec::new(),
+            first_bytes_cache: Vec::new(),
             nonempty_cache: Vec::new(),
             empty: 0,
             epsilon: 0,
@@ -88,6 +92,7 @@ impl ResidualArena {
         self.nodes.push(node);
         self.nullable.push(nullable);
         self.transitions.push(None);
+        self.first_bytes_cache.push(None);
         self.nonempty_cache.push(None);
         Some(id)
     }
@@ -433,10 +438,94 @@ impl ResidualArena {
         }
     }
 
+    /// Byte alphabet that can possibly begin a nonempty word of this
+    /// residual. For exclusion this is deliberately an over-approximation
+    /// (`FIRST(left)`), which is sufficient for exact reachability because the
+    /// derivative itself still decides whether the byte is actually live.
+    fn first_bytes(&mut self, id: ResidualId) -> Option<U8Set> {
+        if let Some(bytes) = self.first_bytes_cache[id as usize] {
+            return Some(bytes);
+        }
+        let bytes = match self.nodes[id as usize].clone() {
+            ResidualNode::Empty | ResidualNode::Epsilon => U8Set::empty(),
+            ResidualNode::Literal { bytes, offset } => {
+                U8Set::single(*bytes.get(offset as usize)?)
+            }
+            ResidualNode::Class(bytes) => bytes,
+            ResidualNode::Dfa { dfa, state } => {
+                let mut bytes = U8Set::empty();
+                for (byte, &target) in dfa.states().get(state as usize)?.transitions.iter() {
+                    if !dfa.finalizers(target).is_empty()
+                        || !dfa.possible_future_group_ids(target).is_empty()
+                    {
+                        bytes.insert(byte);
+                    }
+                }
+                bytes
+            }
+            ResidualNode::Choice(parts) => {
+                let mut bytes = U8Set::empty();
+                for &part in parts.iter() {
+                    bytes |= self.first_bytes(part)?;
+                }
+                bytes
+            }
+            ResidualNode::Seq(parts) => {
+                let mut bytes = U8Set::empty();
+                for &part in parts.iter() {
+                    bytes |= self.first_bytes(part)?;
+                    if !self.is_nullable(part) {
+                        break;
+                    }
+                }
+                bytes
+            }
+            ResidualNode::Intersect(left, right) => {
+                self.first_bytes(left)?.intersection(&self.first_bytes(right)?)
+            }
+            ResidualNode::Exclude(left, _) => self.first_bytes(left)?,
+            ResidualNode::Repeat { body, max, .. } => {
+                if max == Some(0) {
+                    U8Set::empty()
+                } else {
+                    self.first_bytes(body)?
+                }
+            }
+        };
+        self.first_bytes_cache[id as usize] = Some(bytes);
+        Some(bytes)
+    }
+
+    /// Cheap exact answer when structural recursion is sufficient, otherwise
+    /// a conservative `true`. This is suitable for the infallible tokenizer
+    /// future bitset: dynamic mask/commit perform the fallible exact check at
+    /// token boundaries before retaining a symbolic residual.
+    fn conservative_has_future(&mut self, id: ResidualId) -> bool {
+        if let Some(value) = self.nonempty_cache[id as usize] {
+            return value;
+        }
+        self.has_nonempty_fast(id).unwrap_or(true)
+    }
+
     /// Exact existence of a nonempty accepted continuation. Most expressions,
     /// including giant bounded repeats, resolve structurally in O(AST) time.
     /// Boolean combinations fall back to lazy derivative-graph reachability.
+    /// The search has a hard resource ceiling; exceeding it is an error, never
+    /// a semantic "dead" result.
     pub(crate) fn has_future(&mut self, id: ResidualId) -> Result<bool, String> {
+        self.has_future_with_budget(
+            id,
+            DEFAULT_LIVENESS_STATE_BUDGET,
+            DEFAULT_LIVENESS_TRANSITION_BUDGET,
+        )
+    }
+
+    fn has_future_with_budget(
+        &mut self,
+        id: ResidualId,
+        state_budget: usize,
+        transition_budget: usize,
+    ) -> Result<bool, String> {
         if let Some(value) = self.nonempty_cache[id as usize] {
             return Ok(value);
         }
@@ -448,10 +537,22 @@ impl ResidualArena {
         let mut seen = FxHashMap::<ResidualId, ()>::default();
         let mut queue = VecDeque::from([id]);
         seen.insert(id, ());
+        let mut transitions = 0usize;
         while let Some(state) = queue.pop_front() {
-            for byte in 0u16..=255 {
+            let first_bytes = self
+                .first_bytes(state)
+                .ok_or_else(|| "dynamic residual FIRST-set construction overflow".to_owned())?;
+            for byte in first_bytes.iter() {
+                transitions = transitions
+                    .checked_add(1)
+                    .ok_or_else(|| "dynamic residual liveness transition count overflow".to_owned())?;
+                if transitions > transition_budget {
+                    return Err(format!(
+                        "dynamic residual liveness exceeded transition budget ({transition_budget})"
+                    ));
+                }
                 let target = self
-                    .step(state, byte as u8)
+                    .step(state, byte)
                     .ok_or_else(|| "dynamic residual state-id overflow".to_owned())?;
                 if target == self.empty {
                     continue;
@@ -461,6 +562,11 @@ impl ResidualArena {
                     return Ok(true);
                 }
                 if seen.insert(target, ()).is_none() {
+                    if seen.len() > state_budget {
+                        return Err(format!(
+                            "dynamic residual liveness exceeded state budget ({state_budget})"
+                        ));
+                    }
                     queue.push_back(target);
                 }
             }
@@ -486,6 +592,7 @@ pub(super) struct VirtualResidualRuntime {
     terminal: TerminalID,
     physical_state_count: u32,
     root_state: u32,
+    root_has_future: bool,
     state_allocator: Arc<VirtualStateAllocator>,
     accepting: BitSet,
     live: BitSet,
@@ -510,11 +617,11 @@ impl VirtualResidualRuntime {
             return None;
         }
         let (mut arena, root) = ResidualArena::from_expr(expr)?;
-        // Force exact root liveness now. Specialized runtimes are selected
-        // before this fallback, so pathological Boolean products keep their
-        // dedicated implementations rather than surprising the first mask.
+        // Force exact root liveness now under the general resource ceiling.
+        // A hard Boolean case that exceeds the ceiling rejects installation;
+        // it is never reinterpreted as an empty language.
         let root_live = arena.has_future(root).ok()?;
-        if !root_live && !arena.is_nullable(root) {
+        if !root_live {
             return None;
         }
         let mut accepting = BitSet::new(num_terminals as usize);
@@ -524,6 +631,7 @@ impl VirtualResidualRuntime {
             terminal,
             physical_state_count,
             root_state,
+            root_has_future: root_live,
             state_allocator,
             accepting,
             live,
@@ -590,11 +698,6 @@ impl VirtualResidualRuntime {
         if store.arena.is_empty(target) {
             return None;
         }
-        let nullable = store.arena.is_nullable(target);
-        let future = store.arena.has_future(target).ok()?;
-        if !nullable && !future {
-            return None;
-        }
         self.intern_locked(&mut store, target)
     }
 
@@ -605,13 +708,27 @@ impl VirtualResidualRuntime {
         // root is the drained zero-byte configuration and must not emit a
         // terminal match before any input is consumed.
         let accepting = state != self.root_state && store.arena.is_nullable(residual);
-        let future = store.arena.has_future(residual).ok()?;
+        let future = if state == self.root_state {
+            self.root_has_future
+        } else {
+            store.arena.conservative_has_future(residual)
+        };
         Some((accepting, future))
     }
 
     pub(super) fn root_has_future(&self) -> bool {
-        self.observation(self.root_state)
-            .is_some_and(|(_, future)| future)
+        self.root_has_future
+    }
+
+    /// Exact nonempty-continuation query for a state owned by this runtime.
+    /// Resource exhaustion is propagated to dynamic mask/commit instead of
+    /// being collapsed into a dead transition.
+    pub(super) fn exact_has_future(&self, state: u32) -> Result<Option<bool>, String> {
+        let mut store = self.store.lock().unwrap();
+        let Some(residual) = Self::residual_for_state(&store, self.root_state, state) else {
+            return Ok(None);
+        };
+        store.arena.has_future(residual).map(Some)
     }
 
     pub(super) fn finalizers(&self, state: u32) -> Option<&BitSet> {
@@ -633,10 +750,15 @@ impl VirtualResidualRuntime {
         if !self.handles_state(state) {
             return None;
         }
+        let bytes = {
+            let mut store = self.store.lock().unwrap();
+            let residual = Self::residual_for_state(&store, self.root_state, state)?;
+            store.arena.first_bytes(residual)?
+        };
         let mut out = Vec::new();
-        for byte in 0u16..=255 {
-            if let Some(target) = self.step(state, byte as u8) {
-                out.push((byte as u8, target));
+        for byte in bytes.iter() {
+            if let Some(target) = self.step(state, byte) {
+                out.push((byte, target));
             }
         }
         Some(out)
@@ -738,5 +860,48 @@ mod tests {
         assert!(accepts(&mut arena, root, b"aab"));
         assert!(!accepts(&mut arena, root, b"ab"));
         assert!(!accepts(&mut arena, root, b"c"));
+    }
+
+    #[test]
+    fn boolean_liveness_ceiling_is_error_not_dead() {
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 100,
+                max: Some(100),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"aa")),
+                min: 50,
+                max: Some(50),
+            }),
+        };
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        let error = arena
+            .has_future_with_budget(root, 8, 64)
+            .expect_err("a deliberately tiny resource ceiling must not become a false dead result");
+        assert!(error.contains("budget"), "unexpected liveness error: {error}");
+        assert!(arena.has_future_with_budget(root, 256, 512).unwrap());
+    }
+
+    #[test]
+    fn runtime_future_bit_is_conservative_until_exact_boundary_check() {
+        // The whole intersection accepts "c", but after consuming 'a' its
+        // residual is exactly b ∩ c: syntactically nonempty, semantically dead.
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Choice(vec![bytes(b"ab"), bytes(b"c")])),
+            intersect: Box::new(Expr::Choice(vec![bytes(b"ac"), bytes(b"c")])),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let runtime = VirtualResidualRuntime::new(&expr, 0, 1, 2, 1, allocator).unwrap();
+        let dead_prefix = runtime
+            .step(1, b'a')
+            .expect("syntactic derivative is retained until the exact boundary check");
+        assert!(runtime.futures(dead_prefix).unwrap().contains(0));
+        assert_eq!(runtime.exact_has_future(dead_prefix).unwrap(), Some(false));
+
+        let accepting = runtime.step(1, b'c').unwrap();
+        assert!(runtime.finalizers(accepting).unwrap().contains(0));
+        assert_eq!(runtime.exact_has_future(accepting).unwrap(), Some(false));
     }
 }
