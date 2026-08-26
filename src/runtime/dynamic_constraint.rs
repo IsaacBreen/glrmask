@@ -1968,7 +1968,7 @@ mod tests {
             "pattern": "^(?:a|bb)+$",
             "format": "hostname",
             "minLength": 2,
-            "maxLength": 5000
+            "maxLength": 128
         }"#;
         let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         assert!(
@@ -1977,7 +1977,7 @@ mod tests {
                 .tokenizer
                 .virtual_residual_bounded_code_liveness_oracle_count()
                 > 0,
-            "nested pattern/format/length intersections must flatten around the JSON length envelope and retain certified liveness",
+            "nested pattern/format/length intersections below the generic giant-repeat threshold must still use the certified residual representation",
         );
 
         let accepts = |bytes: &[u8]| {
@@ -1998,6 +1998,108 @@ mod tests {
                 > 0,
         );
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
+
+        let encode_current = |payload: DynamicConstraintPayloadV5| {
+            let payload = bincode::serialize(&payload).unwrap();
+            let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+            bytes
+        };
+
+        let mut missing_owner = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&dynamic.inner)],
+        };
+        assert_eq!(missing_owner.alternatives[0].base.virtual_runtimes.len(), 1);
+        missing_owner.alternatives[0].base.virtual_runtimes.clear();
+        let error = DynamicConstraint::load(&encode_current(missing_owner)).unwrap_err();
+        assert!(
+            error.to_string().contains("terminal ownership mismatch"),
+            "dropping a below-threshold residual owner from its physical proxy artifact must fail closed: {error}",
+        );
+
+        let mut forged_owner = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&dynamic.inner)],
+        };
+        let terminal = forged_owner.alternatives[0].base.virtual_runtimes[0].terminal as usize;
+        forged_owner.alternatives[0]
+            .base
+            .v2
+            .v1
+            .terminal_exprs
+            .as_mut()
+            .expect("current dynamic artifact retains terminal expressions")[terminal] =
+            Expr::U8Seq(b"a".to_vec());
+        let error = DynamicConstraint::load(&encode_current(forged_owner)).unwrap_err();
+        assert!(
+            error.to_string().contains("certified bounded-code residual"),
+            "a below-threshold residual owner cannot be forged for an uncertified expression: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_json_schema_cross_branch_bounded_string_constraints_share_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"bb".to_vec()),
+            (5, b".".to_vec()),
+            (6, b"-".to_vec()),
+        ]);
+        let schemas = [
+            r#"{
+                "allOf": [
+                    {"type":"string","format":"hostname","minLength":2,"maxLength":5000},
+                    {"type":"string","pattern":"^(?:a|bb)+$","minLength":3,"maxLength":5000},
+                    {"type":"string","pattern":"^(?:a|bbb)+$","maxLength":5000}
+                ]
+            }"#,
+            r#"{
+                "allOf": [
+                    {"type":"string","pattern":"^(?:a|bb)+$","minLength":2,"maxLength":6000},
+                    {"type":"string","pattern":"^(?:a|bbb)+$","minLength":3,"maxLength":5000},
+                    {"type":"string","format":"hostname","maxLength":5500}
+                ]
+            }"#,
+        ];
+
+        for schema in schemas {
+            let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+            assert!(
+                dynamic.inner.tokenizer.has_virtual_residual_runtime(),
+                "expected virtual residual runtime for cross-branch schema: {schema}",
+            );
+            assert!(
+                dynamic
+                    .inner
+                    .tokenizer
+                    .virtual_residual_bounded_code_liveness_oracle_count()
+                    > 0,
+                "cross-branch bounded string constraints must flatten to one common JSON decoded-length envelope plus finite constraint operands: {schema}",
+            );
+            assert!(
+                !dynamic
+                    .inner
+                    .dynamic_mask_vocab_for_runtime()
+                    .has_terminal_observation_classes(),
+                "virtual residual constraints must not attach a physical observation quotient",
+            );
+
+            let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+            assert!(
+                loaded
+                    .inner
+                    .tokenizer
+                    .virtual_residual_bounded_code_liveness_oracle_count()
+                    > 0,
+                "save/load must reconstruct the cross-branch bounded-code oracle: {schema}",
+            );
+            assert_eq!(loaded.start().mask(), dynamic.start().mask());
+        }
     }
 
     #[test]

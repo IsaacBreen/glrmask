@@ -23,6 +23,7 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
+    expression_supports_bounded_code_residual_runtime,
     expression_supports_deferred_dense_runtime,
     factor_regex_expr,
     prepare_partitioned_expression_pair_with_structural_map,
@@ -668,10 +669,30 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
                 .then_some(terminal as TerminalID)
         })
         .collect::<Vec<_>>();
-    if giant_terminals.is_empty() {
+    // A bounded-code intersection can have a declared bound below the generic
+    // 4096 giant-repeat threshold and still explode when eagerly materialized
+    // (pattern/format + JSON decoded-length envelopes are a common example).
+    // When no older virtual family is already required, let the exact oracle
+    // itself certify these terminals for the general residual runtime. Keeping
+    // this lane dynamic-only leaves static representation policy unchanged.
+    let bounded_code_terminals = if giant_terminals.is_empty() {
+        expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, expression)| {
+                expression_supports_bounded_code_residual_runtime(expression)
+                    .then_some(terminal as TerminalID)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if giant_terminals.is_empty() && bounded_code_terminals.is_empty() {
         return Ok(None);
     }
-    if let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions) {
+    if !giant_terminals.is_empty()
+        && let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions)
+    {
         if compile_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][dynamic_tokenizer] path=virtual_unit_repeat states={}",
@@ -715,13 +736,18 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
 
     let build_error = |detail: &str| {
         crate::Error::Compilation(format!(
-            "validated giant-repeat tokenizer could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
+            "validated protected tokenizer component could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
         ))
+    };
+    let general_residual_terminals = if giant_terminals.is_empty() {
+        &bounded_code_terminals
+    } else {
+        &giant_terminals
     };
 
     let build_general_residual = || -> crate::Result<Option<Tokenizer>> {
         let mut proxy_expressions = expressions.clone();
-        for &terminal in &giant_terminals {
+        for &terminal in general_residual_terminals {
             proxy_expressions[terminal as usize] = Expr::U8Class(U8Set::empty());
         }
         let terminal_labels = grammar
@@ -745,7 +771,7 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
             .map_err(|detail| build_error(&format!("terminal expression restoration failed: {detail}")))?;
         tokenizer
             .install_virtual_residual_components(
-                giant_terminals
+                general_residual_terminals
                     .iter()
                     .map(|&terminal| (expressions[terminal as usize].clone(), terminal))
                     .collect(),
@@ -755,13 +781,13 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
             eprintln!(
                 "[glrmask/profile][dynamic_tokenizer] path=hybrid_virtual_residuals physical_states={} components={}",
                 tokenizer.num_states(),
-                giant_terminals.len(),
+                general_residual_terminals.len(),
             );
         }
         Ok(Some(tokenizer))
     };
 
-    if !all_giants_specialized {
+    if giant_terminals.is_empty() || !all_giants_specialized {
         return build_general_residual();
     }
 

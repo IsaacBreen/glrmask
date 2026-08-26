@@ -917,6 +917,15 @@ impl BoolRelation {
     }
 }
 
+/// Return whether the exact bounded-code liveness oracle can be constructed
+/// for this expression without changing its language. Dynamic compilation uses
+/// this as a proof-backed representation selector for bounded intersections
+/// that would otherwise be eagerly materialized below the generic giant-repeat
+/// threshold.
+pub(crate) fn expression_supports_bounded_code_liveness_oracle(expr: &Expr) -> bool {
+    BoundedCodeIntersectionOracle::from_expr(expr).is_some()
+}
+
 #[derive(Debug)]
 struct BoundedCodeIntersectionOracle {
     pattern: Arc<DFA>,
