@@ -1860,6 +1860,75 @@ mod tests {
     }
 
     #[test]
+    fn recursive_parser_layout_flattens_state_coordinate_but_preserves_outer_wrapper_owner() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"!".to_vec()),
+        ]);
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let leaf_states = leaf.table.num_states;
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent_states = middle_parent.table.num_states;
+        let middle = middle_parent
+            .bind_grammar_dynamic_boundary("leaf", leaf)
+            .unwrap();
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let outer_parent_states = outer_parent.table.num_states;
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", middle)
+            .unwrap();
+
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+            let layout = constraint
+                .recursive_parser_layout()
+                .unwrap()
+                .expect("nested composition must expose a recursive parser layout");
+            assert_eq!(layout.component_offsets, vec![0, outer_parent_states]);
+            assert_eq!(layout.leaves.len(), 3);
+            assert_eq!(
+                layout
+                    .leaves
+                    .iter()
+                    .map(|leaf| (leaf.state_offset, leaf.state_count, leaf.top_component))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (0, outer_parent_states, 0),
+                    (outer_parent_states, middle_parent_states, 1),
+                    (
+                        outer_parent_states + middle_parent_states,
+                        leaf_states,
+                        1,
+                    ),
+                ],
+            );
+            assert_eq!(
+                layout.total_states,
+                outer_parent_states + middle_parent_states + leaf_states,
+            );
+            assert_eq!(constraint.recursive_parser_state_span().unwrap(), layout.total_states);
+        }
+    }
+
+    #[test]
     fn static_boundary_shards_are_authoritative_across_multiple_internal_crossings() {
         let vocab = Vocab::new(vec![
             (0, b"x".to_vec()),

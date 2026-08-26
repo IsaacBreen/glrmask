@@ -59,6 +59,22 @@ pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileS
 use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecursiveParserLeafLayout {
+    pub(crate) state_offset: u32,
+    pub(crate) state_count: u32,
+    /// Immediate wrapper of the composition whose layout was requested. Inner
+    /// leaf changes within one nested component deliberately keep this owner.
+    pub(crate) top_component: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecursiveParserLayout {
+    pub(crate) component_offsets: Vec<u32>,
+    pub(crate) leaves: Vec<RecursiveParserLeafLayout>,
+    pub(crate) total_states: u32,
+}
+
 #[derive(Default)]
 struct DirectSparseWeightBufCaches {
     eligible: DirectSparseWeightTokenSetCache,
@@ -1559,6 +1575,98 @@ impl Constraint {
             self.runtime_backend,
             super::artifact::ConstraintRuntimeBackend::Dynamic
         )
+    }
+
+    #[inline]
+    fn has_recursive_segmented_parser_tree(&self) -> bool {
+        self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+            !overlay.segmented_parser_components.is_empty()
+                && !overlay.segmented_parser_links.is_empty()
+                && overlay.segmented_parser_state_offsets.len()
+                    == overlay.segmented_parser_components.len()
+        })
+    }
+
+    /// Width of the endpoint parser-state coordinate when this constraint is
+    /// embedded as one component. Nested compositions contribute the disjoint
+    /// union of their intact descendants, not the size of their transitional
+    /// materialized composed table.
+    pub(crate) fn recursive_parser_state_span(&self) -> Result<u32, String> {
+        if !self.has_recursive_segmented_parser_tree() {
+            return Ok(self.table.num_states);
+        }
+        let overlay = self
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("recursive segmented parser tree requires overlay");
+        let mut total = 0u32;
+        for component in &overlay.segmented_parser_components {
+            total = total
+                .checked_add(component.constraint.recursive_parser_state_span()?)
+                .ok_or_else(|| "recursive parser-state coordinate overflow".to_owned())?;
+        }
+        Ok(total)
+    }
+
+    fn append_recursive_parser_leaves(
+        &self,
+        base: u32,
+        top_component: u32,
+        leaves: &mut Vec<RecursiveParserLeafLayout>,
+    ) -> Result<u32, String> {
+        if !self.has_recursive_segmented_parser_tree() {
+            leaves.push(RecursiveParserLeafLayout {
+                state_offset: base,
+                state_count: self.table.num_states,
+                top_component,
+            });
+            return base
+                .checked_add(self.table.num_states)
+                .ok_or_else(|| "recursive parser-state coordinate overflow".to_owned());
+        }
+        let overlay = self
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("recursive segmented parser tree requires overlay");
+        let mut next = base;
+        for component in &overlay.segmented_parser_components {
+            next = component.constraint.append_recursive_parser_leaves(
+                next,
+                top_component,
+                leaves,
+            )?;
+        }
+        Ok(next)
+    }
+
+    /// Derived recursive layout for one composition level. Immediate wrappers
+    /// occupy contiguous intervals. Descendant leaves inside the same wrapper
+    /// retain the same `top_component`, which is the level-local ownership
+    /// relation needed by dynamic B.
+    pub(crate) fn recursive_parser_layout(&self) -> Result<Option<RecursiveParserLayout>, String> {
+        if !self.has_recursive_segmented_parser_tree() {
+            return Ok(None);
+        }
+        let overlay = self
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("recursive segmented parser tree requires overlay");
+        let mut component_offsets = Vec::with_capacity(overlay.segmented_parser_components.len());
+        let mut leaves = Vec::new();
+        let mut next = 0u32;
+        for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
+            component_offsets.push(next);
+            next = component.constraint.append_recursive_parser_leaves(
+                next,
+                component_index as u32,
+                &mut leaves,
+            )?;
+        }
+        Ok(Some(RecursiveParserLayout {
+            component_offsets,
+            leaves,
+            total_states: next,
+        }))
     }
 
     /// Whether this live, source-built composition can use the compact parser
