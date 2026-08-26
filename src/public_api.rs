@@ -2274,11 +2274,13 @@ mod tests {
             );
             for (global_terminal, targets) in layout.terminal_targets.iter().enumerate() {
                 for &(leaf_index, local_terminal) in targets {
-                    assert!(
-                        layout.leaf_terminal_globals[leaf_index as usize]
-                            [local_terminal as usize]
-                            .contains(&(global_terminal as u32)),
-                        "terminal routing inverse lost global={global_terminal} leaf={leaf_index} local={local_terminal}",
+                    let scoped = constraint
+                        .recursive_terminal_scoped_id(leaf_index as usize, local_terminal)
+                        .unwrap();
+                    assert_eq!(
+                        constraint.recursive_terminal_leaf_local(scoped),
+                        Some((leaf_index as usize, local_terminal)),
+                        "terminal routing lost global={global_terminal} leaf={leaf_index} local={local_terminal}",
                     );
                 }
             }

@@ -1951,7 +1951,9 @@ impl Constraint {
         )?;
         let leaf_state_offsets = leaves.iter().map(|leaf| leaf.state_offset).collect();
         let mut leaf_tokenizer_state_offsets = Vec::with_capacity(leaves.len());
+        let mut leaf_terminal_offsets = Vec::with_capacity(leaves.len());
         let mut next_tokenizer_state = 0u32;
+        let mut next_leaf_terminal = 0u32;
         for leaf in &leaves {
             let constraint = self
                 .constraint_at_recursive_component_path(&leaf.component_path)
@@ -1965,6 +1967,10 @@ impl Constraint {
             next_tokenizer_state = next_tokenizer_state
                 .checked_add(constraint.tokenizer.num_states())
                 .ok_or_else(|| "recursive tokenizer-state coordinate overflow".to_owned())?;
+            leaf_terminal_offsets.push(next_leaf_terminal);
+            next_leaf_terminal = next_leaf_terminal
+                .checked_add(constraint.table.num_terminals)
+                .ok_or_else(|| "recursive terminal coordinate overflow".to_owned())?;
         }
         let mut terminal_targets = Vec::with_capacity(self.table.num_terminals as usize);
         for terminal in 0..self.table.num_terminals {
@@ -1977,38 +1983,6 @@ impl Constraint {
                 &mut targets,
             )?;
             terminal_targets.push(targets);
-        }
-        let mut leaf_terminal_globals = Vec::with_capacity(leaves.len());
-        for leaf in &leaves {
-            let constraint = self
-                .constraint_at_recursive_component_path(&leaf.component_path)
-                .ok_or_else(|| {
-                    format!(
-                        "recursive terminal leaf path {:?} does not resolve to a constraint",
-                        leaf.component_path,
-                    )
-                })?;
-            leaf_terminal_globals.push(
-                (0..constraint.table.num_terminals)
-                    .map(|_| SmallVec::<[TerminalID; 2]>::new())
-                    .collect::<Vec<_>>(),
-            );
-        }
-        for (global_terminal, targets) in terminal_targets.iter().enumerate() {
-            let global_terminal = global_terminal as TerminalID;
-            for &(leaf_index, local_terminal) in targets {
-                let aliases = leaf_terminal_globals
-                    .get_mut(leaf_index as usize)
-                    .and_then(|row| row.get_mut(local_terminal as usize))
-                    .ok_or_else(|| {
-                        format!(
-                            "recursive terminal target leaf={leaf_index} local={local_terminal} lies outside derived leaf terminal domain",
-                        )
-                    })?;
-                if !aliases.contains(&global_terminal) {
-                    aliases.push(global_terminal);
-                }
-            }
         }
         let mut materialized_states_by_recursive_state = vec![Vec::new(); next as usize];
         let mut recursive_states_by_materialized_state =
@@ -2059,12 +2033,13 @@ impl Constraint {
             leaf_state_offsets,
             leaf_tokenizer_state_offsets,
             total_tokenizer_states: next_tokenizer_state,
-            tokenizer_future_globals: (0..next_tokenizer_state)
+            leaf_terminal_offsets,
+            total_leaf_terminals: next_leaf_terminal,
+            tokenizer_future_scoped: (0..next_tokenizer_state)
                 .map(|_| OnceLock::new())
                 .collect(),
             links,
             terminal_targets,
-            leaf_terminal_globals,
             materialized_states_by_recursive_state,
             total_states: next,
         });
@@ -2311,7 +2286,101 @@ impl Constraint {
         local_state == constraint.runtime_commit_initial_state()
     }
 
-    pub(crate) fn recursive_tokenizer_future_global_terminals(
+    #[inline]
+    pub(crate) fn recursive_runtime_terminal_count(&self) -> Option<usize> {
+        let layout = self.recursive_parser_layout_ref()?;
+        usize::try_from(
+            self.table
+                .num_terminals
+                .checked_add(layout.total_leaf_terminals)?,
+        )
+        .ok()
+    }
+
+    #[inline]
+    pub(crate) fn recursive_terminal_scoped_id(
+        &self,
+        leaf_index: usize,
+        local_terminal: TerminalID,
+    ) -> Option<u32> {
+        let layout = self.recursive_parser_layout_ref()?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let leaf_constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        if local_terminal >= leaf_constraint.table.num_terminals {
+            return None;
+        }
+        self.table
+            .num_terminals
+            .checked_add(*layout.leaf_terminal_offsets.get(leaf_index)?)?
+            .checked_add(local_terminal)
+    }
+
+    #[inline]
+    pub(crate) fn recursive_terminal_leaf_local(
+        &self,
+        runtime_terminal: u32,
+    ) -> Option<(usize, TerminalID)> {
+        let layout = self.recursive_parser_layout_ref()?;
+        let scoped = runtime_terminal.checked_sub(self.table.num_terminals)?;
+        if scoped >= layout.total_leaf_terminals {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_terminal_offsets
+            .partition_point(|&offset| offset <= scoped)
+            .checked_sub(1)?;
+        let local_terminal = scoped.checked_sub(layout.leaf_terminal_offsets[leaf_index])?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let leaf_constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        (local_terminal < leaf_constraint.table.num_terminals)
+            .then_some((leaf_index, local_terminal))
+    }
+
+    pub(crate) fn recursive_terminal_for_component(
+        &self,
+        component_index: usize,
+        runtime_terminal: u32,
+    ) -> Option<u32> {
+        let layout = self.recursive_parser_layout_ref()?;
+        let (leaf_index, local_terminal) = self.recursive_terminal_leaf_local(runtime_terminal)?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let (&owner, descendant_path) = leaf.component_path.split_first()?;
+        if owner as usize != component_index {
+            return None;
+        }
+        let component = self
+            .static_dynamic_overlay
+            .as_ref()?
+            .segmented_parser_components
+            .get(component_index)?;
+        let component_constraint = component.constraint.as_ref();
+        if !component_constraint.uses_compact_segmented_parser_runtime() {
+            if !descendant_path.is_empty()
+                || local_terminal >= component_constraint.table.num_terminals
+            {
+                return None;
+            }
+            return Some(local_terminal);
+        }
+        let component_layout = component_constraint.recursive_parser_layout_ref()?;
+        let component_leaf_index = component_layout
+            .leaves
+            .iter()
+            .position(|candidate| candidate.component_path.as_slice() == descendant_path)?;
+        component_constraint.recursive_terminal_scoped_id(component_leaf_index, local_terminal)
+    }
+
+    pub(crate) fn recursive_terminal_is_ignore(&self, runtime_terminal: u32) -> bool {
+        let Some((leaf_index, local_terminal)) =
+            self.recursive_terminal_leaf_local(runtime_terminal)
+        else {
+            return false;
+        };
+        self.recursive_leaf_constraint(leaf_index)
+            .is_some_and(|leaf| leaf.ignore_terminal == Some(local_terminal))
+    }
+
+    pub(crate) fn recursive_tokenizer_future_scoped_terminals(
         &self,
         scoped_state: u32,
     ) -> Option<&BitSet> {
@@ -2330,26 +2399,23 @@ impl Constraint {
         if local_state >= leaf_constraint.tokenizer.num_states() {
             return None;
         }
-        let cache = layout
-            .tokenizer_future_globals
-            .get(scoped_state as usize)?;
+        let cache = layout.tokenizer_future_scoped.get(scoped_state as usize)?;
         Some(cache.get_or_init(|| {
             let local_future = leaf_constraint
                 .tokenizer
                 .possible_future_terminals(local_state);
-            let mut globals = BitSet::new(self.table.num_terminals as usize);
+            let mut scoped = BitSet::new(
+                self.recursive_runtime_terminal_count()
+                    .expect("recursive terminal layout must fit usize"),
+            );
             for local_terminal in local_future.iter_ones() {
-                if let Some(aliases) = layout
-                    .leaf_terminal_globals
-                    .get(leaf_index)
-                    .and_then(|row| row.get(local_terminal))
+                if let Some(runtime_terminal) =
+                    self.recursive_terminal_scoped_id(leaf_index, local_terminal as u32)
                 {
-                    for &global_terminal in aliases {
-                        globals.set(global_terminal as usize);
-                    }
+                    scoped.set(runtime_terminal as usize);
                 }
             }
-            globals
+            scoped
         }))
     }
 
@@ -2358,22 +2424,6 @@ impl Constraint {
         let layout = self.recursive_parser_layout().ok().flatten()?;
         let leaf = layout.leaves.get(leaf_index)?;
         self.constraint_at_recursive_component_path(&leaf.component_path)
-    }
-
-    #[inline]
-    pub(crate) fn recursive_global_terminals_for_leaf_terminal(
-        &self,
-        leaf_index: usize,
-        local_terminal: TerminalID,
-    ) -> Option<SmallVec<[TerminalID; 2]>> {
-        let layout = self.recursive_parser_layout().ok().flatten()?;
-        Some(
-            layout
-                .leaf_terminal_globals
-                .get(leaf_index)?
-                .get(local_terminal as usize)?
-                .clone(),
-        )
     }
 
     #[inline]
@@ -2534,6 +2584,25 @@ impl Constraint {
             }
         }
         !out.is_empty()
+    }
+
+    fn recursive_parser_symbols_for_runtime_terminal(
+        &self,
+        layout: &RecursiveParserLayout,
+        runtime_terminal: TerminalID,
+        out: &mut SmallVec<[ScopedParserSymbol; 8]>,
+    ) -> bool {
+        out.clear();
+        if let Some((leaf_index, local_terminal)) =
+            self.recursive_terminal_leaf_local(runtime_terminal)
+        {
+            out.push(ScopedParserSymbol::Terminal {
+                component: leaf_index as u32,
+                terminal: local_terminal,
+            });
+            return true;
+        }
+        self.recursive_parser_symbols_for_global_terminal(layout, runtime_terminal, out)
     }
 
     /// Correctness/reference entry point for the recursive endpoint parser
@@ -2698,7 +2767,7 @@ impl Constraint {
         )
         .expect("validated compact segmented parser metadata");
         let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
-        if !self.recursive_parser_symbols_for_global_terminal(
+        if !self.recursive_parser_symbols_for_runtime_terminal(
             &layout,
             global_terminal,
             &mut symbols,
@@ -2739,7 +2808,7 @@ impl Constraint {
         )
         .expect("validated compact segmented parser metadata");
         let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
-        if !self.recursive_parser_symbols_for_global_terminal(
+        if !self.recursive_parser_symbols_for_runtime_terminal(
             &layout,
             global_terminal,
             &mut symbols,

@@ -277,12 +277,6 @@ impl Constraint {
 	}
 
 	pub(crate) fn initial_state_map(&self) -> crate::runtime::state::ParserStateMap {
-		let initial_tok_state = if self.uses_compact_segmented_parser_runtime() {
-			self.recursive_tokenizer_reset_state(0)
-				.expect("recursive runtime must expose a root-leaf tokenizer reset")
-		} else {
-			self.tokenizer.initial_state()
-		};
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
 		let parser_gss = if let Some(closed) = self.close_compact_segmented_parser(&parser_gss) {
 			closed
@@ -291,7 +285,20 @@ impl Constraint {
 		} else {
 			close_control_stacks(&self.table, &parser_gss)
 		};
-		crate::runtime::state::ParserStateMap::singleton(initial_tok_state, parser_gss)
+		if self.uses_compact_segmented_parser_runtime() {
+			let partitions = self
+				.partition_recursive_parser_gss_by_active_leaf(&parser_gss)
+				.expect("recursive initial parser state must partition by active leaf");
+			let mut state = crate::runtime::state::ParserStateMap::default();
+			for (leaf_index, partition) in partitions {
+				let reset = self
+					.recursive_tokenizer_reset_state(leaf_index)
+					.expect("recursive initial active leaf must expose a tokenizer reset");
+				state.merge_insert(reset, partition);
+			}
+			return state;
+		}
+		crate::runtime::state::ParserStateMap::singleton(self.tokenizer.initial_state(), parser_gss)
 	}
 
 	fn collect_original_token_ids(

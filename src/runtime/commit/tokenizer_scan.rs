@@ -333,25 +333,23 @@ pub(super) fn execute_recursive_tokenizer_from_state_small(
     for matched in local.matches {
         let scoped_end_state =
             constraint.recursive_tokenizer_scoped_state(leaf_index, matched.end_state)?;
-        let globals = constraint
-            .recursive_global_terminals_for_leaf_terminal(leaf_index, matched.id)?;
-        for global_terminal in globals {
-            if let Some(existing) = result
-                .matches
-                .iter_mut()
-                .find(|existing| existing.id == global_terminal)
-            {
-                if matched.width >= existing.width {
-                    existing.width = matched.width;
-                    existing.end_state = scoped_end_state;
-                }
-            } else {
-                result.matches.push(crate::automata::lexer::tokenizer::TokenizerMatch {
-                    id: global_terminal,
-                    width: matched.width,
-                    end_state: scoped_end_state,
-                });
+        let runtime_terminal =
+            constraint.recursive_terminal_scoped_id(leaf_index, matched.id)?;
+        if let Some(existing) = result
+            .matches
+            .iter_mut()
+            .find(|existing| existing.id == runtime_terminal)
+        {
+            if matched.width >= existing.width {
+                existing.width = matched.width;
+                existing.end_state = scoped_end_state;
             }
+        } else {
+            result.matches.push(crate::automata::lexer::tokenizer::TokenizerMatch {
+                id: runtime_terminal,
+                width: matched.width,
+                end_state: scoped_end_state,
+            });
         }
     }
     Some(result)

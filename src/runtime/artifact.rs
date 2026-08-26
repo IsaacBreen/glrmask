@@ -4405,23 +4405,22 @@ pub(crate) struct RecursiveParserLayout {
     /// independent offsets because their local state counts differ.
     pub(crate) leaf_tokenizer_state_offsets: Vec<u32>,
     pub(crate) total_tokenizer_states: u32,
-    /// Lazily mapped outer/global future-terminal support for each scoped leaf
-    /// tokenizer state. The source future set remains owned by the intact leaf
-    /// tokenizer; this cache only bridges terminal IDs while commit still uses
-    /// the transitional outer terminal coordinate.
-    pub(crate) tokenizer_future_globals: Vec<OnceLock<BitSet>>,
+    /// Disjoint-union terminal coordinate over the same intact leaves. Runtime
+    /// byte terminals are encoded after the outer/materialized terminal range,
+    /// so the `u32` is self-describing while byte scanning no longer needs a
+    /// leaf-local -> outer -> leaf-local round trip.
+    pub(crate) leaf_terminal_offsets: Vec<u32>,
+    pub(crate) total_leaf_terminals: u32,
+    /// Lazily mapped future-terminal support in the live runtime terminal
+    /// coordinate for each scoped leaf tokenizer state.
+    pub(crate) tokenizer_future_scoped: Vec<OnceLock<BitSet>>,
     /// Linker controls rewritten only into the leaf-component coordinate.
     pub(crate) links: Vec<SegmentedParserLink>,
-    /// Transitional outer/global terminal -> intact leaf-local terminals.
-    /// This keeps terminal routing out of the commit hot path while the
-    /// tokenizer still uses the composed terminal coordinate.
+    /// Outer/global terminal -> intact leaf-local terminals. Ordinary byte
+    /// commit no longer consumes this relation; it remains for compiler-side
+    /// static-B materialization, compatibility/reference evaluation, and outer
+    /// special-token routing.
     pub(crate) terminal_targets: Vec<SmallVec<[(u32, TerminalID); 4]>>,
-    /// Exact inverse of `terminal_targets`, grouped by recursive leaf and then
-    /// leaf-local terminal. This is transitional routing metadata for the
-    /// tokenizer migration: a leaf tokenizer can scan entirely in its local
-    /// coordinate and expose the corresponding outer terminal aliases without
-    /// consulting the union tokenizer.
-    pub(crate) leaf_terminal_globals: Vec<Vec<SmallVec<[TerminalID; 2]>>>,
     /// Exact preimage relation from one recursive runtime parser-state symbol
     /// to the materialized composed-table parser-state symbols it represents.
     /// This is used only to transport legacy/compiler-oracle parser languages

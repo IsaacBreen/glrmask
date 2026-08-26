@@ -2669,6 +2669,17 @@ impl<'a> ConstraintState<'a> {
             );
             for local_tokenizer_state in local_tokenizer_states {
                 for &terminal in terminals.iter() {
+                    if self.constraint.uses_compact_segmented_parser_runtime()
+                        && terminal >= self.constraint.table.num_terminals
+                    {
+                        if let Some(local_terminal) = self
+                            .constraint
+                            .recursive_terminal_for_component(component_index, terminal)
+                        {
+                            result = result.with_insert(local_tokenizer_state, local_terminal);
+                        }
+                        continue;
+                    }
                     if terminal_start <= terminal && terminal < terminal_end {
                         result = result.with_insert(
                             local_tokenizer_state,

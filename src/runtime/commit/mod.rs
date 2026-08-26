@@ -1476,10 +1476,19 @@ fn runtime_tokenizer_future_terminals(
     state: u32,
 ) -> Option<&crate::ds::bitset::BitSet> {
     if constraint.uses_compact_segmented_parser_runtime() {
-        constraint.recursive_tokenizer_future_global_terminals(state)
+        constraint.recursive_tokenizer_future_scoped_terminals(state)
     } else {
         Some(constraint.tokenizer.possible_future_terminals(state))
     }
+}
+
+#[inline]
+fn runtime_terminal_count(constraint: &Constraint) -> usize {
+    constraint
+        .uses_compact_segmented_parser_runtime()
+        .then(|| constraint.recursive_runtime_terminal_count())
+        .flatten()
+        .unwrap_or(constraint.table.num_terminals as usize)
 }
 
 #[inline]
@@ -1511,7 +1520,7 @@ fn batched_end_state_admitted_terminals(
     gss: &ParserGSS,
     end_states: &[u32],
 ) -> Option<crate::ds::bitset::BitSet> {
-    let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
+    let mut candidates = crate::ds::bitset::BitSet::new(runtime_terminal_count(constraint));
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if runtime_tokenizer_is_reset_state(constraint, end_state) {
@@ -1731,7 +1740,7 @@ fn cached_batched_end_state_admission(
     end_states: &[u32],
     cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> Option<usize> {
-    let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
+    let mut candidates = crate::ds::bitset::BitSet::new(runtime_terminal_count(constraint));
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if runtime_tokenizer_is_reset_state(constraint, end_state) {
@@ -1927,6 +1936,19 @@ fn is_ignored_terminal(ignore_terminal: Option<u32>, terminal: u32) -> bool {
     Some(terminal) == ignore_terminal
 }
 
+#[inline]
+fn runtime_is_ignored_terminal(
+    constraint: &Constraint,
+    ignore_terminal: Option<u32>,
+    terminal: u32,
+) -> bool {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        constraint.recursive_terminal_is_ignore(terminal)
+    } else {
+        is_ignored_terminal(ignore_terminal, terminal)
+    }
+}
+
 fn is_actionable_terminal(
     actionable_terminals: Option<&ActionableTerminals>,
     constraint: &Constraint,
@@ -2067,7 +2089,7 @@ fn collect_unique_actionable_reusable_matches(
     // its longest width, so no second duplicate-removal pass is needed here.
     let mut normalized = SmallVec::<[NormalizedMatch; 16]>::new();
     for matched in matches {
-        let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+        let ignored = runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id);
         if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
             continue;
         }
@@ -2091,7 +2113,7 @@ fn collect_unique_actionable_matches(
 
     if matches.len() <= SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX {
         'matches: for matched in matches {
-            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            let ignored = runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id);
             if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
                 continue;
             }
@@ -2112,7 +2134,7 @@ fn collect_unique_actionable_matches(
     if let Some(seen_matches) = reusable_seen_matches {
         seen_matches.clear();
         for matched in matches {
-            let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+            let ignored = runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id);
             if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
                 continue;
             }
@@ -2130,7 +2152,7 @@ fn collect_unique_actionable_matches(
 
     let mut seen_matches = FxHashSet::default();
     for matched in matches {
-        let ignored = is_ignored_terminal(ignore_terminal, matched.id);
+        let ignored = runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id);
         if !ignored && !is_actionable_terminal(actionable_terminals, constraint, matched.id) {
             continue;
         }
@@ -2195,7 +2217,7 @@ fn advance_terminals_disallowed_over_bytes(
             return None;
         }
         for &end_state in end_states {
-            let future = constraint.tokenizer.possible_future_terminals(end_state);
+            let future = runtime_tokenizer_future_terminals(constraint, end_state)?;
             for &terminal in disallowed.iter() {
                 if future.contains(terminal as usize) {
                     remapped
@@ -2421,6 +2443,31 @@ fn queue_parser_reset_state(
     true
 }
 
+fn queue_parser_ignored_reset_state(
+    constraint: &Constraint,
+    processing_queue: &mut [ParserStatesByTokenizer],
+    pending_state: &mut ParserStatesByTokenizer,
+    new_offset: usize,
+    total_len: usize,
+    gss: ParserGSS,
+) -> bool {
+    let gss = if constraint.uses_compact_segmented_parser_runtime() {
+        constraint
+            .close_compact_segmented_parser(&gss)
+            .unwrap_or(gss)
+    } else {
+        gss
+    };
+    queue_parser_reset_state(
+        constraint,
+        processing_queue,
+        pending_state,
+        new_offset,
+        total_len,
+        gss,
+    )
+}
+
 fn finalize_pending_state(
     pending_state: &mut ParserStatesByTokenizer,
 ) -> ParserStateMap {
@@ -2473,10 +2520,8 @@ fn apply_future_terminal_disallow_for_states(
         .iter()
         .copied()
         .filter(|&end_state| {
-            constraint
-                .tokenizer
-                .possible_future_terminals(end_state)
-                .contains(terminal as usize)
+            runtime_tokenizer_future_terminals(constraint, end_state)
+                .is_some_and(|future| future.contains(terminal as usize))
         })
         .collect();
     if relevant.is_empty() {
@@ -5403,7 +5448,7 @@ fn commit_bytes_impl_profiled_inner(
 
                 if matched.ignored {
                     let enqueue_start = Instant::now();
-                    if !queue_parser_reset_state(
+                    if !queue_parser_ignored_reset_state(
                         constraint,
                         &mut processing_queue,
                         &mut pending_state,
@@ -7653,7 +7698,7 @@ fn commit_bytes_impl_inner(
                 let new_offset = offset + matched.width;
 
                 if matched.ignored {
-                    if !queue_parser_reset_state(
+                    if !queue_parser_ignored_reset_state(
                         constraint,
                         &mut processing_queue,
                         &mut bufs.pending_state,
@@ -8038,16 +8083,10 @@ mod tests {
         for constraint in [&bound, &loaded] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             assert_eq!(layout.leaves.len(), 2);
-            let global_x = layout
-                .terminal_targets
-                .iter()
-                .position(|targets| targets.contains(&(0, local_x)))
-                .unwrap() as u32;
-            let global_a = layout
-                .terminal_targets
-                .iter()
-                .position(|targets| targets.contains(&(1, local_a)))
-                .unwrap() as u32;
+            let scoped_x = constraint.recursive_terminal_scoped_id(0, local_x).unwrap();
+            let scoped_a = constraint.recursive_terminal_scoped_id(1, local_a).unwrap();
+            assert!(scoped_x >= constraint.table.num_terminals);
+            assert!(scoped_a >= constraint.table.num_terminals);
 
             let root_reset = constraint.recursive_tokenizer_reset_state(0).unwrap();
             let root_x = tokenizer_scan::execute_recursive_tokenizer_from_state_small(
@@ -8056,7 +8095,7 @@ mod tests {
                 root_reset,
             )
             .unwrap();
-            assert!(root_x.matches.iter().any(|matched| matched.id == global_x));
+            assert!(root_x.matches.iter().any(|matched| matched.id == scoped_x));
             assert!(root_x.end_state.iter().all(|&state| {
                 constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 0
             }));
@@ -8067,7 +8106,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                root_a.matches.iter().all(|matched| matched.id != global_a),
+                root_a.matches.iter().all(|matched| matched.id != scoped_a),
                 "child terminal leaked from inactive leaf: {:?}",
                 root_a.matches,
             );
@@ -8079,7 +8118,7 @@ mod tests {
                 child_reset,
             )
             .unwrap();
-            assert!(child_a.matches.iter().any(|matched| matched.id == global_a));
+            assert!(child_a.matches.iter().any(|matched| matched.id == scoped_a));
             assert!(child_a.end_state.iter().all(|&state| {
                 constraint.recursive_tokenizer_leaf_state(state).unwrap().0 == 1
             }));
@@ -9010,6 +9049,63 @@ nt start ::= item item? item?;
         assert!(probe.commit_token(4).is_err());
         let mut probe = state.clone();
         assert!(probe.commit_token(5).is_err());
+    }
+
+    #[test]
+    fn recursive_delayed_exclusion_stays_in_leaf_tokenizer_terminal_coordinate() {
+        let vocab = Vocab::new(vec![
+            (0, b"@".to_vec()),
+            (1, b" double".to_vec()),
+            (2, b"Quote".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"=".to_vec()),
+            (5, b"%".to_vec()),
+            (6, b"0".to_vec()),
+        ]);
+        let body = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                ignore WS;
+                nt start ::= declaration expression;
+                nt declaration ::= "@" ID;
+                nt expression ::= ID OP "0";
+                t WS ::= [ \t\r\n]+;
+                t OP ::= "=" | "%=";
+                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let parent = Constraint::compile(
+            Grammar::glrm("glrm 1; start document; extern grammar body; nt document = body;"),
+            &vocab,
+        )
+        .unwrap();
+        let bound = parent
+            .bind_grammar_dynamic_boundary("body", body.clone())
+            .unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+        let loaded = Constraint::load(bound.save()).unwrap();
+
+        let mut expected = body.start();
+        for token in [0, 1, 2] {
+            expected.commit_token(token).unwrap();
+        }
+        let expected_mask = expected.mask();
+        for constraint in [&bound, &loaded] {
+            let mut state = constraint.start();
+            for token in [0, 1, 2] {
+                state.commit_token(token).unwrap();
+            }
+            assert_eq!(state.mask(), expected_mask);
+            assert!(state.state.iter().any(|(_, gss)| {
+                !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+            }));
+            let mut probe = state.clone();
+            assert!(probe.commit_token(4).is_err());
+            let mut probe = state.clone();
+            assert!(probe.commit_token(5).is_err());
+        }
     }
 
     #[test]
