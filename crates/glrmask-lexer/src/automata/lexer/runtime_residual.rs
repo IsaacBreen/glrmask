@@ -940,16 +940,32 @@ impl BoundedCodeIntersectionOracle {
             return None;
         }
 
-        let mut envelope = None;
+        let mut envelope: Option<(Vec<u8>, Expr, usize, usize, Vec<u8>)> = None;
         let mut pattern_operands = Vec::new();
         for operand in operands {
-            if envelope.is_none()
-                && let Some(candidate) = bounded_code_envelope(operand)
-            {
-                envelope = Some(candidate);
-            } else {
-                pattern_operands.push(operand.clone());
+            if let Some((prefix, body, min, max, suffix)) = bounded_code_envelope(operand) {
+                match &mut envelope {
+                    None => {
+                        envelope = Some((prefix, body, min, max, suffix));
+                        continue;
+                    }
+                    Some((existing_prefix, existing_body, existing_min, existing_max, existing_suffix))
+                        if *existing_prefix == prefix
+                            && *existing_body == body
+                            && *existing_suffix == suffix =>
+                    {
+                        // Intersecting identical code envelopes is exactly an
+                        // intersection of their copy-count intervals. This
+                        // occurs naturally when JSON Schema `allOf` contains
+                        // multiple differently-patterned bounded strings.
+                        *existing_min = (*existing_min).max(min);
+                        *existing_max = (*existing_max).min(max);
+                        continue;
+                    }
+                    Some(_) => {}
+                }
             }
+            pattern_operands.push(operand.clone());
         }
         let (prefix, body_expr, min, max, suffix) = envelope?;
         if pattern_operands.is_empty() || max == usize::MAX {
@@ -2250,6 +2266,54 @@ mod tests {
         let mut live_oracle = BoundedCodeIntersectionOracle::from_expr(&live)
             .expect("prefix-code bounded intersection should certify");
         assert!(live_oracle.has_future(live_oracle.root_coordinate()));
+    }
+
+    #[test]
+    fn bounded_code_oracle_coalesces_identical_envelope_intervals_exactly() {
+        let pattern = exact_code_count_pattern(3);
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Intersect {
+                expr: Box::new(pattern),
+                intersect: Box::new(bounded_code_envelope_expr(1, 4)),
+            }),
+            intersect: Box::new(bounded_code_envelope_expr(3, 6)),
+        };
+        let mut oracle = BoundedCodeIntersectionOracle::from_expr(&expr)
+            .expect("identical bounded-code envelopes should coalesce");
+        assert_eq!((oracle.min, oracle.max), (3, 4));
+        assert!(oracle.has_future(oracle.root_coordinate()));
+
+        let materialized = compile_terminal_expr_dfa(&expr);
+        assert!(
+            materialized
+                .possible_future_group_ids(0)
+                .contains(0),
+            "materialized intersection must agree that the root has a future",
+        );
+    }
+
+    #[test]
+    fn bounded_code_oracle_coalesces_disjoint_identical_envelopes_to_dead() {
+        let pattern = Expr::Choice(vec![exact_code_count_pattern(2), exact_code_count_pattern(4)]);
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Intersect {
+                expr: Box::new(pattern),
+                intersect: Box::new(bounded_code_envelope_expr(1, 2)),
+            }),
+            intersect: Box::new(bounded_code_envelope_expr(4, 5)),
+        };
+        let mut oracle = BoundedCodeIntersectionOracle::from_expr(&expr)
+            .expect("disjoint identical envelopes should still admit an exact dead certificate");
+        assert_eq!((oracle.min, oracle.max), (4, 2));
+        assert!(!oracle.has_future(oracle.root_coordinate()));
+
+        let materialized = compile_terminal_expr_dfa(&expr);
+        assert!(
+            !materialized
+                .possible_future_group_ids(0)
+                .contains(0),
+            "materialized disjoint intersection must also be dead",
+        );
     }
 
     #[test]

@@ -6451,6 +6451,37 @@ fn patterned_string_enum_does_not_use_raw_regex_fast_path() {
 }
 
 #[test]
+fn allof_distinct_bounded_string_patterns_remain_an_intersection() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": "string",
+                "pattern": "^(?:a|bb)+$",
+                "minLength": 2,
+                "maxLength": 5000
+            },
+            {
+                "type": "string",
+                "pattern": "^(?:a|cc)+$",
+                "minLength": 3,
+                "maxLength": 4000
+            }
+        ]
+    });
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let root = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name.starts_with("schema_root_"))
+        .expect("expected schema root rule");
+    assert!(
+        matches!(root.expr, GrammarExpr::Intersect { .. }),
+        "terminal allOf branches must remain conjunctive, got {:?}",
+        root.expr,
+    );
+}
+
+#[test]
 fn allof_finite_string_enum_and_pattern_is_filtered_at_import_time() {
     let schema = json!({
         "allOf": [

@@ -1894,6 +1894,68 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_allof_bounded_patterns_share_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"c".to_vec()),
+            (5, b"\\".to_vec()),
+            (6, b"u".to_vec()),
+            (7, b"0".to_vec()),
+            (8, b"6".to_vec()),
+            (9, b"1".to_vec()),
+        ]);
+        let schema = r#"{
+            "allOf": [
+                {
+                    "type": "string",
+                    "pattern": "^(?:a|bb)+$",
+                    "minLength": 2,
+                    "maxLength": 5000
+                },
+                {
+                    "type": "string",
+                    "pattern": "^(?:a|cc)+$",
+                    "minLength": 3,
+                    "maxLength": 4000
+                }
+            ]
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "allOf branches with the same JSON length envelope language should share one exact bounded-code oracle",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""aa""#));
+        assert!(accepts(br#""aaa""#));
+        assert!(accepts(br#""\u0061\u0061\u0061""#));
+        assert!(!accepts(br#""bbb""#));
+        assert!(!accepts(br#""ccc""#));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the coalesced allOf oracle",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
     fn dynamic_json_schema_bounded_unicode_pattern_keeps_raw_and_escaped_spellings_exact() {
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
