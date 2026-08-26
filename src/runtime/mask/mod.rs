@@ -1195,7 +1195,16 @@ mod tests {
             }
             let mut fallback = vec![0u32; poisoned.mask_len()];
             actual.fill_recursive_mask_by_exact_commits(&mut fallback);
-            assert_eq!(fallback, expected.mask());
+            let expected_mask = expected.mask();
+            assert_eq!(fallback, expected_mask);
+
+            let mut dynamic_reference = vec![0u32; poisoned.mask_len()];
+            actual.fill_mask_dynamic(&mut dynamic_reference);
+            assert_eq!(dynamic_reference, expected_mask);
+
+            let mut profiled = vec![0u32; poisoned.mask_len()];
+            actual.fill_mask_profiled(&mut profiled);
+            assert_eq!(profiled, expected_mask);
         }
     }
 
@@ -3636,7 +3645,7 @@ impl<'a> ConstraintState<'a> {
     /// used by the live runtime. This is intentionally rare/slow, but unlike
     /// the historical unified-dynamic fallback it has no dependency on the
     /// transitional outer composed tokenizer or GLR table.
-    fn fill_recursive_mask_by_exact_commits(&self, buf: &mut [u32]) {
+    pub(crate) fn fill_recursive_mask_by_exact_commits(&self, buf: &mut [u32]) {
         buf.fill(0);
         let mut buffers = CommitBuffers::default();
         let mut token_ids = self
@@ -6909,6 +6918,27 @@ impl<'a> ConstraintState<'a> {
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
                 cache_hit: 1,
+                ..MaskProfile::default()
+            };
+        }
+        if self
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                overlay.segmented_mask_authoritative
+                    && (!overlay.segmented_parser_components.is_empty()
+                        || overlay.segmented_static_baseline)
+            })
+        {
+            // The recursive provider-native mask has different profiling
+            // phases from the historical flattened/static evaluator. Preserve
+            // exact semantics first; detailed segmented profiling can be added
+            // independently without routing a recursive state through the
+            // transitional outer parser/tokenizer.
+            self.fill_mask(buf);
+            return MaskProfile {
+                total_ns: elapsed_ns(total_start),
                 ..MaskProfile::default()
             };
         }
