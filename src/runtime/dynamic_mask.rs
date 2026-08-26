@@ -2558,6 +2558,10 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    assert!(
+        !state.constraint.uses_compact_segmented_parser_runtime(),
+        "unified dynamic walker cannot consume recursive provider coordinates",
+    );
     fill_mask_dynamic_impl(state, buf, None, false, None)
         .expect("unbounded dynamic mask generation cannot time out");
 }
@@ -2567,6 +2571,12 @@ pub(crate) fn fill_mask_dynamic_bounded(
     buf: &mut [u32],
     timeout_ms: u64,
 ) -> Result<(), String> {
+    if state.constraint.uses_compact_segmented_parser_runtime() {
+        return Err(
+            "bounded unified dynamic walker cannot consume recursive provider coordinates"
+                .to_owned(),
+        );
+    }
     fill_mask_dynamic_impl(
         state,
         buf,
@@ -2581,6 +2591,10 @@ pub(crate) fn fill_mask_dynamic_bounded(
 /// mask. The baseline is used solely as a trie-pruning certificate; all
 /// surviving leaves are still validated by the ordinary exact dynamic walker.
 pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    assert!(
+        !state.constraint.uses_compact_segmented_parser_runtime(),
+        "unified dynamic additions cannot consume recursive provider coordinates",
+    );
     fill_mask_dynamic_impl(state, buf, None, true, None)
         .expect("unbounded additive dynamic mask generation cannot time out");
 }
@@ -2594,6 +2608,10 @@ pub(crate) fn or_mask_dynamic_candidate_additions(
     buf: &mut [u32],
     candidate_mask: &[u32],
 ) {
+    assert!(
+        !state.constraint.uses_compact_segmented_parser_runtime(),
+        "unified dynamic candidate additions cannot consume recursive provider coordinates",
+    );
     fill_mask_dynamic_impl(state, buf, None, true, Some(candidate_mask))
         .expect("unbounded candidate dynamic mask generation cannot time out");
 }
