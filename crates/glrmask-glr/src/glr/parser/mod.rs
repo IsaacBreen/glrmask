@@ -86,7 +86,7 @@ pub struct ScopedProvidedAction<'a> {
 /// separate from the optimized GLRTable/u32 implementation while composition
 /// is migrated; it is the differential oracle for the scoped representation.
 pub trait ScopedParserActionProvider {
-    type Symbol: Copy;
+    type Symbol: Copy + Eq;
 
     fn action(
         &self,
@@ -100,6 +100,16 @@ pub trait ScopedParserActionProvider {
         goto_from: ScopedParserState,
         nonterminal: u32,
     ) -> Option<(ScopedParserState, bool)>;
+
+    /// Append zero-width parser-control symbols that may be meaningful from
+    /// this scoped state. Symbols remain provider-local/ephemeral; composition
+    /// does not need a global terminal coordinate for controls.
+    fn control_symbols(
+        &self,
+        _state: ScopedParserState,
+        _out: &mut SmallVec<[Self::Symbol; 4]>,
+    ) {
+    }
 
     fn state_count_hint(&self) -> usize;
 }
@@ -4440,6 +4450,55 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
     }
 }
 
+
+/// Close a scoped GSS under provider-owned zero-width controls. The provider
+/// enumerates only local/ephemeral control symbols for each active scoped top;
+/// reductions and gotos under a control symbol remain ordinary GLR work.
+pub fn close_scoped_control_stacks_with_provider<P: ScopedParserActionProvider>(
+    provider: &P,
+    stack: &ScopedParserGSS,
+) -> ScopedParserGSS {
+    if stack.is_empty() {
+        return stack.clone();
+    }
+
+    let mut closure = stack.clone();
+    let pass_limit = provider.state_count_hint().saturating_mul(4).saturating_add(2);
+    let mut symbols = SmallVec::<[P::Symbol; 4]>::new();
+    for _ in 0..pass_limit {
+        symbols.clear();
+        for state in closure.peek_values() {
+            provider.control_symbols(state, &mut symbols);
+        }
+        // Multiple active states may expose the same control. Keep this tiny
+        // stack vector unique without allocating a set.
+        let mut unique = SmallVec::<[P::Symbol; 4]>::new();
+        for symbol in symbols.drain(..) {
+            if !unique.contains(&symbol) {
+                unique.push(symbol);
+            }
+        }
+        if unique.is_empty() {
+            return closure;
+        }
+
+        let mut additions = ScopedParserGSS::empty();
+        for symbol in unique {
+            let advanced = advance_scoped_stacks_with_provider(provider, closure.clone(), symbol);
+            merge_scoped_into(&mut additions, advanced);
+        }
+        if additions.is_empty() {
+            return closure;
+        }
+        let next = closure.merge(&additions);
+        if next == closure {
+            return closure;
+        }
+        closure = next;
+    }
+    closure
+}
+
 /// Canonical provider-driven GLR advance. This deliberately uses no table-
 /// specific fast paths: it is the semantic bridge for scoped composition and
 /// a differential oracle against the existing optimized `GLRTable` path.
@@ -5392,6 +5451,7 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
+    use smallvec::SmallVec;
 
     #[test]
     fn scoped_provider_call_and_return_use_only_ordinary_gss_stack_effects() {
@@ -5446,6 +5506,18 @@ mod tests {
                 None
             }
 
+            fn control_symbols(
+                &self,
+                state: ScopedParserState,
+                out: &mut SmallVec<[u32; 4]>,
+            ) {
+                match (state.component(), state.local_state()) {
+                    (0, 0) => out.push(10),
+                    (1, 1) => out.push(11),
+                    _ => {}
+                }
+            }
+
             fn state_count_hint(&self) -> usize {
                 4
             }
@@ -5472,6 +5544,14 @@ mod tests {
             vec![ScopedParserState::new(0, 0)],
             acc,
         );
+        let closed_at_entry = close_scoped_control_stacks_with_provider(&provider, &start);
+        assert!(
+            closed_at_entry
+                .peek_values()
+                .contains(&ScopedParserState::new(1, 0)),
+            "control closure should include the entered child branch",
+        );
+
         let called = advance_scoped_stacks_with_provider(&provider, start, 10);
         let child_advanced = advance_scoped_stacks_with_provider(&provider, called, 0);
         let returned = advance_scoped_stacks_with_provider(&provider, child_advanced, 11);
