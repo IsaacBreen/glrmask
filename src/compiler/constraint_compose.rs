@@ -20932,7 +20932,7 @@ fn compose_constraints_owned_parent_impl(
             crate::runtime::StaticDynamicOverlayMetadata {
                 terminal_offsets: result.terminal_offsets.clone(),
                 tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
-                repair_terminals: vec![false; num_terminals],
+                repair_terminals: Vec::new(),
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
                 segmented_parser_links: Vec::new(),
@@ -21410,7 +21410,7 @@ fn compose_constraints_owned_parent_impl(
                 crate::runtime::StaticDynamicOverlayMetadata {
                     terminal_offsets: result.terminal_offsets.clone(),
                     tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
-                    repair_terminals: vec![false; num_terminals],
+                    repair_terminals: Vec::new(),
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
                     segmented_parser_links: Vec::new(),
@@ -21479,7 +21479,7 @@ fn compose_constraints_owned_parent_impl(
             crate::runtime::StaticDynamicOverlayMetadata {
                 terminal_offsets: result.terminal_offsets.clone(),
                 tokenizer_state_offsets: result.tokenizer_state_offsets.clone(),
-                repair_terminals: vec![false; num_terminals],
+                repair_terminals: Vec::new(),
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
                 segmented_parser_links: Vec::new(),
