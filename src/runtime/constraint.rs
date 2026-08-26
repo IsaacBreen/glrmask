@@ -24,7 +24,6 @@ use crate::compiler::glr::parser::{
 use crate::compiler::glr::table::{Action, TableAmbiguity};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::Merge;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
 use crate::grammar::flat::TerminalID;
