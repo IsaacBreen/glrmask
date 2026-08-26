@@ -4679,7 +4679,7 @@ fn email_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
-fn email_format_with_large_max_length_does_not_preserve_length_envelope() {
+fn email_format_with_large_max_length_preserves_length_envelope() {
     let schema = json!({
         "type": "string",
         "format": "email",
@@ -4687,20 +4687,59 @@ fn email_format_with_large_max_length_does_not_preserve_length_envelope() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected constrained email terminal");
+    assert!(matches!(rule.expr, GrammarExpr::Intersect { .. }), "{:?}", rule.expr);
 
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("@"), "{glrm}");
-    assert!(!glrm.contains("JSON_STRING_CHAR{0,1024}"), "{glrm}");
-    assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
-    lower(&grammar).unwrap();
+    let mut at_limit = Vec::with_capacity(1026);
+    at_limit.push(b'"');
+    at_limit.extend(std::iter::repeat_n(b'a', 1022));
+    at_limit.extend_from_slice(b"@b\"");
+    assert_eq!(at_limit.len() - 2, 1024);
+    assert!(schema_accepts_bytes(&schema, &at_limit));
+
+    let mut too_long = Vec::with_capacity(1027);
+    too_long.push(b'"');
+    too_long.extend(std::iter::repeat_n(b'a', 1023));
+    too_long.extend_from_slice(b"@b\"");
+    assert_eq!(too_long.len() - 2, 1025);
+    assert!(!schema_accepts_bytes(&schema, &too_long));
+}
+
+#[test]
+fn email_format_with_min_length_preserves_length_envelope() {
+    let schema = json!({
+        "type": "string",
+        "format": "email",
+        "minLength": 5
+    });
+
+    assert!(!schema_accepts_bytes(&schema, br#""a@b""#));
+    assert!(schema_accepts_bytes(&schema, br#""abc@d""#));
+}
+
+#[test]
+fn fixed_width_format_with_disjoint_max_length_is_empty() {
+    let schema = json!({
+        "type": "string",
+        "format": "uuid",
+        "maxLength": 35
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected constrained UUID terminal");
+    assert!(matches!(rule.expr, GrammarExpr::Intersect { .. }), "{:?}", rule.expr);
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#""123e4567-e89b-12d3-a456-426614174000""#,
+    ));
 }
 
 #[test]

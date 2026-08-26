@@ -1894,6 +1894,53 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_bounded_format_uses_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b".".to_vec()),
+            (4, b"-".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "format": "hostname",
+            "minLength": 3,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "format/length intersections must carry the same certified JSON decoded-length liveness oracle as pattern/length intersections",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""aa""#));
+        assert!(accepts(br#""aaa""#));
+        assert!(accepts(br#""a.b""#));
+        assert!(!accepts(br#""a..b""#));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the bounded format liveness oracle",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
     fn dynamic_json_schema_allof_bounded_patterns_share_exact_code_liveness_oracle() {
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),

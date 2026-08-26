@@ -540,19 +540,16 @@ impl<'a> Lowerer<'a> {
         split_pattern: bool,
     ) -> ImportResult<GrammarExpr> {
         if schema.pattern.is_none()
+            && schema.min_length == 0
+            && schema.max_length.is_none()
             && let Some(format_body_regex) =
                 recognized_string_format_body_regex_for_lowering(schema.format.as_deref())
         {
-            // Recognized JSON Schema formats are already emitted as JSON-string
-            // body regexes. Do not build a generic JSON string terminal and then
-            // intersect it with the format terminal: for trivial timestamp
-            // schemas that intersection dominates compile time. The recognized
-            // format bodies below contain only raw JSON-safe ASCII, so the
-            // quoted terminal is already a valid JSON string spelling.
-            //
-            // As with the previous format-lowering policy, sibling min/max
-            // bounds are intentionally not preserved here. Keeping them creates
-            // the same timeout class as patterned-string length intersections.
+            // With no sibling length assertion the recognized format is already
+            // the complete JSON-string language. Keep the direct terminal fast
+            // path. When minLength/maxLength is present, fall through to the
+            // exact bounded-string envelope intersection below instead of
+            // deleting a schema assertion for build-time convenience.
             return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
                 format_body_regex,
             )));
