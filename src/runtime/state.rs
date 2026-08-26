@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
@@ -279,11 +279,38 @@ pub(crate) struct MaskScratch {
     /// Bounded live-state cache for indexed-DAG masking. Cached products are
     /// exact pure-function results keyed by retained immutable GSS nodes.
     pub indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime,
+    /// Reusable scratch for retained segmented component evaluators. These are
+    /// allocated when the outer state is created, not in the mask hot path.
+    /// `Arc<Mutex<_>>` lets a short-lived projected `ConstraintState` borrow the
+    /// component scratch without moving it out of the parent scratch object.
+    pub segmented_component_scratch: Vec<Arc<Mutex<MaskScratch>>>,
+    /// Exact component initial states/masks, prepared outside mask timing. A
+    /// composed projection frequently lands exactly at a component entry; in
+    /// that case reuse the component's already-cached initial mask rather than
+    /// invoking its uncached mask engine through a synthetic shadow state.
+    pub segmented_component_initial_states: Vec<ParserStateMap>,
+    pub segmented_component_initial_masks: Vec<Vec<u32>>,
 }
 
 impl MaskScratch {
     pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
         let dense_words = constraint.internal_token_dense_words;
+        let mut segmented_component_scratch = Vec::new();
+        let mut segmented_component_initial_states = Vec::new();
+        let mut segmented_component_initial_masks = Vec::new();
+        if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
+            segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
+            segmented_component_initial_states.reserve(overlay.segmented_parser_components.len());
+            segmented_component_initial_masks.reserve(overlay.segmented_parser_components.len());
+            for component in &overlay.segmented_parser_components {
+                let source = component.constraint.as_ref();
+                segmented_component_scratch.push(Arc::new(Mutex::new(
+                    MaskScratch::for_constraint(source),
+                )));
+                segmented_component_initial_states.push(source.initial_state_map());
+                segmented_component_initial_masks.push(source.start().mask());
+            }
+        }
         Self {
             merged_dense: Vec::with_capacity(dense_words),
             chain_merged_dense: Vec::with_capacity(dense_words),
@@ -293,6 +320,9 @@ impl MaskScratch {
             single_path_aux_dense: vec![0; dense_words],
             single_path_acc_dense: vec![0; dense_words],
             indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
+            segmented_component_scratch,
+            segmented_component_initial_states,
+            segmented_component_initial_masks,
         }
     }
 }
@@ -416,7 +446,7 @@ pub struct ConstraintState<'a> {
     /// Not cloned — clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
-    pub(crate) mask_scratch: Mutex<MaskScratch>,
+    pub(crate) mask_scratch: Arc<Mutex<MaskScratch>>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -427,7 +457,7 @@ impl<'a> Clone for ConstraintState<'a> {
             buffers: self.buffers.clone(),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(MaskScratch::for_constraint(self.constraint)),
+            mask_scratch: Arc::new(Mutex::new(MaskScratch::for_constraint(self.constraint))),
         }
     }
 }

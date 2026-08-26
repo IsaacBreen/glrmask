@@ -719,6 +719,26 @@ pub(crate) fn advance_parser_stacks_if_possible(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+/// Advance against the authoritative composed GLR table without consulting
+/// parser-DWA/direct-regular admission caches.
+///
+/// Segmented boundary B deliberately represents language that is absent from
+/// retained component/static A. After loading a hybrid, the constraint's
+/// parser DWA may therefore be exactly A; using the ordinary admission
+/// prefilter here would circularly reject B-only cross-component terminals.
+pub(crate) fn advance_parser_stacks_table_exact(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> Option<ParserGSS> {
+    let advanced = if constraint.table.control_terminals.is_empty() {
+        advance_stacks(&constraint.table, stack, terminal)
+    } else {
+        advance_control_closed_stacks(&constraint.table, stack, terminal)
+    };
+    (!advanced.is_empty()).then_some(advanced)
+}
+
 struct ProfiledAdvanceAttempt {
     advanced: ParserGSS,
     profile: AdvanceProfile,

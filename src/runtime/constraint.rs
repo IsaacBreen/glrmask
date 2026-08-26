@@ -4,7 +4,7 @@ use crate::automata::lexer::{
 };
 use crate::automata::regex::Expr;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -54,6 +54,26 @@ pub use super::artifact::Constraint;
 pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
 use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
+
+#[derive(Debug)]
+struct ExactPackedVocabWire {
+    bytes: Arc<Vec<u8>>,
+}
+
+impl glrmask_vocab::__private::VocabDerivedArtifact for ExactPackedVocabWire {}
+
+fn exact_packed_vocab_wire(vocab: &crate::Vocab) -> Arc<Vec<u8>> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<ExactPackedVocabWire>() {
+        return Arc::clone(&cached.bytes);
+    }
+    let bytes = Arc::new(super::artifact::token_bytes_artifact_serde::pack_external(
+        vocab.entries_map(),
+    ));
+    vocab.vocab_derived_cache_set(Arc::new(ExactPackedVocabWire {
+        bytes: Arc::clone(&bytes),
+    }));
+    bytes
+}
 
 #[derive(Default)]
 struct DirectSparseWeightBufCaches {
@@ -1062,13 +1082,43 @@ impl Constraint {
         if let Some(exprs) = self.deferred_terminal_exprs.get() {
             return Some(exprs.as_ref());
         }
-        let blob = self.deferred_terminal_exprs_blob.as_ref()?.as_slice();
-        let decoded = bincode::deserialize::<Vec<Expr>>(blob).ok()?;
-        if decoded.len() != self.tokenizer.num_terminals() as usize {
+        if let Some(blob) = self.deferred_terminal_exprs_blob.as_ref() {
+            let decoded = bincode::deserialize::<Vec<Expr>>(blob.as_slice()).ok()?;
+            if decoded.len() != self.tokenizer.num_terminals() as usize {
+                return None;
+            }
+            let decoded = Arc::<[Expr]>::from(decoded.into_boxed_slice());
+            let _ = self.deferred_terminal_exprs.set(decoded);
+            return self.deferred_terminal_exprs.get().map(Arc::as_ref);
+        }
+
+        // Segmented dynamic coordinators preserve their source A components
+        // rather than flattening them into one runtime parser. Keep the same
+        // principle for source terminal expressions: reconstruct the flattened
+        // proof view only when a later composition actually asks for it.
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if overlay.segmented_parser_components.is_empty() {
             return None;
         }
-        let decoded = Arc::<[Expr]>::from(decoded.into_boxed_slice());
-        let _ = self.deferred_terminal_exprs.set(decoded);
+        let total_terminals = self.tokenizer.num_terminals() as usize;
+        let mut merged = vec![None::<Expr>; total_terminals];
+        for component in &overlay.segmented_parser_components {
+            let exprs = component.constraint.retained_terminal_exprs()?;
+            if exprs.len() != component.constraint.tokenizer.num_terminals() as usize {
+                return None;
+            }
+            let offset = component.terminal_offset as usize;
+            for (local_terminal, expr) in exprs.iter().enumerate() {
+                let slot = merged.get_mut(offset + local_terminal)?;
+                if slot.is_some() {
+                    return None;
+                }
+                *slot = Some(expr.clone());
+            }
+        }
+        let merged = merged.into_iter().collect::<Option<Vec<_>>>()?;
+        let merged = Arc::<[Expr]>::from(merged.into_boxed_slice());
+        let _ = self.deferred_terminal_exprs.set(merged);
         self.deferred_terminal_exprs.get().map(Arc::as_ref)
     }
 
@@ -1114,11 +1164,20 @@ impl Constraint {
             return true;
         }
         if let Some(packed) = &self.packed_token_bytes {
+            // Current artifacts use the same canonical indexed token-byte wire
+            // produced from a `Vocab`. Build that wire once per caller-owned
+            // vocabulary and compare bytes directly. This is still exact, but
+            // avoids walking 100k+ BTreeMap entries for every loaded component.
+            // Legacy packed encodings simply miss this fast path and retain
+            // the element-wise compatibility check below.
+            let vocab_wire = exact_packed_vocab_wire(vocab);
+            if packed.wire() == vocab_wire.as_slice() {
+                return true;
+            }
             // Validate the supplied vocabulary directly. Do not manufacture a
-            // second packed wire through a process-global cache: that made the
-            // first load for a vocabulary pay work that every later benchmark
-            // load got for free. PackedTokenBytes iteration is zero-copy, so a
-            // fresh load now pays only the actual exact comparison.
+            // process-global cache: compatibility state belongs to the explicit
+            // caller-owned Vocab. PackedTokenBytes iteration is zero-copy, so
+            // legacy/noncanonical wires still have an exact fallback.
             return packed.len() == vocab.entries_map().len()
                 && packed.iter().eq(
                     vocab
@@ -1165,12 +1224,18 @@ impl Constraint {
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
+            self.late_bind_vocab = OnceLock::from(vocab.clone());
             return Ok(());
         }
         if !self.token_bytes_match_vocab(vocab) {
             return Err("constraint was not compiled for the supplied vocabulary".to_string());
         }
         self.token_bytes = entries;
+        // A successful exact bind establishes the precise public vocabulary
+        // for every later late-subgrammar bind as well. Keep the caller's
+        // already-built `Vocab` (and its pure derived-artifact cache) instead
+        // of reconstructing the same bytes again in `constraint_vocab()`.
+        self.late_bind_vocab = OnceLock::from(vocab.clone());
         Ok(())
     }
 
@@ -1414,7 +1479,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -9096,7 +9161,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -9111,7 +9176,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
         state
@@ -9802,15 +9867,132 @@ impl Constraint {
             .chain(
                 self.special_token_terminals
                     .iter()
+                    .filter(|special| {
+                        !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+                    })
                     .map(|special| special.token_id),
             )
             .max()
     }
 
+    /// Remove compiler-only late-grammar sentinel token IDs from the runtime
+    /// model-token coordinate while retaining their terminal metadata for the
+    /// linker. Returns whether the token coordinate changed.
+    ///
+    /// External-grammar placeholders are compiled initially as exact special
+    /// tokens so the ordinary compiler can build the parent grammar. Once a
+    /// terminal is recorded in `late_grammar_slots`, that backing token ID is
+    /// no longer a public/model token. Leaving it in the original-token map
+    /// makes persisted sparse mask fragments wider than `mask_len()`, which
+    /// correctly excludes unresolved linker sentinels.
+    pub(crate) fn sanitize_late_grammar_placeholder_token_domain(&mut self) -> bool {
+        if self.late_grammar_slots.is_empty() || !self.has_original_token_map() {
+            return false;
+        }
+
+        let placeholder_terminals = self
+            .late_grammar_slots
+            .iter()
+            .map(|slot| slot.terminal_id)
+            .collect::<BTreeSet<_>>();
+        let mut placeholder_tokens = self
+            .special_token_terminals
+            .iter()
+            .filter(|special| placeholder_terminals.contains(&special.terminal_id))
+            .filter(|special| self.token_bytes_for_id(special.token_id).is_none())
+            .filter(|special| {
+                !self.special_token_terminals.iter().any(|other| {
+                    other.token_id == special.token_id
+                        && !placeholder_terminals.contains(&other.terminal_id)
+                })
+            })
+            .map(|special| special.token_id)
+            .collect::<Vec<_>>();
+        placeholder_tokens.sort_unstable();
+        placeholder_tokens.dedup();
+        if placeholder_tokens.is_empty()
+            || !placeholder_tokens.iter().any(|&token| {
+                self.original_token_internal_at(token)
+                    .is_some_and(|internal| internal != u32::MAX)
+            })
+        {
+            return false;
+        }
+
+        let group_count = self.internal_token_count();
+        let mut original_to_internal = self.original_token_map().to_vec();
+        for token in placeholder_tokens {
+            if let Some(internal) = original_to_internal.get_mut(token as usize) {
+                *internal = u32::MAX;
+            }
+        }
+        let mut internal_to_tokens = (0..group_count)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        for (original, &internal) in original_to_internal.iter().enumerate() {
+            if internal == u32::MAX {
+                continue;
+            }
+            if let Some(group) = internal_to_tokens.get_mut(internal as usize) {
+                group.push(original as u32);
+            }
+        }
+
+        self.original_token_to_internal = original_to_internal;
+        self.packed_original_token_to_internal = None;
+        self.deferred_original_token_to_internal = OnceLock::new();
+        self.internal_token_to_tokens = internal_to_tokens;
+        self.deferred_internal_token_to_tokens = OnceLock::new();
+
+        // Portable per-token fragments and every aggregate derived from them
+        // were built before the slot became linker-only. Force one rebuild in
+        // the reduced public token domain; subsequent save/load can reuse the
+        // clean caches normally.
+        self.internal_token_buf_masks.clear();
+        self.internal_token_buf_flat = Box::new([]);
+        self.backed_internal_token_buf_flat = None;
+        self.internal_token_buf_offsets = Box::new([]);
+        self.word_group_buf_masks.clear();
+        self.pair_word_group_buf_masks = Default::default();
+        self.quad_word_group_buf_masks = Default::default();
+        self.super_word_group_buf_masks = Default::default();
+        self.mega_word_group_buf_masks = Default::default();
+        self.giga_word_group_buf_masks = Default::default();
+        self.word_group_sparse_masks.clear();
+        self.word_group_prefix_buf_masks = Default::default();
+        self.word_group_sparse_prefix_entries.clear();
+        self.quad_group_sparse_masks.clear();
+        self.quad_group_dense_masks.clear();
+        self.byte_group_sparse_masks.clear();
+        self.byte_group_dense_masks.clear();
+        self.word_group_sparse_total_entries = 0;
+        self.word_group_sparse_max_entries = 0;
+        self.all_tokens_buf_mask = Box::new([]);
+        self.heavy_token_dense_masks.clear();
+        self.heavy_token_indices.clear();
+        self.internal_token_buf_op_costs.clear();
+        self.word_group_buf_op_costs.clear();
+        self.total_internal_buf_cost = 0;
+        self.heavy_total_cost = 0;
+        self.light_avg_cost_x256 = 0;
+        self.parser_runtime_caches_prebuilt = false;
+        self.serialized_artifact_cache = None;
+        true
+    }
+
+    pub(crate) fn is_late_grammar_placeholder_terminal(&self, terminal_id: u32) -> bool {
+        self.late_grammar_slots
+            .iter()
+            .any(|slot| slot.terminal_id == terminal_id)
+    }
+
     pub(crate) fn has_special_token_id(&self, token_id: u32) -> bool {
         self.special_token_terminals
             .iter()
-            .any(|special| special.token_id == token_id)
+            .any(|special| {
+                special.token_id == token_id
+                    && !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+            })
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
@@ -10867,6 +11049,15 @@ mod dense_internal_token_mask_tests {
         assert!(!Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
         constraint.bind_vocab_exact(&vocab_b).unwrap();
         assert!(Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+        assert!(constraint.late_bind_vocab.get().is_some());
+        assert!(Arc::ptr_eq(
+            &constraint
+                .late_bind_vocab
+                .get()
+                .expect("exact vocab bind should seed late-bind vocab")
+                .entries_arc(),
+            &vocab_b.entries_arc(),
+        ));
 
         let bound = Arc::clone(&constraint.token_bytes);
         assert!(constraint.bind_vocab_exact(&vocab_bad).is_err());

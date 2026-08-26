@@ -731,18 +731,30 @@ impl PyConstraint {
     }
 
     /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
-    /// The parent remains reusable; compiler-side preparation is cached in place.
+    ///
+    /// The compiled parent retains its target vocabulary, so callers no longer
+    /// need to supply it again. `vocab` remains an optional compatibility
+    /// argument for callers using the previous Python API; when present it is
+    /// validated against the parent before binding.
+    #[pyo3(signature = (name, child, vocab=None))]
     fn bind_grammar(
-        &mut self,
+        &self,
         name: &str,
         child: PyRef<'_, PyConstraint>,
-        vocab: &PyVocab,
+        vocab: Option<&PyVocab>,
     ) -> PyResult<Self> {
-        let parent = Arc::make_mut(&mut self.inner);
-        Self::from_constraint_result(
-            parent.bind_grammar(name, child.inner.as_ref(), &vocab.inner),
-            vocab,
-        )
+        if let Some(vocab) = vocab {
+            let mut validation = self.inner.as_ref().clone();
+            validation
+                .bind_vocab_exact(&vocab.inner)
+                .map_err(PyValueError::new_err)?;
+        }
+        let constraint = constraint_result(self.inner.bind_grammar(name, child.inner.as_ref()))?;
+        let max_token = constraint.max_original_token_id().unwrap_or(0);
+        Ok(Self {
+            inner: Arc::new(constraint),
+            max_token,
+        })
     }
 
     fn save(&self) -> Vec<u8> {
@@ -751,10 +763,10 @@ impl PyConstraint {
 
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let mut constraint = constraint_result(glrmask::Constraint::load(data.to_vec()))?;
-        constraint
-            .bind_vocab_exact(&vocab.inner)
-            .map_err(PyValueError::new_err)?;
+        let constraint = constraint_result(glrmask::Constraint::load_with_vocab(
+            data.to_vec(),
+            &vocab.inner,
+        ))?;
         Self::from_constraint_result(Ok::<_, String>(constraint), vocab)
     }
 

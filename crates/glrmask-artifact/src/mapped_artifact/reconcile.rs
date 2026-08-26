@@ -482,11 +482,20 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
     let mut touched_right = Vec::<usize>::new();
     let mut left_only = Vec::<u32>::new();
 
-    let mut emit = |originals: Vec<u32>| {
+    let mut emit = |mut originals: Vec<u32>| {
         if originals.is_empty() {
             return;
         }
-        debug_assert!(originals.windows(2).all(|pair| pair[0] < pair[1]));
+        // Most maps are already canonical and this branch is just one linear
+        // check. Some independently/parallel-built artifacts can arrive with
+        // an equivalent class whose inverse list is not in strict ID order.
+        // The common-map relation is set-valued, so canonicalize that rare
+        // input locally instead of making the direct sparse fast path depend
+        // on incidental inverse-list construction order.
+        if !originals.windows(2).all(|pair| pair[0] < pair[1]) {
+            originals.sort_unstable();
+            originals.dedup();
+        }
         let class = internal_to_originals.len() as u32;
         for &original in &originals {
             original_to_internal[original as usize] = class;
@@ -1362,7 +1371,13 @@ pub fn remap_weights_with_maps(
             .iter()
             .map(|(_, tokens)| tokens.ranges().count())
             .sum::<usize>();
-        let use_range_cache = total_source_tokens >= 8_192
+        // Building a global range cache pays a hash/interning cost before any
+        // source set is remapped. With only a few dozen distinct source token
+        // sets, direct disjoint-run remapping is cheaper even for fairly dense
+        // sets; reserve the shared range cache for workloads with enough
+        // independent sets to amortize that setup cost.
+        let use_range_cache = sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            && total_source_tokens >= 8_192
             && total_source_ranges.saturating_mul(4) < total_source_tokens;
         let remapped = if use_range_cache {
             let mut unique_ranges = FxHashSet::<(u32, u32)>::default();

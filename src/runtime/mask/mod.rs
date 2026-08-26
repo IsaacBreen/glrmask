@@ -2411,6 +2411,48 @@ fn enqueue_parser_state_transition(
 }
 
 impl<'a> ConstraintState<'a> {
+    fn or_segmented_component_mask(&self, output: &mut [u32], component_mask: &[u32]) {
+        // Retained components can carry private linker sentinel IDs (and other
+        // component-local specials) that are deliberately absent from the
+        // finished outer constraint.  Their masks are expressed in original
+        // token-ID space.  Intersect wordwise with the outer constraint's
+        // precomputed public model-token universe instead of testing every set
+        // token individually: a broad JS mask can contain tens of thousands of
+        // bits, while this loop is only `mask_len()` words.
+        for ((target_word, &source_word), &known_word) in output
+            .iter_mut()
+            .zip(component_mask.iter())
+            .zip(self.constraint.all_tokens_buf_mask.iter())
+        {
+            *target_word |= source_word & known_word;
+        }
+
+        // Out-of-vocabulary special tokens are not represented by
+        // `all_tokens_buf_mask`.  There are only a handful of these, so carry
+        // them explicitly when both the outer constraint declares the special
+        // and the retained component mask admitted its original token ID.
+        let mut previous_token_id = None;
+        for special in &self.constraint.special_token_terminals {
+            if self
+                .constraint
+                .is_late_grammar_placeholder_terminal(special.terminal_id)
+                || previous_token_id == Some(special.token_id)
+            {
+                continue;
+            }
+            previous_token_id = Some(special.token_id);
+            let word = special.token_id as usize / 32;
+            let bit = special.token_id % 32;
+            if component_mask
+                .get(word)
+                .is_some_and(|source_word| source_word & (1u32 << bit) != 0)
+                && let Some(target_word) = output.get_mut(word)
+            {
+                *target_word |= 1u32 << bit;
+            }
+        }
+    }
+
     fn segmented_local_tokenizer_state(
         &self,
         component: &crate::runtime::SegmentedParserComponent,
@@ -2558,9 +2600,7 @@ impl<'a> ConstraintState<'a> {
                         let original = internal_token;
                         let outer_internal = outer
                             .constraint
-                            .original_token_to_internal
-                            .get(original as usize)
-                            .copied()
+                            .original_token_internal_at(original)
                             .unwrap_or(u32::MAX);
                         if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
                             set_original_mask_bit(buf, original);
@@ -2571,9 +2611,7 @@ impl<'a> ConstraintState<'a> {
                         for &original in originals {
                             let outer_internal = outer
                                 .constraint
-                                .original_token_to_internal
-                                .get(original as usize)
-                                .copied()
+                                .original_token_internal_at(original)
                                 .unwrap_or(u32::MAX);
                             if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
                                 set_original_mask_bit(buf, original);
@@ -2592,7 +2630,11 @@ impl<'a> ConstraintState<'a> {
         if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
             return false;
         }
-        buf.fill(0);
+        if overlay.segmented_static_baseline {
+            self.fill_mask_uncached(buf);
+        } else {
+            buf.fill(0);
+        }
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let mut complete = true;
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
@@ -2700,9 +2742,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut projected_states = Vec::<ParserStateMap>::with_capacity(
-            overlay.segmented_parser_components.len(),
-        );
+        let mut projected_states = SmallVec::<[ParserStateMap; 4]>::new();
         projected_states.resize_with(
             overlay.segmented_parser_components.len(),
             ParserStateMap::default,
@@ -2728,9 +2768,16 @@ impl<'a> ConstraintState<'a> {
                             terminal,
                         );
                     }
+                    // An empty projected parser stack is the component-root
+                    // coordinate in the segmented union.  In particular, do
+                    // not seed a retained dynamic child with its standalone
+                    // initial language here: reaching the child is a boundary
+                    // event owned by B, not part of the child's local A mask.
+                    let root_gss =
+                        ParserGSS::from_single_stack(Vec::new(), local_disallowed);
                     projected_states[component_index].merge_insert(
                         local_tokenizer_state,
-                        ParserGSS::from_single_stack(Vec::new(), local_disallowed),
+                        root_gss,
                     );
                 }
 
@@ -2783,18 +2830,43 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        buf.fill(0);
-        let mut component_buf = vec![0u32; buf.len()];
+        if overlay.segmented_static_baseline {
+            self.fill_mask_uncached(buf);
+        } else {
+            buf.fill(0);
+        }
         let mut component_times = SmallVec::<[u64; 4]>::new();
-        for (component, state) in overlay
+        let required_component_mask_len = overlay
+            .segmented_parser_components
+            .iter()
+            .zip(projected_states.iter())
+            .filter_map(|(component, state)| {
+                (!state.is_empty()).then(|| component.constraint.mask_len())
+            })
+            .max()
+            .unwrap_or(0)
+            .max(buf.len());
+        let mut component_buf = if projected_states.iter().any(|state| !state.is_empty()) {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            let mut reusable = std::mem::take(&mut scratch.output_buf);
+            reusable.resize(required_component_mask_len, 0);
+            Some(reusable)
+        } else {
+            None
+        };
+        for (component_index, (component, state)) in overlay
             .segmented_parser_components
             .iter()
             .zip(projected_states)
+            .enumerate()
         {
             if state.is_empty() {
                 component_times.push(0);
                 continue;
             }
+            let component_buf = component_buf
+                .as_mut()
+                .expect("active segmented component requires a mask buffer");
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
             let shadow = ConstraintState {
@@ -2803,15 +2875,25 @@ impl<'a> ConstraintState<'a> {
                 buffers: Default::default(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
-                mask_scratch: Mutex::new(MaskScratch::for_constraint(
-                    component.constraint.as_ref(),
-                )),
+                mask_scratch: {
+                    let scratch = self.mask_scratch.lock().unwrap();
+                    scratch
+                        .segmented_component_scratch
+                        .get(component_index)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Arc::new(Mutex::new(MaskScratch::for_constraint(
+                                component.constraint.as_ref(),
+                            )))
+                        })
+                },
             };
-            shadow.fill_mask_uncached(&mut component_buf);
-            shadow.update_control_special_token_mask(&mut component_buf);
-            for (output, component_word) in buf.iter_mut().zip(&component_buf) {
-                *output |= *component_word;
-            }
+            // Dispatch through the retained component itself. Static source
+            // constraints therefore keep their parser DWA and precomputed mask
+            // artifacts, while dynamic sources keep their parser/lexer walker.
+            // A nested hybrid component recursively retains the same split.
+            shadow.fill_mask(component_buf);
+            self.or_segmented_component_mask(buf, &component_buf);
             component_times.push(component_started_at.map_or(0, elapsed_ns));
         }
 
@@ -2848,7 +2930,9 @@ impl<'a> ConstraintState<'a> {
     /// irrelevant; truncating there preserves every accepting prefix exactly.
     /// Ambiguous GSSes deliberately decline this fast path for now.
     fn try_fill_mask_segmented_single_paths(&self, buf: &mut [u32]) -> bool {
-        let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let profile_all = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let profile_slow = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK_SLOW").is_some();
+        let profile = profile_all || profile_slow;
         let total_started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
@@ -2856,13 +2940,16 @@ impl<'a> ConstraintState<'a> {
         if !overlay.segmented_component_union_root_dispatch.is_empty() {
             return self.try_fill_mask_segmented_deterministic_union(buf);
         }
-        if overlay.segmented_parser_components.is_empty() {
+        // v22 deliberately flattens all-static retained components into one
+        // ordinary parser-DWA baseline at save time.  After load the live
+        // component list can therefore be empty while B remains separately
+        // serialized and authoritative.  In that shape A comes from
+        // `fill_mask_uncached` below and this evaluator only needs to OR B.
+        if overlay.segmented_parser_components.is_empty() && !overlay.segmented_static_baseline {
             return false;
         }
 
-        let mut projected_states = Vec::<ParserStateMap>::with_capacity(
-            overlay.segmented_parser_components.len(),
-        );
+        let mut projected_states = SmallVec::<[ParserStateMap; 4]>::new();
         projected_states.resize_with(
             overlay.segmented_parser_components.len(),
             ParserStateMap::default,
@@ -2891,12 +2978,37 @@ impl<'a> ConstraintState<'a> {
                         }
                         local_top_first.push(local);
                     }
-                    local_top_first.reverse();
-                    let local_disallowed = self.segmented_local_disallowed(component, acc);
-                    let local_gss = ParserGSS::from_single_stack(
-                        local_top_first.into_vec(),
-                        local_disallowed,
-                    );
+                    let mut local_disallowed = self.segmented_local_disallowed(component, acc);
+                    let local_gss = if local_top_first.is_empty() {
+                        // An empty *composed* parser stack belongs to the outer
+                        // parent root.  An empty projection of a non-empty
+                        // composed stack means instead that this component does
+                        // not own the current stack top.  In particular, while
+                        // a child is active the buried parent caller frame must
+                        // not reactivate parent A (or its scoped ignore) merely
+                        // because the child's top state has no parent preimage.
+                        if !top_first.is_empty() || component.terminal_offset != 0 {
+                            continue;
+                        }
+                        // Boundary reachability is accounted for separately by
+                        // B.  A component-root projection must therefore stay
+                        // at the segmented root for both static and dynamic
+                        // component backends. Scoped ignores are standalone
+                        // root acceptance in a retained component, so suppress
+                        // them only in this synthetic-root coordinate; when a
+                        // real composed LR state projects into the component,
+                        // its own ignore language remains authoritative A.
+                        if let Some(terminal) = component.root_disallowed_terminal {
+                            local_disallowed = local_disallowed.with_insert(
+                                local_tokenizer_state,
+                                terminal,
+                            );
+                        }
+                        ParserGSS::from_single_stack(Vec::new(), local_disallowed)
+                    } else {
+                        local_top_first.reverse();
+                        ParserGSS::from_single_stack(local_top_first.into_vec(), local_disallowed)
+                    };
                     projected_states[component_index]
                         .merge_insert(local_tokenizer_state, local_gss);
                 }
@@ -2906,36 +3018,133 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
-        buf.fill(0);
-        let mut component_buf = vec![0u32; buf.len()];
+        if overlay.segmented_static_baseline {
+            self.fill_mask_uncached(buf);
+        } else {
+            buf.fill(0);
+        }
+        let mut component_buf = None::<Vec<u32>>;
         let mut component_times = SmallVec::<[u64; 4]>::new();
-        for (component, state) in overlay
+        for (component_index, (component, state)) in overlay
             .segmented_parser_components
             .iter()
             .zip(projected_states)
+            .enumerate()
         {
             if state.is_empty() {
                 component_times.push(0);
                 continue;
             }
             let component_started_at = profile.then(Instant::now);
+            let phase_profile =
+                std::env::var_os("GLRMASK_PROFILE_SEGMENTED_COMPONENT_PHASES").is_some();
+            let phase_started_at = phase_profile.then(Instant::now);
+            let reused_initial = {
+                let scratch = self.mask_scratch.lock().unwrap();
+                match (
+                    scratch.segmented_component_initial_states.get(component_index),
+                    scratch.segmented_component_initial_masks.get(component_index),
+                ) {
+                    (Some(initial_state), Some(initial_mask)) if initial_state == &state => {
+                        self.or_segmented_component_mask(buf, initial_mask);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if reused_initial {
+                component_times.push(component_started_at.map_or(0, elapsed_ns));
+                continue;
+            }
+            let after_reuse = phase_profile.then(Instant::now);
+            if component_buf.is_none() {
+                let mut scratch = self.mask_scratch.lock().unwrap();
+                let mut reusable = std::mem::take(&mut scratch.output_buf);
+                reusable.resize(
+                    buf.len().max(component.constraint.mask_len()),
+                    0,
+                );
+                component_buf = Some(reusable);
+            } else if component_buf
+                .as_ref()
+                .is_some_and(|buffer| buffer.len() < component.constraint.mask_len())
+            {
+                component_buf
+                    .as_mut()
+                    .expect("segmented component mask buffer exists")
+                    .resize(component.constraint.mask_len(), 0);
+            }
+            let component_buf = component_buf
+                .as_mut()
+                .expect("active segmented component requires a mask buffer");
             component_buf.fill(0);
+            let after_buffer = phase_profile.then(Instant::now);
             let shadow = ConstraintState {
                 constraint: component.constraint.as_ref(),
                 state,
                 buffers: Default::default(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
-                mask_scratch: Mutex::new(MaskScratch::for_constraint(
-                    component.constraint.as_ref(),
-                )),
+                mask_scratch: {
+                    let scratch = self.mask_scratch.lock().unwrap();
+                    scratch
+                        .segmented_component_scratch
+                        .get(component_index)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Arc::new(Mutex::new(MaskScratch::for_constraint(
+                                component.constraint.as_ref(),
+                            )))
+                        })
+                },
             };
-            shadow.fill_mask_uncached(&mut component_buf);
-            shadow.update_control_special_token_mask(&mut component_buf);
-            for (output, component_word) in buf.iter_mut().zip(&component_buf) {
-                *output |= *component_word;
+            let after_shadow = phase_profile.then(Instant::now);
+            // Preserve the supplied component's runtime backend. A static
+            // component reuses its compiled parser-DWA/mask machinery; a
+            // dynamic component keeps using its exact lexer/parser walker.
+            // Nested segmented components recurse through the same dispatch.
+            shadow.fill_mask(component_buf);
+            let after_fill = phase_profile.then(Instant::now);
+            if std::env::var_os("GLRMASK_DEBUG_SEGMENTED_COMPONENT_MASK").is_some() {
+                eprintln!(
+                    "[glrmask/debug][segmented_component_mask] dynamic={} terminal_offset={} mask={:?} state={:?}",
+                    component.constraint.uses_dynamic_runtime(),
+                    component.terminal_offset,
+                    component_buf,
+                    shadow.state,
+                );
+            }
+            self.or_segmented_component_mask(buf, component_buf.as_slice());
+            if let (
+                Some(started),
+                Some(after_reuse),
+                Some(after_buffer),
+                Some(after_shadow),
+                Some(after_fill),
+            ) = (
+                phase_started_at,
+                after_reuse,
+                after_buffer,
+                after_shadow,
+                after_fill,
+            ) {
+                let after_or = Instant::now();
+                eprintln!(
+                    "[glrmask/profile][segmented_component_phases] component={} reuse_us={:.3} buffer_us={:.3} shadow_us={:.3} fill_us={:.3} or_us={:.3} total_us={:.3}",
+                    component_index,
+                    after_reuse.duration_since(started).as_nanos() as f64 / 1000.0,
+                    after_buffer.duration_since(after_reuse).as_nanos() as f64 / 1000.0,
+                    after_shadow.duration_since(after_buffer).as_nanos() as f64 / 1000.0,
+                    after_fill.duration_since(after_shadow).as_nanos() as f64 / 1000.0,
+                    after_or.duration_since(after_fill).as_nanos() as f64 / 1000.0,
+                    after_or.duration_since(started).as_nanos() as f64 / 1000.0,
+                );
             }
             component_times.push(component_started_at.map_or(0, elapsed_ns));
+        }
+        if let Some(mut reusable) = component_buf.take() {
+            reusable.clear();
+            self.mask_scratch.lock().unwrap().output_buf = reusable;
         }
         let boundary_started_at = profile.then(Instant::now);
         if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
@@ -2950,12 +3159,15 @@ impl<'a> ConstraintState<'a> {
         }
         let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
         if let Some(started_at) = total_started_at {
-            eprintln!(
-                "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
-                overlay.segmented_parser_components.len(),
-                boundary_ns,
-                elapsed_ns(started_at),
-            );
+            let total_ns = elapsed_ns(started_at);
+            if profile_all || total_ns >= 100_000 {
+                eprintln!(
+                    "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
+                    overlay.segmented_parser_components.len(),
+                    boundary_ns,
+                    total_ns,
+                );
+            }
         }
         true
     }
@@ -2970,6 +3182,8 @@ impl<'a> ConstraintState<'a> {
         boundary: &crate::runtime::SegmentedBoundaryTerminalTrie,
         buf: &mut [u32],
     ) -> bool {
+        const MAX_NWA_PRODUCT_ENTRIES: usize = 4096;
+
         fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
             let word = token as usize / 64;
             let bit = token % 64;
@@ -2977,6 +3191,71 @@ impl<'a> ConstraintState<'a> {
                 dense.get(word)
                     .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
             })
+        }
+
+        #[derive(Clone)]
+        enum BoundaryTokenDomain {
+            Full,
+            Set(Arc<RangeSetBlaze<u32>>),
+        }
+
+        fn same_domain(left: &BoundaryTokenDomain, right: &BoundaryTokenDomain) -> bool {
+            match (left, right) {
+                (BoundaryTokenDomain::Full, BoundaryTokenDomain::Full) => true,
+                (BoundaryTokenDomain::Set(left), BoundaryTokenDomain::Set(right)) => {
+                    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+                }
+                _ => false,
+            }
+        }
+
+        fn intersect_domain(
+            current: &BoundaryTokenDomain,
+            edge: &Weight,
+            tsid: u32,
+        ) -> Option<BoundaryTokenDomain> {
+            if edge.is_empty() {
+                return None;
+            }
+            if edge.is_full() {
+                return Some(current.clone());
+            }
+            let edge_tokens = edge.token_set_for_tsid_ref(tsid)?;
+            match current {
+                BoundaryTokenDomain::Full => {
+                    Some(BoundaryTokenDomain::Set(Arc::clone(edge_tokens)))
+                }
+                BoundaryTokenDomain::Set(current_tokens) => {
+                    if Arc::ptr_eq(current_tokens, edge_tokens)
+                        || current_tokens.as_ref() == edge_tokens.as_ref()
+                    {
+                        return Some(current.clone());
+                    }
+                    if current_tokens.as_ref().is_disjoint(edge_tokens.as_ref()) {
+                        return None;
+                    }
+                    let overlap = current_tokens.as_ref() & edge_tokens.as_ref();
+                    (!overlap.is_empty())
+                        .then(|| BoundaryTokenDomain::Set(Arc::new(overlap)))
+                }
+            }
+        }
+
+        type ProductBucket = SmallVec<[(BoundaryTokenDomain, ParserGSS); 4]>;
+
+        fn push_product(
+            bucket: &mut ProductBucket,
+            domain: BoundaryTokenDomain,
+            parser: ParserGSS,
+        ) {
+            if let Some((_, existing_parser)) = bucket
+                .iter_mut()
+                .find(|(existing_domain, _)| same_domain(existing_domain, &domain))
+            {
+                *existing_parser = existing_parser.merge(&parser);
+            } else {
+                bucket.push((domain, parser));
+            }
         }
 
         for (&global_tokenizer_state, gss) in self.state.iter() {
@@ -2988,15 +3267,9 @@ impl<'a> ConstraintState<'a> {
             if tsid == u32::MAX {
                 continue;
             }
-            let root = boundary
-                .root_by_tsid
-                .get(tsid as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if root == u32::MAX {
-                continue;
-            }
+
             let mut complete = true;
+            let single_path = gss.is_single_path();
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
                 let Some(allowed) =
                     self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
@@ -3004,9 +3277,146 @@ impl<'a> ConstraintState<'a> {
                     complete = false;
                     return;
                 };
-                let mut stack = top_first.to_vec();
-                stack.reverse();
-                let parser = ParserGSS::from_single_stack(stack, acc.clone());
+                let parser = if single_path {
+                    gss.clone()
+                } else {
+                    let mut stack = SmallVec::<[u32; 64]>::from_slice(top_first);
+                    stack.reverse();
+                    ParserGSS::from_single_stack(stack.into_vec(), acc.clone())
+                };
+
+                let mut admit_internal_token = |internal_token: u32| -> bool {
+                    let Some(originals) = boundary
+                        .internal_token_to_originals
+                        .get(internal_token as usize)
+                    else {
+                        return false;
+                    };
+                    for &original in originals {
+                        let outer_internal = self
+                            .constraint
+                            .original_token_internal_at(original)
+                            .unwrap_or(u32::MAX);
+                        let outer_allowed = outer_internal != u32::MAX
+                            && dense_contains(&allowed, outer_internal);
+                        if outer_allowed {
+                            set_original_mask_bit(buf, original);
+                        }
+                    }
+                    true
+                };
+
+                if let Some(nwa) = boundary.symbolic_nwa.as_ref() {
+                    let mut buckets = SmallVec::<[ProductBucket; 16]>::new();
+                    buckets.resize_with(nwa.nodes.len(), ProductBucket::new);
+                    for &start in &nwa.start_states {
+                        let Some(bucket) = buckets.get_mut(start as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        push_product(bucket, BoundaryTokenDomain::Full, parser.clone());
+                    }
+
+                    let mut product_entries = 0usize;
+                    for &state_id in &nwa.topological_order {
+                        let Some(bucket) = buckets.get_mut(state_id as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        let entries = std::mem::take(bucket);
+                        if entries.is_empty() {
+                            continue;
+                        }
+                        product_entries = product_entries.saturating_add(entries.len());
+                        if product_entries > MAX_NWA_PRODUCT_ENTRIES {
+                            complete = false;
+                            return;
+                        }
+                        let Some(node) = nwa.nodes.get(state_id as usize) else {
+                            complete = false;
+                            return;
+                        };
+                        for (domain, parser) in entries {
+                            if let Some(final_weight) = node.final_weight.as_ref()
+                                && let Some(output_domain) =
+                                    intersect_domain(&domain, final_weight, tsid)
+                            {
+                                match output_domain {
+                                    BoundaryTokenDomain::Full => {
+                                        for internal_token in
+                                            0..boundary.internal_token_to_originals.len() as u32
+                                        {
+                                            if !admit_internal_token(internal_token) {
+                                                complete = false;
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    BoundaryTokenDomain::Set(tokens) => {
+                                        for range in tokens.ranges() {
+                                            for internal_token in range {
+                                                if !admit_internal_token(internal_token) {
+                                                    complete = false;
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            for (target, edge_weight) in &node.epsilons {
+                                let Some(next_domain) =
+                                    intersect_domain(&domain, edge_weight, tsid)
+                                else {
+                                    continue;
+                                };
+                                let Some(target_bucket) = buckets.get_mut(*target as usize) else {
+                                    complete = false;
+                                    return;
+                                };
+                                push_product(target_bucket, next_domain, parser.clone());
+                            }
+                            for transition in &node.transitions {
+                                let Some(next_domain) =
+                                    intersect_domain(&domain, &transition.weight, tsid)
+                                else {
+                                    continue;
+                                };
+                                let advanced = super::commit::advance_parser_stacks_table_exact(
+                                    self.constraint,
+                                    &parser,
+                                    transition.terminal,
+                                );
+                                let Some(advanced) = advanced else {
+                                    continue;
+                                };
+                                if advanced.is_empty() {
+                                    continue;
+                                }
+                                let Some(target_bucket) =
+                                    buckets.get_mut(transition.target as usize)
+                                else {
+                                    complete = false;
+                                    return;
+                                };
+                                push_product(target_bucket, next_domain, advanced);
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Legacy v21 artifacts carry an explicitly expanded trie. Keep
+                // that evaluator unchanged for backwards compatibility.
+                let root = boundary
+                    .root_by_tsid
+                    .get(tsid as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if root == u32::MAX {
+                    return;
+                }
                 let mut pending = Vec::<(u32, ParserGSS)>::new();
                 pending.push((root, parser));
                 let mut visits = 0usize;
@@ -3020,33 +3430,14 @@ impl<'a> ConstraintState<'a> {
                         complete = false;
                         return;
                     };
-                    let mut outputs = node.outputs;
-                    while outputs != 0 {
-                        let internal_token = outputs.trailing_zeros() as u32;
-                        outputs &= outputs - 1;
-                        let Some(originals) = boundary
-                            .internal_token_to_originals
-                            .get(internal_token as usize)
-                        else {
+                    for &internal_token in &node.outputs {
+                        if !admit_internal_token(internal_token) {
                             complete = false;
                             return;
-                        };
-                        for &original in originals {
-                            let outer_internal = self
-                                .constraint
-                                .original_token_to_internal
-                                .get(original as usize)
-                                .copied()
-                                .unwrap_or(u32::MAX);
-                            if outer_internal != u32::MAX
-                                && dense_contains(&allowed, outer_internal)
-                            {
-                                set_original_mask_bit(buf, original);
-                            }
                         }
                     }
                     for &(terminal, child) in &node.children {
-                        if let Some(advanced) = super::commit::advance_parser_stacks_if_possible(
+                        if let Some(advanced) = super::commit::advance_parser_stacks_table_exact(
                             self.constraint,
                             &parser,
                             terminal,
@@ -3200,6 +3591,11 @@ impl<'a> ConstraintState<'a> {
                 let Some(allowed) =
                     self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
                 else {
+                    // This segmented evaluator is an optimization. If an
+                    // exclusion accumulator cannot be represented exactly in
+                    // its dense scratch form, decline the whole projection so
+                    // the caller runs the unified exact fallback.
+                    complete = false;
                     return;
                 };
                 if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
@@ -3233,9 +3629,7 @@ impl<'a> ConstraintState<'a> {
                         for &original in originals {
                             let outer_internal = self
                                 .constraint
-                                .original_token_to_internal
-                                .get(original as usize)
-                                .copied()
+                                .original_token_internal_at(original)
                                 .unwrap_or(u32::MAX);
                             if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
                                 set_original_mask_bit(buf, original);
@@ -3280,9 +3674,7 @@ impl<'a> ConstraintState<'a> {
                             for &original in originals {
                                 let outer_internal = self
                                     .constraint
-                                    .original_token_to_internal
-                                    .get(original as usize)
-                                    .copied()
+                                    .original_token_internal_at(original)
                                     .unwrap_or(u32::MAX);
                                 if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
                                     set_original_mask_bit(buf, original);
@@ -3305,6 +3697,8 @@ impl<'a> ConstraintState<'a> {
     /// own path, so only apply this overlay when there are no component
     /// segments.
     fn or_two_dwa_boundary_parser_mask(&self, buf: &mut [u32]) -> bool {
+        let profile = std::env::var_os("GLRMASK_PROFILE_TWO_DWA_WRAPPER").is_some();
+        let started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return true;
         };
@@ -3321,6 +3715,14 @@ impl<'a> ConstraintState<'a> {
         {
             return false;
         }
+        if let Some(started_at) = started_at {
+            eprintln!(
+                "[glrmask/profile][two_dwa_wrapper] parser={} trie={} us={:.3}",
+                overlay.segmented_boundary_parser.is_some(),
+                overlay.segmented_boundary_terminal_trie.is_some(),
+                started_at.elapsed().as_nanos() as f64 / 1000.0,
+            );
+        }
         true
     }
 
@@ -3331,12 +3733,22 @@ impl<'a> ConstraintState<'a> {
         if self.constraint.table.control_terminals.is_empty() {
             return;
         }
+        let profile = std::env::var_os("GLRMASK_PROFILE_CONTROL_SPECIAL_MASK").is_some();
+        let started_at = profile.then(Instant::now);
         let mut previous_token_id = None;
+        let mut tested = 0usize;
         for special in &self.constraint.special_token_terminals {
+            if self
+                .constraint
+                .is_late_grammar_placeholder_terminal(special.terminal_id)
+            {
+                continue;
+            }
             if previous_token_id == Some(special.token_id) {
                 continue;
             }
             previous_token_id = Some(special.token_id);
+            tested += 1;
             if super::commit::advance_special_token_paths(
                 self.constraint,
                 &self.state,
@@ -3345,6 +3757,31 @@ impl<'a> ConstraintState<'a> {
             .is_some_and(|gss| !gss.is_empty())
             {
                 set_original_mask_bit(buf, special.token_id);
+            }
+        }
+        if let Some(started_at) = started_at {
+            eprintln!(
+                "[glrmask/profile][control_special_mask] controls={} specials={} tested={} us={:.3}",
+                self.constraint.table.control_terminals.len(),
+                self.constraint.special_token_terminals.len(),
+                tested,
+                started_at.elapsed().as_nanos() as f64 / 1000.0,
+            );
+        }
+    }
+
+    pub(crate) fn clear_late_grammar_placeholder_mask(&self, buf: &mut [u32]) {
+        for special in &self.constraint.special_token_terminals {
+            if !self
+                .constraint
+                .is_late_grammar_placeholder_terminal(special.terminal_id)
+            {
+                continue;
+            }
+            let word = special.token_id as usize / 32;
+            let bit = special.token_id % 32;
+            if let Some(slot) = buf.get_mut(word) {
+                *slot &= !(1u32 << bit);
             }
         }
     }
@@ -3463,6 +3900,10 @@ impl<'a> ConstraintState<'a> {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
             return false;
         }
+
+        let segmented_direct_profile =
+            std::env::var_os("GLRMASK_PROFILE_SINGLE_PATH_DIRECT_PHASES").is_some();
+        let segmented_direct_started_at = segmented_direct_profile.then(Instant::now);
 
         if self.state.is_empty()
             || self.state.len() > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS
@@ -3973,6 +4414,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
+        let segmented_direct_eval_done = segmented_direct_profile.then(Instant::now);
         if merged.iter().any(|&word| word != 0) {
             let buf_zeroed = !direct_buf_dirty;
             self.constraint.or_internal_dense_to_buf_fast_with_scratch(
@@ -3988,6 +4430,19 @@ impl<'a> ConstraintState<'a> {
             self.store_mask_cache(buf, &merged);
         }
         restore_scratch(merged, output_scratch, single_path_aux, single_path_acc);
+        if let (Some(started_at), Some(eval_done)) =
+            (segmented_direct_started_at, segmented_direct_eval_done)
+        {
+            eprintln!(
+                "[glrmask/profile][single_path_direct_phases] paths={} stack_values={} dense_words={} eval_us={:.3} finalize_us={:.3} total_us={:.3}",
+                paths.len(),
+                total_stack_values,
+                dense_words,
+                eval_done.duration_since(started_at).as_nanos() as f64 / 1000.0,
+                Instant::now().duration_since(eval_done).as_nanos() as f64 / 1000.0,
+                started_at.elapsed().as_nanos() as f64 / 1000.0,
+            );
+        }
         true
     }
 
@@ -5369,12 +5824,17 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn prefill_mask_cache(&self) {
-        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
-            && self
-                .constraint
-                .static_dynamic_overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
+        if self
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                (!overlay.segmented_parser_components.is_empty()
+                    && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some())
+                    || (overlay.segmented_mask_authoritative
+                        && (!overlay.segmented_parser_components.is_empty()
+                            || overlay.segmented_static_baseline))
+            })
         {
             return;
         }
@@ -5622,11 +6082,36 @@ impl<'a> ConstraintState<'a> {
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
+        let authoritative_segmented = self
+            .constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .is_some_and(|overlay| {
+                overlay.segmented_mask_authoritative
+                    && (!overlay.segmented_parser_components.is_empty()
+                        || overlay.segmented_static_baseline)
+            });
+        if authoritative_segmented {
+            if self.try_fill_mask_segmented_single_paths(mask) {
+                self.update_control_special_token_mask(mask);
+                self.clear_late_grammar_placeholder_mask(mask);
+                return;
+            }
+            // Segmented projection is the common authoritative A/B path. For
+            // an exceptional GSS shape it cannot represent, retain exactness
+            // by evaluating the unified composed table dynamically. This is a
+            // fallback only: supported states continue to reuse every retained
+            // component backend independently.
+            self.fill_mask_dynamic(mask);
+            self.clear_late_grammar_placeholder_mask(mask);
+            return;
+        }
         if self.constraint.uses_dynamic_runtime() {
             if !self.try_fill_mask_from_cache(mask) {
                 self.fill_mask_dynamic(mask);
                 self.store_mask_cache_reuse_dense(mask);
             }
+            self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
         if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
@@ -5667,20 +6152,33 @@ impl<'a> ConstraintState<'a> {
                     }
                 }
                 self.store_mask_cache_reuse_dense(mask);
+                self.clear_late_grammar_placeholder_mask(mask);
                 return;
             }
         }
+        let static_wrapper_profile =
+            std::env::var_os("GLRMASK_PROFILE_STATIC_MASK_WRAPPER").is_some();
+        let static_wrapper_started_at = static_wrapper_profile.then(Instant::now);
+        let cache_started_at = static_wrapper_profile.then(Instant::now);
         let cache_hit = self.try_fill_mask_from_cache(mask);
+        let cache_ns = cache_started_at.map_or(0, elapsed_ns);
+        let mut uncached_ns = 0u64;
+        let mut boundary_ns = 0u64;
+        let mut special_ns = 0u64;
         if !cache_hit {
             let factor_profile = std::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
             let factor_started = factor_profile.then(Instant::now);
             if let Some(shadow) = self.lookahead_factored_mask_shadow() {
                 let factor_ns = factor_started.map_or(0, elapsed_ns);
                 let fill_started = factor_profile.then(Instant::now);
+                let uncached_started_at = static_wrapper_profile.then(Instant::now);
                 shadow.fill_mask_uncached(mask);
+                uncached_ns += uncached_started_at.map_or(0, elapsed_ns);
+                let boundary_started_at = static_wrapper_profile.then(Instant::now);
                 if !shadow.or_two_dwa_boundary_parser_mask(mask) {
                     mask.fill(0);
                 }
+                boundary_ns += boundary_started_at.map_or(0, elapsed_ns);
                 if let Some(fill_started) = fill_started {
                     eprintln!(
                         "[glrmask/profile][lookahead_factor] built_ns={} fill_ns={} original_branches={} shadow_branches={}",
@@ -5699,21 +6197,46 @@ impl<'a> ConstraintState<'a> {
                         self.state.len(),
                     );
                 }
+                let uncached_started_at = static_wrapper_profile.then(Instant::now);
                 self.fill_mask_uncached(mask);
+                uncached_ns += uncached_started_at.map_or(0, elapsed_ns);
+                let boundary_started_at = static_wrapper_profile.then(Instant::now);
                 if !self.or_two_dwa_boundary_parser_mask(mask) {
                     mask.fill(0);
                 }
+                boundary_ns += boundary_started_at.map_or(0, elapsed_ns);
             }
+            let special_started_at = static_wrapper_profile.then(Instant::now);
             self.update_control_special_token_mask(mask);
+            special_ns += special_started_at.map_or(0, elapsed_ns);
             if !self.constraint.table.control_terminals.is_empty() {
                 self.store_mask_cache_reuse_dense(mask);
             }
         }
+        let scoped_started_at = static_wrapper_profile.then(Instant::now);
         self.add_admissible_scoped_ignore_tokens(mask);
+        let scoped_ns = scoped_started_at.map_or(0, elapsed_ns);
         if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY").is_some() {
             super::dynamic_mask::or_mask_dynamic_additions(self, mask);
         }
+        let clear_started_at = static_wrapper_profile.then(Instant::now);
+        self.clear_late_grammar_placeholder_mask(mask);
+        let clear_ns = clear_started_at.map_or(0, elapsed_ns);
         assert_dynamic_mask_equivalence(self, mask);
+        if let Some(started_at) = static_wrapper_started_at {
+            eprintln!(
+                "[glrmask/profile][static_mask_wrapper] cache_hit={} state_len={} cache_us={:.3} uncached_us={:.3} boundary_us={:.3} special_us={:.3} scoped_us={:.3} clear_us={:.3} total_us={:.3}",
+                cache_hit,
+                self.state.len(),
+                cache_ns as f64 / 1000.0,
+                uncached_ns as f64 / 1000.0,
+                boundary_ns as f64 / 1000.0,
+                special_ns as f64 / 1000.0,
+                scoped_ns as f64 / 1000.0,
+                clear_ns as f64 / 1000.0,
+                started_at.elapsed().as_nanos() as f64 / 1000.0,
+            );
+        }
     }
 
     pub(crate) fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
@@ -5729,6 +6252,7 @@ impl<'a> ConstraintState<'a> {
         tail.fill(0);
         let total_start = Instant::now();
         if self.try_fill_mask_from_cache(buf) {
+            self.clear_late_grammar_placeholder_mask(buf);
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
                 cache_hit: 1,
@@ -5737,6 +6261,7 @@ impl<'a> ConstraintState<'a> {
         }
         if self.constraint.uses_dynamic_runtime() {
             self.fill_mask_dynamic(buf);
+            self.clear_late_grammar_placeholder_mask(buf);
             self.store_mask_cache_reuse_dense(buf);
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
@@ -5751,6 +6276,7 @@ impl<'a> ConstraintState<'a> {
                 ..MaskProfile::default()
             });
         self.update_control_special_token_mask(buf);
+        self.clear_late_grammar_placeholder_mask(buf);
         if !self.constraint.table.control_terminals.is_empty() {
             self.store_mask_cache_reuse_dense(buf);
         }

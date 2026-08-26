@@ -7601,8 +7601,18 @@ impl Tokenizer {
         );
 
         let mut active = FxHashMap::<ScanKey, Vec<u32>>::default();
+        // Compiler analyses often materialize the singleton-closure table
+        // before scanning many residual starts. Reuse it when already present;
+        // do not force construction here so callers that only need a handful of
+        // scans retain the historical lazy behavior.
+        let cached_singleton_closures = self
+            .cached_singleton_epsilon_closures()
+            .map(Arc::as_ref);
         for &start in starts {
-            let states = self.epsilon_closure_states(&[start]);
+            let states = cached_singleton_closures
+                .and_then(|closures| closures.get(start as usize))
+                .map(TokenizerStateSet::from_slice)
+                .unwrap_or_else(|| self.epsilon_closure_states(&[start]));
             active
                 .entry((states, SmallVec::new()))
                 .or_default()

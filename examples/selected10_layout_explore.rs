@@ -32,6 +32,7 @@ const SELECTED10: [(&str, &str); 10] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Layout {
     Current,
+    PublicOpen,
     WrappedChild,
     PostDot,
     FullCallChild,
@@ -43,6 +44,7 @@ enum Layout {
 impl Layout {
     fn from_env() -> Self {
         match std::env::var("SELECTED10_LAYOUT").as_deref() {
+            Ok("public-open") => Self::PublicOpen,
             Ok("wrapped-child") => Self::WrappedChild,
             Ok("post-dot") => Self::PostDot,
             Ok("full-call-child") => Self::FullCallChild,
@@ -57,6 +59,7 @@ impl Layout {
     fn tag(self) -> &'static str {
         match self {
             Self::Current => "current",
+            Self::PublicOpen => "public-open",
             Self::WrappedChild => "wrapped-child",
             Self::PostDot => "post-dot",
             Self::FullCallChild => "full-call-child",
@@ -166,7 +169,9 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
     source = source.replace("\r\n", "\n");
     let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
     let tool_alt = match layout {
-        Layout::Current | Layout::WrappedChild => "'tools' PROGRAMMATIC_TOOL_SUFFIX",
+        Layout::Current | Layout::PublicOpen | Layout::WrappedChild => {
+            "'tools' PROGRAMMATIC_TOOL_SUFFIX"
+        }
         Layout::PostDot => "'tools' '.' PROGRAMMATIC_TOOL_SUFFIX",
         Layout::FullCallChild => "PROGRAMMATIC_TOOL_SUFFIX",
         Layout::PrefixTool => "'tools' '.' 'tool' PROGRAMMATIC_TOOL_SUFFIX",
@@ -178,7 +183,7 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
     );
     assert!(source.contains(needle), "JS grammar shape changed; cannot insert programmatic-tools alternative");
     source = source.replacen(needle, &replacement, 1);
-    if layout == Layout::ParentClose {
+    if matches!(layout, Layout::ParentClose | Layout::PublicOpen) {
         source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     } else {
         source.push_str(&format!(
@@ -197,7 +202,9 @@ fn wrapped_schema_parent_source(index: usize, layout: Layout) -> String {
         Layout::PrefixTool => format!("_{index}(") ,
         Layout::PrefixToolUnderscore => format!("{index}(") ,
         Layout::ParentClose => format!(".tool_{index}(") ,
-        Layout::Current => panic!("current layout does not use wrapped schema children"),
+        Layout::Current | Layout::PublicOpen => {
+            panic!("literal dispatcher layouts do not use wrapped schema children")
+        }
     };
     if layout == Layout::ParentClose {
         format!(
@@ -267,7 +274,7 @@ fn prepare(cache_dir: &Path, cfa_root: &Path, vocab: &Vocab, rebuild: bool) {
             .enumerate()
             .map(|(index, (short_name, _))| load_constraint(&schema_cache_path(cache_dir, index, short_name)))
             .collect::<Vec<_>>();
-        let dispatch = if layout == Layout::Current {
+        let dispatch = if matches!(layout, Layout::Current | Layout::PublicOpen) {
             let parent_started = Instant::now();
             let parent = Constraint::compile(Grammar::glrm(&dispatcher_literal_names_parent_source()), vocab).unwrap();
             eprintln!("[selected10-layout] dispatcher parent compile: {:.3} ms", parent_started.elapsed().as_secs_f64() * 1000.0);
@@ -407,17 +414,48 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
     for run in 0..runs {
         eprintln!("[selected10/debug] run={} before_load dispatch={dispatch_name}", run + 1);
         let load_started = Instant::now();
-        let mut core = Constraint::load(&core_bytes).unwrap();
-        let mut dispatch = Constraint::load(&dispatch_bytes).unwrap();
-        core.prepare_for_composition(vocab).unwrap();
-        dispatch.prepare_for_composition(vocab).unwrap();
+        let bind_vocab_on_load = std::env::var_os("SELECTED10_BIND_VOCAB_ON_LOAD").is_some();
+        let mut core = if bind_vocab_on_load {
+            Constraint::load_with_vocab(&core_bytes, vocab).unwrap()
+        } else {
+            Constraint::load(&core_bytes).unwrap()
+        };
+        let mut dispatch = if bind_vocab_on_load {
+            Constraint::load_with_vocab(&dispatch_bytes, vocab).unwrap()
+        } else {
+            Constraint::load(&dispatch_bytes).unwrap()
+        };
+        if layout != Layout::PublicOpen {
+            core.prepare_for_composition(vocab).unwrap();
+            dispatch.prepare_for_composition(vocab).unwrap();
+        }
         let load = load_started.elapsed();
         eprintln!("[selected10/debug] run={} after_load ms={:.3}", run + 1, load.as_secs_f64() * 1000.0);
 
         eprintln!("[selected10/debug] run={} before_compose", run + 1);
         let compose_started = Instant::now();
-        let composed = if layout == Layout::ParentClose {
-            core.bind_grammar("PROGRAMMATIC_TOOL_SUFFIX", &dispatch, vocab).unwrap()
+        let composed = if matches!(layout, Layout::ParentClose | Layout::PublicOpen) {
+            if std::env::var_os("SELECTED10_GENERIC_REFERENCE").is_some() {
+                core.compose_compiled_subgrammars(
+                    &[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)],
+                    vocab,
+                )
+                .unwrap()
+            } else if std::env::var_os("SELECTED10_DYNAMIC_BOUNDARY").is_some() {
+                if std::env::var_os("SELECTED10_BORROW_CHILD").is_some() {
+                    core.bind_grammar_dynamic_boundary("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)
+                        .unwrap()
+                } else {
+                    core.bind_grammar_dynamic_boundary("PROGRAMMATIC_TOOL_SUFFIX", dispatch)
+                        .unwrap()
+                }
+            } else {
+                if std::env::var_os("SELECTED10_BORROW_CHILD").is_some() {
+                    core.bind_grammar("PROGRAMMATIC_TOOL_SUFFIX", &dispatch).unwrap()
+                } else {
+                    core.bind_grammar("PROGRAMMATIC_TOOL_SUFFIX", dispatch).unwrap()
+                }
+            }
         } else if std::env::var_os("GLRMASK_EXPERIMENT_SHARED_SEGMENTED_COMPONENTS").is_some() {
             let dispatch = Arc::new(dispatch);
             core.compose_compiled_subgrammars_shared(
