@@ -5219,7 +5219,16 @@ impl Tokenizer {
         debug_assert_eq!(built.source_subsets.len(), built.tokenizer.num_states() as usize);
         debug_assert_eq!(built.exact_source_states.len(), built.source_subsets.len());
 
-        let source_dfa = std::mem::replace(&mut self.dfa, DFA::new(0));
+        let mut source_dfa = std::mem::replace(&mut self.dfa, DFA::new(0));
+        // Immutable disjoint tokenizer composition deliberately permits old
+        // component states to retain shorter finalizer/future bitsets: group
+        // membership beyond that shorter local domain is simply false. Once
+        // those states are appended behind a deterministic runtime product,
+        // however, product and fallback states coexist in one live tokenizer
+        // frontier and runtime admission unions their metadata directly. Make
+        // the source fallback use the product tokenizer's one canonical
+        // terminal domain before publishing it.
+        source_dfa.ensure_group_capacity(self.num_terminals as usize);
         let global_groups = (0..self.num_terminals as usize).collect::<Vec<_>>();
         built.source_state_offset = built
             .tokenizer
