@@ -1363,6 +1363,25 @@ fn commit_token_impl(
     finish_token_commit(state)
 }
 
+/// Exact one-token admission probe over an existing runtime state.
+///
+/// This is intentionally the ordinary authoritative commit implementation,
+/// not a second recognizer. Recursive boundary-B masking uses it to validate
+/// its small composition-owned candidate domain without translating the live
+/// leaf-scoped tokenizer/parser state back into the transitional outer lexer
+/// coordinate. `buffers` is reusable across probes; state-dependent caches are
+/// reset between candidates while their allocated capacity is retained.
+pub(crate) fn token_admissible_from_state_exact(
+    constraint: &Constraint,
+    source: &ParserStateMap,
+    buffers: &mut CommitBuffers,
+    token_id: u32,
+) -> bool {
+    buffers.reset_all();
+    let mut probe = source.clone();
+    commit_token_impl(constraint, &mut probe, buffers, token_id).is_ok()
+}
+
 #[cold]
 pub(crate) fn prime_initial_commits(
     constraint: &Constraint,

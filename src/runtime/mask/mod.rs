@@ -20,7 +20,9 @@ use crate::runtime::artifact::IndexedDagDenseMask;
 use crate::runtime::constraint::{
     Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
 };
-use crate::runtime::state::{ConstraintState, MaskCacheData, MaskScratch, ParserStateMap};
+use crate::runtime::state::{
+    CommitBuffers, ConstraintState, MaskCacheData, MaskScratch, ParserStateMap,
+};
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -3454,10 +3456,15 @@ impl<'a> ConstraintState<'a> {
                 }
             }
             if needs_direct_dynamic {
-                if direct_candidates_complete {
-                    // Token-summary trigger: exact dynamic recognition remains
-                    // authoritative, but trie traversal is restricted to the
-                    // conservative union of component-owned candidate tokens.
+                if self.constraint.uses_compact_segmented_parser_runtime() {
+                    self.or_recursive_dynamic_boundary_candidates_exact(
+                        buf,
+                        direct_candidates_complete.then_some(&direct_candidates),
+                    );
+                } else if direct_candidates_complete {
+                    // Legacy/materialized coordinate: retain the optimized
+                    // composed dynamic recognizer and restrict it to the
+                    // conservative union of component-owned candidates.
                     super::dynamic_mask::or_mask_dynamic_candidate_additions(
                         self,
                         buf,
@@ -3486,6 +3493,74 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
         true
+    }
+
+    /// Validate recursive DynamicDirect B through the same scoped runtime that
+    /// will commit the selected model token. This removes the final correctness
+    /// dependency on interpreting recursive tokenizer-state keys as states of
+    /// the transitional outer/composed tokenizer.
+    ///
+    /// When boundary discovery supplied an exact candidate domain, only those
+    /// tokens are probed. The `None` fallback is deliberately correctness-first:
+    /// enumerate real vocabulary/special-token IDs and probe every token not
+    /// already admitted by component A/static B.
+    fn or_recursive_dynamic_boundary_candidates_exact(
+        &self,
+        buf: &mut [u32],
+        candidates: Option<&[u32]>,
+    ) {
+        let mut buffers = CommitBuffers::default();
+        let mut probe = |token_id: u32, buf: &mut [u32]| {
+            if original_mask_contains(buf, token_id) {
+                return;
+            }
+            if crate::runtime::commit::token_admissible_from_state_exact(
+                self.constraint,
+                &self.state,
+                &mut buffers,
+                token_id,
+            ) {
+                set_original_mask_bit(buf, token_id);
+            }
+        };
+
+        if let Some(candidates) = candidates {
+            for (word_index, &candidate_word) in candidates.iter().enumerate() {
+                let already = buf.get(word_index).copied().unwrap_or(0);
+                let mut remaining = candidate_word & !already;
+                while remaining != 0 {
+                    let bit = remaining.trailing_zeros();
+                    probe((word_index as u32) * 32 + bit, buf);
+                    remaining &= remaining - 1;
+                }
+            }
+            return;
+        }
+
+        // TriggerDetail::None is intentionally rare. Avoid probing sparse ID
+        // holes (especially with high-valued model special tokens) while still
+        // covering every token the public runtime can actually consume.
+        let mut token_ids = self
+            .constraint
+            .token_bytes_iter()
+            .map(|(token_id, _)| token_id)
+            .collect::<Vec<_>>();
+        token_ids.extend(
+            self.constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| {
+                    !self
+                        .constraint
+                        .is_late_grammar_placeholder_terminal(special.terminal_id)
+                })
+                .map(|special| special.token_id),
+        );
+        token_ids.sort_unstable();
+        token_ids.dedup();
+        for token_id in token_ids {
+            probe(token_id, buf);
+        }
     }
 
     fn or_segmented_boundary_terminal_trie_mask(
@@ -3834,9 +3909,10 @@ impl<'a> ConstraintState<'a> {
             // Exact trigger labels are still compiled in this component's
             // transitional materialized-table coordinate. Once its parser is
             // projected recursively, feeding those leaf-scoped states to the
-            // trigger DWA would be unsound. Decline the accelerator and let the
-            // exact composed dynamic recognizer run instead. Trigger metadata
-            // is pruning only, never semantics.
+            // trigger DWA would be unsound. Decline the accelerator; recursive
+            // DynamicDirect B will validate the resulting token domain through
+            // exact scoped commits. Trigger metadata is pruning only, never
+            // semantics.
             return false;
         }
         for (&global_tokenizer_state, gss) in self.state.iter() {

@@ -1840,6 +1840,59 @@ mod tests {
         )
         .unwrap();
 
+        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let mut no_trigger = bound.clone();
+        {
+            let overlay = no_trigger.static_dynamic_overlay.as_mut().unwrap();
+            for component in &mut overlay.segmented_parser_components {
+                let Some(shard) = component.boundary.as_mut() else {
+                    continue;
+                };
+                if !matches!(
+                    shard.backend,
+                    crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                ) {
+                    continue;
+                }
+                shard.candidate_tokens = None;
+                std::sync::Arc::make_mut(&mut component.constraint).boundary_trigger =
+                    crate::runtime::BoundaryTrigger::None;
+            }
+        }
+        for constraint in [&bound, &loaded, &no_trigger] {
+            let mut pending = vec![Vec::<u32>::new()];
+            while let Some(path) = pending.pop() {
+                let mut actual = constraint.start();
+                let mut expected = monolithic.start();
+                for &token in &path {
+                    actual.commit_token(token).unwrap();
+                    expected.commit_token(token).unwrap();
+                }
+                let actual_mask = actual.mask();
+                let expected_mask = expected.mask();
+                assert_eq!(actual_mask, expected_mask, "mask mismatch at {path:?}");
+                assert_eq!(
+                    actual.is_accepting(),
+                    expected.is_accepting(),
+                    "acceptance mismatch at {path:?}",
+                );
+                if path.len() == 5 {
+                    continue;
+                }
+                for token in 0..8u32 {
+                    if actual_mask
+                        .get(token as usize / 32)
+                        .is_none_or(|word| *word & (1u32 << (token % 32)) == 0)
+                    {
+                        continue;
+                    }
+                    let mut next = path.clone();
+                    next.push(token);
+                    pending.push(next);
+                }
+            }
+        }
+
         for tokens in [
             &[7][..],
             &[0, 6][..],

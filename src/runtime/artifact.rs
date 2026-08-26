@@ -4540,10 +4540,10 @@ pub(crate) struct SegmentedBoundaryShard {
 pub(crate) enum SegmentedBoundaryShardBackend {
     StaticParser(Arc<SegmentedBoundaryParser>),
     DynamicTerminalTrie(Arc<SegmentedBoundaryTerminalTrie>),
-    /// Exact conservative dynamic crossing fallback.  This stores no
-    /// composition-specific boundary automaton: runtime invokes the ordinary
-    /// dynamic lexer/parser walker over the composed state and ORs only the
-    /// additions beyond the already-computed component-local mask.
+    /// Exact dynamic crossing fallback with no composition-specific boundary
+    /// automaton. Recursive runtimes validate the component-owned candidate
+    /// token domain by exact scoped commits; legacy/materialized runtimes keep
+    /// using the ordinary composed dynamic recognizer.
     DynamicDirect,
 }
 
