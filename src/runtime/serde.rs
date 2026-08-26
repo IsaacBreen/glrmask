@@ -2388,7 +2388,8 @@ struct ConstraintArtifactCurrentRuntime {
     packed_dwa_dense_mask_rows: Vec<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct ConstraintArtifactV23Runtime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV23>,
