@@ -118,9 +118,46 @@ fn overlay_advance_repair(
 
 #[inline]
 fn lazy_repair_parser_enabled(constraint: &Constraint, branch: &DynamicBranch) -> bool {
+    // Compact composition makes zero-width CALL/RETURN part of the live parser
+    // semantics. Deferring parser execution would also defer the only exact
+    // observation of whether this model token has crossed a component boundary.
+    if constraint.uses_compact_segmented_parser_runtime() {
+        return false;
+    }
     !branch.repair_used
         && constraint.static_dynamic_overlay.is_some()
         && std::env::var_os("GLRMASK_EXPERIMENT_LAZY_REPAIR_PARSER").is_some()
+}
+
+#[inline]
+fn compact_parser_scope_changed(
+    constraint: &Constraint,
+    before: &ParserStacks,
+    after: &ParserStacks,
+) -> bool {
+    if !constraint.uses_compact_segmented_parser_runtime() {
+        return false;
+    }
+    fn scopes(
+        constraint: &Constraint,
+        stacks: &ParserStacks,
+    ) -> Option<SmallVec<[usize; 4]>> {
+        let mut result = SmallVec::<[usize; 4]>::new();
+        for top in stacks.peek_values() {
+            let (component, _) = constraint.compact_segmented_parser_component(top)?;
+            if !result.contains(&component) {
+                result.push(component);
+            }
+        }
+        result.sort_unstable();
+        Some(result)
+    }
+    match (scopes(constraint, before), scopes(constraint, after)) {
+        (Some(before), Some(after)) => before != after,
+        // Unknown scoped state is not a reason to suppress B. A conservative
+        // repair mark can only duplicate a token already admitted by A.
+        _ => true,
+    }
 }
 
 fn replay_pending_terminals(
@@ -639,6 +676,12 @@ impl DynamicRecognizerStateCache {
                         let Some(advanced_parser) = advanced_parser else {
                             continue;
                         };
+                        let repair_used = repair_used
+                            || compact_parser_scope_changed(
+                                constraint,
+                                &branch.gss,
+                                &advanced_parser,
+                            );
                         next.push(DynamicBranch {
                             tokenizer_config: initial_config,
                             gss: advanced_parser,
@@ -2783,14 +2826,22 @@ fn advance_dynamic_branches_over_segment(
                                 traversal_cache,
                             )
                         };
-                        advanced_parser.map(|advanced_parser| DynamicBranch {
-                            tokenizer_config: initial_config,
-                            gss: advanced_parser,
-                            initial_prune_guard: matched_prune_guard,
-                            last_component,
-                            repair_used,
-                            pending_terminals: SmallVec::new(),
-                            fresh_reset: true,
+                        advanced_parser.map(|advanced_parser| {
+                            let repair_used = repair_used
+                                || compact_parser_scope_changed(
+                                    constraint,
+                                    &branch.gss,
+                                    &advanced_parser,
+                                );
+                            DynamicBranch {
+                                tokenizer_config: initial_config,
+                                gss: advanced_parser,
+                                initial_prune_guard: matched_prune_guard,
+                                last_component,
+                                repair_used,
+                                pending_terminals: SmallVec::new(),
+                                fresh_reset: true,
+                            }
                         })
                     };
                     if let Some(child) = child
