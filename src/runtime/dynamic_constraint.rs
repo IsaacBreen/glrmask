@@ -3167,7 +3167,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_nested_giant_with_budgeted_other_repeat_materializes_exactly() {
+    fn dynamic_nested_giant_with_budgeted_other_repeat_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
         use crate::ds::u8set::U8Set;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
@@ -3223,13 +3223,12 @@ mod tests {
 
         assert!(
             dynamic.inner.tokenizer.num_states() < 512,
-            "the budgeted ordinary side must bound the lazy product independently of the giant max",
+            "the physical tokenizer must stay small independently of the giant max",
         );
         assert!(!dynamic.inner.tokenizer.has_virtual_binary_repeat_intersection());
         assert!(
-            (0..dynamic.inner.tokenizer.num_states() as u32)
-                .any(|state| dynamic.inner.tokenizer.has_compressed_transition_state(state)),
-            "this regression must exercise the compressed lazy-repeat intersection runtime",
+            dynamic.inner.tokenizer.has_virtual_residual_runtime(),
+            "nested giant intersections outside the arithmetic fast paths must use the general residual runtime",
         );
         assert_eq!(dynamic.start().mask(), oracle.start().mask());
 
@@ -3277,9 +3276,8 @@ mod tests {
         let loaded = DynamicConstraint::load(&saved).unwrap();
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
         assert!(
-            (0..loaded.inner.tokenizer.num_states() as u32)
-                .any(|state| loaded.inner.tokenizer.has_compressed_transition_state(state)),
-            "save/load must preserve the compressed lazy-repeat runtime",
+            loaded.inner.tokenizer.has_virtual_residual_runtime(),
+            "save/load must reconstruct the general residual runtime",
         );
         let mut loaded_state = loaded.start();
         let mut dynamic_state = dynamic.start();
