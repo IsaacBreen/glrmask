@@ -6383,13 +6383,13 @@ mod tests {
         ]);
         let parent = Constraint::compile(
             crate::Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = "<" child ">";",
+                r#"glrm 1; start document; extern grammar child; nt document = "<" child ">";"#,
             ),
             &vocab,
         )
         .unwrap();
         let child = Constraint::compile(
-            crate::Grammar::glrm("glrm 1; start child; nt child = "a";"),
+            crate::Grammar::glrm(r#"glrm 1; start child; nt child = "a";"#),
             &vocab,
         )
         .unwrap();
