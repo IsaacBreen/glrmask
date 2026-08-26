@@ -55,6 +55,60 @@ impl VirtualStateAllocator {
     }
 }
 
+/// Shared direct owner index for a family of virtual tokenizer runtimes.
+/// Physical proxy roots are fixed at construction time; lazily allocated
+/// states use a dense owner vector indexed from the allocator's first virtual
+/// state. The vector therefore grows only with states actually reached at
+/// runtime, never with any declared repeat bound.
+#[derive(Debug)]
+pub(super) struct VirtualRuntimeStateOwners {
+    physical_state_count: u32,
+    root_owners: FxHashMap<u32, u32>,
+    virtual_owners: Mutex<Vec<u32>>,
+}
+
+impl VirtualRuntimeStateOwners {
+    pub(super) fn new(physical_state_count: u32, roots: &[u32]) -> Option<Self> {
+        let mut root_owners = FxHashMap::default();
+        for (owner, &root) in roots.iter().enumerate() {
+            if root >= physical_state_count
+                || root_owners.insert(root, u32::try_from(owner).ok()?).is_some()
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            physical_state_count,
+            root_owners,
+            virtual_owners: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub(super) fn register_virtual(&self, state: u32, owner: u32) -> Option<()> {
+        let index = state.checked_sub(self.physical_state_count)? as usize;
+        let mut owners = self.virtual_owners.lock().unwrap();
+        if owners.len() <= index {
+            owners.resize(index + 1, u32::MAX);
+        }
+        let slot = &mut owners[index];
+        if *slot != u32::MAX && *slot != owner {
+            return None;
+        }
+        *slot = owner;
+        Some(())
+    }
+
+    pub(super) fn owner_index(&self, state: u32) -> Option<usize> {
+        let owner = if state < self.physical_state_count {
+            *self.root_owners.get(&state)?
+        } else {
+            let index = state.checked_sub(self.physical_state_count)? as usize;
+            *self.virtual_owners.lock().unwrap().get(index)?
+        };
+        (owner != u32::MAX).then_some(owner as usize)
+    }
+}
+
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct VirtualBoundedRepeatSpec {
@@ -143,6 +197,7 @@ struct BodyProductEdge {
 
 #[derive(Debug)]
 pub(super) struct VirtualBinaryRepeatIntersectionRuntime {
+    runtime_index: u32,
     left: VirtualBoundedRepeatSpec,
     right: VirtualBoundedRepeatSpec,
     byte_support: U8Set,
@@ -150,6 +205,7 @@ pub(super) struct VirtualBinaryRepeatIntersectionRuntime {
     physical_state_count: u32,
     root_state: u32,
     state_allocator: Arc<VirtualStateAllocator>,
+    state_owners: Arc<VirtualRuntimeStateOwners>,
     accepting: BitSet,
     live: BitSet,
     dead: BitSet,
@@ -170,11 +226,13 @@ pub(super) struct VirtualBinaryRepeatIntersectionRuntime {
 impl VirtualBinaryRepeatIntersectionRuntime {
     pub(super) fn new(
         descriptor: VirtualBinaryRepeatIntersectionDescriptor,
+        runtime_index: u32,
         terminal: TerminalID,
         num_terminals: u32,
         physical_state_count: u32,
         root_state: u32,
         state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
     ) -> Option<Self> {
         let synchronized_self_repeat = descriptor.left.min == descriptor.right.min
             && descriptor.left.max == descriptor.right.max
@@ -183,6 +241,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             || terminal >= num_terminals
             || physical_state_count == 0
             || root_state >= physical_state_count
+            || state_owners.owner_index(root_state) != Some(runtime_index as usize)
             || physical_state_count >= VIRTUAL_STATE_LIMIT
             || descriptor.left.min > descriptor.left.max
             || descriptor.right.min > descriptor.right.max
@@ -209,6 +268,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         accepting.set(terminal as usize);
         let live = accepting.clone();
         Some(Self {
+            runtime_index,
             left: descriptor.left,
             right: descriptor.right,
             byte_support: descriptor.byte_support,
@@ -216,6 +276,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             physical_state_count,
             root_state,
             state_allocator,
+            state_owners,
             accepting,
             live,
             dead: BitSet::new(num_terminals as usize),
@@ -450,6 +511,9 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         let state = self.state_allocator.allocate().expect(
             "exact virtual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
         );
+        self.state_owners
+            .register_virtual(state, self.runtime_index)
+            .expect("virtual repeat state owner index must follow shared allocator");
         store.states.push(residual);
         store.transitions.push(SmallVec::new());
         store.state_by_residual.insert(residual, state);
@@ -776,14 +840,11 @@ impl VirtualBinaryRepeatIntersectionRuntime {
     }
 
     pub(super) fn handles_state(&self, state: u32) -> bool {
-        if state == self.root_state {
-            return true;
-        }
-        if state < self.physical_state_count {
-            return false;
-        }
-        let store = self.store.lock().unwrap();
-        store.state_index.contains_key(&state)
+        self.state_owners.owner_index(state) == Some(self.runtime_index as usize)
+    }
+
+    pub(super) fn owner_index(&self, state: u32) -> Option<usize> {
+        self.state_owners.owner_index(state)
     }
 
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {

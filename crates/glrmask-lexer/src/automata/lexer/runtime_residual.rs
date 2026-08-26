@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 
 use super::ast::Expr;
 use super::dfa::DFA;
-use super::runtime_repeat_product::VirtualStateAllocator;
+use super::runtime_repeat_product::{VirtualRuntimeStateOwners, VirtualStateAllocator};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
@@ -584,60 +584,6 @@ struct ResidualRuntimeStore {
     residual_by_state: FxHashMap<u32, ResidualId>,
 }
 
-/// Shared O(1)-ish owner index for one residual-runtime family. Proxy roots
-/// are immutable physical states; lazily allocated virtual handles use a dense
-/// owner vector indexed by `state - physical_state_count`. State allocation is
-/// globally monotonic, so this grows only with residual states actually
-/// reached at runtime, never with any regex repeat bound.
-#[derive(Debug)]
-pub(super) struct VirtualResidualStateOwners {
-    physical_state_count: u32,
-    root_owners: FxHashMap<u32, u32>,
-    virtual_owners: Mutex<Vec<u32>>,
-}
-
-impl VirtualResidualStateOwners {
-    pub(super) fn new(physical_state_count: u32, roots: &[u32]) -> Option<Self> {
-        let mut root_owners = FxHashMap::default();
-        for (owner, &root) in roots.iter().enumerate() {
-            if root >= physical_state_count
-                || root_owners.insert(root, u32::try_from(owner).ok()?).is_some()
-            {
-                return None;
-            }
-        }
-        Some(Self {
-            physical_state_count,
-            root_owners,
-            virtual_owners: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn register_virtual(&self, state: u32, owner: u32) -> Option<()> {
-        let index = state.checked_sub(self.physical_state_count)? as usize;
-        let mut owners = self.virtual_owners.lock().unwrap();
-        if owners.len() <= index {
-            owners.resize(index + 1, u32::MAX);
-        }
-        let slot = &mut owners[index];
-        if *slot != u32::MAX && *slot != owner {
-            return None;
-        }
-        *slot = owner;
-        Some(())
-    }
-
-    pub(super) fn owner_index(&self, state: u32) -> Option<usize> {
-        let owner = if state < self.physical_state_count {
-            *self.root_owners.get(&state)?
-        } else {
-            let index = state.checked_sub(self.physical_state_count)? as usize;
-            *self.virtual_owners.lock().unwrap().get(index)?
-        };
-        (owner != u32::MAX).then_some(owner as usize)
-    }
-}
-
 /// Exact general symbolic tokenizer component. The regex upper bounds live in
 /// `ResidualNode::Repeat`; this store grows only when runtime bytes discover a
 /// new canonical language residual.
@@ -649,7 +595,7 @@ pub(super) struct VirtualResidualRuntime {
     root_state: u32,
     root_has_future: bool,
     state_allocator: Arc<VirtualStateAllocator>,
-    state_owners: Arc<VirtualResidualStateOwners>,
+    state_owners: Arc<VirtualRuntimeStateOwners>,
     accepting: BitSet,
     live: BitSet,
     dead: BitSet,
@@ -666,7 +612,7 @@ impl VirtualResidualRuntime {
         physical_state_count: u32,
         root_state: u32,
         state_allocator: Arc<VirtualStateAllocator>,
-        state_owners: Arc<VirtualResidualStateOwners>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
     ) -> Option<Self> {
         if terminal >= num_terminals
             || physical_state_count == 0
@@ -956,7 +902,7 @@ mod tests {
             intersect: Box::new(Expr::Choice(vec![bytes(b"ac"), bytes(b"c")])),
         };
         let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
-        let owners = Arc::new(VirtualResidualStateOwners::new(2, &[1]).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
         let runtime =
             VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         let dead_prefix = runtime
@@ -982,7 +928,7 @@ mod tests {
             intersect: Box::new(Expr::Seq(vec![a_star(), bytes(b"c")])),
         };
         let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
-        let owners = Arc::new(VirtualResidualStateOwners::new(2, &[1]).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
         let runtime =
             VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         assert!(!runtime.root_has_future());

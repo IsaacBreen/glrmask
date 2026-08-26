@@ -16,9 +16,9 @@ use super::runtime_unit_repeat::{
 };
 use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
-    VirtualBinaryRepeatIntersectionRuntime, VirtualStateAllocator,
+    VirtualBinaryRepeatIntersectionRuntime, VirtualRuntimeStateOwners, VirtualStateAllocator,
 };
-use super::runtime_residual::{VirtualResidualRuntime, VirtualResidualStateOwners};
+use super::runtime_residual::VirtualResidualRuntime;
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
@@ -4650,6 +4650,15 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 
 impl Tokenizer {
     #[inline]
+    fn virtual_repeat_runtime_for_state(
+        &self,
+        state: u32,
+    ) -> Option<&VirtualBinaryRepeatIntersectionRuntime> {
+        let owner = self.virtual_repeat_intersections.first()?.owner_index(state)?;
+        self.virtual_repeat_intersections.get(owner).map(Arc::as_ref)
+    }
+
+    #[inline]
     fn virtual_residual_runtime_for_state(&self, state: u32) -> Option<&VirtualResidualRuntime> {
         let owner = self.virtual_residuals.first()?.owner_index(state)?;
         self.virtual_residuals.get(owner).map(Arc::as_ref)
@@ -6107,11 +6116,7 @@ impl Tokenizer {
         if self.virtual_residual_runtime_for_state(state).is_some() {
             return false;
         }
-        if self
-            .virtual_repeat_intersections
-            .iter()
-            .any(|runtime| runtime.handles_state(state))
-        {
+        if self.virtual_repeat_runtime_for_state(state).is_some() {
             return false;
         }
         if self
@@ -6149,9 +6154,8 @@ impl Tokenizer {
             return finalizers;
         }
         if let Some(finalizers) = self
-            .virtual_repeat_intersections
-            .iter()
-            .find_map(|runtime| runtime.finalizers(state))
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizers(state))
         {
             return finalizers;
         }
@@ -6189,9 +6193,8 @@ impl Tokenizer {
             return futures;
         }
         if let Some(futures) = self
-            .virtual_repeat_intersections
-            .iter()
-            .find_map(|runtime| runtime.futures(state))
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.futures(state))
         {
             return futures;
         }
@@ -6496,7 +6499,7 @@ impl Tokenizer {
             );
             let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
             let owners = Arc::new(
-                VirtualResidualStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
                     "serialized residual runtime has invalid state ownership metadata".to_owned()
                 })?,
             );
@@ -6562,8 +6565,14 @@ impl Tokenizer {
             VirtualStateAllocator::new(physical_state_count)
                 .ok_or_else(|| "serialized virtual runtime has no state-id namespace".to_owned())?,
         );
+        let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
+        let owners = Arc::new(
+            VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                "serialized virtual product runtime has invalid state ownership metadata".to_owned()
+            })?,
+        );
         let mut runtimes = Vec::with_capacity(metadata.len());
-        for entry in metadata {
+        for (runtime_index, entry) in metadata.iter().enumerate() {
             if entry.kind != VirtualTokenizerRuntimeKind::RepeatProduct {
                 return Err("serialized virtual runtime has unknown mixed runtime kind".to_owned());
             }
@@ -6582,11 +6591,15 @@ impl Tokenizer {
             let runtime = Arc::new(
                 VirtualBinaryRepeatIntersectionRuntime::new(
                     descriptor,
+                    u32::try_from(runtime_index).map_err(|_| {
+                        "serialized virtual product runtime count exceeds u32".to_owned()
+                    })?,
                     entry.terminal,
                     self.num_terminals,
                     physical_state_count,
                     entry.root_state,
                     Arc::clone(&allocator),
+                    Arc::clone(&owners),
                 )
                 .ok_or_else(|| "serialized virtual product runtime metadata is invalid".to_owned())?,
             );
@@ -6772,18 +6785,23 @@ impl Tokenizer {
         let physical_state_count = existing_physical_state_count
             .checked_add(u32::try_from(components.len()).ok()?)?;
         let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let roots = (0..components.len())
+            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
+            .collect::<Option<Vec<_>>>()?;
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
         let mut pending = Vec::with_capacity(components.len());
         for (index, (descriptor, terminal)) in components.into_iter().enumerate() {
-            let root_state = existing_physical_state_count
-                .checked_add(u32::try_from(index).ok()?)?;
+            let root_state = roots[index];
             let byte_support = descriptor.byte_support;
             let runtime = Arc::new(VirtualBinaryRepeatIntersectionRuntime::new(
                 descriptor,
+                u32::try_from(index).ok()?,
                 terminal,
                 self.num_terminals,
                 physical_state_count,
                 root_state,
                 Arc::clone(&allocator),
+                Arc::clone(&owners),
             )?);
             pending.push((terminal, root_state, byte_support, runtime));
         }
@@ -6856,7 +6874,7 @@ impl Tokenizer {
         let roots = (0..components.len())
             .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
             .collect::<Option<Vec<_>>>()?;
-        let owners = Arc::new(VirtualResidualStateOwners::new(physical_state_count, &roots)?);
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
         let mut pending = Vec::with_capacity(components.len());
         for (index, (expression, terminal)) in components.into_iter().enumerate() {
             let root_state = roots[index];
@@ -7206,23 +7224,37 @@ impl Tokenizer {
             "serialized virtual repeat-intersection tokenizer has no virtual state-id space"
                 .to_owned()
         })?);
-        let mut runtimes = Vec::with_capacity(restored.len());
         let mut seen_roots = BTreeSet::new();
-        for (terminal, descriptor, root_state) in restored {
+        for &(_, _, root_state) in &restored {
             if !seen_roots.insert(root_state) {
                 return Err(
                     "serialized tokenizer maps multiple virtual repeat components to one proxy root"
                         .to_owned(),
                 );
             }
+        }
+        let roots = restored.iter().map(|(_, _, root)| *root).collect::<Vec<_>>();
+        let owners = Arc::new(
+            VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                "serialized virtual repeat-intersection tokenizer has invalid state ownership"
+                    .to_owned()
+            })?,
+        );
+        let mut runtimes = Vec::with_capacity(restored.len());
+        for (runtime_index, (terminal, descriptor, root_state)) in restored.into_iter().enumerate() {
             runtimes.push(Arc::new(
                 VirtualBinaryRepeatIntersectionRuntime::new(
                     descriptor,
+                    u32::try_from(runtime_index).map_err(|_| {
+                        "serialized virtual repeat-intersection runtime count exceeds u32"
+                            .to_owned()
+                    })?,
                     terminal,
                     self.num_terminals,
                     physical_state_count,
                     root_state,
                     Arc::clone(&allocator),
+                    Arc::clone(&owners),
                 )
                 .ok_or_else(|| {
                     "serialized virtual repeat-intersection tokenizer has an invalid physical proxy"
@@ -7782,9 +7814,8 @@ impl Tokenizer {
             };
         }
         if let Some(transitions) = self
-            .virtual_repeat_intersections
-            .iter()
-            .find_map(|runtime| runtime.transitions(state))
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.transitions(state))
         {
             return TokenizerTransitionsIter {
                 inner: TokenizerTransitionsIterInner::VirtualProduct(transitions.into_iter()),
@@ -8411,10 +8442,8 @@ impl Tokenizer {
         if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
             return runtime.step(state, byte);
         }
-        for runtime in &self.virtual_repeat_intersections {
-            if runtime.handles_state(state) {
-                return runtime.step(state, byte);
-            }
+        if let Some(runtime) = self.virtual_repeat_runtime_for_state(state) {
+            return runtime.step(state, byte);
         }
         if let Some(runtime) = self.virtual_unit_repeat.as_deref()
             && runtime.handles_state(state)
@@ -8515,9 +8544,8 @@ impl Tokenizer {
             return finalizers;
         }
         if let Some(finalizers) = self
-            .virtual_repeat_intersections
-            .iter()
-            .find_map(|runtime| runtime.finalizer_list(state))
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizer_list(state))
         {
             return finalizers;
         }
@@ -9450,6 +9478,74 @@ mod tests {
             );
         });
         assert!(virtualized.virtual_binary_repeat_intersection_interned_state_count() < 128);
+    }
+
+    #[test]
+    fn repeat_product_state_owner_index_dispatches_multiple_components_directly() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let descriptor = |byte| {
+            let base = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(vec![byte])));
+            VirtualBinaryRepeatIntersectionDescriptor {
+                byte_support: U8Set::single(byte),
+                left: VirtualBoundedRepeatSpec {
+                    base_dfa: Arc::clone(&base),
+                    min: 0,
+                    max: 32,
+                },
+                right: VirtualBoundedRepeatSpec {
+                    base_dfa: base,
+                    min: 0,
+                    max: 32,
+                },
+            }
+        };
+
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 2, None);
+        tokenizer
+            .install_virtual_binary_repeat_intersection_components(vec![
+                (descriptor(b'a'), 0),
+                (descriptor(b'b'), 1),
+            ])
+            .expect("two repeat-product components must install");
+
+        let a_state = tokenizer.step(1, b'a').expect("first product must advance");
+        let b_state = tokenizer.step(2, b'b').expect("second product must advance");
+        assert_ne!(a_state, b_state);
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(a_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(b_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(1),
+        );
+
+        let aa_state = tokenizer
+            .step(a_state, b'a')
+            .expect("interleaved first product must remain owned");
+        let bb_state = tokenizer
+            .step(b_state, b'b')
+            .expect("interleaved second product must remain owned");
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(aa_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(bb_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(1),
+        );
     }
 
     #[test]
