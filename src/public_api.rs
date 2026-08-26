@@ -1095,6 +1095,23 @@ mod tests {
         }
     }
 
+    fn poison_materialized_outer_table(constraint: &mut RuntimeConstraint) {
+        constraint.recursive_parser_layout().unwrap().unwrap();
+        constraint.table.action.clear();
+        constraint.table.goto.clear();
+        constraint.table.advance.clear();
+        constraint.table.unconditional_advance.clear();
+        constraint.table.rules.clear();
+        constraint.table.forwarded_shifts.clear();
+        constraint.table.control_terminals.clear();
+        constraint.table.skip_terminals.clear();
+        constraint.table.guarded_shift_index.clear();
+        constraint.table.direct_regular_wide_frontiers.clear();
+        constraint.table.num_states = 0;
+        constraint.table.num_terminals = 0;
+        constraint.table.num_rules = 0;
+    }
+
     fn assert_static_boundary(constraint: &RuntimeConstraint) {
         let overlay = constraint
             .static_dynamic_overlay
@@ -1875,21 +1892,7 @@ mod tests {
                 root.tokenizer_has_epsilon_transitions;
         }
         let mut no_outer_table = loaded.clone();
-        {
-            // Force all recursive derived views while the compiler-oracle table
-            // is still present, then replace the outer materialized table with
-            // the intact root leaf table. Live recursive execution must use the
-            // leaf/provider coordinate rather than outer LR actions/states.
-            no_outer_table.recursive_parser_layout().unwrap().unwrap();
-            let root = no_outer_table
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_parser_components[0]
-                .constraint
-                .clone();
-            no_outer_table.table = root.table.clone();
-        }
+        poison_materialized_outer_table(&mut no_outer_table);
         for constraint in [
             &bound,
             &loaded,
@@ -2034,17 +2037,7 @@ mod tests {
 
         let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
         let mut no_outer_table = loaded.clone();
-        {
-            no_outer_table.recursive_parser_layout().unwrap().unwrap();
-            let root = no_outer_table
-                .static_dynamic_overlay
-                .as_ref()
-                .unwrap()
-                .segmented_parser_components[0]
-                .constraint
-                .clone();
-            no_outer_table.table = root.table.clone();
-        }
+        poison_materialized_outer_table(&mut no_outer_table);
         for constraint in [&bound, &loaded, &no_outer_table] {
             let mut state = constraint.start();
             state.commit_token(0).unwrap();
@@ -2162,6 +2155,8 @@ mod tests {
             &vocab,
         )
         .unwrap();
+        let mut no_outer_table = loaded.clone();
+        poison_materialized_outer_table(&mut no_outer_table);
         fn compare_reachable_prefix_tree(
             actual_constraint: &RuntimeConstraint,
             expected_constraint: &RuntimeConstraint,
@@ -2201,7 +2196,7 @@ mod tests {
                 }
             }
         }
-        for constraint in [&bound, &loaded] {
+        for constraint in [&bound, &loaded, &no_outer_table] {
             compare_reachable_prefix_tree(constraint, &monolithic, 5);
             for tokens in [
                 &[7][..],
@@ -2265,8 +2260,10 @@ mod tests {
             &vocab,
         )
         .unwrap();
+        let mut no_outer_table = loaded.clone();
+        poison_materialized_outer_table(&mut no_outer_table);
 
-        for constraint in [&bound, &loaded] {
+        for constraint in [&bound, &loaded, &no_outer_table] {
             for tokens in [&[3][..], &[4][..], &[0, 2][..], &[0, 5][..], &[0, 1, 2][..]] {
                 let mut actual = constraint.start();
                 let mut expected = monolithic.start();

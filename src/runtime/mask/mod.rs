@@ -2671,16 +2671,14 @@ impl<'a> ConstraintState<'a> {
             );
             for local_tokenizer_state in local_tokenizer_states {
                 for &terminal in terminals.iter() {
-                    if self.constraint.uses_compact_segmented_parser_runtime()
-                        && terminal >= self.constraint.table.num_terminals
-                    {
+                    if self.constraint.uses_compact_segmented_parser_runtime() {
                         if let Some(local_terminal) = self
                             .constraint
                             .recursive_terminal_for_component(component_index, terminal)
                         {
                             result = result.with_insert(local_tokenizer_state, local_terminal);
+                            continue;
                         }
-                        continue;
                     }
                     if terminal_start <= terminal && terminal < terminal_end {
                         result = result.with_insert(
@@ -4334,7 +4332,9 @@ impl<'a> ConstraintState<'a> {
     /// a linker control chain. Ordinary parser-DWA weights remain the fast path;
     /// constraints without explicit controls pay nothing here.
     fn update_control_special_token_mask(&self, buf: &mut [u32]) {
-        if self.constraint.table.control_terminals.is_empty() {
+        if self.constraint.table.control_terminals.is_empty()
+            && !self.constraint.uses_compact_segmented_parser_runtime()
+        {
             return;
         }
         let mut previous_token_id = None;
@@ -6766,7 +6766,9 @@ impl<'a> ConstraintState<'a> {
                 }
             }
             self.update_control_special_token_mask(mask);
-            if !self.constraint.table.control_terminals.is_empty() {
+            if !self.constraint.table.control_terminals.is_empty()
+                || self.constraint.uses_compact_segmented_parser_runtime()
+            {
                 self.store_mask_cache_reuse_dense(mask);
             }
         }
@@ -6816,7 +6818,9 @@ impl<'a> ConstraintState<'a> {
             });
         self.update_control_special_token_mask(buf);
         self.clear_late_grammar_placeholder_mask(buf);
-        if !self.constraint.table.control_terminals.is_empty() {
+        if !self.constraint.table.control_terminals.is_empty()
+            || self.constraint.uses_compact_segmented_parser_runtime()
+        {
             self.store_mask_cache_reuse_dense(buf);
         }
         profile
