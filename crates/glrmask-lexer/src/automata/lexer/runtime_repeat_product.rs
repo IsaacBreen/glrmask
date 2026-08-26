@@ -871,7 +871,7 @@ impl VirtualBinaryRepeatIntersectionRuntime {
 
         let target = self
             .step_residual(residual, byte)
-            .and_then(|target| self.intern_locked(&mut store, target))
+            .and_then(|target| self.intern_locked(store, target))
             .unwrap_or(DEAD_TRANSITION);
         if state == self.root_state {
             store.root_transitions.push((byte, target));
