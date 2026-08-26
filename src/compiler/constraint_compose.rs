@@ -24779,6 +24779,107 @@ constraint: &third,
     }
 
     #[test]
+    fn hybrid_boundary_policy_is_per_component_and_roundtrips() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"z".to_vec()),
+            (3, b"xy".to_vec()),
+            (4, b"yz".to_vec()),
+            (5, b"xyz".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "x" SUB "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let reference = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt document ::= "x" "y" "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let slot = terminal(&parent, "SUB");
+        let child_input = [CompiledSubgrammarInput {
+            placeholder_terminal: slot,
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+
+        for static_component in [0usize, 1usize] {
+            let mut static_components = BitSet::new(2);
+            static_components.set(static_component);
+            let hybrid = compose_constraints_owned_parent_segmented_hybrid(
+                parent.clone(),
+                &child_input,
+                &vocab,
+                &static_components,
+            )
+            .unwrap()
+            .constraint;
+
+            let assert_policy = |constraint: &Constraint| {
+                let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
+                assert!(overlay.segmented_boundary_parser.is_none());
+                assert!(overlay.segmented_boundary_terminal_trie.is_none());
+                assert_eq!(overlay.segmented_parser_components.len(), 2);
+                for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                    let shard = component
+                        .boundary
+                        .as_ref()
+                        .expect("each component in this fixture has crossing tokens");
+                    if index == static_component {
+                        assert!(matches!(
+                            shard.backend,
+                            crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                        ));
+                    } else {
+                        assert!(matches!(
+                            shard.backend,
+                            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                        ));
+                    }
+                }
+            };
+            assert_policy(&hybrid);
+            let loaded = Constraint::load(&hybrid.save()).unwrap();
+            assert_policy(&loaded);
+
+            for constraint in [&hybrid, &loaded] {
+                for tokens in [&[5][..], &[0, 4][..], &[3, 2][..], &[0, 1, 2][..]] {
+                    let mut actual = constraint.start();
+                    let mut expected = reference.start();
+                    for &token in tokens {
+                        assert_eq!(
+                            actual.mask(),
+                            expected.mask(),
+                            "hybrid component {static_component} mismatch before {tokens:?} token {token}",
+                        );
+                        actual.commit_token(token).unwrap();
+                        expected.commit_token(token).unwrap();
+                    }
+                    assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+                    assert!(actual.is_accepting(), "{tokens:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn segmented_parser_links_preserve_nullable_child_local_coordinates() {
         let vocab = byte_vocab();
         let parent = Constraint::from_glrm_grammar(

@@ -1099,8 +1099,16 @@ mod tests {
             .static_dynamic_overlay
             .as_ref()
             .expect("bound constraint must use the explicit segmented runtime");
-        assert!(overlay.segmented_boundary_parser.is_some());
+        assert!(overlay.segmented_boundary_parser.is_none());
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
+        assert!(
+            !overlay.segmented_boundary_shards.is_empty(),
+            "static boundary policy must publish component-owned shards",
+        );
+        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+            shard.backend,
+            crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+        )));
     }
 
     fn assert_dynamic_boundary(constraint: &RuntimeConstraint) {
