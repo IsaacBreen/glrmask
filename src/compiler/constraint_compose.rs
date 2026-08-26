@@ -24718,8 +24718,8 @@ constraint: &third,
         );
         let loaded_segmented = Constraint::load(&segmented.save()).unwrap();
         assert!(
-            !loaded_segmented.uses_compact_segmented_parser_runtime(),
-            "legacy serialized runtime intentionally keeps the composed-table coordinate",
+            loaded_segmented.uses_compact_segmented_parser_runtime(),
+            "v24 dynamic composition should restore compact parser coordinates",
         );
         for constraint in [&segmented, &loaded_segmented] {
             let mut expected = monolithic.start();

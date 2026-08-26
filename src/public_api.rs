@@ -1944,6 +1944,8 @@ mod tests {
             .all(|component| component.root_disallowed_terminal.is_none()));
 
         let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+        assert!(loaded.uses_compact_segmented_parser_runtime());
         let loaded_overlay = loaded
             .static_dynamic_overlay
             .as_ref()

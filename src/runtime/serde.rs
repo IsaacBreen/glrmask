@@ -6289,6 +6289,130 @@ mod tests {
         .unwrap()
     }
 
+    fn downgrade_v24_artifact_to_v23(saved: &[u8]) -> Vec<u8> {
+        assert_eq!(
+            u16::from_le_bytes([saved[8], saved[9]]),
+            CONSTRAINT_VERSION,
+        );
+        let payload = &saved[CONSTRAINT_HEADER_LEN..];
+        let (
+            weight,
+            dwa,
+            table,
+            core,
+            runtime,
+            token_bytes,
+            original_map,
+            tokenizer,
+            internal_masks,
+            token_mask_cache,
+            composition_metadata,
+        ) = v24_sections(payload).unwrap();
+        let runtime = bincode::deserialize::<ConstraintArtifactCurrentRuntime>(runtime).unwrap();
+        let segmented_runtime = runtime.segmented_runtime.map(|runtime| {
+            let SegmentedRuntimeArtifactV24 {
+                materialized_static_component_parser,
+                materialized_static_parser_state_domain_labels,
+                components,
+                segmented_parser_links: _,
+                segmented_parser_state_offsets: _,
+                segmented_mask_authoritative,
+                segmented_component_union_root_dispatch,
+                boundary_shards,
+            } = runtime;
+            SegmentedRuntimeArtifactV23 {
+                materialized_static_component_parser,
+                materialized_static_parser_state_domain_labels,
+                components: components
+                    .into_iter()
+                    .map(|component| SegmentedParserComponentV22 {
+                        constraint_artifact: component.constraint_artifact,
+                        tokenizer_state_offset: component.tokenizer_state_offset,
+                        terminal_offset: component.terminal_offset,
+                        root_entry_terminals: component.root_entry_terminals,
+                        root_disallowed_terminal: component.root_disallowed_terminal,
+                        global_to_local_parser_state: component.global_to_local_parser_state,
+                    })
+                    .collect(),
+                segmented_mask_authoritative,
+                segmented_component_union_root_dispatch,
+                boundary_shards,
+            }
+        });
+        let runtime = bincode::serialize(&ConstraintArtifactV23Runtime {
+            terminal_live_states: runtime.terminal_live_states,
+            segmented_runtime,
+            dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+            packed_dwa_dense_mask_ids: runtime.packed_dwa_dense_mask_ids,
+            packed_dwa_dense_mask_rows: runtime.packed_dwa_dense_mask_rows,
+        })
+        .unwrap();
+        let sections: [&[u8]; 11] = [
+            weight,
+            dwa,
+            table,
+            core,
+            runtime.as_slice(),
+            token_bytes,
+            original_map,
+            tokenizer,
+            internal_masks,
+            token_mask_cache,
+            composition_metadata,
+        ];
+        let payload_len = V23_SECTION_HEADER_LEN
+            + sections.iter().map(|section| section.len()).sum::<usize>();
+        let mut previous = Vec::with_capacity(payload_len);
+        previous.extend_from_slice(&V23_SECTION_MAGIC);
+        for section in &sections {
+            previous.extend_from_slice(&(section.len() as u64).to_le_bytes());
+        }
+        for section in sections {
+            previous.extend_from_slice(section);
+        }
+        envelope(PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION, &previous)
+    }
+
+    #[test]
+    fn v23_segmented_runtime_remains_loadable_without_compact_parser_metadata() {
+        let vocab = Vocab::new(vec![
+            (0, b"<a>".to_vec()),
+            (1, b"<".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b">".to_vec()),
+        ]);
+        let parent = Constraint::compile(
+            crate::Grammar::glrm(
+                "glrm 1; start document; extern grammar child; nt document = "<" child ">";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::compile(
+            crate::Grammar::glrm("glrm 1; start child; nt child = "a";"),
+            &vocab,
+        )
+        .unwrap();
+        let current = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        assert!(current.uses_compact_segmented_parser_runtime());
+
+        let previous = downgrade_v24_artifact_to_v23(&current.save());
+        let loaded = Constraint::load(previous).unwrap();
+        assert!(
+            !loaded.uses_compact_segmented_parser_runtime(),
+            "v23 has no compact links/state offsets and must retain the legacy parser coordinate",
+        );
+        let mut current_state = current.start();
+        let mut loaded_state = loaded.start();
+        assert_eq!(current_state.mask(), loaded_state.mask());
+        current_state.commit_token(0).unwrap();
+        loaded_state.commit_token(0).unwrap();
+        assert_eq!(current_state.is_accepting(), loaded_state.is_accepting());
+        assert!(current_state.is_accepting());
+    }
+
     #[test]
     fn fresh_packed_non_dwa_weight_runtime_matches_materialized_and_roundtrips() {
         let baseline = tiny_constraint();
