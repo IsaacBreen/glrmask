@@ -2151,6 +2151,7 @@ struct SegmentedParserComponentV22Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct SegmentedParserComponentV22 {
     constraint_artifact: Vec<u8>,
     tokenizer_state_offset: u32,
@@ -2167,6 +2168,7 @@ struct BoundaryTerminalTrieNodeV22Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct BoundaryTerminalTrieNodeV22 {
     children: Vec<(u32, u32)>,
     outputs: Vec<u32>,
@@ -2182,6 +2184,7 @@ struct SegmentedBoundaryTerminalTrieV22Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct SegmentedBoundaryTerminalTrieV22 {
     nodes: Vec<BoundaryTerminalTrieNodeV22>,
     root_by_tsid: Vec<u32>,
@@ -2221,6 +2224,7 @@ struct SegmentedBoundaryParserV23Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct SegmentedBoundaryParserV23 {
     parser_dwa: crate::automata::weighted_u32::dwa::DWA,
     uses_composed_tsid_coordinate: bool,
@@ -2239,6 +2243,7 @@ enum SegmentedBoundaryShardScopeV23Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 enum SegmentedBoundaryShardScopeV23 {
     Global,
     Component {
@@ -2256,6 +2261,7 @@ enum SegmentedBoundaryShardBackendV23Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 enum SegmentedBoundaryShardBackendV23 {
     StaticParser(SegmentedBoundaryParserV23),
     DynamicTerminalTrie(SegmentedBoundaryTerminalTrieV22),
@@ -2270,6 +2276,7 @@ struct SegmentedBoundaryShardV23Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct SegmentedBoundaryShardV23 {
     scope: SegmentedBoundaryShardScopeV23,
     candidate_tokens: Option<Vec<u32>>,
@@ -2287,6 +2294,7 @@ struct SegmentedRuntimeArtifactV23Ref<'a> {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 struct SegmentedRuntimeArtifactV23 {
     materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
     materialized_static_parser_state_domain_labels: Vec<i32>,
