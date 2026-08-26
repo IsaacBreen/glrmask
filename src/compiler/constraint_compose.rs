@@ -527,6 +527,22 @@ struct DirectComponentStateCoordinates {
 /// global state still projects back to the same local state. The representation
 /// is unavailable only when one global state would project to two different
 /// local states of this component.
+fn build_segmented_parser_state_offsets(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+) -> Result<Vec<u32>, String> {
+    let mut offsets = Vec::with_capacity(children.len() + 1);
+    let mut next = 0u32;
+    for constraint in std::iter::once(parent).chain(children.iter().map(|child| child.constraint)) {
+        offsets.push(next);
+        next = next
+            .checked_add(constraint.table.num_states)
+            .ok_or_else(|| "segmented parser-state coordinate overflow".to_owned())?;
+    }
+    Ok(offsets)
+}
+
+
 fn invert_functional_parser_state_relation(
     relation: &[Vec<u32>],
     global_state_count: usize,
@@ -17857,6 +17873,7 @@ fn build_static_dynamic_overlay_metadata(
             non_parent_only_parser_states,
             segmented_parser_components: Vec::new(),
             segmented_parser_links: Vec::new(),
+            segmented_parser_state_offsets: Vec::new(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
             segmented_component_union_root_dispatch: Vec::new(),
@@ -19586,6 +19603,10 @@ fn compose_constraints_owned_parent_impl(
         .then(|| build_segmented_parser_links(children, &child_rules))
         .transpose()?
         .unwrap_or_default();
+    let segmented_parser_state_offsets = segmented_runtime_requested
+        .then(|| build_segmented_parser_state_offsets(&parent, children))
+        .transpose()?
+        .unwrap_or_default();
     let components_have_no_runtime_product = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
@@ -20744,6 +20765,7 @@ fn compose_constraints_owned_parent_impl(
                 non_parent_only_parser_states: vec![false; global_state_count],
                 segmented_parser_components: Vec::new(),
                 segmented_parser_links: Vec::new(),
+                segmented_parser_state_offsets: Vec::new(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -20754,6 +20776,7 @@ fn compose_constraints_owned_parent_impl(
         });
         overlay.segmented_parser_components = segmented_components;
         overlay.segmented_parser_links = segmented_parser_links.clone();
+        overlay.segmented_parser_state_offsets = segmented_parser_state_offsets.clone();
         overlay.segmented_mask_authoritative = explicit_segmented_boundary.is_some();
         if let Some(dispatch) = deterministic_root_dispatch {
             overlay.segmented_component_union_root_dispatch = dispatch;
@@ -21137,6 +21160,7 @@ fn compose_constraints_owned_parent_impl(
                     non_parent_only_parser_states: vec![false; global_state_count],
                     segmented_parser_components: Vec::new(),
                     segmented_parser_links: Vec::new(),
+                    segmented_parser_state_offsets: Vec::new(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
                     segmented_component_union_root_dispatch: Vec::new(),
@@ -21147,6 +21171,7 @@ fn compose_constraints_owned_parent_impl(
             });
             overlay.segmented_parser_components = segmented_components;
             overlay.segmented_parser_links = segmented_parser_links.clone();
+            overlay.segmented_parser_state_offsets = segmented_parser_state_offsets.clone();
             if compose_profile_enabled() {
                 eprintln!(
                     "[glrmask/profile][constraint_segmented_parser_runtime] components={} exact_singleton_relations=true",
@@ -21201,6 +21226,7 @@ fn compose_constraints_owned_parent_impl(
                 non_parent_only_parser_states: vec![false; result.constraint.table.num_states as usize],
                 segmented_parser_components: Vec::new(),
                 segmented_parser_links: Vec::new(),
+                segmented_parser_state_offsets: Vec::new(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),

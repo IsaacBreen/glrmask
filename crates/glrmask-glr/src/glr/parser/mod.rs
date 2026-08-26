@@ -139,35 +139,124 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
     }
 }
 
+/// Read-only source of intact component LR tables for compact composed parsing.
+/// The runtime can implement this over its component wrappers without building
+/// a temporary `Vec<&GLRTable>`.
+pub trait ParserComponentTableSource {
+    fn component_count(&self) -> usize;
+    fn component_table(&self, component: u32) -> Option<&GLRTable>;
+}
+
+impl<const N: usize> ParserComponentTableSource for [&GLRTable; N] {
+    #[inline]
+    fn component_count(&self) -> usize {
+        N
+    }
+
+    #[inline]
+    fn component_table(&self, component: u32) -> Option<&GLRTable> {
+        self.get(component as usize).copied()
+    }
+}
+
+impl ParserComponentTableSource for [&GLRTable] {
+    #[inline]
+    fn component_count(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn component_table(&self, component: u32) -> Option<&GLRTable> {
+        self.get(component as usize).copied()
+    }
+}
+
+enum ProviderStateOffsets<'a> {
+    Owned(Vec<u32>),
+    Borrowed(&'a [u32]),
+}
+
+impl ProviderStateOffsets<'_> {
+    #[inline]
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Owned(offsets) => offsets,
+            Self::Borrowed(offsets) => offsets,
+        }
+    }
+}
+
 /// Compact `u32` action provider over the disjoint union of intact component
 /// LR-state sets. Offsets encode scope but do not form or require a merged LR
 /// table. Ordinary actions remain borrowed and local.
-pub struct DisjointComponentActionProvider<'a> {
-    components: &'a [&'a GLRTable],
+pub struct DisjointComponentActionProvider<'a, S: ParserComponentTableSource + ?Sized> {
+    components: &'a S,
     links: &'a [ScopedSubgrammarLink],
-    state_offsets: Vec<u32>,
+    state_offsets: ProviderStateOffsets<'a>,
     total_states: u32,
 }
 
-impl<'a> DisjointComponentActionProvider<'a> {
-    pub fn new(
-        components: &'a [&'a GLRTable],
-        links: &'a [ScopedSubgrammarLink],
-    ) -> Result<Self, String> {
-        let mut state_offsets = Vec::with_capacity(components.len());
+impl<'a, S: ParserComponentTableSource + ?Sized> DisjointComponentActionProvider<'a, S> {
+    pub fn new(components: &'a S, links: &'a [ScopedSubgrammarLink]) -> Result<Self, String> {
+        let mut offsets = Vec::with_capacity(components.component_count());
         let mut total_states = 0u32;
-        for table in components {
-            state_offsets.push(total_states);
+        for component in 0..components.component_count() {
+            let table = components
+                .component_table(component as u32)
+                .ok_or_else(|| format!("missing parser component {component}"))?;
+            offsets.push(total_states);
             total_states = total_states
                 .checked_add(table.num_states)
                 .ok_or_else(|| "scoped parser-state coordinate overflow".to_owned())?;
         }
+        Self::from_offsets(components, links, ProviderStateOffsets::Owned(offsets), total_states)
+    }
+
+    /// Zero-allocation runtime constructor using offsets precomputed with the
+    /// component wrapper metadata.
+    pub fn with_state_offsets(
+        components: &'a S,
+        links: &'a [ScopedSubgrammarLink],
+        state_offsets: &'a [u32],
+    ) -> Result<Self, String> {
+        if state_offsets.len() != components.component_count() {
+            return Err("segmented parser-state offset/component count mismatch".to_owned());
+        }
+        let mut expected = 0u32;
+        for component in 0..components.component_count() {
+            if state_offsets[component] != expected {
+                return Err(format!(
+                    "segmented parser-state offset {component} is {}, expected {expected}",
+                    state_offsets[component],
+                ));
+            }
+            let table = components
+                .component_table(component as u32)
+                .ok_or_else(|| format!("missing parser component {component}"))?;
+            expected = expected
+                .checked_add(table.num_states)
+                .ok_or_else(|| "scoped parser-state coordinate overflow".to_owned())?;
+        }
+        Self::from_offsets(
+            components,
+            links,
+            ProviderStateOffsets::Borrowed(state_offsets),
+            expected,
+        )
+    }
+
+    fn from_offsets(
+        components: &'a S,
+        links: &'a [ScopedSubgrammarLink],
+        state_offsets: ProviderStateOffsets<'a>,
+        total_states: u32,
+    ) -> Result<Self, String> {
         for (index, link) in links.iter().enumerate() {
             let parent = components
-                .get(link.parent_component as usize)
+                .component_table(link.parent_component)
                 .ok_or_else(|| format!("link {index} references missing parent component"))?;
             let child = components
-                .get(link.child_component as usize)
+                .component_table(link.child_component)
                 .ok_or_else(|| format!("link {index} references missing child component"))?;
             if link.slot_terminal >= parent.num_terminals || link.child_start >= child.num_states {
                 return Err(format!("link {index} references an invalid local coordinate"));
@@ -183,11 +272,12 @@ impl<'a> DisjointComponentActionProvider<'a> {
 
     #[inline]
     pub fn scoped_state(&self, component: u32, local_state: u32) -> Option<u32> {
-        let table = *self.components.get(component as usize)?;
+        let table = self.components.component_table(component)?;
         if local_state >= table.num_states {
             return None;
         }
         self.state_offsets
+            .as_slice()
             .get(component as usize)?
             .checked_add(local_state)
     }
@@ -197,20 +287,22 @@ impl<'a> DisjointComponentActionProvider<'a> {
         if state >= self.total_states {
             return None;
         }
-        let component = self
-            .state_offsets
+        let offsets = self.state_offsets.as_slice();
+        let component = offsets
             .partition_point(|&offset| offset <= state)
             .checked_sub(1)?;
-        Some((component as u32, state - self.state_offsets[component]))
+        Some((component as u32, state - offsets[component]))
     }
 
     #[inline]
-    fn table(&self, component: u32) -> Option<&'a GLRTable> {
-        self.components.get(component as usize).copied()
+    fn table(&self, component: u32) -> Option<&GLRTable> {
+        self.components.component_table(component)
     }
 }
 
-impl ParserActionProvider for DisjointComponentActionProvider<'_> {
+impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
+    for DisjointComponentActionProvider<'_, S>
+{
     type Symbol = ScopedParserSymbol;
 
     fn action(&self, state: u32, symbol: Self::Symbol) -> Option<ProvidedAction<'_>> {

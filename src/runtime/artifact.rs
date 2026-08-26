@@ -11,7 +11,9 @@ use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
 use crate::compiler::glr::labels::DEFAULT_LABEL;
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{
+    ParserComponentTableSource, ParserGSS, ScopedSubgrammarLink,
+};
 use crate::compiler::glr::table::GLRTable;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -4379,20 +4381,7 @@ pub(crate) enum ConstraintRuntimeBackend {
     Dynamic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SegmentedParserLink {
-    /// Component whose local slot terminal performs the zero-width call.
-    pub(crate) parent_component: u32,
-    /// Parent-local placeholder terminal; never a rebased/global terminal ID.
-    pub(crate) slot_terminal: u32,
-    pub(crate) child_component: u32,
-    /// Child-local start LR state. Currently zero for compiled constraints, but
-    /// retained explicitly so the provider contract does not depend on that.
-    pub(crate) child_start: u32,
-    /// Number of child-side states removed when local EOF reaches Accept.
-    pub(crate) return_pop: u32,
-    pub(crate) child_start_nullable: bool,
-}
+pub(crate) type SegmentedParserLink = ScopedSubgrammarLink;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StaticDynamicOverlayMetadata {
@@ -4422,6 +4411,10 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// intentionally scoped to this composition level only.
     #[serde(skip, default)]
     pub(crate) segmented_parser_links: Vec<SegmentedParserLink>,
+    /// Prefix offsets for the compact disjoint-union parser state coordinate.
+    /// `offset[i] + local_state` is the runtime GSS value for component `i`.
+    #[serde(skip, default)]
+    pub(crate) segmented_parser_state_offsets: Vec<u32>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.
@@ -4509,6 +4502,33 @@ pub(crate) struct SegmentedParserComponent {
     /// unchanged, and scope/link behavior lives in the composed parser view/B.
     pub(crate) root_disallowed_terminal: Option<u32>,
     pub(crate) global_to_local_parser_state: Vec<u32>,
+}
+
+
+#[derive(Clone, Copy)]
+pub(crate) struct SegmentedParserComponentTables<'a> {
+    components: &'a [SegmentedParserComponent],
+}
+
+impl<'a> SegmentedParserComponentTables<'a> {
+    #[inline]
+    pub(crate) fn new(components: &'a [SegmentedParserComponent]) -> Self {
+        Self { components }
+    }
+}
+
+impl ParserComponentTableSource for SegmentedParserComponentTables<'_> {
+    #[inline]
+    fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    #[inline]
+    fn component_table(&self, component: u32) -> Option<&GLRTable> {
+        self.components
+            .get(component as usize)
+            .map(|component| &component.constraint.table)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
