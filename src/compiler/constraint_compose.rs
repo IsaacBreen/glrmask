@@ -3898,12 +3898,20 @@ pub(crate) fn build_exact_component_boundary_trigger(
     constraint: &Constraint,
     candidate_tokens: &[u32],
 ) -> Result<Option<DWA>, String> {
-    // The first implementation deliberately declines components whose parser
-    // requires linker-control closure before testing entry/finish readiness.
-    // Tokens remains a sound fallback for these already-composed components.
-    if !constraint.table.control_terminals.is_empty() {
-        return Ok(None);
-    }
+    // Exact trigger semantics observe parser readiness *after* zero-width
+    // linker closure. Compile that closure into a private table copy when this
+    // reusable component is itself composed. Control elimination preserves LR
+    // state IDs, so the trigger remains in the component-local parser-state
+    // coordinate and the live component/table is never mutated.
+    let controls_eliminated = !constraint.table.control_terminals.is_empty();
+    let trigger_table_storage = if controls_eliminated {
+        let mut table = constraint.table.clone();
+        table.eliminate_control_terminals_exact()?;
+        Some(table)
+    } else {
+        None
+    };
+    let trigger_table = trigger_table_storage.as_ref().unwrap_or(&constraint.table);
 
     let mut placeholders = constraint
         .unbound_grammar_placeholders
@@ -3913,9 +3921,9 @@ pub(crate) fn build_exact_component_boundary_trigger(
         .collect::<Vec<_>>();
     placeholders.sort_unstable();
     placeholders.dedup();
-    placeholders.retain(|&terminal| terminal < constraint.table.num_terminals);
+    placeholders.retain(|&terminal| terminal < trigger_table.num_terminals);
 
-    let finish_terminal = constraint.table.num_terminals;
+    let finish_terminal = trigger_table.num_terminals;
     let extended_terminal_count = finish_terminal
         .checked_add(1)
         .ok_or_else(|| "boundary trigger terminal-count overflow".to_owned())?;
@@ -4028,81 +4036,100 @@ pub(crate) fn build_exact_component_boundary_trigger(
         )));
     }
 
-    // Reconstruct the ordinary per-terminal parser templates retained in the
-    // component artifact. Fresh static constraints carry these exactly. A
-    // direct-regular table can reconstruct them without AnalyzedGrammar; older
-    // artifacts may also retain symbolic characterizations. If any terminal
-    // actually used by the trigger remains unavailable, decline Exact rather
-    // than silently drop that language.
+    // Reconstruct ordinary terminal stack relations. For a control-bearing
+    // component cached templates describe the pre-closure table, so they are
+    // deliberately ignored: characterize the trigger-only control-eliminated
+    // table directly. For ordinary components retain the cheaper artifact
+    // reuse/reconstruction path.
     let mut by_terminal = BTreeMap::<u32, UnweightedDfa>::new();
-    for &terminal in &used_terminals {
-        if terminal == finish_terminal {
-            continue;
-        }
-        if let Some(dfa) = constraint
-            .composition_parser_templates_by_terminal
-            .get(terminal as usize)
-            .and_then(Option::as_ref)
-        {
-            by_terminal.insert(terminal, dfa.clone());
-        }
-    }
-
-    if used_terminals
-        .iter()
-        .copied()
-        .filter(|&terminal| terminal != finish_terminal)
-        .any(|terminal| !by_terminal.contains_key(&terminal))
-        && let Some(direct) =
-            Templates::from_direct_regular_table(&constraint.table, constraint.table.num_terminals)
-    {
-        for (terminal, dfa) in direct.by_terminal {
-            if used_terminals.contains(&terminal) {
-                by_terminal.entry(terminal).or_insert(dfa);
+    if controls_eliminated {
+        let mut selected = vec![false; trigger_table.num_terminals as usize];
+        for &terminal in &used_terminals {
+            if terminal != finish_terminal
+                && let Some(slot) = selected.get_mut(terminal as usize)
+            {
+                *slot = true;
             }
         }
-    }
-
-    let missing = used_terminals
-        .iter()
-        .copied()
-        .filter(|&terminal| terminal != finish_terminal && !by_terminal.contains_key(&terminal))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        let mut characterizations = missing
+        let characterizations = characterize_selected_terminals_for_terminal_count(
+            trigger_table,
+            trigger_table.num_terminals,
+            &selected,
+        );
+        if used_terminals
             .iter()
-            .filter_map(|&terminal| {
-                constraint
-                    .composition_parser_characterizations_by_terminal
-                    .get(terminal as usize)
-                    .and_then(Option::as_ref)
-                    .cloned()
-                    .map(|characterization| (terminal, characterization))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if characterizations.len() != missing.len() {
-            // Dynamic constraints intentionally retain neither AnalyzedGrammar
-            // nor ordinary parser templates. Rebuild only the missing terminal
-            // relations directly from the retained GLR table; this is still a
-            // static trigger build and does not materialize the ordinary
-            // DynamicConstraint parser DWA.
-            let mut selected = vec![false; constraint.table.num_terminals as usize];
-            for &terminal in &missing {
-                if let Some(slot) = selected.get_mut(terminal as usize) {
-                    *slot = true;
-                }
-            }
-            characterizations = characterize_selected_terminals_for_terminal_count(
-                &constraint.table,
-                constraint.table.num_terminals,
-                &selected,
-            );
-        }
-        if characterizations.len() != missing.len() {
+            .copied()
+            .filter(|&terminal| terminal != finish_terminal)
+            .any(|terminal| !characterizations.contains_key(&terminal))
+        {
             return Ok(None);
         }
-        let rebuilt = Templates::from_characterizations(&characterizations);
-        by_terminal.extend(rebuilt.by_terminal);
+        by_terminal.extend(Templates::from_characterizations(&characterizations).by_terminal);
+    } else {
+        for &terminal in &used_terminals {
+            if terminal == finish_terminal {
+                continue;
+            }
+            if let Some(dfa) = constraint
+                .composition_parser_templates_by_terminal
+                .get(terminal as usize)
+                .and_then(Option::as_ref)
+            {
+                by_terminal.insert(terminal, dfa.clone());
+            }
+        }
+
+        if used_terminals
+            .iter()
+            .copied()
+            .filter(|&terminal| terminal != finish_terminal)
+            .any(|terminal| !by_terminal.contains_key(&terminal))
+            && let Some(direct) =
+                Templates::from_direct_regular_table(trigger_table, trigger_table.num_terminals)
+        {
+            for (terminal, dfa) in direct.by_terminal {
+                if used_terminals.contains(&terminal) {
+                    by_terminal.entry(terminal).or_insert(dfa);
+                }
+            }
+        }
+
+        let missing = used_terminals
+            .iter()
+            .copied()
+            .filter(|&terminal| terminal != finish_terminal && !by_terminal.contains_key(&terminal))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let mut characterizations = missing
+                .iter()
+                .filter_map(|&terminal| {
+                    constraint
+                        .composition_parser_characterizations_by_terminal
+                        .get(terminal as usize)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .map(|characterization| (terminal, characterization))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if characterizations.len() != missing.len() {
+                let mut selected = vec![false; trigger_table.num_terminals as usize];
+                for &terminal in &missing {
+                    if let Some(slot) = selected.get_mut(terminal as usize) {
+                        *slot = true;
+                    }
+                }
+                characterizations = characterize_selected_terminals_for_terminal_count(
+                    trigger_table,
+                    trigger_table.num_terminals,
+                    &selected,
+                );
+            }
+            if characterizations.len() != missing.len() {
+                return Ok(None);
+            }
+            let rebuilt = Templates::from_characterizations(&characterizations);
+            by_terminal.extend(rebuilt.by_terminal);
+        }
     }
 
     if used_terminals
@@ -4116,7 +4143,7 @@ pub(crate) fn build_exact_component_boundary_trigger(
 
     let finish_characterizations = BTreeMap::from([(
         finish_terminal,
-        characterize_finish_probe(&constraint.table),
+        characterize_finish_probe(trigger_table),
     )]);
     let mut finish_templates = Templates::from_characterizations(&finish_characterizations);
     let Some(finish_dfa) = finish_templates.by_terminal.remove(&finish_terminal) else {
@@ -4131,7 +4158,7 @@ pub(crate) fn build_exact_component_boundary_trigger(
             &terminal_automaton,
             extended_terminal_count,
             &templates,
-            &constraint.table,
+            trigger_table,
         )
     else {
         return Ok(Some(DWA::new(
@@ -4142,11 +4169,11 @@ pub(crate) fn build_exact_component_boundary_trigger(
 
     resolve_negative_codes_in_nwa(
         &mut parser_nwa,
-        constraint.table.construction
+        trigger_table.construction
             == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
     );
     Ok(Some(normalize_weighted_parser_stack_nwa(
-        &constraint.table,
+        trigger_table,
         &parser_nwa,
     )))
 }

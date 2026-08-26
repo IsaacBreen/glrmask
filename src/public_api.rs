@@ -1523,6 +1523,81 @@ mod tests {
     }
 
     #[test]
+    fn exact_trigger_supports_control_bearing_composed_component() {
+        let vocab = Vocab::new(vec![
+            (0, b"<".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b">".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"<a>!".to_vec()),
+            (5, b"a>!".to_vec()),
+            (6, b">!".to_vec()),
+        ]);
+
+        let inner_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"glrm 1; start inner; extern grammar leaf; nt inner = "<" leaf ">";"#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let leaf = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "a""#), &vocab)
+            .unwrap();
+        let mut inner = inner_parent
+            .bind_grammar_dynamic_boundary("leaf", leaf)
+            .unwrap();
+        assert!(
+            !inner.table.control_terminals.is_empty(),
+            "fixture must exercise Exact construction over live linker controls",
+        );
+        inner.build_exact_boundary_trigger().unwrap();
+        assert!(matches!(
+            inner.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+
+        let outer = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"glrm 1; start document; extern grammar inner; nt document = inner "!";"#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let composed = outer
+            .bind_grammar_dynamic_boundary("inner", RuntimeConstraint::load(inner.save()).unwrap())
+            .unwrap();
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "<" "a" ">" "!""#),
+            &vocab,
+        )
+        .unwrap();
+
+        let overlay = composed.static_dynamic_overlay.as_ref().unwrap();
+        assert!(matches!(
+            overlay.segmented_parser_components[1]
+                .constraint
+                .boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+
+        for tokens in [&[4][..], &[0, 5][..], &[0, 1, 6][..], &[0, 1, 2, 3][..]] {
+            let mut actual = composed.start();
+            let mut expected = reference.start();
+            for &token in tokens {
+                assert_eq!(
+                    actual.mask(),
+                    expected.mask(),
+                    "control-bearing Exact trigger mismatch before {tokens:?} token {token}",
+                );
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+            assert!(actual.is_accepting(), "{tokens:?}");
+        }
+    }
+
+    #[test]
     fn loaded_constraint_trigger_upgrade_resaves_updated_link_metadata() {
         let vocab = Vocab::new(vec![
             (0, b"x".to_vec()),
