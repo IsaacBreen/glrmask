@@ -2149,7 +2149,7 @@ struct SegmentedParserComponentV22Ref<'a> {
     constraint_artifact: Vec<u8>,
     tokenizer_state_offset: u32,
     terminal_offset: u32,
-    root_entry_terminals: &'a crate::ds::bitset::BitSet,
+    root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
     global_to_local_parser_state: &'a [u32],
 }
@@ -2314,7 +2314,7 @@ struct SegmentedParserComponentV24Ref<'a> {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
-    root_entry_terminals: &'a crate::ds::bitset::BitSet,
+    root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
     global_to_local_parser_state: &'a [u32],
 }
@@ -2383,7 +2383,7 @@ struct RecursiveSegmentedParserComponentV25Ref<'a> {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
-    root_entry_terminals: &'a crate::ds::bitset::BitSet,
+    root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
 }
 
@@ -2595,6 +2595,21 @@ fn boundary_terminal_trie_v22_ref(
     }
 }
 
+fn serialized_component_root_entry_terminals(
+    component: &crate::runtime::SegmentedParserComponent,
+    global_terminal_count: usize,
+) -> crate::ds::bitset::BitSet {
+    let mut terminals = crate::ds::bitset::BitSet::new(global_terminal_count);
+    let end = component
+        .terminal_offset
+        .saturating_add(component.constraint.table.num_terminals)
+        .min(global_terminal_count as u32);
+    for terminal in component.terminal_offset..end {
+        terminals.set(terminal as usize);
+    }
+    terminals
+}
+
 fn segmented_runtime_artifact_v24_ref(
     constraint: &Constraint,
 ) -> Option<SegmentedRuntimeArtifactV24Ref<'_>> {
@@ -2614,7 +2629,10 @@ fn segmented_runtime_artifact_v24_ref(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
-            root_entry_terminals: &component.root_entry_terminals,
+            root_entry_terminals: serialized_component_root_entry_terminals(
+                component,
+                constraint.table.num_terminals as usize,
+            ),
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: &component.global_to_local_parser_state,
         })
@@ -2724,7 +2742,10 @@ fn segmented_runtime_artifact_ref(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
-            root_entry_terminals: &component.root_entry_terminals,
+            root_entry_terminals: serialized_component_root_entry_terminals(
+                component,
+                constraint.table.num_terminals as usize,
+            ),
             root_disallowed_terminal: component.root_disallowed_terminal,
         })
         .collect();
@@ -3018,7 +3039,6 @@ fn restore_segmented_runtime_v22(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: Vec::new(),
-            root_entry_terminals: component.root_entry_terminals,
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: component.global_to_local_parser_state,
         });
@@ -3626,7 +3646,6 @@ fn restore_recursive_segmented_runtime_v25(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: component.global_terminal_aliases,
-            root_entry_terminals: component.root_entry_terminals,
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: Vec::new(),
         });

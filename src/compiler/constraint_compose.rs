@@ -816,10 +816,6 @@ fn build_segmented_runtime_metadata(
             excluded_local_state,
         ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
         let terminal_offset = terminal_offsets[component_index];
-        let mut root_entry_terminals = BitSet::new(global_terminal_count);
-        for local_terminal in 0..source.table.num_terminals {
-            root_entry_terminals.set((terminal_offset + local_terminal) as usize);
-        }
         let mut global_terminal_aliases = Vec::new();
         if let Some(canonical) = canonical_terminal {
             let component_end = terminal_offset + source.table.num_terminals;
@@ -835,7 +831,6 @@ fn build_segmented_runtime_metadata(
             tokenizer_state_offset: tokenizer_state_offsets[component_index],
             terminal_offset,
             global_terminal_aliases,
-            root_entry_terminals,
             root_disallowed_terminal,
             global_to_local_parser_state,
         });
@@ -21399,18 +21394,12 @@ fn compose_constraints_owned_parent_impl(
                     break;
                 };
                 let terminal_offset = result.terminal_offsets[component_index];
-                let mut root_entry_terminals =
-                    BitSet::new(result.constraint.table.num_terminals as usize);
-                for local_terminal in 0..source.table.num_terminals {
-                    root_entry_terminals.set((terminal_offset + local_terminal) as usize);
-                }
                 segmented_components.push(crate::runtime::SegmentedParserComponent {
                     constraint: Arc::new(source),
                     boundary: None,
                     tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
                     terminal_offset,
                     global_terminal_aliases: Vec::new(),
-                    root_entry_terminals,
                     root_disallowed_terminal: None,
                     global_to_local_parser_state,
                 });

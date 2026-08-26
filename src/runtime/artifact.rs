@@ -4560,12 +4560,6 @@ pub(crate) struct SegmentedParserComponent {
     /// this stores only exceptional many-scope aliases (currently globally
     /// equivalent ignore terminals).
     pub(crate) global_terminal_aliases: Vec<(u32, u32)>,
-    /// Global composed-terminal domain owned by this component.  When a
-    /// retained dynamic component is projected at the synthetic union root,
-    /// the root is live only if the current composed parser frontier can
-    /// actually advance into this component.  Keeping the domain prebuilt
-    /// makes that token-start entry test one exact bitset admission query.
-    pub(crate) root_entry_terminals: BitSet,
     /// Legacy v22 compatibility metadata. New authoritative A+B compositions
     /// leave this `None`: component parser DWAs keep their standalone semantics
     /// unchanged, and scope/link behavior lives in the composed parser view/B.
