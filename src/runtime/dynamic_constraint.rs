@@ -15,14 +15,16 @@ use crate::runtime::{Constraint, ConstraintState, DynamicMaskVocab, SpecialToken
 const DYNAMIC_CONSTRAINT_MAGIC: [u8; 8] = *b"GLRDYN\0\0";
 const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V12: u16 = 12;
 const PREVIOUS_DYNAMIC_CONSTRAINT_VERSION: u16 = 13;
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 14;
+const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14: u16 = 14;
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 15;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
 const DYNAMIC_TRANSFER_VERSION_V2: u16 = 2;
 const DYNAMIC_TRANSFER_VERSION_V3: u16 = 3;
 const DYNAMIC_TRANSFER_VERSION_V4: u16 = 4;
-const DYNAMIC_TRANSFER_VERSION: u16 = 5;
+const LEGACY_DYNAMIC_TRANSFER_VERSION_V5: u16 = 5;
+const DYNAMIC_TRANSFER_VERSION: u16 = 6;
 
 mod compressed_terminal_exprs_serde {
     use super::Expr;
@@ -953,7 +955,10 @@ impl DynamicConstraint {
         Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
     }
 
-    fn from_payload_v4(payload: DynamicConstraintPayloadV4) -> crate::Result<Self> {
+    fn from_payload_v4(
+        payload: DynamicConstraintPayloadV4,
+        allow_legacy_exact_dead_residual_roots: bool,
+    ) -> crate::Result<Self> {
         let mut alternatives = Vec::with_capacity(payload.alternatives.len());
         for mut alternative in payload.alternatives {
             let exprs = alternative.v2.v1.terminal_exprs.clone();
@@ -964,6 +969,7 @@ impl DynamicConstraint {
                 .restore_terminal_exprs_with_virtual_runtime_metadata(
                     exprs,
                     &alternative.virtual_runtimes,
+                    allow_legacy_exact_dead_residual_roots,
                 )
                 .map_err(crate::GlrMaskError::Serialization)?;
             alternatives.push(Self::from_payload_v2(alternative.v2));
@@ -1056,6 +1062,7 @@ impl DynamicConstraint {
                 | DYNAMIC_TRANSFER_VERSION_V2
                 | DYNAMIC_TRANSFER_VERSION_V3
                 | DYNAMIC_TRANSFER_VERSION_V4
+                | LEGACY_DYNAMIC_TRANSFER_VERSION_V5
                 | DYNAMIC_TRANSFER_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -1077,12 +1084,19 @@ impl DynamicConstraint {
                 "invalid dynamic transfer artifact payload length".to_owned(),
             ));
         }
-        let exact_virtual_metadata = version == DYNAMIC_TRANSFER_VERSION;
+        let exact_virtual_metadata = matches!(
+            version,
+            LEGACY_DYNAMIC_TRANSFER_VERSION_V5 | DYNAMIC_TRANSFER_VERSION
+        );
+        let allow_legacy_exact_dead_residual_roots =
+            version == LEGACY_DYNAMIC_TRANSFER_VERSION_V5;
         let payload = match version {
-            DYNAMIC_TRANSFER_VERSION => bincode::deserialize::<DynamicConstraintTransferPayloadV2>(
-                &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
-            )
-            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?,
+            LEGACY_DYNAMIC_TRANSFER_VERSION_V5 | DYNAMIC_TRANSFER_VERSION => {
+                bincode::deserialize::<DynamicConstraintTransferPayloadV2>(
+                    &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
+                )
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+            }
             DYNAMIC_TRANSFER_VERSION_V4 => {
                 let legacy = bincode::deserialize::<DynamicConstraintTransferPayloadV1>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
@@ -1180,6 +1194,7 @@ impl DynamicConstraint {
                         .restore_terminal_exprs_with_virtual_runtime_metadata(
                             exprs,
                             &alternative.virtual_runtimes,
+                            allow_legacy_exact_dead_residual_roots,
                         )
                         .map_err(crate::GlrMaskError::Serialization)?;
                 }
@@ -1244,6 +1259,7 @@ impl DynamicConstraint {
                 | 11
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V12
                 | PREVIOUS_DYNAMIC_CONSTRAINT_VERSION
+                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14
                 | DYNAMIC_CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -1324,11 +1340,17 @@ impl DynamicConstraint {
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 Self::from_payload_v3(payload)
             }
+            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14 => {
+                let payload: DynamicConstraintPayloadV4 =
+                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
+                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                Self::from_payload_v4(payload, true)
+            }
             DYNAMIC_CONSTRAINT_VERSION => {
                 let payload: DynamicConstraintPayloadV4 =
                     bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-                Self::from_payload_v4(payload)
+                Self::from_payload_v4(payload, false)
             }
             _ => unreachable!("version was validated above"),
         }
@@ -1693,7 +1715,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_standalone_virtual_unit_v14_and_transfer_v5_round_trip() {
+    fn dynamic_standalone_virtual_unit_v15_and_transfer_v6_round_trip() {
         let vocab = Vocab::new(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
@@ -1738,6 +1760,20 @@ mod tests {
             assert_eq!(loaded_state.mask(), original.mask());
             assert_eq!(transferred_state.mask(), original.mask());
         }
+
+        // v14/v5 use the same payload schema but the historical exact-root
+        // future policy. Current metadata must still load through those
+        // provenance-gated branches.
+        let mut legacy_saved = saved.clone();
+        legacy_saved[8..10].copy_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14.to_le_bytes());
+        let legacy_loaded = DynamicConstraint::load(&legacy_saved).unwrap();
+        assert_eq!(legacy_loaded.start().mask(), constraint.start().mask());
+
+        let mut legacy_transfer = transfer.clone();
+        legacy_transfer[8..10].copy_from_slice(&LEGACY_DYNAMIC_TRANSFER_VERSION_V5.to_le_bytes());
+        let legacy_transferred =
+            DynamicConstraint::load_with_vocab(&legacy_transfer, &vocab).unwrap();
+        assert_eq!(legacy_transferred.start().mask(), constraint.start().mask());
     }
 
     #[test]
@@ -3569,7 +3605,7 @@ mod tests {
                 .inner
                 .tokenizer
                 .has_virtual_binary_repeat_intersection(),
-            "v5 transfer load must reconstruct all shared lazy repeat runtimes",
+            "v6 transfer load must reconstruct all shared lazy repeat runtimes",
         );
         assert_eq!(dynamic.start().mask(), transferred.start().mask());
         for token in [0u32, 1] {

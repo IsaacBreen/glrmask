@@ -6355,6 +6355,7 @@ impl Tokenizer {
         &mut self,
         exprs: Option<Vec<Expr>>,
         metadata: &[VirtualTokenizerRuntimeMetadata],
+        allow_legacy_exact_dead_residual_roots: bool,
     ) -> Result<(), String> {
         self.restore_terminal_exprs_only(exprs)?;
         self.virtual_unit_repeat = None;
@@ -6504,6 +6505,7 @@ impl Tokenizer {
                 })?,
             );
             let mut runtimes = Vec::with_capacity(metadata.len());
+            let mut legacy_exact_dead_roots = Vec::<(u32, TerminalID, BitSet)>::new();
             for (runtime_index, entry) in metadata.into_iter().enumerate() {
                 let expression = expressions
                     .get(entry.terminal as usize)
@@ -6535,13 +6537,38 @@ impl Tokenizer {
                     expected_future.set(entry.terminal as usize);
                 }
                 if self.state_futures(entry.root_state) != &expected_future {
-                    return Err(format!(
-                        "serialized residual root {} has inconsistent future metadata",
+                    // Residual artifacts written before conservative root
+                    // futures were introduced stored the exact root liveness
+                    // bit. Accept only that one legacy mismatch: current
+                    // metadata is conservatively live, the serialized root is
+                    // dead, and an exact residual query proves the root really
+                    // has no positive continuation. Any missing bit for a live
+                    // root (or any other bit mismatch) remains corruption.
+                    let serialized_root_future = self.state_futures(entry.root_state).clone();
+                    let legacy_exact_dead = allow_legacy_exact_dead_residual_roots
+                        && runtime.root_has_future()
+                        && serialized_root_future.is_empty()
+                        && !self.state_futures(start_state).contains(entry.terminal as usize)
+                        && runtime.exact_has_future(entry.root_state)? == Some(false);
+                    if !legacy_exact_dead {
+                        return Err(format!(
+                            "serialized residual root {} has inconsistent future metadata",
+                            entry.root_state,
+                        ));
+                    }
+                    legacy_exact_dead_roots.push((
                         entry.root_state,
+                        entry.terminal,
+                        expected_future.clone(),
                     ));
                 }
                 if runtime.root_has_future()
                     && !self.state_futures(start_state).contains(entry.terminal as usize)
+                    && !legacy_exact_dead_roots
+                        .iter()
+                        .any(|&(root, terminal, _)| {
+                            root == entry.root_state && terminal == entry.terminal
+                        })
                 {
                     return Err(format!(
                         "serialized residual terminal {} is missing from reset-state futures",
@@ -6549,6 +6576,24 @@ impl Tokenizer {
                     ));
                 }
                 runtimes.push(runtime);
+            }
+            if !legacy_exact_dead_roots.is_empty() {
+                let start_finalizers = self.state_finalizers(start_state).clone();
+                let mut start_futures = self.state_futures(start_state).clone();
+                for (root_state, terminal, expected_future) in legacy_exact_dead_roots {
+                    let root_finalizers = self.state_finalizers(root_state).clone();
+                    self.dfa.overwrite_state_metadata(
+                        root_state,
+                        root_finalizers,
+                        expected_future,
+                    );
+                    start_futures.set(terminal as usize);
+                }
+                self.dfa.overwrite_state_metadata(
+                    start_state,
+                    start_finalizers,
+                    start_futures,
+                );
             }
             self.virtual_residuals = runtimes;
             self.invalidate_derived_caches();
@@ -6939,7 +6984,8 @@ impl Tokenizer {
     /// residuals deliberately expose a conservative infallible future bitset,
     /// so they are resolved through their bounded exact derivative search here.
     /// Resource exhaustion is an error rather than a false dead/live answer.
-    pub(crate) fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
+    #[doc(hidden)]
+    pub fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
         if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
             return runtime
                 .exact_has_future(state)?
@@ -10065,6 +10111,7 @@ mod tests {
             .restore_terminal_exprs_with_virtual_runtime_metadata(
                 Some(vec![expression]),
                 &metadata,
+                false,
             )
             .unwrap_err();
         assert!(
@@ -10075,6 +10122,154 @@ mod tests {
             loaded.virtual_unit_repeat.is_none(),
             "failed exact restoration must not leave a reconstructed sidecar installed",
         );
+    }
+
+    #[test]
+    fn residual_runtime_restore_migrates_legacy_exact_dead_root_futures() {
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: Some(10_000),
+                },
+                bytes(b"b"),
+            ])),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 0,
+                max: None,
+            }),
+        };
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("dead Boolean residual must install conservatively");
+        let metadata = original.virtual_runtime_metadata();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].kind, VirtualTokenizerRuntimeKind::ResidualExpr);
+        let root = metadata[0].root_state;
+        assert!(original.state_futures(root).contains(0));
+        assert_eq!(original.exact_dynamic_state_has_future(root).unwrap(), false);
+
+        let mut loaded = serialized_roundtrip(&original);
+        assert!(!loaded.has_packed_runtime_metadata());
+        // Pre-conservative artifacts stored the exact-dead root as future=false
+        // and consequently omitted that terminal from the reset-state future
+        // set as well.
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                true,
+            )
+            .expect("exact-dead legacy residual metadata must migrate");
+        assert!(loaded.has_virtual_residual_runtime());
+        assert!(loaded.state_futures(root).contains(0));
+        assert!(loaded.state_futures(start).contains(0));
+        assert_eq!(loaded.exact_dynamic_state_has_future(root).unwrap(), false);
+    }
+
+    #[test]
+    fn residual_runtime_restore_rejects_exact_dead_root_without_legacy_provenance() {
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: Some(10_000),
+                },
+                bytes(b"b"),
+            ])),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 0,
+                max: None,
+            }),
+        };
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("dead Boolean residual must install conservatively");
+        let metadata = original.virtual_runtime_metadata();
+        let root = metadata[0].root_state;
+
+        let mut loaded = serialized_roundtrip(&original);
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        let error = loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("inconsistent future metadata"),
+            "current-version exact-dead corruption must not be mistaken for legacy metadata: {error}",
+        );
+        assert!(loaded.virtual_residuals.is_empty());
+    }
+
+    #[test]
+    fn residual_runtime_restore_rejects_missing_future_for_live_root() {
+        let expression = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"aa")])),
+                min: 0,
+                max: Some(10_000),
+            },
+            bytes(b"z"),
+        ]);
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("live residual must install");
+        let metadata = original.virtual_runtime_metadata();
+        let root = metadata[0].root_state;
+        assert_eq!(original.exact_dynamic_state_has_future(root).unwrap(), true);
+
+        let mut loaded = serialized_roundtrip(&original);
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        let error = loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("inconsistent future metadata"),
+            "unexpected restoration error: {error}",
+        );
+        assert!(loaded.virtual_residuals.is_empty());
     }
 
     #[test]
