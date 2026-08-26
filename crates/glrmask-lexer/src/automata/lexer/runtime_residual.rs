@@ -752,17 +752,26 @@ impl VirtualResidualRuntime {
         self.state_owners.owner_index(state)
     }
 
+    fn step_residual_locked(
+        &self,
+        store: &mut ResidualRuntimeStore,
+        residual: ResidualId,
+        byte: u8,
+    ) -> Option<u32> {
+        let target = store.arena.step(residual, byte)?;
+        if store.arena.is_empty(target) {
+            return None;
+        }
+        self.intern_locked(store, target)
+    }
+
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
         if state == self.root_state && !self.root_has_future {
             return None;
         }
         let mut store = self.store.lock().unwrap();
         let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let target = store.arena.step(residual, byte)?;
-        if store.arena.is_empty(target) {
-            return None;
-        }
-        self.intern_locked(&mut store, target)
+        self.step_residual_locked(&mut store, residual, byte)
     }
 
     fn observation(&self, state: u32) -> Option<(bool, bool)> {
@@ -814,14 +823,15 @@ impl VirtualResidualRuntime {
         if !self.handles_state(state) {
             return None;
         }
-        let bytes = {
-            let mut store = self.store.lock().unwrap();
-            let residual = Self::residual_for_state(&store, self.root_state, state)?;
-            store.arena.first_bytes(residual)?
-        };
+        if state == self.root_state && !self.root_has_future {
+            return Some(Vec::new());
+        }
+        let mut store = self.store.lock().unwrap();
+        let residual = Self::residual_for_state(&store, self.root_state, state)?;
+        let bytes = store.arena.first_bytes(residual)?;
         let mut out = Vec::new();
         for byte in bytes.iter() {
-            if let Some(target) = self.step(state, byte) {
+            if let Some(target) = self.step_residual_locked(&mut store, residual, byte) {
                 out.push((byte, target));
             }
         }

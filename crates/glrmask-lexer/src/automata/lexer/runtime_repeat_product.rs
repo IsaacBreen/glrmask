@@ -847,9 +847,13 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         self.state_owners.owner_index(state)
     }
 
-    pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        let mut store = self.store.lock().unwrap();
-        let residual = self.residual_for_state_locked(&store, state)?;
+    fn step_locked(
+        &self,
+        store: &mut LazyProductStore,
+        state: u32,
+        residual: ProductResidual,
+        byte: u8,
+    ) -> Option<u32> {
         let cached = if state == self.root_state {
             store
                 .root_transitions
@@ -876,6 +880,12 @@ impl VirtualBinaryRepeatIntersectionRuntime {
             store.transitions[index].push((byte, target));
         }
         (target != DEAD_TRANSITION).then_some(target)
+    }
+
+    pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        let mut store = self.store.lock().unwrap();
+        let residual = self.residual_for_state_locked(&store, state)?;
+        self.step_locked(&mut store, state, residual, byte)
     }
 
     fn component_accepting(spec: &VirtualBoundedRepeatSpec, residual: RepeatResidual) -> bool {
@@ -918,9 +928,11 @@ impl VirtualBinaryRepeatIntersectionRuntime {
         if !self.handles_state(state) {
             return None;
         }
+        let mut store = self.store.lock().unwrap();
+        let residual = self.residual_for_state_locked(&store, state)?;
         let mut transitions = Vec::new();
         for byte in self.byte_support.iter() {
-            if let Some(target) = self.step(state, byte) {
+            if let Some(target) = self.step_locked(&mut store, state, residual, byte) {
                 transitions.push((byte, target));
             }
         }
