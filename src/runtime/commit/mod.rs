@@ -976,10 +976,12 @@ pub(super) fn advance_special_token_paths(
     state: &ParserStateMap,
     token_id: u32,
 ) -> Option<ParserGSS> {
-    let initial_state = constraint.runtime_commit_initial_state();
     let mut merged = None::<ParserGSS>;
 
-    for initial_gss in state.values_for_key(initial_state) {
+    for (&initial_state, initial_gss) in state.iter() {
+        if !runtime_tokenizer_is_reset_state(constraint, initial_state) {
+            continue;
+        }
         for special in constraint
             .special_token_terminals
             .iter()
@@ -1027,10 +1029,12 @@ fn advance_special_token_paths_profiled(
 ) -> SpecialTokenAdvanceProfile {
     use std::time::Instant;
 
-    let initial_state = constraint.runtime_commit_initial_state();
     let mut result = SpecialTokenAdvanceProfile::default();
 
-    for initial_gss in state.values_for_key(initial_state) {
+    for (&initial_state, initial_gss) in state.iter() {
+        if !runtime_tokenizer_is_reset_state(constraint, initial_state) {
+            continue;
+        }
         for special in constraint
             .special_token_terminals
             .iter()
@@ -1103,12 +1107,26 @@ fn merge_special_token_paths(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     special_paths: Option<ParserGSS>,
-) {
+) -> Result<(), String> {
     let Some(gss) = special_paths.filter(|gss| !gss.is_empty()) else {
-        return;
+        return Ok(());
     };
-    let initial_state = constraint.runtime_commit_initial_state();
-    state.merge_insert(initial_state, gss);
+    if !constraint.uses_compact_segmented_parser_runtime() {
+        state.merge_insert(constraint.runtime_commit_initial_state(), gss);
+        return Ok(());
+    }
+    let partitions = constraint
+        .partition_recursive_parser_gss_by_active_leaf(&gss)
+        .ok_or_else(|| "recursive special-token reset routing failed".to_owned())?;
+    for (leaf_index, partition) in partitions {
+        let reset_state = constraint
+            .recursive_tokenizer_reset_state(leaf_index)
+            .ok_or_else(|| {
+                format!("recursive special-token leaf {leaf_index} has no tokenizer reset")
+            })?;
+        state.merge_insert(reset_state, partition);
+    }
+    Ok(())
 }
 
 fn finish_token_commit(state: &ParserStateMap) -> Result<(), String> {
@@ -1339,7 +1357,7 @@ fn commit_token_impl(
     } else {
         state.clear();
     }
-    merge_special_token_paths(constraint, state, special_paths);
+    merge_special_token_paths(constraint, state, special_paths)?;
     maybe_normalize_lookahead_invariant_reductions(constraint, state);
     coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
@@ -1393,7 +1411,7 @@ fn commit_token_no_fast_path_reference(
     } else {
         state.clear();
     }
-    merge_special_token_paths(constraint, state, special_paths);
+    merge_special_token_paths(constraint, state, special_paths)?;
     coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
 }
@@ -7871,10 +7889,13 @@ impl<'a> ConstraintState<'a> {
             CommitProfile::default()
         };
         apply_special_token_advance_profile(&mut profile, &special);
-        merge_special_token_paths(constraint, &mut self.state, special.paths);
+        let special_merge_result =
+            merge_special_token_paths(constraint, &mut self.state, special.paths);
         coalesce_uniform_runtime_source_states(constraint, &mut self.state);
         profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
-        let result = finish_token_commit(&self.state).map(|()| profile);
+        let result = special_merge_result
+            .and_then(|()| finish_token_commit(&self.state))
+            .map(|()| profile);
         self.generation += 1;
         assert_commit_oracles(
             constraint,
@@ -7939,10 +7960,12 @@ impl<'a> ConstraintState<'a> {
             CommitProfile::default()
         };
         apply_special_token_advance_profile(&mut profile, &special);
-        merge_special_token_paths(constraint, &mut self.state, special.paths);
+        let special_merge_result =
+            merge_special_token_paths(constraint, &mut self.state, special.paths);
         coalesce_uniform_runtime_source_states(constraint, &mut self.state);
         profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
-        let result = finish_token_commit(&self.state)
+        let result = special_merge_result
+            .and_then(|()| finish_token_commit(&self.state))
             .map(|()| (advances, final_stacks(&self.state), profile));
         self.generation += 1;
         assert_commit_oracles(

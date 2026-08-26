@@ -1925,6 +1925,40 @@ mod tests {
     }
 
     #[test]
+    fn recursive_special_token_routes_through_active_child_leaf_and_returns_to_parent() {
+        let vocab = Vocab::new(vec![(0, b"X".to_vec()), (1, b"!".to_vec())]);
+        let child = RuntimeConstraint::compile(
+            Grammar::glrm("start child; nt child ::= @token(100);"),
+            &vocab,
+        )
+        .unwrap();
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = parent.bind_grammar("child", child).unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+
+        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        for constraint in [&bound, &loaded] {
+            let mut state = constraint.start();
+            state.commit_token(0).unwrap();
+            let mask = state.mask();
+            assert_ne!(mask[100 / 32] & (1u32 << (100 % 32)), 0);
+
+            state.commit_token(100).unwrap();
+            let mask = state.mask();
+            assert_ne!(mask[1 / 32] & (1u32 << (1 % 32)), 0);
+
+            state.commit_token(1).unwrap();
+            assert!(state.is_accepting());
+        }
+    }
+
+    #[test]
     fn nested_static_boundaries_use_recursive_parser_coordinate_live_and_loaded() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
