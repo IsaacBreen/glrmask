@@ -942,6 +942,8 @@ impl VirtualResidualRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     fn bytes(value: &[u8]) -> Expr {
         Expr::U8Seq(value.to_vec())
@@ -952,6 +954,85 @@ mod tests {
             state = arena.step(state, byte).unwrap();
         }
         arena.is_nullable(state)
+    }
+
+    fn materialized_accepts(dfa: &DFA, input: &[u8]) -> bool {
+        let mut state = 0;
+        for &byte in input {
+            let Some(target) = dfa.step(state, byte) else {
+                return false;
+            };
+            state = target;
+        }
+        dfa.finalizers(state).contains(0)
+    }
+
+    fn random_small_expr(rng: &mut StdRng, depth: usize) -> Expr {
+        let atom = |rng: &mut StdRng| match rng.gen_range(0..4) {
+            0 => Expr::U8Seq(vec![b'a' + rng.gen_range(0..3)]),
+            1 => Expr::U8Seq(
+                (0..rng.gen_range(1..=3))
+                    .map(|_| b'a' + rng.gen_range(0..3))
+                    .collect(),
+            ),
+            2 => Expr::U8Class(U8Set::from_bytes(match rng.gen_range(0..3) {
+                0 => b"ab",
+                1 => b"bc",
+                _ => b"abc",
+            })),
+            _ => Expr::Epsilon,
+        };
+
+        if depth == 0 {
+            return atom(rng);
+        }
+        match rng.gen_range(0..9) {
+            0..=2 => atom(rng),
+            3 => Expr::Choice(vec![
+                random_small_expr(rng, depth - 1),
+                random_small_expr(rng, depth - 1),
+            ]),
+            4 => Expr::Seq(vec![
+                random_small_expr(rng, depth - 1),
+                random_small_expr(rng, depth - 1),
+            ]),
+            5 => Expr::Repeat {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                min: rng.gen_range(0..=2),
+                max: Some(rng.gen_range(2..=4)),
+            },
+            6 => Expr::Repeat {
+                expr: Box::new(atom(rng)),
+                min: rng.gen_range(0..=1),
+                max: None,
+            },
+            7 => Expr::Exclude {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                exclude: Box::new(random_small_expr(rng, depth - 1)),
+            },
+            _ => Expr::Intersect {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                intersect: Box::new(random_small_expr(rng, depth - 1)),
+            },
+        }
+    }
+
+    fn all_words(alphabet: &[u8], max_len: usize) -> Vec<Vec<u8>> {
+        let mut words = vec![Vec::new()];
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in frontier {
+                for &byte in alphabet {
+                    let mut word = prefix.clone();
+                    word.push(byte);
+                    words.push(word.clone());
+                    next.push(word);
+                }
+            }
+            frontier = next;
+        }
+        words
     }
 
     #[test]
@@ -1139,6 +1220,32 @@ mod tests {
         };
         let (arena, root) = ResidualArena::from_expr(&excluded).unwrap();
         assert!(arena.is_empty(root));
+    }
+
+    #[test]
+    fn seeded_residual_algebra_matches_materialized_dfa() {
+        let mut rng = StdRng::seed_from_u64(0x5E51_DA1A_2026_0826);
+        let words = all_words(b"abc", 4);
+        for case in 0..256 {
+            let expr = random_small_expr(&mut rng, 3);
+            let dfa = super::super::compile::compile_terminal_expr_dfa(&expr);
+            let (mut arena, root) = ResidualArena::from_expr(&expr)
+                .unwrap_or_else(|| panic!("residual compilation failed for case {case}: {expr:?}"));
+
+            for word in &words {
+                assert_eq!(
+                    accepts(&mut arena, root, word),
+                    materialized_accepts(&dfa, word),
+                    "residual/materialized language mismatch in case {case}, expr={expr:?}, word={word:?}",
+                );
+            }
+
+            assert_eq!(
+                arena.has_future(root).unwrap(),
+                dfa.possible_future_group_ids(0).contains(0),
+                "residual/materialized root liveness mismatch in case {case}, expr={expr:?}",
+            );
+        }
     }
 
     #[test]
