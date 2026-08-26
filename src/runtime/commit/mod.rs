@@ -1436,23 +1436,18 @@ fn batched_end_state_admitted_terminals(
     end_states: &[u32],
 ) -> Option<crate::ds::bitset::BitSet> {
     let initial = constraint.runtime_commit_initial_state();
-    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if end_state == initial {
             continue;
         }
         non_initial += 1;
-        let future = constraint.tokenizer.possible_future_terminals(end_state);
-        match &mut candidates {
-            Some(acc) => acc.union_with(future),
-            None => candidates = Some(future.clone()),
-        }
+        candidates.union_with_prefix(constraint.tokenizer.possible_future_terminals(end_state));
     }
     if non_initial <= 1 {
         return None;
     }
-    let candidates = candidates?;
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
         let mut admitted = candidates;
         admitted.intersect_with(&direct);
@@ -1636,23 +1631,18 @@ fn cached_batched_end_state_admission(
     cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> Option<usize> {
     let initial = constraint.runtime_commit_initial_state();
-    let mut candidates: Option<crate::ds::bitset::BitSet> = None;
+    let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
         if end_state == initial {
             continue;
         }
         non_initial += 1;
-        let future = constraint.tokenizer.possible_future_terminals(end_state);
-        match &mut candidates {
-            Some(acc) => acc.union_with(future),
-            None => candidates = Some(future.clone()),
-        }
+        candidates.union_with_prefix(constraint.tokenizer.possible_future_terminals(end_state));
     }
     if non_initial <= 1 {
         return None;
     }
-    let candidates = candidates?;
     let index = admission_cache_entry_index(cache, gss, candidates.len());
     let delta = candidates.difference(&cache[index].tested);
     if !delta.is_empty() {

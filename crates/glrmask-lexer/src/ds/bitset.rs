@@ -124,6 +124,20 @@ impl BitSet {
         }
     }
 
+    /// Union a bitset whose domain is a prefix of this bitset's domain.
+    ///
+    /// Structural tokenizer composition may deliberately retain historical
+    /// component metadata rows at their smaller local terminal width. Once
+    /// those rows are observed through the composed tokenizer, all omitted
+    /// higher terminal IDs are semantically false. This operation preserves
+    /// that representation without eagerly widening every historical row.
+    pub fn union_with_prefix(&mut self, other: &BitSet) {
+        debug_assert!(other.len <= self.len);
+        for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
+            *lhs |= *rhs;
+        }
+    }
+
     /// Union `other` into this set and report whether any bit was newly added.
     /// This avoids allocating the delta when callers need only fixed-point
     /// scheduling information.

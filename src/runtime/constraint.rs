@@ -906,7 +906,7 @@ fn build_dynamic_reset_effect_rows(
         let execution = tokenizer.execute_from_state_all_widths(&bytes, tokenizer.start_state());
         let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
         for &end_state in &execution.end_state {
-            futures.union_with(tokenizer.possible_future_terminals(end_state));
+            futures.union_with_prefix(tokenizer.possible_future_terminals(end_state));
         }
         for future_terminal in futures.iter_ones() {
             residual_by_terminal
@@ -2674,7 +2674,7 @@ impl Constraint {
                 ) -> BitSet {
                     let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
                     for &state in config {
-                        futures.union_with(tokenizer.possible_future_terminals(state));
+                        futures.union_with_prefix(tokenizer.possible_future_terminals(state));
                     }
                     futures
                 }
@@ -2835,7 +2835,7 @@ impl Constraint {
                     fn config_futures(tokenizer: &Tokenizer, config: &[u32]) -> BitSet {
                         let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
                         for &state in config {
-                            futures.union_with(tokenizer.possible_future_terminals(state));
+                            futures.union_with_prefix(tokenizer.possible_future_terminals(state));
                         }
                         futures
                     }
@@ -3770,7 +3770,7 @@ impl Constraint {
                     }
                     let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
                     for &end_state in &reset_execution.end_state {
-                        futures.union_with(self.tokenizer.possible_future_terminals(end_state));
+                        futures.union_with_prefix(self.tokenizer.possible_future_terminals(end_state));
                     }
                     if futures.is_empty() {
                         known_reject += 1;
@@ -3857,7 +3857,7 @@ impl Constraint {
                         );
                         let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
                         for &end_state in &execution.end_state {
-                            futures.union_with(tokenizer.possible_future_terminals(end_state));
+                            futures.union_with_prefix(tokenizer.possible_future_terminals(end_state));
                         }
                         for future_terminal in futures.iter_ones() {
                             residual_by_terminal
