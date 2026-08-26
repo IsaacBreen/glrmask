@@ -24634,7 +24634,15 @@ constraint: &third,
         assert_accepts(&composed, valid);
         assert_rejects(&composed, b"<ab>a!");
 
+        assert!(
+            segmented.uses_compact_segmented_parser_runtime(),
+            "source-built dynamic composition should use compact parser coordinates",
+        );
         let loaded_segmented = Constraint::load(&segmented.save()).unwrap();
+        assert!(
+            !loaded_segmented.uses_compact_segmented_parser_runtime(),
+            "legacy serialized runtime intentionally keeps the composed-table coordinate",
+        );
         for constraint in [&segmented, &loaded_segmented] {
             let mut expected = monolithic.start();
             let mut actual = constraint.start();
