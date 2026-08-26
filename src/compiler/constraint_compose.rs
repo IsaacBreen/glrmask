@@ -521,6 +521,80 @@ struct DirectComponentStateCoordinates {
     local_to_global_tsids: Vec<Vec<Vec<u32>>>,
 }
 
+fn build_recursive_tokenizer_internal_tsid_relation(
+    constraint: &Constraint,
+    component_maps: &[DirectComponentCoordinateMaps],
+) -> Result<Vec<Vec<u32>>, String> {
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "recursive tokenizer TSID relation requires recursive layout".to_owned())?;
+    let overlay = constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .ok_or_else(|| "recursive tokenizer TSID relation requires segmented overlay".to_owned())?;
+    if component_maps.len() != overlay.segmented_parser_components.len() {
+        return Err(format!(
+            "recursive tokenizer TSID component-map count mismatch: maps={} components={}",
+            component_maps.len(),
+            overlay.segmented_parser_components.len(),
+        ));
+    }
+
+    let mut relation = Vec::with_capacity(layout.total_tokenizer_states as usize);
+    for scoped_state in 0..layout.total_tokenizer_states {
+        let (leaf_index, _) = constraint
+            .recursive_tokenizer_leaf_state(scoped_state)
+            .ok_or_else(|| format!("recursive tokenizer state {scoped_state} has no leaf"))?;
+        let leaf = layout
+            .leaves
+            .get(leaf_index)
+            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} is missing"))?;
+        let owner = *leaf
+            .component_path
+            .first()
+            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has empty path"))?
+            as usize;
+        let component = overlay
+            .segmented_parser_components
+            .get(owner)
+            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has invalid owner {owner}"))?;
+        let component_state = constraint
+            .recursive_tokenizer_state_for_component(owner, scoped_state)
+            .ok_or_else(|| {
+                format!(
+                    "recursive tokenizer state {scoped_state} does not project to owner component {owner}"
+                )
+            })?;
+        let local_tsids = component
+            .constraint
+            .runtime_internal_tsids_for_tokenizer_state(component_state)
+            .ok_or_else(|| {
+                format!(
+                    "recursive tokenizer state {scoped_state} projects to component {owner} state {component_state} without a TSID image"
+                )
+            })?;
+        let map = &component_maps[owner].local_to_global_tsids;
+        let mut global_tsids = Vec::new();
+        for local_tsid in local_tsids {
+            let targets = map.get(local_tsid as usize).ok_or_else(|| {
+                format!(
+                    "component {owner} TSID {local_tsid} lies outside its composition map"
+                )
+            })?;
+            global_tsids.extend_from_slice(targets);
+        }
+        global_tsids.sort_unstable();
+        global_tsids.dedup();
+        if global_tsids.is_empty() {
+            return Err(format!(
+                "recursive tokenizer state {scoped_state} has empty composed TSID image"
+            ));
+        }
+        relation.push(global_tsids);
+    }
+    Ok(relation)
+}
+
 /// Invert one component's local->global LR-state relation for runtime A
 /// projection. A local state may appear at several composed states (for
 /// example distinct call/ignore phases); that is harmless because each such
@@ -17984,6 +18058,7 @@ fn build_static_dynamic_overlay_metadata(
             segmented_parser_state_offsets: Vec::new(),
             recursive_parser_layout: Default::default(),
             recursive_states_by_materialized_state: Default::default(),
+            recursive_tokenizer_internal_tsids: Default::default(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
             segmented_component_union_root_dispatch: Vec::new(),
@@ -20872,7 +20947,8 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
-            recursive_states_by_materialized_state: Default::default(),
+                recursive_states_by_materialized_state: Default::default(),
+                recursive_tokenizer_internal_tsids: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -21179,6 +21255,13 @@ fn compose_constraints_owned_parent_impl(
                 .constraint
                 .recursive_parser_layout_for_pending_root()?
                 .expect("compact segmented runtime must have a recursive parser layout");
+            let recursive_tokenizer_tsids = build_recursive_tokenizer_internal_tsid_relation(
+                &result.constraint,
+                &automata_maps,
+            )?;
+            result
+                .constraint
+                .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_tsids)?;
             // Recursive wrapper intervals are now the authoritative component
             // ownership coordinate. The materialized composed-state dispatch
             // was useful only to certify the transitional deterministic-union
@@ -21348,7 +21431,8 @@ fn compose_constraints_owned_parent_impl(
                     segmented_parser_links: Vec::new(),
                     segmented_parser_state_offsets: Vec::new(),
                     recursive_parser_layout: Default::default(),
-            recursive_states_by_materialized_state: Default::default(),
+                    recursive_states_by_materialized_state: Default::default(),
+                    recursive_tokenizer_internal_tsids: Default::default(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
                     segmented_component_union_root_dispatch: Vec::new(),
@@ -21416,7 +21500,8 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
-            recursive_states_by_materialized_state: Default::default(),
+                recursive_states_by_materialized_state: Default::default(),
+                recursive_tokenizer_internal_tsids: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),

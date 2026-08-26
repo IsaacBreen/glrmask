@@ -1128,6 +1128,11 @@ fn finish_token_commit(state: &ParserStateMap) -> Result<(), String> {
 /// relation: compute one viable source subset from the merged group, and copy
 /// every original alternative across that common subset.
 fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStateMap) {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        // Recursive state keys are already exact disjoint-union leaf tokenizer
+        // states, not product states from the transitional outer tokenizer.
+        return;
+    }
     let Some(source_offset) = constraint.runtime_source_state_offset() else {
         return;
     };
@@ -1217,6 +1222,9 @@ fn coalesce_uniform_runtime_source_states(
     constraint: &Constraint,
     state: &mut ParserStateMap,
 ) {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        return;
+    }
     let Some(source_offset) = constraint.runtime_source_state_offset() else {
         return;
     };
@@ -1436,12 +1444,34 @@ fn assert_commit_fast_path_equivalence(
 }
 
 #[inline]
+fn runtime_tokenizer_is_reset_state(constraint: &Constraint, state: u32) -> bool {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        constraint.recursive_tokenizer_is_reset_state(state)
+    } else {
+        state == constraint.runtime_commit_initial_state()
+    }
+}
+
+#[inline]
+fn runtime_tokenizer_future_terminals(
+    constraint: &Constraint,
+    state: u32,
+) -> Option<&crate::ds::bitset::BitSet> {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        constraint.recursive_tokenizer_future_global_terminals(state)
+    } else {
+        Some(constraint.tokenizer.possible_future_terminals(state))
+    }
+}
+
+#[inline]
 fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
-    end_state == constraint.runtime_commit_initial_state()
+    runtime_tokenizer_is_reset_state(constraint, end_state)
         || parser_may_advance_on_any(
             constraint,
             gss,
-            constraint.tokenizer.possible_future_terminals(end_state),
+            runtime_tokenizer_future_terminals(constraint, end_state)
+                .expect("runtime tokenizer end state must belong to its active coordinate"),
         )
 }
 
@@ -1463,15 +1493,16 @@ fn batched_end_state_admitted_terminals(
     gss: &ParserGSS,
     end_states: &[u32],
 ) -> Option<crate::ds::bitset::BitSet> {
-    let initial = constraint.runtime_commit_initial_state();
     let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
-        if end_state == initial {
+        if runtime_tokenizer_is_reset_state(constraint, end_state) {
             continue;
         }
         non_initial += 1;
-        candidates.union_with_prefix(constraint.tokenizer.possible_future_terminals(end_state));
+        candidates.union_with_prefix(
+            runtime_tokenizer_future_terminals(constraint, end_state)?,
+        );
     }
     if non_initial <= 1 {
         return None;
@@ -1663,10 +1694,9 @@ fn end_state_may_advance_from_row_words(
     end_state: u32,
     admitted_words: &[u64; 32],
 ) -> bool {
-    end_state == constraint.runtime_commit_initial_state()
-        || constraint
-            .tokenizer
-            .possible_future_terminals(end_state)
+    runtime_tokenizer_is_reset_state(constraint, end_state)
+        || runtime_tokenizer_future_terminals(constraint, end_state)
+            .expect("runtime tokenizer end state must belong to its active coordinate")
             .words()
             .iter()
             .zip(admitted_words.iter())
@@ -1683,15 +1713,16 @@ fn cached_batched_end_state_admission(
     end_states: &[u32],
     cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> Option<usize> {
-    let initial = constraint.runtime_commit_initial_state();
     let mut candidates = crate::ds::bitset::BitSet::new(constraint.table.num_terminals as usize);
     let mut non_initial = 0usize;
     for &end_state in end_states {
-        if end_state == initial {
+        if runtime_tokenizer_is_reset_state(constraint, end_state) {
             continue;
         }
         non_initial += 1;
-        candidates.union_with_prefix(constraint.tokenizer.possible_future_terminals(end_state));
+        candidates.union_with_prefix(
+            runtime_tokenizer_future_terminals(constraint, end_state)?,
+        );
     }
     if non_initial <= 1 {
         return None;
@@ -1717,10 +1748,12 @@ fn cached_single_end_state_may_advance(
     end_state: u32,
     cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
 ) -> bool {
-    if end_state == constraint.runtime_commit_initial_state() {
+    if runtime_tokenizer_is_reset_state(constraint, end_state) {
         return true;
     }
-    let future = constraint.tokenizer.possible_future_terminals(end_state);
+    let Some(future) = runtime_tokenizer_future_terminals(constraint, end_state) else {
+        return false;
+    };
     let index = admission_cache_entry_index(cache, gss, future.len());
     {
         let entry = &cache[index];
@@ -1750,9 +1783,10 @@ fn end_state_may_advance_from_cache_entry(
     end_state: u32,
     entry: &ParserAdmissionCacheEntry,
 ) -> bool {
-    end_state == constraint.runtime_commit_initial_state()
+    runtime_tokenizer_is_reset_state(constraint, end_state)
         || !entry.admitted.is_disjoint_prefix(
-            constraint.tokenizer.possible_future_terminals(end_state),
+            runtime_tokenizer_future_terminals(constraint, end_state)
+                .expect("runtime tokenizer end state must belong to its active coordinate"),
         )
 }
 
@@ -1764,12 +1798,13 @@ fn end_state_may_advance_with_batch(
     end_state: u32,
     admitted: Option<&crate::ds::bitset::BitSet>,
 ) -> bool {
-    if end_state == constraint.runtime_commit_initial_state() {
+    if runtime_tokenizer_is_reset_state(constraint, end_state) {
         return true;
     }
     match admitted {
         Some(admitted) => !admitted.is_disjoint_prefix(
-            constraint.tokenizer.possible_future_terminals(end_state),
+            runtime_tokenizer_future_terminals(constraint, end_state)
+                .expect("runtime tokenizer end state must belong to its active coordinate"),
         ),
         None => end_state_may_advance(constraint, gss, end_state),
     }
@@ -2328,6 +2363,44 @@ fn queue_parser_state(
     } else {
         merge_parser_state(&mut processing_queue[new_offset], tokenizer_state, gss);
     }
+}
+
+fn queue_parser_reset_state(
+    constraint: &Constraint,
+    processing_queue: &mut [ParserStatesByTokenizer],
+    pending_state: &mut ParserStatesByTokenizer,
+    new_offset: usize,
+    total_len: usize,
+    gss: ParserGSS,
+) -> bool {
+    if !constraint.uses_compact_segmented_parser_runtime() {
+        queue_parser_state(
+            processing_queue,
+            pending_state,
+            new_offset,
+            total_len,
+            constraint.runtime_commit_initial_state(),
+            gss,
+        );
+        return true;
+    }
+    let Some(partitions) = constraint.partition_recursive_parser_gss_by_active_leaf(&gss) else {
+        return false;
+    };
+    for (leaf_index, partition) in partitions {
+        let Some(reset_state) = constraint.recursive_tokenizer_reset_state(leaf_index) else {
+            return false;
+        };
+        queue_parser_state(
+            processing_queue,
+            pending_state,
+            new_offset,
+            total_len,
+            reset_state,
+            partition,
+        );
+    }
+    true
 }
 
 fn finalize_pending_state(
@@ -5312,14 +5385,16 @@ fn commit_bytes_impl_profiled_inner(
 
                 if matched.ignored {
                     let enqueue_start = Instant::now();
-                    queue_parser_state(
+                    if !queue_parser_reset_state(
+                        constraint,
                         &mut processing_queue,
                         &mut pending_state,
                         new_offset,
                         bytes.len(),
-                        constraint.runtime_commit_initial_state(),
                         gss_at_offset.clone(),
-                    );
+                    ) {
+                        return Err("recursive tokenizer reset routing failed".to_owned());
+                    }
                     profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                     continue;
                 }
@@ -5372,14 +5447,16 @@ fn commit_bytes_impl_profiled_inner(
                 }
 
                 let enqueue_start = Instant::now();
-                queue_parser_state(
+                if !queue_parser_reset_state(
+                    constraint,
                     &mut processing_queue,
                     &mut pending_state,
                     new_offset,
                     bytes.len(),
-                    constraint.runtime_commit_initial_state(),
                     advanced,
-                );
+                ) {
+                    return Err("recursive tokenizer reset routing failed".to_owned());
+                }
                 profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
 
@@ -7558,14 +7635,16 @@ fn commit_bytes_impl_inner(
                 let new_offset = offset + matched.width;
 
                 if matched.ignored {
-                    queue_parser_state(
+                    if !queue_parser_reset_state(
+                        constraint,
                         &mut processing_queue,
                         &mut bufs.pending_state,
                         new_offset,
                         bytes.len(),
-                        constraint.runtime_commit_initial_state(),
                         gss_at_offset.clone(),
-                    );
+                    ) {
+                        return Err("recursive tokenizer reset routing failed".to_owned());
+                    }
                     continue;
                 }
 
@@ -7580,14 +7659,16 @@ fn commit_bytes_impl_inner(
                     continue;
                 };
 
-                queue_parser_state(
+                if !queue_parser_reset_state(
+                    constraint,
                     &mut processing_queue,
                     &mut bufs.pending_state,
                     new_offset,
                     bytes.len(),
-                    constraint.runtime_commit_initial_state(),
                     gss,
-                );
+                ) {
+                    return Err("recursive tokenizer reset routing failed".to_owned());
+                }
             }
 
             let admission_cache_index = cached_batched_end_state_admission(

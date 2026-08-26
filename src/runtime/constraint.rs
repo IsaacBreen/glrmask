@@ -2059,6 +2059,9 @@ impl Constraint {
             leaf_state_offsets,
             leaf_tokenizer_state_offsets,
             total_tokenizer_states: next_tokenizer_state,
+            tokenizer_future_globals: (0..next_tokenizer_state)
+                .map(|_| OnceLock::new())
+                .collect(),
             links,
             terminal_targets,
             leaf_terminal_globals,
@@ -2083,6 +2086,26 @@ impl Constraint {
             return Ok(None);
         }
         self.build_recursive_parser_layout_root_expanded().map(Some)
+    }
+
+    fn recursive_parser_layout_ref(&self) -> Option<&RecursiveParserLayout> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let initialized = self
+            .static_dynamic_overlay
+            .as_ref()?
+            .recursive_parser_layout
+            .get()
+            .is_some();
+        if !initialized {
+            self.build_recursive_parser_layout_root_expanded().ok()?;
+        }
+        self.static_dynamic_overlay
+            .as_ref()?
+            .recursive_parser_layout
+            .get()
+            .map(Arc::as_ref)
     }
 
     /// Compiler/load bridge used while a static boundary is still stored in
@@ -2136,6 +2159,121 @@ impl Constraint {
             .checked_add(local_state)
     }
 
+    /// Project one tokenizer state from this composition's recursive leaf
+    /// coordinate into an immediate component's own live tokenizer coordinate.
+    /// Intact components receive a raw local state; recursively composed
+    /// components receive the corresponding state in their own leaf union.
+    pub(crate) fn recursive_tokenizer_state_for_component(
+        &self,
+        component_index: usize,
+        scoped_state: u32,
+    ) -> Option<u32> {
+        let layout = self.recursive_parser_layout_ref()?;
+        if scoped_state >= layout.total_tokenizer_states {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_tokenizer_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)?;
+        let leaf_offset = *layout.leaf_tokenizer_state_offsets.get(leaf_index)?;
+        let local_state = scoped_state.checked_sub(leaf_offset)?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let (&owner, descendant_path) = leaf.component_path.split_first()?;
+        if owner as usize != component_index {
+            return None;
+        }
+
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        let component = overlay.segmented_parser_components.get(component_index)?;
+        let component_constraint = component.constraint.as_ref();
+        if !component_constraint.uses_compact_segmented_parser_runtime() {
+            if !descendant_path.is_empty()
+                || local_state >= component_constraint.tokenizer.num_states()
+            {
+                return None;
+            }
+            return Some(local_state);
+        }
+
+        let component_layout = component_constraint.recursive_parser_layout_ref()?;
+        let component_leaf_index = component_layout
+            .leaves
+            .iter()
+            .position(|candidate| candidate.component_path.as_slice() == descendant_path)?;
+        component_constraint.recursive_tokenizer_scoped_state(component_leaf_index, local_state)
+    }
+
+    /// Exact internal-TSID image of one live tokenizer state. Recursive
+    /// compositions use their persisted/derived leaf-state relation; intact
+    /// constraints use the ordinary tokenizer-state relation. Dynamic intact
+    /// constraints without a TSID quotient use raw tokenizer state as TSID.
+    pub(crate) fn runtime_internal_tsids_for_tokenizer_state(
+        &self,
+        tokenizer_state: u32,
+    ) -> Option<SmallVec<[u32; 4]>> {
+        if self.uses_compact_segmented_parser_runtime() {
+            return self
+                .static_dynamic_overlay
+                .as_ref()?
+                .recursive_tokenizer_internal_tsids
+                .get()?
+                .get(tokenizer_state as usize)
+                .map(|row| row.iter().copied().collect());
+        }
+        if self.state_to_internal_tsid.is_empty() && self.internal_tsid_to_states.is_empty() {
+            return (tokenizer_state < self.tokenizer.num_states())
+                .then(|| smallvec::smallvec![tokenizer_state]);
+        }
+        (tokenizer_state < self.tokenizer.num_states())
+            .then(|| self.internal_tsids_for_state(tokenizer_state).iter().copied().collect())
+    }
+
+    pub(crate) fn install_recursive_tokenizer_internal_tsids(
+        &mut self,
+        mut relation: Vec<Vec<u32>>,
+    ) -> Result<(), String> {
+        let layout = self
+            .recursive_parser_layout_for_pending_root()?
+            .ok_or_else(|| "recursive tokenizer TSID relation requires recursive runtime".to_owned())?;
+        if relation.len() != layout.total_tokenizer_states as usize {
+            return Err(format!(
+                "recursive tokenizer TSID relation has {} rows for {} scoped tokenizer states",
+                relation.len(),
+                layout.total_tokenizer_states,
+            ));
+        }
+        let tsid_count = self.internal_tsid_count();
+        for (state, row) in relation.iter_mut().enumerate() {
+            row.sort_unstable();
+            row.dedup();
+            if row.is_empty() {
+                return Err(format!(
+                    "recursive tokenizer state {state} has no internal TSID image"
+                ));
+            }
+            if let Some(&bad) = row.iter().find(|&&tsid| tsid as usize >= tsid_count) {
+                return Err(format!(
+                    "recursive tokenizer state {state} references out-of-range internal TSID {bad}/{tsid_count}"
+                ));
+            }
+        }
+        let overlay = self
+            .static_dynamic_overlay
+            .as_mut()
+            .ok_or_else(|| "recursive tokenizer TSID relation requires overlay".to_owned())?;
+        if let Some(existing) = overlay.recursive_tokenizer_internal_tsids.get() {
+            if existing.as_ref() != &relation {
+                return Err("recursive tokenizer TSID relation disagrees with existing view".to_owned());
+            }
+            return Ok(());
+        }
+        overlay
+            .recursive_tokenizer_internal_tsids
+            .set(Arc::new(relation))
+            .map_err(|_| "recursive tokenizer TSID relation initialized twice".to_owned())
+    }
+
     #[inline]
     pub(crate) fn recursive_tokenizer_reset_state(&self, leaf_index: usize) -> Option<u32> {
         let layout = self.recursive_parser_layout().ok().flatten()?;
@@ -2145,6 +2283,74 @@ impl Constraint {
             leaf_index,
             constraint.runtime_commit_initial_state(),
         )
+    }
+
+    pub(crate) fn recursive_tokenizer_is_reset_state(&self, scoped_state: u32) -> bool {
+        let Some(layout) = self.recursive_parser_layout_ref() else {
+            return false;
+        };
+        if scoped_state >= layout.total_tokenizer_states {
+            return false;
+        }
+        let Some(leaf_index) = layout
+            .leaf_tokenizer_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)
+        else {
+            return false;
+        };
+        let offset = layout.leaf_tokenizer_state_offsets[leaf_index];
+        let local_state = scoped_state - offset;
+        let Some(leaf) = layout.leaves.get(leaf_index) else {
+            return false;
+        };
+        let Some(constraint) = self.constraint_at_recursive_component_path(&leaf.component_path)
+        else {
+            return false;
+        };
+        local_state == constraint.runtime_commit_initial_state()
+    }
+
+    pub(crate) fn recursive_tokenizer_future_global_terminals(
+        &self,
+        scoped_state: u32,
+    ) -> Option<&BitSet> {
+        let layout = self.recursive_parser_layout_ref()?;
+        if scoped_state >= layout.total_tokenizer_states {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_tokenizer_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)?;
+        let offset = layout.leaf_tokenizer_state_offsets[leaf_index];
+        let local_state = scoped_state.checked_sub(offset)?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let leaf_constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        if local_state >= leaf_constraint.tokenizer.num_states() {
+            return None;
+        }
+        let cache = layout
+            .tokenizer_future_globals
+            .get(scoped_state as usize)?;
+        Some(cache.get_or_init(|| {
+            let local_future = leaf_constraint
+                .tokenizer
+                .possible_future_terminals(local_state);
+            let mut globals = BitSet::new(self.table.num_terminals as usize);
+            for local_terminal in local_future.iter_ones() {
+                if let Some(aliases) = layout
+                    .leaf_terminal_globals
+                    .get(leaf_index)
+                    .and_then(|row| row.get(local_terminal))
+                {
+                    for &global_terminal in aliases {
+                        globals.set(global_terminal as usize);
+                    }
+                }
+            }
+            globals
+        }))
     }
 
     #[inline]

@@ -503,6 +503,18 @@ impl<'a> ConstraintState<'a> {
     ///
     /// An accepting prefix may still admit additional tokens.
     pub fn is_accepting(&self) -> bool {
+        if self.constraint.uses_compact_segmented_parser_runtime() {
+            let Some(root_reset) = self.constraint.recursive_tokenizer_reset_state(0) else {
+                return false;
+            };
+            return self.state.values_for_key(root_reset).any(|stack| {
+                !stack.is_empty()
+                    && self
+                        .constraint
+                        .compact_segmented_parser_is_finished(stack)
+                        .unwrap_or(false)
+            });
+        }
         let product_initial = self.constraint.tokenizer.initial_state();
         let commit_initial = self.constraint.runtime_commit_initial_state();
         self.state

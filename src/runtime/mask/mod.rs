@@ -2564,9 +2564,17 @@ impl<'a> ConstraintState<'a> {
     /// pretending the product state itself is in component coordinates.
     fn segmented_local_tokenizer_states(
         &self,
+        component_index: usize,
         component: &crate::runtime::SegmentedParserComponent,
         global_state: u32,
     ) -> SmallVec<[u32; 8]> {
+        if self.constraint.uses_compact_segmented_parser_runtime() {
+            return self
+                .constraint
+                .recursive_tokenizer_state_for_component(component_index, global_state)
+                .into_iter()
+                .collect();
+        }
         let mut locals = SmallVec::<[u32; 8]>::new();
         let component_reset = component.constraint.runtime_commit_initial_state();
         let component_offset = component.tokenizer_state_offset;
@@ -2646,6 +2654,7 @@ impl<'a> ConstraintState<'a> {
 
     fn segmented_local_disallowed(
         &self,
+        component_index: usize,
         component: &crate::runtime::SegmentedParserComponent,
         source: &TerminalsDisallowed,
     ) -> TerminalsDisallowed {
@@ -2653,8 +2662,11 @@ impl<'a> ConstraintState<'a> {
         let terminal_end = terminal_start.saturating_add(component.constraint.table.num_terminals);
         let mut result = TerminalsDisallowed::new();
         for (global_tokenizer_state, terminals) in source.iter() {
-            let local_tokenizer_states =
-                self.segmented_local_tokenizer_states(component, *global_tokenizer_state);
+            let local_tokenizer_states = self.segmented_local_tokenizer_states(
+                component_index,
+                component,
+                *global_tokenizer_state,
+            );
             for local_tokenizer_state in local_tokenizer_states {
                 for &terminal in terminals.iter() {
                     if terminal_start <= terminal && terminal < terminal_end {
@@ -2739,6 +2751,7 @@ impl<'a> ConstraintState<'a> {
 
         fn or_component_weight(
             outer: &ConstraintState<'_>,
+            component_index: usize,
             component: &crate::runtime::SegmentedParserComponent,
             global_tokenizer_state: u32,
             accepted: &Weight,
@@ -2746,8 +2759,11 @@ impl<'a> ConstraintState<'a> {
             root_disallow: bool,
             buf: &mut [u32],
         ) -> bool {
-            let local_tokenizer_states =
-                outer.segmented_local_tokenizer_states(component, global_tokenizer_state);
+            let local_tokenizer_states = outer.segmented_local_tokenizer_states(
+                component_index,
+                component,
+                global_tokenizer_state,
+            );
             if local_tokenizer_states.is_empty() {
                 return true;
             }
@@ -2834,10 +2850,13 @@ impl<'a> ConstraintState<'a> {
                     return;
                 };
                 // Synthetic root final: every component start final contributes.
-                for component in &overlay.segmented_parser_components {
+                for (component_index, component) in
+                    overlay.segmented_parser_components.iter().enumerate()
+                {
                     let accepted = accepted_for_stack(component, &[]);
                     if !or_component_weight(
                         self,
+                        component_index,
                         component,
                         global_tokenizer_state,
                         &accepted,
@@ -2881,6 +2900,7 @@ impl<'a> ConstraintState<'a> {
                 let accepted = accepted_for_stack(component, &local_top_first);
                 if !or_component_weight(
                     self,
+                    component_index,
                     component,
                     global_tokenizer_state,
                     &accepted,
@@ -2945,11 +2965,16 @@ impl<'a> ConstraintState<'a> {
                         overlay.segmented_parser_components.iter().enumerate()
                     {
                         let local_tokenizer_states = self
-                            .segmented_local_tokenizer_states(component, global_tokenizer_state);
+                            .segmented_local_tokenizer_states(
+                                component_index,
+                                component,
+                                global_tokenizer_state,
+                            );
                         if local_tokenizer_states.is_empty() {
                             continue;
                         }
-                        let local_disallowed = self.segmented_local_disallowed(component, acc);
+                        let local_disallowed =
+                            self.segmented_local_disallowed(component_index, component, acc);
                         for local_tokenizer_state in local_tokenizer_states {
                             let mut branch_disallowed = local_disallowed.clone();
                             if let Some(terminal) = component.root_disallowed_terminal {
@@ -2982,8 +3007,11 @@ impl<'a> ConstraintState<'a> {
                 else {
                     return;
                 };
-                let local_tokenizer_states =
-                    self.segmented_local_tokenizer_states(component, global_tokenizer_state);
+                let local_tokenizer_states = self.segmented_local_tokenizer_states(
+                    component_index,
+                    component,
+                    global_tokenizer_state,
+                );
                 if local_tokenizer_states.is_empty() {
                     return;
                 }
@@ -3004,7 +3032,8 @@ impl<'a> ConstraintState<'a> {
                 }
                 local_top_first.reverse();
                 let local_stack = local_top_first.into_vec();
-                let local_disallowed = self.segmented_local_disallowed(component, acc);
+                let local_disallowed =
+                    self.segmented_local_disallowed(component_index, component, acc);
                 for local_tokenizer_state in local_tokenizer_states {
                     projected_states[component_index].merge_insert(
                         local_tokenizer_state,
@@ -3146,7 +3175,11 @@ impl<'a> ConstraintState<'a> {
                     overlay.segmented_parser_components.iter().enumerate()
                 {
                     let local_tokenizer_states =
-                        self.segmented_local_tokenizer_states(component, global_tokenizer_state);
+                        self.segmented_local_tokenizer_states(
+                            component_index,
+                            component,
+                            global_tokenizer_state,
+                        );
                     if local_tokenizer_states.is_empty() {
                         continue;
                     }
@@ -3162,7 +3195,8 @@ impl<'a> ConstraintState<'a> {
                         };
                         local_top_first.push(local);
                     }
-                    let local_disallowed = self.segmented_local_disallowed(component, acc);
+                    let local_disallowed =
+                        self.segmented_local_disallowed(component_index, component, acc);
                     let local_stack = if local_top_first.is_empty() {
                         // An empty *composed* parser stack belongs to the outer
                         // parent root.  An empty projection of a non-empty
@@ -3795,8 +3829,11 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
         for (&global_tokenizer_state, gss) in self.state.iter() {
-            let local_tokenizer_states =
-                self.segmented_local_tokenizer_states(component, global_tokenizer_state);
+            let local_tokenizer_states = self.segmented_local_tokenizer_states(
+                shard.start_component as usize,
+                component,
+                global_tokenizer_state,
+            );
             if local_tokenizer_states.is_empty() {
                 // An unmappable lexer state is harmless only when this
                 // component cannot own any stack at that lexer key. If an
@@ -4024,28 +4061,36 @@ impl<'a> ConstraintState<'a> {
         };
         let debug_boundary = std::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
-            let boundary_tsid = if boundary.uses_composed_tsid_coordinate {
+            let boundary_tsids = if recursive_parser && boundary.uses_composed_tsid_coordinate {
+                self.constraint
+                    .runtime_internal_tsids_for_tokenizer_state(global_tokenizer_state)
+                    .unwrap_or_default()
+            } else if boundary.uses_composed_tsid_coordinate {
                 self.constraint
                     .state_to_internal_tsid
                     .get(global_tokenizer_state as usize)
                     .copied()
-                    .unwrap_or(u32::MAX)
+                    .filter(|&tsid| tsid != u32::MAX)
+                    .into_iter()
+                    .collect::<SmallVec<[u32; 4]>>()
             } else {
                 boundary
                     .tokenizer_state_to_tsid
                     .get(global_tokenizer_state as usize)
                     .copied()
-                    .unwrap_or(u32::MAX)
+                    .filter(|&tsid| tsid != u32::MAX)
+                    .into_iter()
+                    .collect::<SmallVec<[u32; 4]>>()
             };
             if debug_boundary {
                 eprintln!(
-                    "[glrmask/debug][segmented_boundary_state] global_tokenizer_state={} boundary_tsid={} paths={}",
+                    "[glrmask/debug][segmented_boundary_state] global_tokenizer_state={} boundary_tsids={:?} paths={}",
                     global_tokenizer_state,
-                    boundary_tsid,
+                    boundary_tsids,
                     gss.path_count_at_most(129),
                 );
             }
-            if boundary_tsid == u32::MAX {
+            if boundary_tsids.is_empty() {
                 continue;
             }
             let mut complete = true;
@@ -4085,6 +4130,7 @@ impl<'a> ConstraintState<'a> {
                 if !recursive_parser
                     && let Some(compact) = boundary.compact_parser_dwa.as_ref()
                 {
+                    let boundary_tsid = boundary_tsids[0];
                     let mut accepted = accepted_mask_for_stack(compact, boundary_tsid, top_first);
                     if debug_boundary {
                         let internal = (0..compact.token_count as u32)
@@ -4124,49 +4170,51 @@ impl<'a> ConstraintState<'a> {
                     }
                 } else {
                     let accepted = accepted_for_stack(parser_dwa, top_first);
-                    let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
-                        if debug_boundary {
-                            eprintln!(
-                                "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal=[]",
-                                top_first,
-                                boundary_tsid,
-                            );
-                        }
-                        return;
-                    };
-                    if debug_boundary {
-                        let internal = tokens.ranges().flat_map(|range| range).collect::<Vec<_>>();
-                        let originals = internal
-                            .iter()
-                            .flat_map(|&token| boundary.internal_token_to_originals.get(token as usize).into_iter().flatten().copied())
-                            .collect::<Vec<_>>();
-                        eprintln!(
-                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsid={} accepted_internal={:?} accepted_originals={:?}",
-                            top_first,
-                            boundary_tsid,
-                            internal,
-                            originals,
-                        );
-                    }
-                    for range in tokens.ranges() {
-                        for internal_token in range {
-                            let Some(originals) = boundary
-                                .internal_token_to_originals
-                                .get(internal_token as usize)
-                            else {
-                                complete = false;
-                                return;
-                            };
-                            for &original in originals {
-                                let outer_internal = self
-                                    .constraint
-                                    .original_token_internal_at(original)
-                                    .unwrap_or(u32::MAX);
-                                if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
-                                    set_original_mask_bit(buf, original);
+                    let mut debug_internal = Vec::new();
+                    let mut debug_originals = Vec::new();
+                    for &boundary_tsid in &boundary_tsids {
+                        let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
+                            continue;
+                        };
+                        for range in tokens.ranges() {
+                            for internal_token in range {
+                                let Some(originals) = boundary
+                                    .internal_token_to_originals
+                                    .get(internal_token as usize)
+                                else {
+                                    complete = false;
+                                    return;
+                                };
+                                if debug_boundary {
+                                    debug_internal.push(internal_token);
+                                    debug_originals.extend_from_slice(originals);
+                                }
+                                for &original in originals {
+                                    let outer_internal = self
+                                        .constraint
+                                        .original_token_internal_at(original)
+                                        .unwrap_or(u32::MAX);
+                                    if outer_internal != u32::MAX
+                                        && dense_contains(&allowed, outer_internal)
+                                    {
+                                        set_original_mask_bit(buf, original);
+                                    }
                                 }
                             }
                         }
+                    }
+                    if debug_boundary {
+                        debug_internal.sort_unstable();
+                        debug_internal.dedup();
+                        debug_originals.sort_unstable();
+                        debug_originals.dedup();
+                        eprintln!(
+                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} tsids={:?} accepted_internal={:?} accepted_originals={:?}",
+                            top_first,
+                            boundary_tsids,
+                            debug_internal,
+                            debug_originals,
+                        );
                     }
                 }
             });
@@ -5043,14 +5091,16 @@ impl<'a> ConstraintState<'a> {
         terminals_disallowed: &TerminalsDisallowed,
         tokenizer_state: u32,
     ) -> Option<DenseMaskAcc> {
-        let internal_tsids = self.constraint.internal_tsids_for_state(tokenizer_state);
+        let internal_tsids = self
+            .constraint
+            .runtime_internal_tsids_for_tokenizer_state(tokenizer_state)?;
         let base = &self.constraint.seed_universe_dense;
         if base.is_empty() || internal_tsids.is_empty() {
             return None;
         }
         if terminals_disallowed.is_empty() {
             return DenseMaskAcc::from_dense_arc_for_tsids(
-                internal_tsids,
+                &internal_tsids,
                 Arc::clone(base),
             );
         }
@@ -5060,7 +5110,7 @@ impl<'a> ConstraintState<'a> {
 
         if blocked_only.iter().all(|&word| word == 0) {
             return DenseMaskAcc::from_dense_arc_for_tsids(
-                internal_tsids,
+                &internal_tsids,
                 Arc::clone(base),
             );
         }
@@ -5070,7 +5120,7 @@ impl<'a> ConstraintState<'a> {
             *allowed_word &= !blocked_word;
         }
 
-        DenseMaskAcc::from_dense_arc_for_tsids(internal_tsids, dense.into())
+        DenseMaskAcc::from_dense_arc_for_tsids(&internal_tsids, dense.into())
     }
 
     fn merge_final_weight_to_internal(

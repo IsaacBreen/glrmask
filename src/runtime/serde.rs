@@ -2446,6 +2446,7 @@ struct RecursiveSegmentedRuntimeArtifactV25Ref<'a> {
     components: Vec<RecursiveSegmentedParserComponentV25Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
     recursive_states_by_materialized_state: &'a [Vec<u32>],
+    recursive_tokenizer_internal_tsids: &'a [Vec<u32>],
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV25Ref<'a>>,
 }
@@ -2455,6 +2456,7 @@ struct RecursiveSegmentedRuntimeArtifactV25 {
     components: Vec<RecursiveSegmentedParserComponentV25>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
     recursive_states_by_materialized_state: Vec<Vec<u32>>,
+    recursive_tokenizer_internal_tsids: Vec<Vec<u32>>,
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV25>,
 }
@@ -2710,6 +2712,10 @@ fn segmented_runtime_artifact_ref(
         .recursive_states_by_materialized_state
         .get()
         .expect("recursive runtime must retain its late-composition oracle");
+    let recursive_tokenizer_internal_tsids = overlay
+        .recursive_tokenizer_internal_tsids
+        .get()
+        .expect("recursive runtime must retain its scoped tokenizer TSID relation");
     let components = overlay
         .segmented_parser_components
         .iter()
@@ -2775,6 +2781,8 @@ fn segmented_runtime_artifact_ref(
             segmented_parser_links,
             recursive_states_by_materialized_state:
                 recursive_states_by_materialized_state.as_slice(),
+            recursive_tokenizer_internal_tsids:
+                recursive_tokenizer_internal_tsids.as_slice(),
             segmented_mask_authoritative: overlay.segmented_mask_authoritative,
             boundary_shards,
         },
@@ -3556,6 +3564,7 @@ fn restore_recursive_segmented_runtime_v25(
     }
     let mut recursive_states_by_materialized_state =
         runtime.recursive_states_by_materialized_state;
+    let recursive_tokenizer_internal_tsids = runtime.recursive_tokenizer_internal_tsids;
     if recursive_states_by_materialized_state.len() != constraint.table.num_states as usize {
         return Err(crate::GlrMaskError::Serialization(format!(
             "recursive v25 late-composition oracle has {} rows for {} materialized parser states",
@@ -3669,6 +3678,9 @@ fn restore_recursive_segmented_runtime_v25(
                 "recursive v25 runtime failed to derive its parser layout".to_owned(),
             )
         })?;
+    constraint
+        .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_internal_tsids)
+        .map_err(crate::GlrMaskError::Serialization)?;
     let component_count = constraint
         .static_dynamic_overlay
         .as_ref()

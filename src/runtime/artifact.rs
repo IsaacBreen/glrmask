@@ -4405,6 +4405,11 @@ pub(crate) struct RecursiveParserLayout {
     /// independent offsets because their local state counts differ.
     pub(crate) leaf_tokenizer_state_offsets: Vec<u32>,
     pub(crate) total_tokenizer_states: u32,
+    /// Lazily mapped outer/global future-terminal support for each scoped leaf
+    /// tokenizer state. The source future set remains owned by the intact leaf
+    /// tokenizer; this cache only bridges terminal IDs while commit still uses
+    /// the transitional outer terminal coordinate.
+    pub(crate) tokenizer_future_globals: Vec<OnceLock<BitSet>>,
     /// Linker controls rewritten only into the leaf-component coordinate.
     pub(crate) links: Vec<SegmentedParserLink>,
     /// Transitional outer/global terminal -> intact leaf-local terminals.
@@ -4471,6 +4476,11 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// already-composed constraint is embedded under another wrapper.
     #[serde(skip, default)]
     pub(crate) recursive_states_by_materialized_state: OnceLock<Arc<Vec<Vec<u32>>>>,
+    /// Exact endpoint lexical relation: recursive leaf tokenizer state -> this
+    /// constraint's internal TSID set. Runtime-product components can make the
+    /// image genuinely set-valued, so this must not be collapsed to one TSID.
+    #[serde(skip, default)]
+    pub(crate) recursive_tokenizer_internal_tsids: OnceLock<Arc<Vec<Vec<u32>>>>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.

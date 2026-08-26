@@ -277,7 +277,12 @@ impl Constraint {
 	}
 
 	pub(crate) fn initial_state_map(&self) -> crate::runtime::state::ParserStateMap {
-		let initial_tok_state = self.tokenizer.initial_state();
+		let initial_tok_state = if self.uses_compact_segmented_parser_runtime() {
+			self.recursive_tokenizer_reset_state(0)
+				.expect("recursive runtime must expose a root-leaf tokenizer reset")
+		} else {
+			self.tokenizer.initial_state()
+		};
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
 		let parser_gss = if let Some(closed) = self.close_compact_segmented_parser(&parser_gss) {
 			closed

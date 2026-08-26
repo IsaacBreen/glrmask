@@ -287,6 +287,13 @@ pub(super) fn execute_tokenizer_from_state_small(
     bytes: &[u8],
     start_state: u32,
 ) -> TokenizerExecResult {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        return execute_recursive_tokenizer_from_state_small(constraint, bytes, start_state)
+            .unwrap_or_else(|| TokenizerExecResult {
+                end_state: TokenizerStateSet::new(),
+                matches: Vec::new(),
+            });
+    }
     let mut result = TokenizerExecResult {
         end_state: TokenizerStateSet::new(),
         matches: Vec::with_capacity(8),
