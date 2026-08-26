@@ -655,6 +655,35 @@ fn encode_composition_metadata_part(raw: Vec<u8>) -> (usize, Vec<u8>, bool) {
     (raw_len, raw, false)
 }
 
+fn assemble_composition_metadata_split(
+    link_raw_len: usize,
+    link_wire: &[u8],
+    link_compressed: bool,
+    cache_raw_len: usize,
+    cache_wire: &[u8],
+    cache_compressed: bool,
+) -> Vec<u8> {
+    let mut flags = 0u32;
+    if link_compressed {
+        flags |= COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED;
+    }
+    if cache_compressed {
+        flags |= COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED;
+    }
+    let mut out = Vec::with_capacity(
+        COMPOSITION_METADATA_SPLIT_HEADER_LEN + link_wire.len() + cache_wire.len(),
+    );
+    out.extend_from_slice(&COMPOSITION_METADATA_SPLIT_MAGIC);
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.extend_from_slice(&(link_raw_len as u64).to_le_bytes());
+    out.extend_from_slice(&(link_wire.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(cache_raw_len as u64).to_le_bytes());
+    out.extend_from_slice(&(cache_wire.len() as u64).to_le_bytes());
+    out.extend_from_slice(link_wire);
+    out.extend_from_slice(cache_wire);
+    out
+}
+
 fn decode_composition_metadata_part<'a>(
     wire: &'a [u8],
     raw_len: usize,
@@ -767,25 +796,71 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         encode_composition_metadata_part(link_raw);
     let (cache_raw_len, cache_wire, cache_compressed) =
         encode_composition_metadata_part(cache_raw);
-    let mut flags = 0u32;
-    if link_compressed {
-        flags |= COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED;
+    assemble_composition_metadata_split(
+        link_raw_len,
+        &link_wire,
+        link_compressed,
+        cache_raw_len,
+        &cache_wire,
+        cache_compressed,
+    )
+}
+
+fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
+    let Some(blob) = constraint.deferred_composition_metadata_blob.as_ref() else {
+        return encode_composition_metadata(constraint);
+    };
+    if !constraint.composition_link_metadata_materialized {
+        return blob.as_slice().to_vec();
     }
-    if cache_compressed {
-        flags |= COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED;
+
+    let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
+        composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
+        unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
+        composition_grammar_summary: &constraint.composition_grammar_summary,
+        boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
+    })
+    .expect("composition link metadata serialization should succeed");
+    let (link_raw_len, link_wire, link_compressed) =
+        encode_composition_metadata_part(link_raw);
+
+    let input = blob.as_slice();
+    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+    {
+        let parts = split_composition_metadata_parts(input)
+            .expect("loaded deferred composition metadata must remain structurally valid");
+        return assemble_composition_metadata_split(
+            link_raw_len,
+            &link_wire,
+            link_compressed,
+            parts.cache_raw_len,
+            parts.cache_wire,
+            parts.cache_compressed,
+        );
     }
-    let mut out = Vec::with_capacity(
-        COMPOSITION_METADATA_SPLIT_HEADER_LEN + link_wire.len() + cache_wire.len(),
-    );
-    out.extend_from_slice(&COMPOSITION_METADATA_SPLIT_MAGIC);
-    out.extend_from_slice(&flags.to_le_bytes());
-    out.extend_from_slice(&(link_raw_len as u64).to_le_bytes());
-    out.extend_from_slice(&(link_wire.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(cache_raw_len as u64).to_le_bytes());
-    out.extend_from_slice(&(cache_wire.len() as u64).to_le_bytes());
-    out.extend_from_slice(&link_wire);
-    out.extend_from_slice(&cache_wire);
-    out
+
+    // Pre-split artifacts cannot splice the cache section directly. Decode the
+    // old combined metadata only when a loaded component's link metadata was
+    // actually modified, then re-emit it in the current split format.
+    let old = decode_composition_metadata(input)
+        .expect("loaded deferred composition metadata must remain decodable");
+    let cache_raw = bincode::serialize(&ConstraintCompositionCacheMetadataRef {
+        composition_parser_templates_by_terminal: &old.composition_parser_templates_by_terminal,
+        composition_parser_characterizations_by_terminal:
+            &old.composition_parser_characterizations_by_terminal,
+    })
+    .expect("composition cache metadata serialization should succeed");
+    let (cache_raw_len, cache_wire, cache_compressed) =
+        encode_composition_metadata_part(cache_raw);
+    assemble_composition_metadata_split(
+        link_raw_len,
+        &link_wire,
+        link_compressed,
+        cache_raw_len,
+        &cache_wire,
+        cache_compressed,
+    )
 }
 
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
@@ -4217,11 +4292,7 @@ impl Constraint {
                         ),
                         || {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = if let Some(blob) = self.deferred_composition_metadata_blob.as_ref() {
-                                blob.as_slice().to_vec()
-                            } else {
-                                encode_composition_metadata(self)
-                            };
+                            let bytes = encode_composition_metadata_for_save(self);
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=composition_metadata ms={:.3} bytes={}",

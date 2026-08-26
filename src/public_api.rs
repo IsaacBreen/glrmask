@@ -1491,17 +1491,19 @@ mod tests {
 
         let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
         let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
-        assert!(matches!(
-            loaded_parent.boundary_trigger,
-            crate::runtime::BoundaryTrigger::Exact(_)
-        ));
-        assert!(matches!(
-            loaded_child.boundary_trigger,
-            crate::runtime::BoundaryTrigger::Exact(_)
-        ));
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
             .unwrap();
+        let overlay = bound
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("dynamic composition must retain component runtime metadata");
+        assert!(overlay.segmented_parser_components.iter().all(|component| {
+            matches!(
+                component.constraint.boundary_trigger,
+                crate::runtime::BoundaryTrigger::Exact(_)
+            )
+        }));
 
         for tokens in [&[5][..], &[0, 4][..], &[3, 2][..], &[0, 1, 2][..]] {
             let mut actual = bound.start();
@@ -1518,6 +1520,49 @@ mod tests {
             assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert!(actual.is_accepting(), "{tokens:?}");
         }
+    }
+
+    #[test]
+    fn loaded_constraint_trigger_upgrade_resaves_updated_link_metadata() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+
+        let mut loaded = RuntimeConstraint::load(parent.save()).unwrap();
+        assert!(loaded.deferred_composition_metadata_blob.is_some());
+        loaded.build_exact_boundary_trigger().unwrap();
+        assert!(matches!(
+            loaded.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+        assert!(
+            loaded.deferred_composition_metadata_blob.is_some(),
+            "trigger upgrade should not force materialization of the heavy parser-cache section",
+        );
+
+        let reloaded = RuntimeConstraint::load(loaded.save()).unwrap();
+        let bound = reloaded
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        let overlay = bound.static_dynamic_overlay.as_ref().unwrap();
+        assert!(matches!(
+            overlay.segmented_parser_components[0]
+                .constraint
+                .boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+        assert_ne!(bound.start().mask()[0] & (1 << 2), 0);
     }
 
     #[test]
