@@ -1630,10 +1630,9 @@ mod tests {
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::parser::{
-        ParserGSS, ScopedComponentActionProvider, ScopedParserGSS, ScopedParserState,
-        ScopedParserSymbol, ScopedSubgrammarLink, advance_control_closed_stacks,
-        advance_scoped_stacks_with_provider, close_control_stacks,
-        close_scoped_control_stacks_with_provider,
+        DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol, ScopedSubgrammarLink,
+        advance_control_closed_stacks, advance_stacks_with_provider, close_control_stacks,
+        close_provider_control_stacks,
     };
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::from_glrm;
@@ -1970,7 +1969,7 @@ mod tests {
             return_pop,
             child_start_nullable: true,
         }];
-        let provider = ScopedComponentActionProvider::new(&components, &links);
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
 
         let visible = [
             (
@@ -2009,10 +2008,10 @@ mod tests {
                 &explicit.table,
                 &ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new()),
             );
-            let mut scoped_stack = close_scoped_control_stacks_with_provider(
+            let mut scoped_stack = close_provider_control_stacks(
                 &provider,
-                &ScopedParserGSS::from_single_stack(
-                    vec![ScopedParserState::new(0, 0)],
+                &ParserGSS::from_single_stack(
+                    vec![provider.scoped_state(0, 0).unwrap()],
                     TerminalsDisallowed::new(),
                 ),
             );
@@ -2020,12 +2019,9 @@ mod tests {
                 let (global_terminal, scoped_symbol) = visible[index as usize];
                 explicit_stack =
                     advance_control_closed_stacks(&explicit.table, &explicit_stack, global_terminal);
-                scoped_stack = advance_scoped_stacks_with_provider(
-                    &provider,
-                    scoped_stack,
-                    scoped_symbol,
-                );
-                scoped_stack = close_scoped_control_stacks_with_provider(&provider, &scoped_stack);
+                scoped_stack =
+                    advance_stacks_with_provider(&provider, scoped_stack, scoped_symbol);
+                scoped_stack = close_provider_control_stacks(&provider, &scoped_stack);
             }
             assert_eq!(
                 explicit_stack.is_empty(),

@@ -14,7 +14,6 @@ use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualS
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 
@@ -310,25 +309,36 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
     }
 }
 
-/// Action/goto source for parser states whose runtime IDs need not be the
-/// local IDs stored in one concrete [`GLRTable`]. The provider may borrow a
-/// local action when it contains no remapped state IDs, or return an owned
-/// action with its state-bearing fields translated into the runtime coordinate.
-/// `scope` is opaque provider metadata carried with reductions so goto lookup
-/// can stay in the table that produced the reduction.
+/// Borrowed action view for a compact disjoint-union parser-state coordinate.
+/// Component tables keep local state IDs unchanged; the provider scopes them
+/// lazily only when a state is actually pushed onto the existing `u32` GSS.
+pub enum ProvidedActionRef<'a> {
+    Local { scope: u32, action: &'a Action },
+    Call {
+        parent_target: u32,
+        child_start: u32,
+        replace: bool,
+    },
+    Return { pop: u32 },
+}
+
 pub struct ProvidedAction<'a> {
-    pub action: Cow<'a, Action>,
-    pub scope: u32,
-    /// Additional ordinary stack effects which coexist with `action`. This is
-    /// used by nullable subgrammar return: the child's local EOF reductions
-    /// remain visible while an immediate pop-only return is also possible.
+    pub action: ProvidedActionRef<'a>,
+    /// Component whose local nonterminal coordinate must be used by reductions.
+    pub reduction_scope: u32,
+    /// Additional already-scoped stack effects which coexist with `action`.
+    /// Used for nullable child FINISH when local EOF work also exists.
     pub extra_stack_shifts: SmallVec<[StackShift; 1]>,
 }
 
 pub trait ParserActionProvider {
-    type Symbol: Copy;
+    type Symbol: Copy + Eq;
 
     fn action(&self, state: u32, symbol: Self::Symbol) -> Option<ProvidedAction<'_>>;
+
+    /// Inject one component-local LR state into the compact runtime disjoint
+    /// union. Ordinary one-table parsing is the identity injection.
+    fn scope_state(&self, scope: u32, local_state: u32) -> Option<u32>;
 
     fn goto_target(
         &self,
@@ -337,11 +347,12 @@ pub trait ParserActionProvider {
         nonterminal: u32,
     ) -> Option<(u32, bool)>;
 
+    fn control_symbols(&self, _state: u32, _out: &mut SmallVec<[Self::Symbol; 4]>) {}
+
     fn state_count_hint(&self) -> usize;
 }
 
-/// Zero-remap adapter used both as a reference implementation and as the
-/// migration bridge for ordinary standalone tables.
+/// Zero-remap adapter for an ordinary standalone table.
 pub struct GLRTableActionProvider<'a> {
     table: &'a GLRTable,
 }
@@ -359,10 +370,15 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
     #[inline]
     fn action(&self, state: u32, symbol: TerminalID) -> Option<ProvidedAction<'_>> {
         self.table.action(state, symbol).map(|action| ProvidedAction {
-            action: Cow::Borrowed(action),
-            scope: 0,
+            action: ProvidedActionRef::Local { scope: 0, action },
+            reduction_scope: 0,
             extra_stack_shifts: SmallVec::new(),
         })
+    }
+
+    #[inline]
+    fn scope_state(&self, _scope: u32, local_state: u32) -> Option<u32> {
+        (local_state < self.table.num_states).then_some(local_state)
     }
 
     #[inline]
@@ -381,6 +397,221 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
     }
 }
 
+/// Compact `u32` action provider over the disjoint union of intact component
+/// LR-state sets. Offsets encode scope but do not form or require a merged LR
+/// table. Ordinary actions remain borrowed and local.
+pub struct DisjointComponentActionProvider<'a> {
+    components: &'a [&'a GLRTable],
+    links: &'a [ScopedSubgrammarLink],
+    state_offsets: Vec<u32>,
+    total_states: u32,
+}
+
+impl<'a> DisjointComponentActionProvider<'a> {
+    pub fn new(
+        components: &'a [&'a GLRTable],
+        links: &'a [ScopedSubgrammarLink],
+    ) -> Result<Self, String> {
+        let mut state_offsets = Vec::with_capacity(components.len());
+        let mut total_states = 0u32;
+        for table in components {
+            state_offsets.push(total_states);
+            total_states = total_states
+                .checked_add(table.num_states)
+                .ok_or_else(|| "scoped parser-state coordinate overflow".to_owned())?;
+        }
+        for (index, link) in links.iter().enumerate() {
+            let parent = components
+                .get(link.parent_component as usize)
+                .ok_or_else(|| format!("link {index} references missing parent component"))?;
+            let child = components
+                .get(link.child_component as usize)
+                .ok_or_else(|| format!("link {index} references missing child component"))?;
+            if link.slot_terminal >= parent.num_terminals || link.child_start >= child.num_states {
+                return Err(format!("link {index} references an invalid local coordinate"));
+            }
+        }
+        Ok(Self {
+            components,
+            links,
+            state_offsets,
+            total_states,
+        })
+    }
+
+    #[inline]
+    pub fn scoped_state(&self, component: u32, local_state: u32) -> Option<u32> {
+        let table = *self.components.get(component as usize)?;
+        if local_state >= table.num_states {
+            return None;
+        }
+        self.state_offsets
+            .get(component as usize)?
+            .checked_add(local_state)
+    }
+
+    #[inline]
+    pub fn decode_state(&self, state: u32) -> Option<(u32, u32)> {
+        if state >= self.total_states {
+            return None;
+        }
+        let component = self
+            .state_offsets
+            .partition_point(|&offset| offset <= state)
+            .checked_sub(1)?;
+        Some((component as u32, state - self.state_offsets[component]))
+    }
+
+    #[inline]
+    fn table(&self, component: u32) -> Option<&'a GLRTable> {
+        self.components.get(component as usize).copied()
+    }
+}
+
+impl ParserActionProvider for DisjointComponentActionProvider<'_> {
+    type Symbol = ScopedParserSymbol;
+
+    fn action(&self, state: u32, symbol: Self::Symbol) -> Option<ProvidedAction<'_>> {
+        let (component, local_state) = self.decode_state(state)?;
+        let table = self.table(component)?;
+        match symbol {
+            ScopedParserSymbol::Terminal {
+                component: symbol_component,
+                terminal,
+            } if symbol_component == component => {
+                let action = table.action(local_state, terminal)?;
+                Some(ProvidedAction {
+                    action: ProvidedActionRef::Local {
+                        scope: component,
+                        action,
+                    },
+                    reduction_scope: component,
+                    extra_stack_shifts: SmallVec::new(),
+                })
+            }
+            ScopedParserSymbol::Entry { link } => {
+                let link = *self.links.get(link as usize)?;
+                if link.parent_component != component {
+                    return None;
+                }
+                let action = table.action(local_state, link.slot_terminal)?;
+                match action {
+                    Action::Shift(parent_target, replace)
+                    | Action::Split {
+                        shift: Some((parent_target, replace)),
+                        reduces: _,
+                        accept: false,
+                    } if action.reduce_count() == 0 => Some(ProvidedAction {
+                        action: ProvidedActionRef::Call {
+                            parent_target: self.scoped_state(component, *parent_target)?,
+                            child_start: self.scoped_state(link.child_component, link.child_start)?,
+                            replace: *replace,
+                        },
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    Action::Reduce(..)
+                    | Action::Split {
+                        shift: None,
+                        reduces: _,
+                        accept: false,
+                    } if action.reduce_count() != 0 => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local {
+                            scope: component,
+                            action,
+                        },
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    _ => None,
+                }
+            }
+            ScopedParserSymbol::Finish {
+                component: symbol_component,
+            } if symbol_component == component => {
+                let link = *self.links.iter().find(|link| link.child_component == component)?;
+                let nullable_start = link.child_start_nullable && local_state == link.child_start;
+                let eof_action = table.action(local_state, EOF);
+                let mut provided = match eof_action {
+                    Some(Action::Accept) => ProvidedAction {
+                        action: ProvidedActionRef::Return { pop: link.return_pop },
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    Some(action) => ProvidedAction {
+                        action: ProvidedActionRef::Local {
+                            scope: component,
+                            action,
+                        },
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    None if nullable_start => ProvidedAction {
+                        action: ProvidedActionRef::Return { pop: 1 },
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    None => return None,
+                };
+                if nullable_start && eof_action.is_some() {
+                    provided.extra_stack_shifts.push(StackShift {
+                        pop: 1,
+                        pushes: Vec::new(),
+                    });
+                }
+                Some(provided)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn scope_state(&self, scope: u32, local_state: u32) -> Option<u32> {
+        self.scoped_state(scope, local_state)
+    }
+
+    fn goto_target(
+        &self,
+        scope: u32,
+        goto_from: u32,
+        nonterminal: u32,
+    ) -> Option<(u32, bool)> {
+        let (component, local_goto_from) = self.decode_state(goto_from)?;
+        if component != scope {
+            return None;
+        }
+        let (target, replace) = self.table(component)?.goto_target(local_goto_from, nonterminal)?;
+        Some((self.scoped_state(component, target)?, replace))
+    }
+
+    fn control_symbols(&self, state: u32, out: &mut SmallVec<[Self::Symbol; 4]>) {
+        let Some((component, local_state)) = self.decode_state(state) else {
+            return;
+        };
+        let Some(table) = self.table(component) else {
+            return;
+        };
+        for (index, link) in self.links.iter().enumerate() {
+            if link.parent_component == component
+                && table.action(local_state, link.slot_terminal).is_some()
+            {
+                out.push(ScopedParserSymbol::Entry { link: index as u32 });
+            }
+        }
+        if self.links.iter().any(|link| {
+            link.child_component == component
+                && (table.action(local_state, EOF).is_some()
+                    || (link.child_start_nullable && local_state == link.child_start))
+        }) {
+            out.push(ScopedParserSymbol::Finish { component });
+        }
+    }
+
+    #[inline]
+    fn state_count_hint(&self) -> usize {
+        self.total_states as usize
+    }
+}
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
@@ -4472,9 +4703,75 @@ pub fn close_scoped_control_stacks_with_provider<P: ScopedParserActionProvider>(
     closure
 }
 
-/// Canonical provider-driven GLR advance. This deliberately uses no table-
-/// specific fast paths: it is the semantic bridge for scoped composition and
-/// a differential oracle against the existing optimized `GLRTable` path.
+fn provider_push_local_states<P: ParserActionProvider>(
+    provider: &P,
+    scope: u32,
+    mut gss: ParserGSS,
+    states: &[u32],
+) -> ParserGSS {
+    for &local_state in states {
+        let Some(state) = provider.scope_state(scope, local_state) else {
+            return ParserGSS::empty();
+        };
+        gss = gss.push(state);
+    }
+    gss
+}
+
+fn apply_provider_guarded_stack_shifts<P: ParserActionProvider>(
+    provider: &P,
+    scope: u32,
+    gss: ParserGSS,
+    shifts: &[GuardedStackShift],
+) -> ParserGSS {
+    let mut out = ParserGSS::empty();
+    for shift in shifts {
+        debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
+        debug_assert!(shift.guards.iter().all(|guard| guard.pop <= shift.pop));
+        let mut base = gss.clone();
+        let mut depth = 0u32;
+        let mut dead = false;
+        for guard in &shift.guards {
+            if guard.pop < depth {
+                dead = true;
+                break;
+            }
+            base = base.popn((guard.pop - depth) as isize);
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+            let mut filtered = ParserGSS::empty();
+            for &local_state in &guard.states {
+                let Some(state) = provider.scope_state(scope, local_state) else {
+                    continue;
+                };
+                merge_into(&mut filtered, base.isolate(Some(state)));
+            }
+            base = filtered;
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+            depth = guard.pop;
+        }
+        if dead || shift.pop < depth {
+            continue;
+        }
+        let branch = provider_push_local_states(
+            provider,
+            scope,
+            base.popn((shift.pop - depth) as isize),
+            &shift.pushes,
+        );
+        merge_into(&mut out, branch);
+    }
+    out
+}
+
+/// Canonical provider-driven GLR advance over the existing `u32` parser GSS.
+/// Local component actions remain borrowed; state IDs are injected into the
+/// compact disjoint-union coordinate only when pushed.
 pub fn advance_stacks_with_provider<P: ParserActionProvider>(
     provider: &P,
     mut closure: ParserGSS,
@@ -4489,45 +4786,76 @@ pub fn advance_stacks_with_provider<P: ParserActionProvider>(
             let Some(provided) = provider.action(state, symbol) else {
                 continue;
             };
-            let action = provided.action.as_ref();
             let isolated = closure.isolate(Some(state));
 
-            match action {
-                Action::GuardedStackShifts(shifts) => {
-                    merge_into(
-                        &mut shifted,
-                        apply_guarded_stack_shifts(isolated.clone(), shifts, None),
-                    );
-                }
-                _ => {
-                    action.for_each_stack_shift(|pop, pushes| {
-                        let branch = push_states(isolated.popn(pop as isize), pushes);
-                        merge_into(&mut shifted, branch);
-                    });
-                }
-            }
             for shift in &provided.extra_stack_shifts {
-                let branch = push_states(isolated.popn(shift.pop as isize), &shift.pushes);
+                let branch = push_states(isolated.clone().popn(shift.pop as isize), &shift.pushes);
                 merge_into(&mut shifted, branch);
             }
 
-            action.for_each_reduce(|nt, len| {
-                for (goto_from, base) in
-                    reduce_sources_from_isolated(&isolated, len as usize)
-                {
-                    let Some((target, is_replace)) =
-                        provider.goto_target(provided.scope, goto_from, nt)
-                    else {
-                        continue;
-                    };
-                    let branch = if is_replace {
-                        base.popn(1).push(target)
-                    } else {
-                        base.push(target)
-                    };
-                    merge_into(&mut next, branch);
+            match provided.action {
+                ProvidedActionRef::Local { scope, action } => {
+                    match action {
+                        Action::GuardedStackShifts(shifts) => {
+                            merge_into(
+                                &mut shifted,
+                                apply_provider_guarded_stack_shifts(
+                                    provider,
+                                    scope,
+                                    isolated.clone(),
+                                    shifts,
+                                ),
+                            );
+                        }
+                        _ => {
+                            action.for_each_stack_shift(|pop, pushes| {
+                                let branch = provider_push_local_states(
+                                    provider,
+                                    scope,
+                                    isolated.clone().popn(pop as isize),
+                                    pushes,
+                                );
+                                merge_into(&mut shifted, branch);
+                            });
+                        }
+                    }
+
+                    action.for_each_reduce(|nt, len| {
+                        for (goto_from, base) in
+                            reduce_sources_from_isolated(&isolated, len as usize)
+                        {
+                            let Some((target, is_replace)) = provider.goto_target(
+                                provided.reduction_scope,
+                                goto_from,
+                                nt,
+                            ) else {
+                                continue;
+                            };
+                            let branch = if is_replace {
+                                base.popn(1).push(target)
+                            } else {
+                                base.push(target)
+                            };
+                            merge_into(&mut next, branch);
+                        }
+                    });
                 }
-            });
+                ProvidedActionRef::Call {
+                    parent_target,
+                    child_start,
+                    replace,
+                } => {
+                    let branch = isolated
+                        .clone()
+                        .popn(isize::from(replace))
+                        .push(parent_target)
+                        .push(child_start);
+                    merge_into(&mut shifted, branch);
+                }
+                ProvidedActionRef::Return { pop } => {
+                    merge_into(&mut shifted, isolated.clone().popn(pop as isize));
+                }
+            }
         }
 
         if next.is_empty() {
@@ -4535,6 +4863,50 @@ pub fn advance_stacks_with_provider<P: ParserActionProvider>(
         }
         closure = next;
     }
+}
+
+/// Close a provider-driven frontier under provider-owned zero-width controls.
+pub fn close_provider_control_stacks<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+) -> ParserGSS {
+    if stack.is_empty() {
+        return stack.clone();
+    }
+    let mut closure = stack.clone();
+    let pass_limit = provider.state_count_hint().saturating_mul(4).saturating_add(2);
+    let mut symbols = SmallVec::<[P::Symbol; 4]>::new();
+    for _ in 0..pass_limit {
+        symbols.clear();
+        for state in closure.peek_values() {
+            provider.control_symbols(state, &mut symbols);
+        }
+        let mut unique = SmallVec::<[P::Symbol; 4]>::new();
+        for symbol in symbols.drain(..) {
+            if !unique.contains(&symbol) {
+                unique.push(symbol);
+            }
+        }
+        if unique.is_empty() {
+            return closure;
+        }
+        let mut additions = ParserGSS::empty();
+        for symbol in unique {
+            merge_into(
+                &mut additions,
+                advance_stacks_with_provider(provider, closure.clone(), symbol),
+            );
+        }
+        if additions.is_empty() {
+            return closure;
+        }
+        let merged = closure.merge(&additions);
+        if merged == closure {
+            return closure;
+        }
+        closure = merged;
+    }
+    closure
 }
 
 /// Provider equivalent of linker-control closure. The caller supplies the
