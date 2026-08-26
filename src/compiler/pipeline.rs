@@ -745,7 +745,7 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         ))
     };
 
-    if !all_giants_specialized {
+    let build_general_residual = || -> crate::Result<Option<Tokenizer>> {
         let mut proxy_expressions = expressions.clone();
         for &terminal in &giant_terminals {
             proxy_expressions[terminal as usize] = Expr::U8Class(U8Set::empty());
@@ -784,7 +784,11 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
                 giant_terminals.len(),
             );
         }
-        return Ok(Some(tokenizer));
+        Ok(Some(tokenizer))
+    };
+
+    if !all_giants_specialized {
+        return build_general_residual();
     }
 
     let mut proxy_expressions = expressions.clone();
@@ -814,28 +818,37 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     if virtual_candidates.len() == 1
         && let Some((virtual_terminal, body, min, max)) = unit_candidates.into_iter().next()
     {
-        let physical_state_count = u32::try_from(tokenizer.num_states())
+        let Some(physical_state_count) = u32::try_from(tokenizer.num_states())
             .ok()
             .and_then(|states| states.checked_add(1))
-            .ok_or_else(|| build_error("physical tokenizer state-id overflow"))?;
+        else {
+            return build_general_residual();
+        };
         if virtual_zero_min_unit_repeat_fits_state_ids(max, physical_state_count) {
-            tokenizer
+            if tokenizer
                 .install_virtual_unit_repeat_component(body, min, max, virtual_terminal)
-                .ok_or_else(|| build_error("unit-repeat component installation failed"))?;
+                .is_none()
+            {
+                return build_general_residual();
+            }
             profile_kind = "hybrid_virtual_unit_repeat";
             profile_bound = max;
         } else {
-            let descriptor = virtual_large_bounded_repeat_descriptor(
+            let Some(descriptor) = virtual_large_bounded_repeat_descriptor(
                 &expressions[virtual_terminal as usize],
-            )
-            .ok_or_else(|| build_error("unit-repeat fallback descriptor disappeared"))?;
+            ) else {
+                return build_general_residual();
+            };
             profile_bound = descriptor.left.max as usize;
-            tokenizer
+            if tokenizer
                 .install_virtual_binary_repeat_intersection_component(
                     descriptor,
                     virtual_terminal,
                 )
-                .ok_or_else(|| build_error("bounded-repeat fallback installation failed"))?;
+                .is_none()
+            {
+                return build_general_residual();
+            }
             profile_kind = "hybrid_virtual_bounded_repeat";
         }
     } else {
@@ -844,14 +857,17 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
             .map(|(_, descriptor)| descriptor.left.max.max(descriptor.right.max) as usize)
             .max()
             .ok_or_else(|| build_error("virtual candidate set unexpectedly became empty"))?;
-        tokenizer
+        if tokenizer
             .install_virtual_binary_repeat_intersection_components(
                 virtual_candidates
                     .into_iter()
                     .map(|(terminal, descriptor)| (descriptor, terminal))
                     .collect(),
             )
-            .ok_or_else(|| build_error("multi-component virtual runtime installation failed"))?;
+            .is_none()
+        {
+            return build_general_residual();
+        }
         profile_kind = "hybrid_virtual_repeat_components";
     }
     tokenizer
