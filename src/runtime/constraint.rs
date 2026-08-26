@@ -2025,7 +2025,6 @@ impl Constraint {
             )?;
             terminal_targets.push(targets);
         }
-        let mut materialized_states_by_recursive_state = vec![Vec::new(); next as usize];
         let mut recursive_states_by_materialized_state =
             Vec::with_capacity(self.table.num_states as usize);
         for materialized_state in 0..self.table.num_states {
@@ -2039,22 +2038,12 @@ impl Constraint {
             )?;
             recursive_states.sort_unstable();
             recursive_states.dedup();
-            for &recursive_state in &recursive_states {
-                if let Some(row) = materialized_states_by_recursive_state
-                    .get_mut(recursive_state as usize)
-                {
-                    row.push(materialized_state);
-                } else {
-                    return Err(format!(
-                        "recursive parser state {recursive_state} lies outside derived domain {next}",
-                    ));
-                }
+            if recursive_states.iter().any(|&state| state >= next) {
+                return Err(format!(
+                    "recursive parser state lies outside derived domain {next}",
+                ));
             }
             recursive_states_by_materialized_state.push(recursive_states.into_vec());
-        }
-        for row in &mut materialized_states_by_recursive_state {
-            row.sort_unstable();
-            row.dedup();
         }
         if let Some(existing) = overlay.recursive_states_by_materialized_state.get() {
             if existing.as_ref() != &recursive_states_by_materialized_state {
@@ -2082,7 +2071,6 @@ impl Constraint {
                 .collect(),
             links,
             terminal_targets,
-            materialized_states_by_recursive_state,
             total_states: next,
         });
         let _ = overlay.recursive_parser_layout.set(Arc::clone(&layout));

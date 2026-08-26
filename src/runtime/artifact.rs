@@ -4425,11 +4425,6 @@ pub(crate) struct RecursiveParserLayout {
     /// static-B materialization, compatibility/reference evaluation, and outer
     /// special-token routing.
     pub(crate) terminal_targets: Vec<SmallVec<[(u32, TerminalID); 4]>>,
-    /// Exact preimage relation from one recursive runtime parser-state symbol
-    /// to the materialized composed-table parser-state symbols it represents.
-    /// This is used only to transport legacy/compiler-oracle parser languages
-    /// (notably static B) onto the endpoint runtime coordinate.
-    pub(crate) materialized_states_by_recursive_state: Vec<Vec<u32>>,
     pub(crate) total_states: u32,
 }
 
