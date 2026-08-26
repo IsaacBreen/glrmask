@@ -141,6 +141,7 @@ pub struct ScopedSubgrammarLink {
     pub child_component: u32,
     pub child_start: u32,
     pub return_pop: u32,
+    pub child_start_nullable: bool,
 }
 
 /// Direct provider over intact component tables plus explicit links. Ordinary
@@ -219,22 +220,28 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
             ScopedParserSymbol::Finish {
                 component: symbol_component,
             } if symbol_component == component => {
-                let action = table.action(local_state, EOF)?;
-                if matches!(action, Action::Accept) {
-                    let return_pop = self
-                        .links
-                        .iter()
-                        .find(|link| link.child_component == component)
-                        .map(|link| link.return_pop)?;
-                    Some(ScopedProvidedAction {
-                        action: ScopedActionRef::Return { pop: return_pop },
+                let link = self
+                    .links
+                    .iter()
+                    .find(|link| link.child_component == component)?;
+                match table.action(local_state, EOF) {
+                    Some(Action::Accept) => Some(ScopedProvidedAction {
+                        action: ScopedActionRef::Return {
+                            pop: link.return_pop,
+                        },
                         reduction_component: component,
-                    })
-                } else {
-                    Some(ScopedProvidedAction {
+                    }),
+                    Some(action) => Some(ScopedProvidedAction {
                         action: ScopedActionRef::Local { component, action },
                         reduction_component: component,
-                    })
+                    }),
+                    None if link.child_start_nullable && local_state == link.child_start => {
+                        Some(ScopedProvidedAction {
+                            action: ScopedActionRef::Return { pop: 1 },
+                            reduction_component: component,
+                        })
+                    }
+                    None => None,
                 }
             }
             _ => None,
@@ -273,9 +280,11 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
                 out.push(ScopedParserSymbol::Entry { link: index as u32 });
             }
         }
-        if self.links.iter().any(|link| link.child_component == component)
-            && table.action(local_state, EOF).is_some()
-        {
+        if self.links.iter().any(|link| {
+            link.child_component == component
+                && (table.action(local_state, EOF).is_some()
+                    || (link.child_start_nullable && local_state == link.child_start))
+        }) {
             out.push(ScopedParserSymbol::Finish { component });
         }
     }
@@ -5677,6 +5686,7 @@ mod tests {
             child_component: 1,
             child_start: 0,
             return_pop: 2,
+            child_start_nullable: false,
         }];
         let provider = ScopedComponentActionProvider::new(&components, &links);
         let start = ScopedParserGSS::from_single_stack(
