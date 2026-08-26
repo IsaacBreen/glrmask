@@ -23,6 +23,7 @@ pub(crate) type ResidualId = u32;
 enum ResidualNode {
     Empty,
     Epsilon,
+    SigmaStar,
     Literal { bytes: Arc<[u8]>, offset: u32 },
     Class(U8Set),
     Dfa { dfa: Arc<DFA>, states: Box<[u32]> },
@@ -47,6 +48,7 @@ pub(crate) struct ResidualArena {
     nonempty_cache: Vec<Option<bool>>,
     empty: ResidualId,
     epsilon: ResidualId,
+    sigma_star: ResidualId,
 }
 
 const TRANSITION_UNKNOWN: u32 = u32::MAX;
@@ -110,9 +112,11 @@ impl ResidualArena {
             nonempty_cache: Vec::new(),
             empty: 0,
             epsilon: 0,
+            sigma_star: 0,
         };
         arena.empty = arena.intern_raw(ResidualNode::Empty, false)?;
         arena.epsilon = arena.intern_raw(ResidualNode::Epsilon, true)?;
+        arena.sigma_star = arena.intern_raw(ResidualNode::SigmaStar, true)?;
         let root = arena.compile_expr(expr)?;
         Some((arena, root))
     }
@@ -261,6 +265,9 @@ impl ResidualArena {
     fn choice(&mut self, parts: Vec<ResidualId>) -> Option<ResidualId> {
         let mut flat = Vec::new();
         for part in parts {
+            if part == self.sigma_star {
+                return Some(self.sigma_star);
+            }
             if part == self.empty {
                 continue;
             }
@@ -285,6 +292,12 @@ impl ResidualArena {
         if left == self.empty || right == self.empty {
             return Some(self.empty);
         }
+        if left == self.sigma_star {
+            return Some(right);
+        }
+        if right == self.sigma_star {
+            return Some(left);
+        }
         if left == right {
             return Some(left);
         }
@@ -305,6 +318,9 @@ impl ResidualArena {
 
     fn exclude(&mut self, left: ResidualId, right: ResidualId) -> Option<ResidualId> {
         if left == self.empty || left == right {
+            return Some(self.empty);
+        }
+        if right == self.sigma_star {
             return Some(self.empty);
         }
         if right == self.empty {
@@ -339,6 +355,16 @@ impl ResidualArena {
         }
         if body == self.epsilon {
             return Some(self.epsilon);
+        }
+        if body == self.sigma_star {
+            return Some(self.sigma_star);
+        }
+
+        if min == 0
+            && max.is_none()
+            && matches!(self.nodes[body as usize], ResidualNode::Class(bytes) if bytes.is_full())
+        {
+            return Some(self.sigma_star);
         }
 
         // If B is nullable, B^[m,n] equals (B\\{epsilon})^[0,n]. Empty
@@ -379,6 +405,7 @@ impl ResidualArena {
     fn derive_uncached(&mut self, id: ResidualId, byte: u8) -> Option<ResidualId> {
         match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => Some(self.empty),
+            ResidualNode::SigmaStar => Some(self.sigma_star),
             ResidualNode::Literal { bytes, offset } => {
                 if bytes[offset as usize] != byte {
                     Some(self.empty)
@@ -447,6 +474,7 @@ impl ResidualArena {
     fn has_nonempty_fast(&mut self, id: ResidualId) -> Option<bool> {
         match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => Some(false),
+            ResidualNode::SigmaStar => Some(true),
             ResidualNode::Literal { .. } | ResidualNode::Class(_) => Some(true),
             // `Expr::Dfa` is allowed to carry stale derived future metadata,
             // so there is no metadata-only fast proof here. Let the ordinary
@@ -514,6 +542,7 @@ impl ResidualArena {
         }
         let bytes = match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => U8Set::empty(),
+            ResidualNode::SigmaStar => U8Set::all(),
             ResidualNode::Literal { bytes, offset } => {
                 U8Set::single(*bytes.get(offset as usize)?)
             }
@@ -1068,6 +1097,48 @@ mod tests {
             arena.has_future_with_budget(root, 8, 16).unwrap(),
             "repeat liveness must solve the body language once rather than walk the billion-copy counter",
         );
+    }
+
+    #[test]
+    fn sigma_star_identity_eliminates_trivial_boolean_counter_search() {
+        let mut body = DFA::new(2);
+        body.ensure_group_capacity(1);
+        body.add_transition(0, b'a', 1);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        body.overwrite_state_metadata(1, accepting, BitSet::new(1));
+
+        let counted = Expr::Repeat {
+            expr: Box::new(Expr::Dfa(Arc::new(body))),
+            min: 1_000_000_000,
+            max: Some(1_000_000_000),
+        };
+        let sigma_star = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::all())),
+            min: 0,
+            max: None,
+        };
+        let expr = Expr::Intersect {
+            expr: Box::new(counted),
+            intersect: Box::new(sigma_star.clone()),
+        };
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        assert!(
+            arena.has_future_with_budget(root, 4, 4).unwrap(),
+            "intersection with sigma-star must simplify before walking the billion-copy counter",
+        );
+
+        let choice = Expr::Choice(vec![bytes(b"literal"), sigma_star.clone()]);
+        let (mut arena, root) = ResidualArena::from_expr(&choice).unwrap();
+        assert_eq!(root, arena.sigma_star);
+        assert!(accepts(&mut arena, root, b"anything\0goes"));
+
+        let excluded = Expr::Exclude {
+            expr: Box::new(bytes(b"literal")),
+            exclude: Box::new(sigma_star),
+        };
+        let (arena, root) = ResidualArena::from_expr(&excluded).unwrap();
+        assert!(arena.is_empty(root));
     }
 
     #[test]
