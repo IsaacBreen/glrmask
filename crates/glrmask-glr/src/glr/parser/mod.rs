@@ -68,6 +68,18 @@ pub enum ScopedActionRef<'a> {
         action: &'a Action,
     },
     StackShifts(&'a [ScopedStackShift]),
+    /// A bound parent slot has reached its ordinary local shift. Preserve that
+    /// local parent continuation and enter the child in one normal GSS effect.
+    Call {
+        parent_component: u32,
+        parent_target: u32,
+        replace: bool,
+        child_component: u32,
+        child_start: u32,
+    },
+    /// Child EOF/Accept becomes a zero-width pop exposing the parent
+    /// continuation already stored beneath the child invocation.
+    Return { pop: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -112,6 +124,168 @@ pub trait ScopedParserActionProvider {
     }
 
     fn state_count_hint(&self) -> usize;
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScopedParserSymbol {
+    Terminal { component: u32, terminal: TerminalID },
+    Entry { link: u32 },
+    Finish { component: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScopedSubgrammarLink {
+    pub parent_component: u32,
+    pub slot_terminal: TerminalID,
+    pub child_component: u32,
+    pub child_start: u32,
+    pub return_pop: u32,
+}
+
+/// Direct provider over intact component tables plus explicit links. Ordinary
+/// actions are borrowed from their local table; only call/return interpretation
+/// is composition-specific. This is the semantic target for removing the
+/// temporary materialized composed GLR table.
+pub struct ScopedComponentActionProvider<'a> {
+    components: &'a [&'a GLRTable],
+    links: &'a [ScopedSubgrammarLink],
+}
+
+impl<'a> ScopedComponentActionProvider<'a> {
+    pub fn new(
+        components: &'a [&'a GLRTable],
+        links: &'a [ScopedSubgrammarLink],
+    ) -> Self {
+        Self { components, links }
+    }
+
+    #[inline]
+    fn table(&self, component: u32) -> Option<&'a GLRTable> {
+        self.components.get(component as usize).copied()
+    }
+}
+
+impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
+    type Symbol = ScopedParserSymbol;
+
+    fn action(
+        &self,
+        state: ScopedParserState,
+        symbol: Self::Symbol,
+    ) -> Option<ScopedProvidedAction<'_>> {
+        let component = state.component();
+        let local_state = state.local_state();
+        let table = self.table(component)?;
+        match symbol {
+            ScopedParserSymbol::Terminal {
+                component: symbol_component,
+                terminal,
+            } if symbol_component == component => {
+                let action = table.action(local_state, terminal)?;
+                Some(ScopedProvidedAction {
+                    action: ScopedActionRef::Local { component, action },
+                    reduction_component: component,
+                })
+            }
+            ScopedParserSymbol::Entry { link } => {
+                let link = *self.links.get(link as usize)?;
+                if link.parent_component != component {
+                    return None;
+                }
+                let action = table.action(local_state, link.slot_terminal)?;
+                if let Some((parent_target, replace)) = action.shift_target().map(|target| {
+                    (target, action.shift_is_replace())
+                }) {
+                    Some(ScopedProvidedAction {
+                        action: ScopedActionRef::Call {
+                            parent_component: component,
+                            parent_target,
+                            replace,
+                            child_component: link.child_component,
+                            child_start: link.child_start,
+                        },
+                        reduction_component: component,
+                    })
+                } else if matches!(action, Action::Reduce(..) | Action::Split { shift: None, .. }) {
+                    Some(ScopedProvidedAction {
+                        action: ScopedActionRef::Local { component, action },
+                        reduction_component: component,
+                    })
+                } else {
+                    None
+                }
+            }
+            ScopedParserSymbol::Finish {
+                component: symbol_component,
+            } if symbol_component == component => {
+                let action = table.action(local_state, EOF)?;
+                if matches!(action, Action::Accept) {
+                    let return_pop = self
+                        .links
+                        .iter()
+                        .find(|link| link.child_component == component)
+                        .map(|link| link.return_pop)?;
+                    Some(ScopedProvidedAction {
+                        action: ScopedActionRef::Return { pop: return_pop },
+                        reduction_component: component,
+                    })
+                } else {
+                    Some(ScopedProvidedAction {
+                        action: ScopedActionRef::Local { component, action },
+                        reduction_component: component,
+                    })
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn goto_target(
+        &self,
+        component: u32,
+        goto_from: ScopedParserState,
+        nonterminal: u32,
+    ) -> Option<(ScopedParserState, bool)> {
+        if goto_from.component() != component {
+            return None;
+        }
+        let (target, replace) = self
+            .table(component)?
+            .goto_target(goto_from.local_state(), nonterminal)?;
+        Some((ScopedParserState::new(component, target), replace))
+    }
+
+    fn control_symbols(
+        &self,
+        state: ScopedParserState,
+        out: &mut SmallVec<[Self::Symbol; 4]>,
+    ) {
+        let component = state.component();
+        let local_state = state.local_state();
+        let Some(table) = self.table(component) else {
+            return;
+        };
+        for (index, link) in self.links.iter().enumerate() {
+            if link.parent_component == component
+                && table.action(local_state, link.slot_terminal).is_some()
+            {
+                out.push(ScopedParserSymbol::Entry { link: index as u32 });
+            }
+        }
+        if self.links.iter().any(|link| link.child_component == component)
+            && table.action(local_state, EOF).is_some()
+        {
+            out.push(ScopedParserSymbol::Finish { component });
+        }
+    }
+
+    fn state_count_hint(&self) -> usize {
+        self.components
+            .iter()
+            .map(|table| table.num_states as usize)
+            .sum()
+    }
 }
 
 /// Action/goto source for parser states whose runtime IDs need not be the
@@ -187,7 +361,7 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ScopedParserSymbol {
+pub enum LegacyScopedParserSymbol {
     Terminal { component: u32, terminal: TerminalID },
     Link(u32),
 }
@@ -361,27 +535,27 @@ impl<'a> ScopedTableActionProvider<'a> {
         })
     }
 
-    pub fn link_symbols(&self) -> Vec<ScopedParserSymbol> {
+    pub fn link_symbols(&self) -> Vec<LegacyScopedParserSymbol> {
         (0..self.links.len())
-            .map(|index| ScopedParserSymbol::Link(index as u32))
+            .map(|index| LegacyScopedParserSymbol::Link(index as u32))
             .collect()
     }
 }
 
 impl ParserActionProvider for ScopedTableActionProvider<'_> {
-    type Symbol = ScopedParserSymbol;
+    type Symbol = LegacyScopedParserSymbol;
 
-    fn action(&self, state: u32, symbol: ScopedParserSymbol) -> Option<ProvidedAction<'_>> {
+    fn action(&self, state: u32, symbol: LegacyScopedParserSymbol) -> Option<ProvidedAction<'_>> {
         let (component, local_state) = self.decode_state(state)?;
         match symbol {
-            ScopedParserSymbol::Terminal {
+            LegacyScopedParserSymbol::Terminal {
                 component: terminal_component,
                 terminal,
             } => {
                 (component == terminal_component)
                     .then(|| self.local_action(component, local_state, terminal))?
             }
-            ScopedParserSymbol::Link(link_index) => {
+            LegacyScopedParserSymbol::Link(link_index) => {
                 let link = *self.links.get(link_index as usize)?;
                 if component == link.parent_component {
                     let table = *self.components.get(component as usize)?;
@@ -4440,6 +4614,23 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
                         merge_scoped_into(&mut shifted, branch);
                     }
                 }
+                ScopedActionRef::Call {
+                    parent_component,
+                    parent_target,
+                    replace,
+                    child_component,
+                    child_start,
+                } => {
+                    let base = isolated.clone().popn(isize::from(replace));
+                    let branch = base
+                        .push(ScopedParserState::new(parent_component, parent_target))
+                        .push(ScopedParserState::new(child_component, child_start));
+                    merge_scoped_into(&mut shifted, branch);
+                }
+                ScopedActionRef::Return { pop } => {
+                    let branch = isolated.clone().popn(pop as isize);
+                    merge_scoped_into(&mut shifted, branch);
+                }
             }
         }
 
@@ -5419,6 +5610,7 @@ mod tests {
         GLRTableActionProvider, ScopedActionRef, ScopedParserActionProvider,
         ScopedParserGSS, ScopedParserState, ScopedProvidedAction, ScopedStackShift,
         advance_scoped_stacks_with_provider,
+        close_scoped_control_stacks_with_provider,
         ParserGSS,
         advance_concrete_stacks_reference,
         advance_stacks_with_provider,
