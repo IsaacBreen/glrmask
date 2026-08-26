@@ -80,7 +80,7 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-pub use runtime::{Constraint, ConstraintState};
+pub use runtime::{BoundaryTriggerDetail, Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
 pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar};

@@ -1,12 +1,63 @@
-use glrmask::{
-    ConstraintSpec, DynamicConstraint, Grammar, Constraint, Vocab,
-};
+use glrmask::{Constraint, ConstraintSpec, DynamicConstraint, Grammar, Vocab};
 
 fn allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
     let bit = token_id % 32;
     mask.get(word)
         .is_some_and(|value| value & (1u32 << bit) != 0)
+}
+
+fn assert_static_xy_matches(reference: &Constraint, candidate: &Constraint) {
+    let mut reference_state = reference.start();
+    let mut candidate_state = candidate.start();
+    assert_eq!(candidate_state.mask(), reference_state.mask());
+    assert!(allowed(&candidate_state.mask(), 2));
+    assert!(!allowed(&candidate_state.mask(), 3));
+    candidate_state.commit_token(2).unwrap();
+    reference_state.commit_token(2).unwrap();
+    assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
+
+    let mut reference_state = reference.start();
+    let mut candidate_state = candidate.start();
+    candidate_state.commit_token(0).unwrap();
+    reference_state.commit_token(0).unwrap();
+    assert_eq!(candidate_state.mask(), reference_state.mask());
+    candidate_state.commit_token(1).unwrap();
+    reference_state.commit_token(1).unwrap();
+    assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
+}
+
+fn assert_dynamic_xy_matches(reference: &Constraint, candidate: &DynamicConstraint) {
+    let mut reference_state = reference.start();
+    let mut candidate_state = candidate.start();
+    assert_eq!(candidate_state.mask(), reference_state.mask());
+    assert!(allowed(&candidate_state.mask(), 2));
+    assert!(!allowed(&candidate_state.mask(), 3));
+    candidate_state.commit_token(2).unwrap();
+    reference_state.commit_token(2).unwrap();
+    assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
+
+    let mut reference_state = reference.start();
+    let mut candidate_state = candidate.start();
+    candidate_state.commit_token(0).unwrap();
+    reference_state.commit_token(0).unwrap();
+    assert_eq!(candidate_state.mask(), reference_state.mask());
+    candidate_state.commit_token(1).unwrap();
+    reference_state.commit_token(1).unwrap();
+    assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
+}
+
+fn assert_static_xyz_matches(reference: &Constraint, candidate: &Constraint) {
+    for tokens in [&[5][..], &[2, 3][..], &[0, 4][..], &[0, 1, 3][..]] {
+        let mut reference_state = reference.start();
+        let mut candidate_state = candidate.start();
+        for &token in tokens {
+            assert_eq!(candidate_state.mask(), reference_state.mask());
+            candidate_state.commit_token(token).unwrap();
+            reference_state.commit_token(token).unwrap();
+        }
+        assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
+    }
 }
 
 const EXACT_GRAMMAR: &str = r#"
@@ -87,15 +138,24 @@ nt start = CONTROL payload;
         .unwrap()
         .bind_token("payload", [7])
         .is_err());
-    let parent = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+    // `extern grammar` slots are deliberately allowed to remain unresolved;
+    // only exact-token externs must be complete at `build()`.
+    let open_spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7])
         .unwrap()
         .build()
-        .expect("an entirely unbound grammar manifest is a reusable compiled parent")
-        .compile()
         .unwrap();
-    assert!(!parent.start().is_accepting());
+    let static_open = open_spec.clone().compile().unwrap();
+    let dynamic_open = open_spec.compile_dynamic().unwrap();
+    let mut static_state = static_open.start();
+    let mut dynamic_state = dynamic_open.start();
+    assert_eq!(static_state.mask(), dynamic_state.mask());
+    assert!(allowed(&static_state.mask(), 7));
+    static_state.commit_token(7).unwrap();
+    dynamic_state.commit_token(7).unwrap();
+    assert!(!static_state.is_accepting());
+    assert!(!dynamic_state.is_accepting());
 }
 
 #[test]
@@ -150,6 +210,244 @@ fn exact_tokens_survive_static_and_dynamic_serialization() {
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
     assert!(state.is_accepting());
+}
+
+#[test]
+fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
+    let vocab = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"y".to_vec()),
+        (2, b"xy".to_vec()),
+        // Relevant prefix followed by a suffix outside the language.
+        (3, b"xyz".to_vec()),
+    ]);
+    let parent_source =
+        "glrm 1; start start; extern grammar child; nt start = \"x\" child;";
+    let child_grammar = Grammar::ebnf(r#"start ::= "y""#);
+    let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab)
+        .unwrap();
+    let static_child = Constraint::compile(child_grammar.clone(), &vocab).unwrap();
+    let dynamic_child = DynamicConstraint::compile(child_grammar, &vocab).unwrap();
+    let static_parent = Constraint::compile(Grammar::glrm(parent_source), &vocab).unwrap();
+    let dynamic_parent =
+        DynamicConstraint::compile(Grammar::glrm(parent_source), &vocab).unwrap();
+
+    assert_static_xy_matches(
+        &reference,
+        &static_parent.bind_grammar("child", &static_child).unwrap(),
+    );
+    assert_static_xy_matches(
+        &reference,
+        &static_parent.bind_grammar("child", &dynamic_child).unwrap(),
+    );
+    assert_static_xy_matches(
+        &reference,
+        &static_parent
+            .bind_grammar_dynamic_boundary("child", &static_child)
+            .unwrap(),
+    );
+    assert_static_xy_matches(
+        &reference,
+        &static_parent
+            .bind_grammar_dynamic_boundary("child", &dynamic_child)
+            .unwrap(),
+    );
+
+    assert_dynamic_xy_matches(
+        &reference,
+        &dynamic_parent.bind_grammar("child", &static_child).unwrap(),
+    );
+    assert_dynamic_xy_matches(
+        &reference,
+        &dynamic_parent.bind_grammar("child", &dynamic_child).unwrap(),
+    );
+    assert_dynamic_xy_matches(
+        &reference,
+        &dynamic_parent
+            .bind_grammar_dynamic_boundary("child", &static_child)
+            .unwrap(),
+    );
+    let dynamic_bound_static_boundary = dynamic_parent.bind_grammar("child", &dynamic_child).unwrap();
+    assert_dynamic_xy_matches(&reference, &dynamic_bound_static_boundary);
+    let dynamic_bound_dynamic_boundary = dynamic_parent
+        .bind_grammar_dynamic_boundary("child", &dynamic_child)
+        .unwrap();
+    assert_dynamic_xy_matches(&reference, &dynamic_bound_dynamic_boundary);
+
+    let loaded_dynamic_bound_static =
+        DynamicConstraint::load(&dynamic_bound_static_boundary.save()).unwrap();
+    assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_static);
+    let loaded_dynamic_bound_dynamic =
+        DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save()).unwrap();
+    assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
+
+    let loaded_static_parent = Constraint::load(&static_parent.save()).unwrap();
+    let loaded_static_bound = loaded_static_parent
+        .bind_grammar_dynamic_boundary("child", &dynamic_child)
+        .unwrap();
+    assert_static_xy_matches(&reference, &loaded_static_bound);
+
+    let loaded_dynamic_parent = DynamicConstraint::load(&dynamic_parent.save()).unwrap();
+    let loaded_dynamic_bound = loaded_dynamic_parent
+        .bind_grammar("child", &static_child)
+        .unwrap();
+    assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound);
+
+    assert!(static_parent.bind_grammar("missing", &static_child).is_err());
+    assert!(dynamic_parent
+        .bind_grammar_dynamic_boundary("missing", &dynamic_child)
+        .is_err());
+}
+
+#[test]
+fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
+    let vocab = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"y".to_vec()),
+        (2, b"xy".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+        ),
+        &vocab,
+    )
+    .unwrap();
+
+    // The compiler realizes an unresolved grammar slot using a private exact
+    // token above the model vocabulary. That linker coordinate must never widen
+    // the public output mask, including after save/load cache reconstruction.
+    assert_eq!(parent.mask_len(), 1);
+    assert_eq!(parent.start().mask().len(), 1);
+    let loaded = Constraint::load(&parent.save()).unwrap();
+    assert_eq!(loaded.mask_len(), 1);
+    assert_eq!(loaded.start().mask().len(), 1);
+
+    let child = DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+    let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
+    let bound = loaded
+        .bind_grammar_dynamic_boundary("child", &child)
+        .unwrap();
+    assert_static_xy_matches(&reference, &bound);
+}
+
+#[test]
+fn late_binding_multiple_adjacent_slots_handles_internal_multi_boundary_tokens() {
+    let vocab = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"y".to_vec()),
+        (2, b"xy".to_vec()),
+        (3, b"z".to_vec()),
+        (4, b"yz".to_vec()),
+        (5, b"xyz".to_vec()),
+        (6, b"xyzz".to_vec()),
+    ]);
+    let parent = Grammar::glrm(
+        "glrm 1; start start; extern grammar left; extern grammar right; \
+         nt start = \"x\" left right;",
+    );
+    let reference =
+        Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y" "z""#), &vocab).unwrap();
+    let static_left = Constraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+    let dynamic_right =
+        DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab).unwrap();
+
+    let open = Constraint::compile(parent, &vocab).unwrap();
+    let partial = open.bind_grammar("left", &static_left).unwrap();
+    let complete = partial.bind_grammar("right", &dynamic_right).unwrap();
+    assert_static_xyz_matches(&reference, &complete);
+    let state = complete.start();
+    assert!(!allowed(&state.mask(), 6));
+
+    let complete = partial
+        .bind_grammar_dynamic_boundary("right", &dynamic_right)
+        .unwrap();
+    assert_static_xyz_matches(&reference, &complete);
+    let state = complete.start();
+    assert!(!allowed(&state.mask(), 6));
+}
+
+#[test]
+fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
+    let vocab = Vocab::new(vec![
+        (0, b"X".to_vec()),
+        (1, b" ".to_vec()),
+        (2, b"\t".to_vec()),
+        (3, b"a".to_vec()),
+        (4, b"!".to_vec()),
+        (5, b"X a !".to_vec()),
+        (6, b" \ta".to_vec()),
+        (7, b"a\t ".to_vec()),
+        (8, b"\t\t".to_vec()),
+        (9, b"  ".to_vec()),
+        (10, b"a ".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS = " "+;
+                extern grammar child;
+                nt document = "X" child "!";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let child = DynamicConstraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start child;
+                nt child = "a";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let reference = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS = " "+;
+                g child = {
+                    start child;
+                    nt child = "a";
+                };
+                nt document = "X" child "!";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let bound = parent
+        .bind_grammar_dynamic_boundary("child", &child)
+        .unwrap();
+    let loaded = Constraint::load(&bound.save()).unwrap();
+
+    for tokens in [
+        &[5][..],
+        &[0, 3, 4][..],
+        &[0, 9, 3, 4][..],
+        &[0, 10, 4][..],
+    ] {
+        let mut expected = reference.start();
+        let mut actual = bound.start();
+        let mut restored = loaded.start();
+        for &token in tokens {
+            assert_eq!(actual.mask(), expected.mask(), "bound mask before {tokens:?}");
+            assert_eq!(restored.mask(), expected.mask(), "loaded mask before {tokens:?}");
+            actual.commit_token(token).unwrap();
+            restored.commit_token(token).unwrap();
+            expected.commit_token(token).unwrap();
+        }
+        assert_eq!(actual.is_accepting(), expected.is_accepting(), "bound {tokens:?}");
+        assert_eq!(restored.is_accepting(), expected.is_accepting(), "loaded {tokens:?}");
+    }
 }
 
 #[test]
@@ -365,12 +663,53 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .build()
         .is_ok());
 
-    let unresolved_child = Grammar::glrm(
+    let unresolved_grammar_child = Grammar::glrm(
+        "glrm 1; start start; extern grammar nested; nt start = nested;",
+    );
+    let open = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+        .unwrap()
+        .bind_grammar("child", unresolved_grammar_child)
+        .unwrap()
+        .build()
+        .unwrap()
+        .compile()
+        .unwrap();
+    assert_eq!(open.mask_len(), 1);
+    // Independent open components may reuse the same private sentinel token
+    // number. Terminal IDs, not those hidden token IDs, are the linker
+    // coordinate; qualified nested slots must survive serialization and bind.
+    let open = Constraint::load(&open.save()).unwrap();
+    let leaf = Constraint::compile(Grammar::ebnf(r#"start ::= "x""#), &vocab).unwrap();
+    let fully_bound = open.bind_grammar("child.nested", &leaf).unwrap();
+    let mut state = fully_bound.start();
+    state.commit_token(0).unwrap();
+    assert!(state.is_accepting());
+
+    let dynamic_open = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+        .unwrap()
+        .bind_grammar(
+            "child",
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar nested; nt start = nested;",
+            ),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .compile_dynamic()
+        .unwrap();
+    let dynamic_open = DynamicConstraint::load(&dynamic_open.save()).unwrap();
+    let dynamic_fully_bound = dynamic_open.bind_grammar("child.nested", &leaf).unwrap();
+    let mut state = dynamic_fully_bound.start();
+    state.commit_token(0).unwrap();
+    assert!(state.is_accepting());
+
+    let unresolved_token_child = Grammar::glrm(
         "glrm 1; start start; extern token TOKEN; nt start = TOKEN;",
     );
     let spec = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
         .unwrap()
-        .bind_grammar("child", unresolved_child)
+        .bind_grammar("child", unresolved_token_child)
         .unwrap()
         .build()
         .unwrap();

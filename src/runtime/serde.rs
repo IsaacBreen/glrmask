@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
     BackedInternalTokenBufMasks, ConstraintSerde, DenseBufMaskRows, InternalTokenBufMasks,
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
+use std::sync::Arc;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
@@ -29,7 +31,9 @@ const PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION: u16 = 18;
 /// current core/runtime payloads, so v19 remains independently loadable.
 const PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION: u16 = 19;
 const PREVIOUS_COMBINED_CONSTRAINT_VERSION: u16 = 20;
-const CONSTRAINT_VERSION: u16 = 21;
+const PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION: u16 = 21;
+const PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION: u16 = 22;
+const CONSTRAINT_VERSION: u16 = 23;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -49,12 +53,19 @@ const V20_SECTION_MAGIC: [u8; 4] = *b"S20\0";
 const V20_SECTION_HEADER_LEN: usize = V20_SECTION_MAGIC.len() + 11 * 8;
 const V21_SECTION_MAGIC: [u8; 4] = *b"S21\0";
 const V21_SECTION_HEADER_LEN: usize = V21_SECTION_MAGIC.len() + 11 * 8;
-const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
+const V22_SECTION_MAGIC: [u8; 4] = *b"S22\0";
+const V22_SECTION_HEADER_LEN: usize = V22_SECTION_MAGIC.len() + 11 * 8;
+const V23_SECTION_MAGIC: [u8; 4] = *b"S23\0";
+const V23_SECTION_HEADER_LEN: usize = V23_SECTION_MAGIC.len() + 11 * 8;
+const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
+const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
+    PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
+const PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C20\0";
 const PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
-    PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
-const PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C20\0";
+    PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
+const PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
 const PREVIOUS_CURRENT_CORE_HEADER_LEN: usize = PREVIOUS_CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C21\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C22\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
 
@@ -63,6 +74,8 @@ fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
+            | PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION
             | PREVIOUS_COMBINED_CONSTRAINT_VERSION
             | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
             | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
@@ -280,10 +293,22 @@ struct ConstraintArtifactCurrentCoreBaseRef<'a> {
     ignore_expr: &'a Option<Expr>,
     parser_state_domain_labels: &'a [i32],
     static_dynamic_overlay: &'a Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
+    late_grammar_slots: &'a [crate::runtime::artifact::LateGrammarSlot],
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentCoreBase {
+    #[serde(deserialize_with = "deserialize_constraint")]
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+    parser_state_domain_labels: Vec<i32>,
+    static_dynamic_overlay: Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
+    late_grammar_slots: Vec<crate::runtime::artifact::LateGrammarSlot>,
+}
+
+/// Core payload used by C21, before unresolved named slots were persisted.
+#[derive(Deserialize)]
+struct ConstraintArtifactPreviousOverlayCoreBase {
     #[serde(deserialize_with = "deserialize_constraint")]
     constraint: Constraint,
     ignore_expr: Option<Expr>,
@@ -309,7 +334,7 @@ fn decode_current_core(
     ConstraintArtifactCurrentCoreBase,
     Option<crate::runtime::artifact::DeferredTerminalExprBytes>,
 ), String> {
-    let (header_len, flags, base_len, expr_len, has_current_overlay) =
+    let (header_len, flags, base_len, expr_len, has_current_overlay, has_late_slots) =
         if input.starts_with(&CURRENT_CORE_MAGIC) {
         if input.len() < CURRENT_CORE_HEADER_LEN {
             return Err("truncated current constraint core header".to_owned());
@@ -332,7 +357,7 @@ fn decode_current_core(
                 .try_into()
                 .expect("current core expression length has fixed width"),
         );
-        (CURRENT_CORE_HEADER_LEN, flags, base_len, expr_len, true)
+        (CURRENT_CORE_HEADER_LEN, flags, base_len, expr_len, true, true)
     } else if input.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC) {
         if input.len() < PREVIOUS_CURRENT_CORE_HEADER_LEN {
             return Err("truncated previous current-core header".to_owned());
@@ -360,6 +385,7 @@ fn decode_current_core(
             flags,
             base_len,
             expr_len,
+            true,
             false,
         )
     } else if input.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
@@ -382,6 +408,29 @@ fn decode_current_core(
             base_len,
             expr_len,
             false,
+            false,
+        )
+    } else if input.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC) {
+        if input.len() < PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN {
+            return Err("truncated previous-previous-previous current-core header".to_owned());
+        }
+        let base_len = u64::from_le_bytes(
+            input[4..12]
+                .try_into()
+                .expect("previous-previous-previous current-core base length has fixed width"),
+        );
+        let expr_len = u64::from_le_bytes(
+            input[12..20]
+                .try_into()
+                .expect("previous-previous-previous current-core expression length has fixed width"),
+        );
+        (
+            PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN,
+            0,
+            base_len,
+            expr_len,
+            false,
+            false,
         )
     } else {
         return Err("invalid current constraint core header".to_owned());
@@ -403,9 +452,21 @@ fn decode_current_core(
         crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
             flags & CURRENT_CORE_FLAG_OMIT_TSID_INVERSE != 0,
         );
-    let decoded = if has_current_overlay {
+    let decoded = if has_late_slots {
         bincode::deserialize::<ConstraintArtifactCurrentCoreBase>(&input[header_len..base_end])
             .map_err(|err| err.to_string())
+    } else if has_current_overlay {
+        bincode::deserialize::<ConstraintArtifactPreviousOverlayCoreBase>(
+            &input[header_len..base_end],
+        )
+        .map(|base| ConstraintArtifactCurrentCoreBase {
+            constraint: base.constraint,
+            ignore_expr: base.ignore_expr,
+            parser_state_domain_labels: base.parser_state_domain_labels,
+            static_dynamic_overlay: base.static_dynamic_overlay,
+            late_grammar_slots: Vec::new(),
+        })
+        .map_err(|err| err.to_string())
     } else {
         bincode::deserialize::<ConstraintArtifactPreviousCurrentCoreBase>(
             &input[header_len..base_end],
@@ -415,6 +476,7 @@ fn decode_current_core(
             ignore_expr: base.ignore_expr,
             parser_state_domain_labels: base.parser_state_domain_labels,
             static_dynamic_overlay: None,
+            late_grammar_slots: Vec::new(),
         })
         .map_err(|err| err.to_string())
     };
@@ -451,24 +513,108 @@ const PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP1";
 const PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ1";
 const COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP2";
 const COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ2";
+const PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS3";
+const COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS4";
 const COMPOSITION_METADATA_HEADER_LEN: usize = 12;
+const COMPOSITION_METADATA_SPLIT_HEADER_LEN: usize = 40;
 const COMPOSITION_METADATA_COMPRESS_MIN_BYTES: usize = 64 * 1024;
+const COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED: u32 = 1 << 0;
+const COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED: u32 = 1 << 1;
 
 #[derive(Serialize)]
-struct ConstraintCompositionMetadataRef<'a> {
+enum BoundaryTriggerWireRef<'a> {
+    None,
+    Tokens(&'a [u32]),
+    Exact(&'a crate::automata::weighted_u32::dwa::DWA),
+}
+
+#[derive(Serialize, Deserialize)]
+enum BoundaryTriggerWire {
+    None,
+    Tokens(Vec<u32>),
+    Exact(crate::automata::weighted_u32::dwa::DWA),
+}
+
+fn boundary_trigger_wire_ref(
+    trigger: &crate::runtime::BoundaryTrigger,
+) -> BoundaryTriggerWireRef<'_> {
+    match trigger {
+        crate::runtime::BoundaryTrigger::None => BoundaryTriggerWireRef::None,
+        crate::runtime::BoundaryTrigger::Tokens(tokens) => {
+            BoundaryTriggerWireRef::Tokens(tokens.as_ref())
+        }
+        crate::runtime::BoundaryTrigger::Exact(dwa) => BoundaryTriggerWireRef::Exact(dwa.as_ref()),
+    }
+}
+
+fn restore_boundary_trigger(trigger: BoundaryTriggerWire) -> crate::runtime::BoundaryTrigger {
+    match trigger {
+        BoundaryTriggerWire::None => crate::runtime::BoundaryTrigger::None,
+        BoundaryTriggerWire::Tokens(mut tokens) => {
+            tokens.sort_unstable();
+            tokens.dedup();
+            crate::runtime::BoundaryTrigger::Tokens(Arc::from(tokens.into_boxed_slice()))
+        }
+        BoundaryTriggerWire::Exact(dwa) => crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa)),
+    }
+}
+
+#[derive(Serialize)]
+struct ConstraintCompositionLinkMetadataRef<'a> {
     composition_reset_tokens_by_terminal: &'a [Vec<u32>],
     unbound_grammar_placeholders: &'a BTreeMap<String, TerminalID>,
+    composition_grammar_summary:
+        &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
+    boundary_trigger: BoundaryTriggerWireRef<'a>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConstraintCompositionLinkMetadata {
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
+    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+    boundary_trigger: BoundaryTriggerWire,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviousConstraintCompositionLinkMetadata {
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
+    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+}
+
+#[derive(Serialize)]
+struct ConstraintCompositionCacheMetadataRef<'a> {
     composition_parser_templates_by_terminal:
         &'a [Option<crate::automata::unweighted_u32::dfa::DFA>],
     composition_parser_characterizations_by_terminal:
         &'a [Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>],
-    composition_grammar_summary:
-        &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConstraintCompositionCacheMetadata {
+    composition_parser_templates_by_terminal:
+        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
+    composition_parser_characterizations_by_terminal:
+        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PreviousConstraintCompositionMetadata {
     composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    composition_parser_templates_by_terminal:
+        Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
+    composition_parser_characterizations_by_terminal:
+        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
+    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+}
+
+/// CMP2/CMZ2 and CMS3 predate reusable boundary-trigger metadata but already
+/// carried named unresolved grammar slots.
+#[derive(Serialize, Deserialize)]
+struct PreTriggerConstraintCompositionMetadata {
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     composition_parser_templates_by_terminal:
         Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
     composition_parser_characterizations_by_terminal:
@@ -485,6 +631,108 @@ struct ConstraintCompositionMetadata {
     composition_parser_characterizations_by_terminal:
         Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+    boundary_trigger: BoundaryTriggerWire,
+}
+
+struct CompositionMetadataSplitParts<'a> {
+    link_raw_len: usize,
+    link_wire: &'a [u8],
+    link_compressed: bool,
+    cache_raw_len: usize,
+    cache_wire: &'a [u8],
+    cache_compressed: bool,
+}
+
+fn encode_composition_metadata_part(raw: Vec<u8>) -> (usize, Vec<u8>, bool) {
+    let raw_len = raw.len();
+    if raw_len >= COMPOSITION_METADATA_COMPRESS_MIN_BYTES {
+        let compressed = zstd::bulk::compress(&raw, 1)
+            .expect("composition metadata compression should succeed");
+        if compressed.len() < raw_len {
+            return (raw_len, compressed, true);
+        }
+    }
+    (raw_len, raw, false)
+}
+
+fn decode_composition_metadata_part<'a>(
+    wire: &'a [u8],
+    raw_len: usize,
+    compressed: bool,
+) -> Result<Cow<'a, [u8]>, String> {
+    if !compressed {
+        if wire.len() != raw_len {
+            return Err("invalid raw split composition metadata length".to_owned());
+        }
+        return Ok(Cow::Borrowed(wire));
+    }
+    if raw_len == 0 || wire.is_empty() {
+        return Err("invalid compressed split composition metadata section".to_owned());
+    }
+    let raw = zstd::bulk::decompress(wire, raw_len).map_err(|err| err.to_string())?;
+    if raw.len() != raw_len {
+        return Err("invalid decompressed split composition metadata length".to_owned());
+    }
+    Ok(Cow::Owned(raw))
+}
+
+fn split_composition_metadata_parts(
+    input: &[u8],
+) -> Result<CompositionMetadataSplitParts<'_>, String> {
+    if input.len() < COMPOSITION_METADATA_SPLIT_HEADER_LEN
+        || !(input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC))
+    {
+        return Err("invalid split composition metadata section".to_owned());
+    }
+    let flags = u32::from_le_bytes(input[4..8].try_into().unwrap());
+    if flags
+        & !(COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED
+            | COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED)
+        != 0
+    {
+        return Err("invalid split composition metadata flags".to_owned());
+    }
+    let read_len = |range: std::ops::Range<usize>| -> Result<usize, String> {
+        usize::try_from(u64::from_le_bytes(input[range].try_into().unwrap()))
+            .map_err(|_| "split composition metadata length does not fit platform".to_owned())
+    };
+    let link_raw_len = read_len(8..16)?;
+    let link_wire_len = read_len(16..24)?;
+    let cache_raw_len = read_len(24..32)?;
+    let cache_wire_len = read_len(32..40)?;
+    let link_start = COMPOSITION_METADATA_SPLIT_HEADER_LEN;
+    let link_end = link_start
+        .checked_add(link_wire_len)
+        .ok_or_else(|| "split composition metadata link range overflow".to_owned())?;
+    let cache_end = link_end
+        .checked_add(cache_wire_len)
+        .ok_or_else(|| "split composition metadata cache range overflow".to_owned())?;
+    if cache_end != input.len() {
+        return Err("invalid split composition metadata section length".to_owned());
+    }
+    let link_compressed = flags & COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED != 0;
+    let cache_compressed = flags & COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED != 0;
+    if !link_compressed && link_wire_len != link_raw_len {
+        return Err("invalid raw split composition link length".to_owned());
+    }
+    if !cache_compressed && cache_wire_len != cache_raw_len {
+        return Err("invalid raw split composition cache length".to_owned());
+    }
+    if link_compressed && (link_raw_len == 0 || link_wire_len == 0) {
+        return Err("invalid compressed split composition link section".to_owned());
+    }
+    if cache_compressed && (cache_raw_len == 0 || cache_wire_len == 0) {
+        return Err("invalid compressed split composition cache section".to_owned());
+    }
+    Ok(CompositionMetadataSplitParts {
+        link_raw_len,
+        link_wire: &input[link_start..link_end],
+        link_compressed,
+        cache_raw_len,
+        cache_wire: &input[link_end..cache_end],
+        cache_compressed,
+    })
 }
 
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
@@ -493,45 +741,61 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         && constraint.composition_parser_templates_by_terminal.is_empty()
         && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
+        && constraint.boundary_trigger.is_none()
     {
         return Vec::new();
     }
-    // These parser templates and symbolic characterizations are compiler caches,
-    // but they are also the key inputs to count-only linking of an already-
-    // compiled parent. Rebuilding them during every composition defeats cached-
-    // parent subgrammar use, so persist them with the component artifact.
-    let raw = bincode::serialize(&ConstraintCompositionMetadataRef {
+    // Link-time grammar/reset metadata is kept independently from the much
+    // larger static parser-template caches. Explicit dynamic A+B needs only
+    // the former; keeping it as a separately decodable section avoids paying
+    // megabytes of parser-cache decompression/allocation merely to discover B.
+    let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
         composition_reset_tokens_by_terminal: &constraint.composition_reset_tokens_by_terminal,
         unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
+        composition_grammar_summary: &constraint.composition_grammar_summary,
+        boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
+    })
+    .expect("composition link metadata serialization should succeed");
+    let cache_raw = bincode::serialize(&ConstraintCompositionCacheMetadataRef {
         composition_parser_templates_by_terminal:
             &constraint.composition_parser_templates_by_terminal,
         composition_parser_characterizations_by_terminal:
             &constraint.composition_parser_characterizations_by_terminal,
-        composition_grammar_summary: &constraint.composition_grammar_summary,
     })
-    .expect("composition metadata serialization should succeed");
-
-    let mut out = Vec::new();
-    if raw.len() >= COMPOSITION_METADATA_COMPRESS_MIN_BYTES {
-        let compressed = zstd::bulk::compress(&raw, 1)
-            .expect("composition metadata compression should succeed");
-        if compressed.len() < raw.len() {
-            out.reserve(COMPOSITION_METADATA_HEADER_LEN + compressed.len());
-            out.extend_from_slice(&COMPOSITION_METADATA_ZSTD_MAGIC);
-            out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-            out.extend_from_slice(&compressed);
-            return out;
-        }
+    .expect("composition cache metadata serialization should succeed");
+    let (link_raw_len, link_wire, link_compressed) =
+        encode_composition_metadata_part(link_raw);
+    let (cache_raw_len, cache_wire, cache_compressed) =
+        encode_composition_metadata_part(cache_raw);
+    let mut flags = 0u32;
+    if link_compressed {
+        flags |= COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED;
     }
-    out.reserve(COMPOSITION_METADATA_HEADER_LEN + raw.len());
-    out.extend_from_slice(&COMPOSITION_METADATA_RAW_MAGIC);
-    out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-    out.extend_from_slice(&raw);
+    if cache_compressed {
+        flags |= COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED;
+    }
+    let mut out = Vec::with_capacity(
+        COMPOSITION_METADATA_SPLIT_HEADER_LEN + link_wire.len() + cache_wire.len(),
+    );
+    out.extend_from_slice(&COMPOSITION_METADATA_SPLIT_MAGIC);
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.extend_from_slice(&(link_raw_len as u64).to_le_bytes());
+    out.extend_from_slice(&(link_wire.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(cache_raw_len as u64).to_le_bytes());
+    out.extend_from_slice(&(cache_wire.len() as u64).to_le_bytes());
+    out.extend_from_slice(&link_wire);
+    out.extend_from_slice(&cache_wire);
     out
 }
 
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     if input.is_empty() {
+        return Ok(());
+    }
+    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+    {
+        split_composition_metadata_parts(input)?;
         return Ok(());
     }
     if input.len() < COMPOSITION_METADATA_HEADER_LEN {
@@ -562,6 +826,49 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     }
 }
 
+fn decode_composition_link_metadata(
+    input: &[u8],
+) -> Result<ConstraintCompositionLinkMetadata, String> {
+    validate_composition_metadata_wire(input)?;
+    if input.is_empty() {
+        return Ok(ConstraintCompositionLinkMetadata {
+            composition_reset_tokens_by_terminal: Vec::new(),
+            unbound_grammar_placeholders: BTreeMap::new(),
+            composition_grammar_summary: None,
+            boundary_trigger: BoundaryTriggerWire::None,
+        });
+    }
+    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+    {
+        let parts = split_composition_metadata_parts(input)?;
+        let raw = decode_composition_metadata_part(
+            parts.link_wire,
+            parts.link_raw_len,
+            parts.link_compressed,
+        )?;
+        if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
+            return bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string());
+        }
+        let old: PreviousConstraintCompositionLinkMetadata =
+            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+        return Ok(ConstraintCompositionLinkMetadata {
+            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+            unbound_grammar_placeholders: old.unbound_grammar_placeholders,
+            composition_grammar_summary: old.composition_grammar_summary,
+            boundary_trigger: BoundaryTriggerWire::None,
+        });
+    }
+    // CMP1/CMP2 predate the split and can only be decoded as one object.
+    let metadata = decode_composition_metadata(input)?;
+    Ok(ConstraintCompositionLinkMetadata {
+        composition_reset_tokens_by_terminal: metadata.composition_reset_tokens_by_terminal,
+        unbound_grammar_placeholders: metadata.unbound_grammar_placeholders,
+        composition_grammar_summary: metadata.composition_grammar_summary,
+        boundary_trigger: metadata.boundary_trigger,
+    })
+}
+
 fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMetadata, String> {
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
@@ -571,6 +878,47 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             composition_parser_templates_by_terminal: Vec::new(),
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
+            boundary_trigger: BoundaryTriggerWire::None,
+        });
+    }
+    if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+    {
+        let parts = split_composition_metadata_parts(input)?;
+        let link_raw = decode_composition_metadata_part(
+            parts.link_wire,
+            parts.link_raw_len,
+            parts.link_compressed,
+        )?;
+        let cache_raw = decode_composition_metadata_part(
+            parts.cache_wire,
+            parts.cache_raw_len,
+            parts.cache_compressed,
+        )?;
+        let link = if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
+            bincode::deserialize::<ConstraintCompositionLinkMetadata>(link_raw.as_ref())
+                .map_err(|err| err.to_string())?
+        } else {
+            let old: PreviousConstraintCompositionLinkMetadata =
+                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
+            ConstraintCompositionLinkMetadata {
+                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
+                composition_grammar_summary: old.composition_grammar_summary,
+                boundary_trigger: BoundaryTriggerWire::None,
+            }
+        };
+        let cache: ConstraintCompositionCacheMetadata =
+            bincode::deserialize(cache_raw.as_ref()).map_err(|err| err.to_string())?;
+        return Ok(ConstraintCompositionMetadata {
+            composition_reset_tokens_by_terminal: link.composition_reset_tokens_by_terminal,
+            unbound_grammar_placeholders: link.unbound_grammar_placeholders,
+            composition_parser_templates_by_terminal:
+                cache.composition_parser_templates_by_terminal,
+            composition_parser_characterizations_by_terminal:
+                cache.composition_parser_characterizations_by_terminal,
+            composition_grammar_summary: link.composition_grammar_summary,
+            boundary_trigger: link.boundary_trigger,
         });
     }
     let raw_len = usize::try_from(u64::from_le_bytes(input[4..12].try_into().unwrap()))
@@ -599,9 +947,20 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             composition_parser_characterizations_by_terminal:
                 old.composition_parser_characterizations_by_terminal,
             composition_grammar_summary: old.composition_grammar_summary,
+            boundary_trigger: BoundaryTriggerWire::None,
         })
     } else {
-        bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())
+        let old: PreTriggerConstraintCompositionMetadata =
+            bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+        Ok(ConstraintCompositionMetadata {
+            composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+            unbound_grammar_placeholders: old.unbound_grammar_placeholders,
+            composition_parser_templates_by_terminal: old.composition_parser_templates_by_terminal,
+            composition_parser_characterizations_by_terminal:
+                old.composition_parser_characterizations_by_terminal,
+            composition_grammar_summary: old.composition_grammar_summary,
+            boundary_trigger: BoundaryTriggerWire::None,
+        })
     }
 }
 
@@ -1703,15 +2062,190 @@ struct SegmentedRuntimeArtifactV20 {
 }
 
 #[derive(Serialize)]
+struct SegmentedParserComponentV22Ref<'a> {
+    constraint_artifact: Vec<u8>,
+    tokenizer_state_offset: u32,
+    terminal_offset: u32,
+    root_entry_terminals: &'a crate::ds::bitset::BitSet,
+    root_disallowed_terminal: Option<u32>,
+    global_to_local_parser_state: &'a [u32],
+}
+
+#[derive(Deserialize)]
+struct SegmentedParserComponentV22 {
+    constraint_artifact: Vec<u8>,
+    tokenizer_state_offset: u32,
+    terminal_offset: u32,
+    root_entry_terminals: crate::ds::bitset::BitSet,
+    root_disallowed_terminal: Option<u32>,
+    global_to_local_parser_state: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct BoundaryTerminalTrieNodeV22Ref<'a> {
+    children: &'a [(u32, u32)],
+    outputs: &'a [u32],
+}
+
+#[derive(Deserialize)]
+struct BoundaryTerminalTrieNodeV22 {
+    children: Vec<(u32, u32)>,
+    outputs: Vec<u32>,
+}
+
+#[derive(Serialize)]
+struct SegmentedBoundaryTerminalTrieV22Ref<'a> {
+    nodes: Vec<BoundaryTerminalTrieNodeV22Ref<'a>>,
+    root_by_tsid: &'a [u32],
+    tokenizer_state_to_tsid: &'a [u32],
+    internal_token_to_originals: &'a [Vec<u32>],
+    symbolic_nwa: Option<&'a crate::runtime::artifact::BoundaryTerminalNwa>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedBoundaryTerminalTrieV22 {
+    nodes: Vec<BoundaryTerminalTrieNodeV22>,
+    root_by_tsid: Vec<u32>,
+    tokenizer_state_to_tsid: Vec<u32>,
+    internal_token_to_originals: Vec<Vec<u32>>,
+    symbolic_nwa: Option<crate::runtime::artifact::BoundaryTerminalNwa>,
+}
+
+#[derive(Serialize)]
+struct SegmentedRuntimeArtifactV22Ref<'a> {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV22Ref<'a>>,
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: &'a [u32],
+    boundary_parser: Option<SegmentedBoundaryParserV20Ref<'a>>,
+    boundary_terminal_trie: Option<SegmentedBoundaryTerminalTrieV22Ref<'a>>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedRuntimeArtifactV22 {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV22>,
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: Vec<u32>,
+    boundary_parser: Option<crate::runtime::artifact::SegmentedBoundaryParser>,
+    boundary_terminal_trie: Option<SegmentedBoundaryTerminalTrieV22>,
+}
+
+#[derive(Serialize)]
+struct SegmentedBoundaryParserV23Ref<'a> {
+    parser_dwa: Cow<'a, crate::automata::weighted_u32::dwa::DWA>,
+    uses_composed_tsid_coordinate: bool,
+    tokenizer_state_to_tsid: &'a [u32],
+    internal_token_to_originals: &'a [Vec<u32>],
+}
+
+#[derive(Deserialize)]
+struct SegmentedBoundaryParserV23 {
+    parser_dwa: crate::automata::weighted_u32::dwa::DWA,
+    uses_composed_tsid_coordinate: bool,
+    tokenizer_state_to_tsid: Vec<u32>,
+    internal_token_to_originals: Vec<Vec<u32>>,
+}
+
+#[derive(Serialize)]
+enum SegmentedBoundaryShardScopeV23Ref<'a> {
+    Global,
+    Component {
+        start_component: u32,
+        start_parser_states: &'a crate::ds::bitset::BitSet,
+        accepts_empty_stack: bool,
+    },
+}
+
+#[derive(Deserialize)]
+enum SegmentedBoundaryShardScopeV23 {
+    Global,
+    Component {
+        start_component: u32,
+        start_parser_states: crate::ds::bitset::BitSet,
+        accepts_empty_stack: bool,
+    },
+}
+
+#[derive(Serialize)]
+enum SegmentedBoundaryShardBackendV23Ref<'a> {
+    StaticParser(SegmentedBoundaryParserV23Ref<'a>),
+    DynamicTerminalTrie(SegmentedBoundaryTerminalTrieV22Ref<'a>),
+    DynamicDirect,
+}
+
+#[derive(Deserialize)]
+enum SegmentedBoundaryShardBackendV23 {
+    StaticParser(SegmentedBoundaryParserV23),
+    DynamicTerminalTrie(SegmentedBoundaryTerminalTrieV22),
+    DynamicDirect,
+}
+
+#[derive(Serialize)]
+struct SegmentedBoundaryShardV23Ref<'a> {
+    scope: SegmentedBoundaryShardScopeV23Ref<'a>,
+    candidate_tokens: Option<&'a [u32]>,
+    backend: SegmentedBoundaryShardBackendV23Ref<'a>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedBoundaryShardV23 {
+    scope: SegmentedBoundaryShardScopeV23,
+    candidate_tokens: Option<Vec<u32>>,
+    backend: SegmentedBoundaryShardBackendV23,
+}
+
+#[derive(Serialize)]
+struct SegmentedRuntimeArtifactV23Ref<'a> {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV22Ref<'a>>,
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: &'a [u32],
+    boundary_shards: Vec<SegmentedBoundaryShardV23Ref<'a>>,
+}
+
+#[derive(Deserialize)]
+struct SegmentedRuntimeArtifactV23 {
+    materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
+    materialized_static_parser_state_domain_labels: Vec<i32>,
+    components: Vec<SegmentedParserComponentV22>,
+    segmented_mask_authoritative: bool,
+    segmented_component_union_root_dispatch: Vec<u32>,
+    boundary_shards: Vec<SegmentedBoundaryShardV23>,
+}
+
+#[derive(Serialize)]
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
-    segmented_runtime: Option<SegmentedRuntimeArtifactV20Ref<'a>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV23Ref<'a>>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     packed_dwa_dense_mask_ids: &'a [u32],
     packed_dwa_dense_mask_rows: &'a [u64],
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
+    terminal_live_states: Vec<Vec<u32>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV23>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    packed_dwa_dense_mask_ids: Vec<u32>,
+    packed_dwa_dense_mask_rows: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV22Runtime {
+    terminal_live_states: Vec<Vec<u32>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV22>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    packed_dwa_dense_mask_ids: Vec<u32>,
+    packed_dwa_dense_mask_rows: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV21Runtime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
     packed_dwa_dense_mask_ids: Vec<u32>,
@@ -1726,51 +2260,638 @@ struct ConstraintArtifactV20Runtime {
 
 struct DecodedConstraintRuntime {
     terminal_live_states: Vec<Vec<u32>>,
-    segmented_runtime: Option<SegmentedRuntimeArtifactV20>,
+    segmented_runtime_v20: Option<SegmentedRuntimeArtifactV20>,
+    segmented_runtime_v22: Option<SegmentedRuntimeArtifactV22>,
+    segmented_runtime_v23: Option<SegmentedRuntimeArtifactV23>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     packed_dwa_dense_masks: Option<(Vec<u32>, Vec<u64>)>,
+}
+
+fn boundary_parser_artifact_ref(
+    boundary: &crate::runtime::artifact::SegmentedBoundaryParser,
+) -> SegmentedBoundaryParserV20Ref<'_> {
+    let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+        Cow::Owned(compact.to_generic_dwa())
+    } else {
+        Cow::Borrowed(&boundary.parser_dwa)
+    };
+    SegmentedBoundaryParserV20Ref {
+        parser_dwa,
+        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+        internal_token_to_originals: &boundary.internal_token_to_originals,
+    }
+}
+
+fn boundary_parser_v23_ref(
+    boundary: &crate::runtime::artifact::SegmentedBoundaryParser,
+) -> SegmentedBoundaryParserV23Ref<'_> {
+    let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+        Cow::Owned(compact.to_generic_dwa())
+    } else {
+        Cow::Borrowed(&boundary.parser_dwa)
+    };
+    SegmentedBoundaryParserV23Ref {
+        parser_dwa,
+        uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
+        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+        internal_token_to_originals: &boundary.internal_token_to_originals,
+    }
+}
+
+fn boundary_terminal_trie_v22_ref(
+    boundary: &crate::runtime::artifact::SegmentedBoundaryTerminalTrie,
+) -> SegmentedBoundaryTerminalTrieV22Ref<'_> {
+    SegmentedBoundaryTerminalTrieV22Ref {
+        nodes: boundary
+            .nodes
+            .iter()
+            .map(|node| BoundaryTerminalTrieNodeV22Ref {
+                children: &node.children,
+                outputs: &node.outputs,
+            })
+            .collect(),
+        root_by_tsid: &boundary.root_by_tsid,
+        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
+        internal_token_to_originals: &boundary.internal_token_to_originals,
+        symbolic_nwa: boundary.symbolic_nwa.as_ref(),
+    }
 }
 
 fn segmented_runtime_artifact_ref(
     constraint: &Constraint,
-) -> Option<SegmentedRuntimeArtifactV20Ref<'_>> {
+) -> Option<SegmentedRuntimeArtifactV23Ref<'_>> {
     let overlay = constraint.static_dynamic_overlay.as_ref()?;
     if overlay.segmented_parser_components.is_empty()
+        && overlay.segmented_boundary_shards.is_empty()
         && overlay.segmented_boundary_parser.is_none()
         && overlay.segmented_boundary_terminal_trie.is_none()
     {
         return None;
     }
-    let (materialized_component_parser, materialized_parser_state_domain_labels) =
-        if overlay.segmented_parser_components.is_empty() {
-            (None, Vec::new())
-        } else {
-            match crate::compiler::constraint_compose::materialize_segmented_component_parser_for_serialization(
-                constraint,
-            )
-            .expect("segmented component parser should materialize for serialization")
-            {
-                Some((parser, labels)) => (Some(parser), labels),
-                None => (None, Vec::new()),
+    let components = overlay
+        .segmented_parser_components
+        .iter()
+        .map(|component| SegmentedParserComponentV22Ref {
+            constraint_artifact: component.constraint.save(),
+            tokenizer_state_offset: component.tokenizer_state_offset,
+            terminal_offset: component.terminal_offset,
+            root_entry_terminals: &component.root_entry_terminals,
+            root_disallowed_terminal: component.root_disallowed_terminal,
+            global_to_local_parser_state: &component.global_to_local_parser_state,
+        })
+        .collect();
+
+    let boundary_shards = if !overlay.segmented_boundary_shards.is_empty() {
+        overlay
+            .segmented_boundary_shards
+            .iter()
+            .map(|shard| SegmentedBoundaryShardV23Ref {
+                scope: SegmentedBoundaryShardScopeV23Ref::Component {
+                    start_component: shard.start_component,
+                    start_parser_states: &shard.start_parser_states,
+                    accepts_empty_stack: shard.accepts_empty_stack,
+                },
+                candidate_tokens: shard.candidate_tokens.as_deref(),
+                backend: match &shard.backend {
+                    crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
+                        SegmentedBoundaryShardBackendV23Ref::StaticParser(
+                            boundary_parser_v23_ref(boundary),
+                        )
+                    }
+                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
+                        SegmentedBoundaryShardBackendV23Ref::DynamicTerminalTrie(
+                            boundary_terminal_trie_v22_ref(boundary),
+                        )
+                    }
+                    crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
+                        SegmentedBoundaryShardBackendV23Ref::DynamicDirect
+                    }
+                },
+            })
+            .collect()
+    } else {
+        let mut shards = Vec::new();
+        if let Some(boundary) = overlay.segmented_boundary_parser.as_deref() {
+            shards.push(SegmentedBoundaryShardV23Ref {
+                scope: SegmentedBoundaryShardScopeV23Ref::Global,
+                candidate_tokens: None,
+                backend: SegmentedBoundaryShardBackendV23Ref::StaticParser(
+                    boundary_parser_v23_ref(boundary),
+                ),
+            });
+        }
+        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref() {
+            shards.push(SegmentedBoundaryShardV23Ref {
+                scope: SegmentedBoundaryShardScopeV23Ref::Global,
+                candidate_tokens: None,
+                backend: SegmentedBoundaryShardBackendV23Ref::DynamicTerminalTrie(
+                    boundary_terminal_trie_v22_ref(boundary),
+                ),
+            });
+        }
+        shards
+    };
+
+    Some(SegmentedRuntimeArtifactV23Ref {
+        materialized_static_component_parser: None,
+        materialized_static_parser_state_domain_labels: Vec::new(),
+        components,
+        segmented_mask_authoritative: overlay.segmented_mask_authoritative,
+        segmented_component_union_root_dispatch: &overlay.segmented_component_union_root_dispatch,
+        boundary_shards,
+    })
+}
+
+fn restore_boundary_terminal_trie_v22(
+    boundary: SegmentedBoundaryTerminalTrieV22,
+    global_terminal_count: usize,
+) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryTerminalTrie> {
+    fn weight_within_boundary_domain(weight: &Weight, tsids: usize, tokens: usize) -> bool {
+        if weight.is_empty() || weight.is_full() {
+            return true;
+        }
+        weight.range_entries().all(|(_, end_tsid, token_set)| {
+            end_tsid < tsids as u32
+                && token_set
+                    .ranges()
+                    .all(|range| *range.end() < tokens as u32)
+        })
+    }
+
+    let node_count = boundary.nodes.len();
+    if boundary
+        .root_by_tsid
+        .iter()
+        .any(|&root| root != u32::MAX && root as usize >= node_count)
+    {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized boundary terminal trie references an invalid root node".to_owned(),
+        ));
+    }
+    if boundary
+        .tokenizer_state_to_tsid
+        .iter()
+        .any(|&tsid| tsid != u32::MAX && tsid as usize >= boundary.root_by_tsid.len())
+    {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized boundary terminal trie references an invalid TSID".to_owned(),
+        ));
+    }
+    let internal_token_count = boundary.internal_token_to_originals.len();
+    for (node_index, node) in boundary.nodes.iter().enumerate() {
+        if node
+            .children
+            .iter()
+            .any(|&(_, child)| child as usize >= node_count)
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "serialized boundary terminal trie node {node_index} references an invalid child"
+            )));
+        }
+        if node
+            .outputs
+            .iter()
+            .any(|&token| token as usize >= internal_token_count)
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "serialized boundary terminal trie node {node_index} references an invalid token class"
+            )));
+        }
+    }
+
+    if let Some(symbolic_nwa) = boundary.symbolic_nwa.as_ref() {
+        let symbolic_node_count = symbolic_nwa.nodes.len();
+        if symbolic_nwa.topological_order.len() != symbolic_node_count {
+            return Err(crate::GlrMaskError::Serialization(
+                "serialized boundary terminal NWA has an incomplete topological order".to_owned(),
+            ));
+        }
+        let mut position = vec![usize::MAX; symbolic_node_count];
+        for (index, &state) in symbolic_nwa.topological_order.iter().enumerate() {
+            let Some(slot) = position.get_mut(state as usize) else {
+                return Err(crate::GlrMaskError::Serialization(
+                    "serialized boundary terminal NWA topological order references an invalid state"
+                        .to_owned(),
+                ));
+            };
+            if *slot != usize::MAX {
+                return Err(crate::GlrMaskError::Serialization(
+                    "serialized boundary terminal NWA topological order contains a duplicate state"
+                        .to_owned(),
+                ));
+            }
+            *slot = index;
+        }
+        if symbolic_nwa
+            .start_states
+            .iter()
+            .any(|&state| state as usize >= symbolic_node_count)
+        {
+            return Err(crate::GlrMaskError::Serialization(
+                "serialized boundary terminal NWA references an invalid start state".to_owned(),
+            ));
+        }
+        for (source, node) in symbolic_nwa.nodes.iter().enumerate() {
+            if node.final_weight.as_ref().is_some_and(|weight| {
+                !weight_within_boundary_domain(
+                    weight,
+                    boundary.root_by_tsid.len(),
+                    internal_token_count,
+                )
+            }) {
+                return Err(crate::GlrMaskError::Serialization(format!(
+                    "serialized boundary terminal NWA state {source} has an out-of-domain final weight"
+                )));
+            }
+            for transition in &node.transitions {
+                if transition.terminal as usize >= global_terminal_count
+                    || transition.target as usize >= symbolic_node_count
+                    || position[source] >= position[transition.target as usize]
+                    || !weight_within_boundary_domain(
+                        &transition.weight,
+                        boundary.root_by_tsid.len(),
+                        internal_token_count,
+                    )
+                {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "serialized boundary terminal NWA state {source} has an invalid labeled transition"
+                    )));
+                }
+            }
+            for (target, weight) in &node.epsilons {
+                if *target as usize >= symbolic_node_count
+                    || position[source] >= position[*target as usize]
+                    || !weight_within_boundary_domain(
+                        weight,
+                        boundary.root_by_tsid.len(),
+                        internal_token_count,
+                    )
+                {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "serialized boundary terminal NWA state {source} has an invalid epsilon transition"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(crate::runtime::artifact::SegmentedBoundaryTerminalTrie {
+        nodes: boundary
+            .nodes
+            .into_iter()
+            .map(|node| crate::runtime::artifact::BoundaryTerminalTrieNode {
+                children: node.children,
+                outputs: node.outputs,
+            })
+            .collect(),
+        root_by_tsid: boundary.root_by_tsid,
+        tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
+        internal_token_to_originals: boundary.internal_token_to_originals,
+        symbolic_nwa: boundary.symbolic_nwa,
+    })
+}
+
+fn restore_segmented_runtime_v22(
+    constraint: &mut Constraint,
+    runtime: SegmentedRuntimeArtifactV22,
+) -> crate::Result<()> {
+    let global_state_count = constraint.table.num_states as usize;
+    let global_terminal_count = constraint.table.num_terminals as usize;
+    let global_tokenizer_states = constraint.tokenizer.num_states();
+    let has_static_baseline = runtime.materialized_static_component_parser.is_some();
+    if let Some(parser_dwa) = runtime.materialized_static_component_parser {
+        if !runtime.materialized_static_parser_state_domain_labels.is_empty()
+            && runtime.materialized_static_parser_state_domain_labels.len() != global_state_count
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "serialized static component parser has {} domain labels for {global_state_count} outer states",
+                runtime.materialized_static_parser_state_domain_labels.len(),
+            )));
+        }
+        constraint.parser_dwa = parser_dwa;
+        constraint.packed_parser_dwa = None;
+        constraint.parser_state_domain_labels =
+            runtime.materialized_static_parser_state_domain_labels;
+    } else if !runtime.materialized_static_parser_state_domain_labels.is_empty() {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized static component parser labels exist without a parser".to_owned(),
+        ));
+    }
+    let mut components = Vec::with_capacity(runtime.components.len());
+    for (index, component) in runtime.components.into_iter().enumerate() {
+        if component.global_to_local_parser_state.len() != global_state_count {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} parser-state projection has {} entries for {global_state_count} outer states",
+                component.global_to_local_parser_state.len(),
+            )));
+        }
+        if component.root_entry_terminals.len() != global_terminal_count {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
+                component.root_entry_terminals.len(),
+            )));
+        }
+        let child = Constraint::load(component.constraint_artifact)?;
+        if component
+            .terminal_offset
+            .checked_add(child.table.num_terminals)
+            .is_none_or(|end| end as usize > global_terminal_count)
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} terminal range lies outside outer terminal domain"
+            )));
+        }
+        if component
+            .tokenizer_state_offset
+            .checked_add(child.tokenizer.num_states().saturating_sub(1))
+            .is_none_or(|last| last >= global_tokenizer_states)
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} tokenizer-state range lies outside outer tokenizer"
+            )));
+        }
+        if component
+            .root_disallowed_terminal
+            .is_some_and(|terminal| terminal >= child.table.num_terminals)
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} root-disallowed terminal lies outside the component"
+            )));
+        }
+        if component.global_to_local_parser_state.iter().any(|&local| {
+            local != u32::MAX && local >= child.table.num_states
+        }) {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "segmented component {index} parser-state projection references an invalid local state"
+            )));
+        }
+        components.push(crate::runtime::SegmentedParserComponent {
+            constraint: std::sync::Arc::new(child),
+            tokenizer_state_offset: component.tokenizer_state_offset,
+            terminal_offset: component.terminal_offset,
+            root_entry_terminals: component.root_entry_terminals,
+            root_disallowed_terminal: component.root_disallowed_terminal,
+            global_to_local_parser_state: component.global_to_local_parser_state,
+        });
+    }
+    if !runtime.segmented_component_union_root_dispatch.is_empty()
+        && runtime.segmented_component_union_root_dispatch.len() != global_state_count
+    {
+        return Err(crate::GlrMaskError::Serialization(
+            "segmented component root dispatch has the wrong outer parser-state domain".to_owned(),
+        ));
+    }
+    if runtime
+        .segmented_component_union_root_dispatch
+        .iter()
+        .any(|&component| component != u32::MAX && component as usize >= components.len())
+    {
+        return Err(crate::GlrMaskError::Serialization(
+            "segmented component root dispatch references an unknown component".to_owned(),
+        ));
+    }
+    let overlay = constraint
+        .static_dynamic_overlay
+        .get_or_insert_with(Default::default);
+    overlay.segmented_parser_components = components;
+    overlay.segmented_mask_authoritative = runtime.segmented_mask_authoritative;
+    overlay.segmented_static_baseline = has_static_baseline;
+    overlay.segmented_component_union_root_dispatch =
+        runtime.segmented_component_union_root_dispatch;
+    overlay.segmented_boundary_parser = runtime.boundary_parser.map(Arc::new);
+    overlay.segmented_boundary_terminal_trie = runtime
+        .boundary_terminal_trie
+        .map(|boundary| restore_boundary_terminal_trie_v22(boundary, global_terminal_count))
+        .transpose()?
+        .map(Arc::new);
+    // v22 stores one global B. Keep the new shard collection empty so runtime
+    // deliberately takes the exact legacy/global fallback rather than
+    // pretending the old wire format contained per-start-component roots.
+    overlay.segmented_boundary_shards.clear();
+    Ok(())
+}
+
+fn restore_boundary_parser_v23(
+    constraint: &Constraint,
+    boundary: SegmentedBoundaryParserV23,
+) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryParser> {
+    let global_tokenizer_states = constraint.tokenizer.num_states();
+    let tsid_count = if boundary.uses_composed_tsid_coordinate {
+        if !boundary.tokenizer_state_to_tsid.is_empty() {
+            return Err(crate::GlrMaskError::Serialization(
+                "composed-coordinate boundary shard redundantly stores a private tokenizer-state map"
+                    .to_owned(),
+            ));
+        }
+        constraint.internal_tsid_count()
+    } else {
+        if boundary.tokenizer_state_to_tsid.len() != global_tokenizer_states as usize {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "private-coordinate boundary shard has {} tokenizer-state entries for {global_tokenizer_states} outer states",
+                boundary.tokenizer_state_to_tsid.len(),
+            )));
+        }
+        boundary
+            .tokenizer_state_to_tsid
+            .iter()
+            .copied()
+            .filter(|&tsid| tsid != u32::MAX)
+            .max()
+            .map_or(0, |tsid| tsid as usize + 1)
+    };
+    let token_count = boundary.internal_token_to_originals.len();
+    let state_count = boundary.parser_dwa.num_states() as usize;
+    if boundary.parser_dwa.start_state() as usize >= state_count {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized boundary parser has an invalid start state".to_owned(),
+        ));
+    }
+    let weight_in_domain = |weight: &Weight| {
+        weight.is_empty()
+            || weight.is_full()
+            || weight.raw_range_values().all(|(range, tokens)| {
+                *range.end() < tsid_count as u32
+                    && tokens
+                        .ranges()
+                        .all(|token_range| *token_range.end() < token_count as u32)
+            })
+    };
+    for (state_index, state) in boundary.parser_dwa.states().iter().enumerate() {
+        if state
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight_in_domain(weight))
+        {
+            return Err(crate::GlrMaskError::Serialization(format!(
+                "serialized boundary parser state {state_index} has an out-of-domain final weight"
+            )));
+        }
+        for (target, weight) in state.transitions.values() {
+            if *target as usize >= state_count || !weight_in_domain(weight) {
+                return Err(crate::GlrMaskError::Serialization(format!(
+                    "serialized boundary parser state {state_index} has an invalid transition"
+                )));
+            }
+        }
+    }
+    if !boundary.uses_composed_tsid_coordinate
+        && boundary
+            .tokenizer_state_to_tsid
+            .iter()
+            .any(|&tsid| tsid != u32::MAX && tsid as usize >= tsid_count)
+    {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized boundary parser tokenizer-state map references an invalid TSID".to_owned(),
+        ));
+    }
+    Ok(crate::runtime::artifact::SegmentedBoundaryParser {
+        parser_dwa: boundary.parser_dwa,
+        compact_parser_dwa: None,
+        uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
+        tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
+        internal_token_to_originals: boundary.internal_token_to_originals,
+    })
+}
+
+fn restore_segmented_runtime_v23(
+    constraint: &mut Constraint,
+    runtime: SegmentedRuntimeArtifactV23,
+) -> crate::Result<()> {
+    let SegmentedRuntimeArtifactV23 {
+        materialized_static_component_parser,
+        materialized_static_parser_state_domain_labels,
+        components,
+        segmented_mask_authoritative,
+        segmented_component_union_root_dispatch,
+        boundary_shards,
+    } = runtime;
+    restore_segmented_runtime_v22(
+        constraint,
+        SegmentedRuntimeArtifactV22 {
+            materialized_static_component_parser,
+            materialized_static_parser_state_domain_labels,
+            components,
+            segmented_mask_authoritative,
+            segmented_component_union_root_dispatch,
+            boundary_parser: None,
+            boundary_terminal_trie: None,
+        },
+    )?;
+
+    let global_state_count = constraint.table.num_states as usize;
+    let global_terminal_count = constraint.table.num_terminals as usize;
+    let component_count = constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .map_or(0, |overlay| overlay.segmented_parser_components.len());
+    let mut seen_components = vec![false; component_count];
+    let mut global_static = None;
+    let mut global_dynamic = None;
+    let mut restored_shards = Vec::new();
+
+    for (index, shard) in boundary_shards.into_iter().enumerate() {
+        let backend = match shard.backend {
+            SegmentedBoundaryShardBackendV23::StaticParser(boundary) => {
+                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(Arc::new(
+                    restore_boundary_parser_v23(constraint, boundary)?,
+                ))
+            }
+            SegmentedBoundaryShardBackendV23::DynamicTerminalTrie(boundary) => {
+                crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(Arc::new(
+                    restore_boundary_terminal_trie_v22(boundary, global_terminal_count)?,
+                ))
+            }
+            SegmentedBoundaryShardBackendV23::DynamicDirect => {
+                crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
             }
         };
-    let boundary_parser = overlay.segmented_boundary_parser.as_deref().map(|boundary| {
-        let parser_dwa = if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
-            Cow::Owned(compact.to_generic_dwa())
-        } else {
-            Cow::Borrowed(&boundary.parser_dwa)
-        };
-        SegmentedBoundaryParserV20Ref {
-            parser_dwa,
-            tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
-            internal_token_to_originals: &boundary.internal_token_to_originals,
+        match shard.scope {
+            SegmentedBoundaryShardScopeV23::Global => {
+                if shard.candidate_tokens.is_some() {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "global boundary shard {index} unexpectedly carries component trigger tokens"
+                    )));
+                }
+                match backend {
+                    crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
+                        if global_static.replace(boundary).is_some() {
+                            return Err(crate::GlrMaskError::Serialization(
+                                "serialized v23 runtime contains multiple global static boundary shards"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
+                        if global_dynamic.replace(boundary).is_some() {
+                            return Err(crate::GlrMaskError::Serialization(
+                                "serialized v23 runtime contains multiple global dynamic boundary shards"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                    crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
+                        return Err(crate::GlrMaskError::Serialization(
+                            "serialized v23 runtime cannot use an unscoped direct-dynamic boundary shard"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
+            SegmentedBoundaryShardScopeV23::Component {
+                start_component,
+                start_parser_states,
+                accepts_empty_stack,
+            } => {
+                let component_index = start_component as usize;
+                if component_index >= component_count {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "boundary shard {index} references unknown component {start_component}"
+                    )));
+                }
+                if seen_components[component_index] {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "serialized v23 runtime contains multiple boundary shards for component {start_component}"
+                    )));
+                }
+                seen_components[component_index] = true;
+                if start_parser_states.len() != global_state_count {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "boundary shard {index} start-state set has length {} for {global_state_count} outer states",
+                        start_parser_states.len(),
+                    )));
+                }
+                if accepts_empty_stack && start_component != 0 {
+                    return Err(crate::GlrMaskError::Serialization(format!(
+                        "boundary shard {index} gives empty-stack ownership to non-root component {start_component}"
+                    )));
+                }
+                let candidate_tokens = shard.candidate_tokens.map(|mut tokens| {
+                    tokens.sort_unstable();
+                    tokens.dedup();
+                    Arc::<[u32]>::from(tokens)
+                });
+                restored_shards.push(crate::runtime::SegmentedBoundaryShard {
+                    start_component,
+                    start_parser_states,
+                    accepts_empty_stack,
+                    candidate_tokens,
+                    backend,
+                });
+            }
         }
-    });
-    Some(SegmentedRuntimeArtifactV20Ref {
-        materialized_component_parser,
-        materialized_parser_state_domain_labels,
-        boundary_parser,
-        boundary_terminal_trie: overlay.segmented_boundary_terminal_trie.as_deref(),
-    })
+    }
+    if !restored_shards.is_empty() && (global_static.is_some() || global_dynamic.is_some()) {
+        return Err(crate::GlrMaskError::Serialization(
+            "serialized v23 runtime mixes global and component-scoped boundary shards".to_owned(),
+        ));
+    }
+    let overlay = constraint
+        .static_dynamic_overlay
+        .get_or_insert_with(Default::default);
+    overlay.segmented_boundary_shards = restored_shards;
+    overlay.segmented_boundary_parser = global_static;
+    overlay.segmented_boundary_terminal_trie = global_dynamic;
+    Ok(())
 }
 
 fn restore_segmented_runtime_v20(
@@ -1790,8 +2911,9 @@ fn restore_segmented_runtime_v20(
     // deliberately not recursively embedded in the artifact.
     overlay.segmented_parser_components.clear();
     overlay.segmented_component_union_root_dispatch.clear();
-    overlay.segmented_boundary_parser = runtime.boundary_parser.map(Box::new);
-    overlay.segmented_boundary_terminal_trie = runtime.boundary_terminal_trie.map(Box::new);
+    overlay.segmented_boundary_parser = runtime.boundary_parser.map(Arc::new);
+    overlay.segmented_boundary_terminal_trie = runtime.boundary_terminal_trie.map(Arc::new);
+    overlay.segmented_boundary_shards.clear();
     Ok(())
 }
 
@@ -2185,6 +3307,155 @@ fn v20_sections(
     ))
 }
 
+fn v23_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V23_SECTION_HEADER_LEN || !payload.starts_with(&V23_SECTION_MAGIC) {
+        return Err("invalid v23 constraint section header".to_owned());
+    }
+    let mut pos = V23_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v23 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v23 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V23_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v23 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v23 constraint section lengths".to_owned());
+    }
+    let mut pos = V23_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
+
+fn v22_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V22_SECTION_HEADER_LEN || !payload.starts_with(&V22_SECTION_MAGIC) {
+        return Err("invalid v22 constraint section header".to_owned());
+    }
+    let mut pos = V22_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v22 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v22 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V22_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v22 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v22 constraint section lengths".to_owned());
+    }
+    let mut pos = V22_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
 fn v21_sections(
     payload: &[u8],
 ) -> Result<
@@ -2203,10 +3474,10 @@ fn v21_sections(
     ),
     String,
 > {
-    if payload.len() < V21_SECTION_HEADER_LEN || !payload.starts_with(&V21_SECTION_MAGIC) {
+    if payload.len() < V22_SECTION_HEADER_LEN || !payload.starts_with(&V22_SECTION_MAGIC) {
         return Err("invalid v21 constraint section header".to_owned());
     }
-    let mut pos = V21_SECTION_MAGIC.len();
+    let mut pos = V22_SECTION_MAGIC.len();
     let mut take_len = || {
         let end = pos + 8;
         let value = u64::from_le_bytes(
@@ -2231,14 +3502,14 @@ fn v21_sections(
         take_len()?,
         take_len()?,
     ];
-    let total = lengths.iter().try_fold(V21_SECTION_HEADER_LEN, |sum, &len| {
+    let total = lengths.iter().try_fold(V22_SECTION_HEADER_LEN, |sum, &len| {
         sum.checked_add(len)
             .ok_or_else(|| "v21 constraint section lengths overflow".to_owned())
     })?;
     if total != payload.len() {
         return Err("invalid v21 constraint section lengths".to_owned());
     }
-    let mut pos = V21_SECTION_HEADER_LEN;
+    let mut pos = V22_SECTION_HEADER_LEN;
     let mut next = |len: usize| {
         let section = &payload[pos..pos + len];
         pos += len;
@@ -2493,7 +3764,30 @@ impl Constraint {
         self.composition_parser_characterizations_by_terminal =
             metadata.composition_parser_characterizations_by_terminal;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
+        self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
+        self.composition_link_metadata_materialized = true;
         self.deferred_composition_metadata_blob = None;
+        Ok(())
+    }
+
+    /// Materialize only the metadata needed to link an explicit dynamic A+B
+    /// composition. New split-format artifacts keep this data independent of
+    /// the large static parser-template caches, so dynamic late binding can
+    /// remain cheap. The deferred blob is intentionally retained: a later
+    /// static/generic composition of the same constraint can still request the
+    /// complete compiler cache through `materialize_composition_metadata_for_compilation`.
+    pub(crate) fn materialize_composition_link_metadata_for_compilation(
+        &mut self,
+    ) -> Result<(), String> {
+        let Some(blob) = self.deferred_composition_metadata_blob.clone() else {
+            return Ok(());
+        };
+        let metadata = decode_composition_link_metadata(blob.as_slice())?;
+        self.composition_reset_tokens_by_terminal = metadata.composition_reset_tokens_by_terminal;
+        self.unbound_grammar_placeholders = metadata.unbound_grammar_placeholders;
+        self.composition_grammar_summary = metadata.composition_grammar_summary;
+        self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
+        self.composition_link_metadata_materialized = true;
         Ok(())
     }
 
@@ -2782,6 +4076,7 @@ impl Constraint {
                                 ignore_expr: &self.ignore_expr,
                                 parser_state_domain_labels: &self.parser_state_domain_labels,
                                 static_dynamic_overlay: &self.static_dynamic_overlay,
+                                late_grammar_slots: &self.late_grammar_slots,
                             },
                         );
                         crate::runtime::artifact::internal_tsid_inverse_artifact_serde::set_omit(
@@ -2890,6 +4185,10 @@ impl Constraint {
                             let bytes = bincode::serialize(&ConstraintArtifactCurrentRuntimeRef {
                                 terminal_live_states: &self.terminal_live_states,
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
+                                dynamic_mask_vocab: self
+                                    .uses_dynamic_runtime()
+                                    .then(|| self.dynamic_mask_vocab.to_artifact())
+                                    .flatten(),
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
                                 packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
                             })
@@ -2983,7 +4282,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V21_SECTION_HEADER_LEN
+            + V23_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -3010,7 +4309,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V21_SECTION_HEADER_LEN
+            + V23_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -3030,7 +4329,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V21_SECTION_HEADER_LEN
+        let payload_len = V23_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -3062,7 +4361,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V21_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V23_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -3071,8 +4370,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V21_SECTION_MAGIC.len()].copy_from_slice(&V21_SECTION_MAGIC);
-            pos += V21_SECTION_MAGIC.len();
+            header[pos..pos + V23_SECTION_MAGIC.len()].copy_from_slice(&V23_SECTION_MAGIC);
+            pos += V23_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -3271,7 +4570,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V21_SECTION_MAGIC);
+        bytes.extend_from_slice(&V23_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -3353,6 +4652,25 @@ impl Constraint {
         }
     }
 
+    /// Load a compiled constraint and bind it to an already-existing exact
+    /// model vocabulary.
+    ///
+    /// This preserves the zero-copy packed artifact representation while
+    /// sharing the caller's `Vocab` identity and derived-artifact cache. Later
+    /// subgrammar composition can therefore prove vocabulary compatibility by
+    /// `Arc` identity instead of reconstructing and repeatedly comparing the
+    /// same token byte map.
+    pub fn load_with_vocab<'a>(
+        bytes: impl Into<Cow<'a, [u8]>>,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        let mut constraint = Self::load(bytes)?;
+        constraint
+            .bind_vocab_exact(vocab)
+            .map_err(crate::GlrMaskError::Serialization)?;
+        Ok(constraint)
+    }
+
     fn load_impl(
         bytes: &[u8],
         owned_artifact: Option<std::sync::Arc<Vec<u8>>>,
@@ -3381,6 +4699,8 @@ impl Constraint {
                 | PREVIOUS_EXTERNAL_RUNTIME_CONSTRAINT_VERSION
                 | PREVIOUS_SERIALIZATION_CURRENT_CONSTRAINT_VERSION
                 | PREVIOUS_COMBINED_CONSTRAINT_VERSION
+                | PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION
+                | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -3505,6 +4825,38 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v23_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v22_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v21_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -3719,7 +5071,76 @@ impl Constraint {
                                             };
                                             Ok(DecodedConstraintRuntime {
                                                 terminal_live_states: runtime.terminal_live_states,
-                                                segmented_runtime: runtime.segmented_runtime,
+                                                segmented_runtime_v20: None,
+                                                segmented_runtime_v22: None,
+                                                segmented_runtime_v23: runtime.segmented_runtime,
+                                                dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                packed_dwa_dense_masks,
+                                            })
+                                        })
+                                    } else if version == PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION {
+                                        bincode::deserialize::<ConstraintArtifactV22Runtime>(
+                                            runtime_section,
+                                        )
+                                        .and_then(|runtime| {
+                                            let packed_dwa_dense_masks = if runtime
+                                                .packed_dwa_dense_mask_ids
+                                                .is_empty()
+                                            {
+                                                if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                                    return Err(bincode::Error::new(
+                                                        bincode::ErrorKind::Custom(
+                                                            "packed DWA dense-mask slab has rows but no ids"
+                                                                .to_owned(),
+                                                        ),
+                                                    ));
+                                                }
+                                                None
+                                            } else {
+                                                Some((
+                                                    runtime.packed_dwa_dense_mask_ids,
+                                                    runtime.packed_dwa_dense_mask_rows,
+                                                ))
+                                            };
+                                            Ok(DecodedConstraintRuntime {
+                                                terminal_live_states: runtime.terminal_live_states,
+                                                segmented_runtime_v20: None,
+                                                segmented_runtime_v22: runtime.segmented_runtime,
+                                                segmented_runtime_v23: None,
+                                                dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                packed_dwa_dense_masks,
+                                            })
+                                        })
+                                    } else if version == PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION {
+                                        bincode::deserialize::<ConstraintArtifactV21Runtime>(
+                                            runtime_section,
+                                        )
+                                        .and_then(|runtime| {
+                                            let packed_dwa_dense_masks = if runtime
+                                                .packed_dwa_dense_mask_ids
+                                                .is_empty()
+                                            {
+                                                if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                                    return Err(bincode::Error::new(
+                                                        bincode::ErrorKind::Custom(
+                                                            "packed DWA dense-mask slab has rows but no ids"
+                                                                .to_owned(),
+                                                        ),
+                                                    ));
+                                                }
+                                                None
+                                            } else {
+                                                Some((
+                                                    runtime.packed_dwa_dense_mask_ids,
+                                                    runtime.packed_dwa_dense_mask_rows,
+                                                ))
+                                            };
+                                            Ok(DecodedConstraintRuntime {
+                                                terminal_live_states: runtime.terminal_live_states,
+                                                segmented_runtime_v20: runtime.segmented_runtime,
+                                                segmented_runtime_v22: None,
+                                                segmented_runtime_v23: None,
+                                                dynamic_mask_vocab: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -3729,7 +5150,10 @@ impl Constraint {
                                         )
                                         .map(|runtime| DecodedConstraintRuntime {
                                             terminal_live_states: runtime.terminal_live_states,
-                                            segmented_runtime: runtime.segmented_runtime,
+                                            segmented_runtime_v20: runtime.segmented_runtime,
+                                            segmented_runtime_v22: None,
+                                            segmented_runtime_v23: None,
+                                            dynamic_mask_vocab: None,
                                             packed_dwa_dense_masks: None,
                                         })
                                     } else {
@@ -3738,7 +5162,10 @@ impl Constraint {
                                         )
                                         .map(|runtime| DecodedConstraintRuntime {
                                             terminal_live_states: runtime.terminal_live_states,
-                                            segmented_runtime: None,
+                                            segmented_runtime_v20: None,
+                                            segmented_runtime_v22: None,
+                                            segmented_runtime_v23: None,
+                                            dynamic_mask_vocab: None,
                                             packed_dwa_dense_masks: None,
                                         })
                                     }
@@ -3972,6 +5399,7 @@ impl Constraint {
                             if core_section.starts_with(&CURRENT_CORE_MAGIC)
                                 || core_section.starts_with(&PREVIOUS_CURRENT_CORE_MAGIC)
                                 || core_section.starts_with(&PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
+                                || core_section.starts_with(&PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC)
                             {
                                 let core_backing = current_backing.as_ref().and_then(|backing| {
                                     let base = backing.as_ptr() as usize;
@@ -3982,6 +5410,7 @@ impl Constraint {
                                 .map(|(artifact, terminal_exprs_blob)| {
                                     let mut constraint = artifact.constraint;
                                     constraint.static_dynamic_overlay = artifact.static_dynamic_overlay;
+                                    constraint.late_grammar_slots = artifact.late_grammar_slots;
                                     DecodedConstraintCore {
                                         constraint,
                                         ignore_expr: artifact.ignore_expr,
@@ -4227,6 +5656,8 @@ impl Constraint {
             } else {
                 None
             };
+            constraint.composition_link_metadata_materialized =
+                constraint.deferred_composition_metadata_blob.is_none();
             if let Some(decoded) = external_internal_token_buf_masks {
                 constraint.internal_token_buf_masks = Vec::new();
                 constraint.internal_token_buf_flat = decoded.flat;
@@ -4259,8 +5690,19 @@ impl Constraint {
                     constraint.packed_dwa_token_dense_masks = cache;
                     loaded_packed_dwa_dense_masks = true;
                 }
-                if let Some(segmented_runtime) = runtime.segmented_runtime {
+                if let Some(dynamic_mask_vocab) = runtime.dynamic_mask_vocab {
+                    constraint.dynamic_mask_vocab =
+                        crate::runtime::artifact::DynamicMaskVocab::from_artifact(dynamic_mask_vocab)
+                            .map_err(crate::GlrMaskError::Serialization)?;
+                }
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v20 {
                     restore_segmented_runtime_v20(&mut constraint, segmented_runtime)?;
+                }
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v22 {
+                    restore_segmented_runtime_v22(&mut constraint, segmented_runtime)?;
+                }
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v23 {
+                    restore_segmented_runtime_v23(&mut constraint, segmented_runtime)?;
                 }
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
@@ -4356,6 +5798,12 @@ impl Constraint {
         let skip_runtime_rebuild_for_profile =
             std::env::var_os("GLRMASK_SKIP_RUNTIME_REBUILD_FOR_PROFILE").is_some();
         if !skip_runtime_rebuild_for_profile {
+            // Current late-bind artifacts are written with linker-only
+            // placeholder token IDs removed from the public token coordinate.
+            // Repair older/current-process artifacts that were saved before
+            // that invariant was enforced, before any derived mask cache is
+            // rebuilt against the smaller public `mask_len()`.
+            constraint.sanitize_late_grammar_placeholder_token_domain();
             if constraint.uses_dynamic_runtime() {
                 constraint.rebuild_dynamic_runtime_caches();
             } else {
@@ -4788,6 +6236,61 @@ mod tests {
     }
 
     #[test]
+    fn previous_split_composition_metadata_wire_defaults_trigger_to_none() {
+        let constraint = tiny_constraint();
+        let link = PreviousConstraintCompositionLinkMetadata {
+            composition_reset_tokens_by_terminal: constraint
+                .composition_reset_tokens_by_terminal
+                .clone(),
+            unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
+            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
+        };
+        let cache = ConstraintCompositionCacheMetadata {
+            composition_parser_templates_by_terminal: constraint
+                .composition_parser_templates_by_terminal
+                .clone(),
+            composition_parser_characterizations_by_terminal: constraint
+                .composition_parser_characterizations_by_terminal
+                .clone(),
+        };
+        let link_raw = bincode::serialize(&link).unwrap();
+        let cache_raw = bincode::serialize(&cache).unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC);
+        wire.extend_from_slice(&0u32.to_le_bytes());
+        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&link_raw);
+        wire.extend_from_slice(&cache_raw);
+
+        let decoded = decode_composition_metadata(&wire).unwrap();
+        assert!(matches!(decoded.boundary_trigger, BoundaryTriggerWire::None));
+        assert_eq!(
+            decoded.composition_grammar_summary,
+            constraint.composition_grammar_summary,
+        );
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_boundary_token_trigger() {
+        let mut constraint = tiny_constraint();
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
+            vec![1u32, 3u32].into_boxed_slice(),
+        ));
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(matches!(
+            loaded.boundary_trigger,
+            crate::runtime::BoundaryTrigger::None
+        ));
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        assert_eq!(loaded.boundary_trigger.token_summary(), Some(&[1u32, 3u32][..]));
+    }
+
+    #[test]
     fn current_constraint_artifact_preserves_composition_reset_tokens() {
         let mut constraint = tiny_constraint();
         constraint.ensure_composition_reset_tokens_by_terminal();
@@ -4881,6 +6384,50 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.composition_grammar_summary, Some(expected));
         assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn split_composition_metadata_allows_link_only_materialization() {
+        let mut constraint = tiny_constraint();
+        constraint.ensure_composition_reset_tokens_by_terminal();
+        let expected_resets = constraint.composition_reset_tokens_by_terminal.clone();
+        let expected_summary = constraint.composition_grammar_summary.clone();
+        let expected_templates = constraint.composition_parser_templates_by_terminal.clone();
+        assert!(expected_summary.is_some());
+        assert!(expected_templates.iter().any(Option::is_some));
+
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let deferred = loaded
+            .deferred_composition_metadata_blob
+            .as_ref()
+            .expect("current artifact should defer composition metadata");
+        assert!(deferred.as_slice().starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC));
+        assert!(!loaded.composition_link_metadata_materialized);
+        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        assert_eq!(loaded.composition_reset_tokens_by_terminal, expected_resets);
+        assert_eq!(loaded.composition_grammar_summary, expected_summary);
+        assert!(loaded.composition_link_metadata_materialized);
+        assert!(
+            loaded.composition_parser_templates_by_terminal.is_empty(),
+            "link-only materialization must not instantiate static parser caches",
+        );
+        assert!(
+            loaded.deferred_composition_metadata_blob.is_some(),
+            "full compiler metadata must remain available for a later static composition",
+        );
+
+        loaded
+            .materialize_composition_metadata_for_compilation()
+            .unwrap();
+        assert_eq!(
+            loaded.composition_parser_templates_by_terminal,
+            expected_templates,
+        );
+        assert!(loaded.deferred_composition_metadata_blob.is_none());
     }
 
     #[test]

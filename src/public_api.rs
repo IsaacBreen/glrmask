@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
+use crate::compiler::constraint_compose::{
+    CompiledSubgrammarInput, SegmentedBoundaryBackend,
+    compose_constraints_owned_parent_segmented_shared,
+};
 use crate::runtime::Constraint as RuntimeConstraint;
-use crate::{DynamicConstraint, Error, Result, Vocab};
+use crate::{BoundaryTriggerDetail, DynamicConstraint, Error, Result, Vocab};
 
 /// Grammar source with optional source-level subgrammar bindings.
 ///
@@ -83,6 +88,7 @@ pub struct ConstraintSpec<'a> {
     token_bindings: BTreeMap<String, Vec<u32>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     unbound_grammar_names: Vec<String>,
+    boundary_trigger_detail: BoundaryTriggerDetail,
 }
 
 /// Builder for [`ConstraintSpec`].
@@ -94,6 +100,7 @@ pub struct ConstraintSpecBuilder<'a> {
     declared_grammars: BTreeSet<String>,
     token_bindings: BTreeMap<String, Vec<u32>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
+    boundary_trigger_detail: BoundaryTriggerDetail,
 }
 
 /// Internal input accepted by [`ConstraintSpecBuilder::bind_grammar`].
@@ -183,61 +190,127 @@ impl<'a> ConstraintSpec<'a> {
 
     /// Compile this specification into a [`Constraint`](crate::Constraint).
     pub fn compile(&self) -> Result<RuntimeConstraint> {
+        let mut constraint = self.compile_static_with_trigger_uncached()?;
+        // A constraint with unresolved external grammars is explicitly a
+        // reusable late-bind parent.  Cache its exact tokenizer-reset
+        // terminal -> model-token relation now, while compilation already owns
+        // the vocabulary, instead of rescanning the vocabulary on every later
+        // bind.  The cache is part of composition metadata and therefore
+        // survives ordinary save/load.
+        if !constraint.late_grammar_slots.is_empty() {
+            constraint.ensure_composition_reset_tokens_by_terminal();
+        }
+        // Encoding a segmented dynamic leaf into the ordinary static artifact
+        // format must not turn compilation itself into an eager dynamic -> DWA
+        // materialization. Preserve the live hybrid and defer that work until
+        // an explicit `save()` call. Purely static results keep the cheap
+        // cached-save behavior.
+        if !retains_dynamic_component(&constraint) {
+            constraint.cache_serialized_artifact_for_save();
+        }
+        Ok(constraint)
+    }
+
+    fn compile_static_with_trigger_uncached(&self) -> Result<RuntimeConstraint> {
         let mut constraint = self.compile_static_uncached()?;
-        constraint.cache_serialized_artifact_for_save();
+        constraint
+            .build_boundary_trigger(self.boundary_trigger_detail)
+            .map_err(Error::Compilation)?;
         Ok(constraint)
     }
 
     fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
+            if let Some(source) = self.grammar.glrm_source() {
+                return RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+                    source,
+                    &[],
+                    self.vocab,
+                    &token_bindings,
+                    &[],
+                );
+            }
             return compile_static_source(&self.grammar, self.vocab, &token_bindings);
         }
 
-        let children = self.compile_children()?;
-        let child_refs = children
-            .iter()
-            .map(|(name, child)| (name.as_str(), child.as_ref()))
-            .collect::<Vec<_>>();
         let source = self.grammar.glrm_source().ok_or_else(|| {
             Error::Compilation("external grammar bindings require a GLRM grammar".to_owned())
         })?;
-        RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+        let parent = RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
             source,
-            &child_refs,
+            &[],
             self.vocab,
             &token_bindings,
             &[],
+        )?;
+        let children = self.compile_children(ChildCompileMode::Static)?;
+        let children = prepare_compiled_children(
+            children,
+            self.vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )?;
+        compose_named_children(
+            parent,
+            &children,
+            self.vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
     }
 
     /// Compile this specification into a [`DynamicConstraint`].
     pub fn compile_dynamic(&self) -> Result<DynamicConstraint> {
-        if !self.unbound_grammar_names.is_empty() {
-            return Err(Error::Compilation(format!(
-                "dynamic compilation requires bindings for external grammars: {}",
-                self.unbound_grammar_names.join(", "),
-            )));
+        let mut constraint = self.compile_dynamic_uncached()?;
+        for component in constraint.constraints_mut() {
+            component
+                .build_boundary_trigger(self.boundary_trigger_detail)
+                .map_err(Error::Compilation)?;
         }
+        Ok(constraint)
+    }
+
+    fn compile_dynamic_uncached(&self) -> Result<DynamicConstraint> {
         let token_bindings = self.token_binding_refs();
         if self.grammar_bindings.is_empty() {
+            if let Some(source) = self.grammar.glrm_source() {
+                return DynamicConstraint::from_glrm_grammar_with_subgrammars_and_bindings(
+                    source,
+                    &[],
+                    self.vocab,
+                    &token_bindings,
+                );
+            }
             return compile_dynamic_source(&self.grammar, self.vocab, &token_bindings);
         }
 
-        let children = self.compile_children()?;
-        let child_refs = children
-            .iter()
-            .map(|(name, child)| (name.as_str(), child.as_ref()))
-            .collect::<Vec<_>>();
         let source = self.grammar.glrm_source().ok_or_else(|| {
             Error::Compilation("external grammar bindings require a GLRM grammar".to_owned())
         })?;
-        DynamicConstraint::from_glrm_grammar_with_subgrammars_and_bindings(
+        let parents = DynamicConstraint::from_glrm_grammar_with_subgrammars_and_bindings(
             source,
-            &child_refs,
+            &[],
             self.vocab,
             &token_bindings,
-        )
+        )?;
+        let children = self.compile_children(ChildCompileMode::Dynamic)?;
+        let children = prepare_compiled_children(
+            children,
+            self.vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )?;
+        let alternatives = parents
+            .clone_constraints()
+            .into_iter()
+            .map(|parent| {
+                compose_named_children(
+                    parent,
+                    &children,
+                    self.vocab,
+                    SegmentedBoundaryBackend::Dynamic,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(DynamicConstraint::from_constraints(alternatives))
     }
 
     fn token_binding_refs(&self) -> Vec<(&str, &[u32])> {
@@ -247,10 +320,13 @@ impl<'a> ConstraintSpec<'a> {
             .collect()
     }
 
-    fn compile_children(&self) -> Result<Vec<(String, CompiledChild<'_>)>> {
+    fn compile_children(
+        &self,
+        mode: ChildCompileMode,
+    ) -> Result<Vec<(String, CompiledChild<'_>)>> {
         self.grammar_bindings
             .iter()
-            .map(|(name, binding)| Ok((name.clone(), binding.compile(self.vocab)?)))
+            .map(|(name, binding)| Ok((name.clone(), binding.compile(self.vocab, mode)?)))
             .collect()
     }
 
@@ -291,7 +367,18 @@ impl<'a> ConstraintSpecBuilder<'a> {
                 .into_iter()
                 .map(|(name, grammar)| (name, GrammarBinding::Source(grammar)))
                 .collect(),
+            boundary_trigger_detail: BoundaryTriggerDetail::None,
         })
+    }
+
+    /// Request reusable dynamic-boundary trigger metadata for this component.
+    ///
+    /// The default is [`BoundaryTriggerDetail::None`], which adds no trigger
+    /// construction cost. This setting is independent of static vs dynamic
+    /// ordinary masking.
+    pub fn boundary_trigger_detail(mut self, detail: BoundaryTriggerDetail) -> Self {
+        self.boundary_trigger_detail = detail;
+        self
     }
 
     /// Bind an `extern token NAME;` declaration to exact token IDs.
@@ -343,7 +430,11 @@ impl<'a> ConstraintSpecBuilder<'a> {
         Ok(self)
     }
 
-    /// Check that every extern is bound and finish the specification.
+    /// Check that every exact-token extern is bound and finish the specification.
+    ///
+    /// External grammars may remain unresolved. Their names are retained in
+    /// the compiled constraint and can be supplied later with
+    /// [`RuntimeConstraint::bind_grammar`] or [`DynamicConstraint::bind_grammar`].
     pub fn build(self) -> Result<ConstraintSpec<'a>> {
         if let Some(name) = self
             .declared_tokens
@@ -360,23 +451,13 @@ impl<'a> ConstraintSpecBuilder<'a> {
             .filter(|name| !self.grammar_bindings.contains_key(*name))
             .cloned()
             .collect::<Vec<_>>();
-        // A completely unbound grammar manifest is a reusable compiled parent:
-        // each unresolved call remains unreachable until `Constraint::bind_grammar`
-        // supplies its child. Preserve the existing all-at-once builder rule when
-        // the caller has started binding grammars, so accidental partial specs are
-        // still rejected.
-        if !unbound_grammar_names.is_empty() && !self.grammar_bindings.is_empty() {
-            return Err(Error::Compilation(format!(
-                "GLRM declares external grammar {:?}, but no realization was supplied",
-                unbound_grammar_names[0],
-            )));
-        }
         Ok(ConstraintSpec {
             grammar: self.grammar,
             vocab: self.vocab,
             token_bindings: self.token_bindings,
             grammar_bindings: self.grammar_bindings,
             unbound_grammar_names,
+            boundary_trigger_detail: self.boundary_trigger_detail,
         })
     }
 
@@ -428,50 +509,43 @@ impl ExternKind {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ChildCompileMode {
+    Static,
+    Dynamic,
+}
+
 enum CompiledChild<'a> {
-    Borrowed(&'a RuntimeConstraint),
-    Owned(RuntimeConstraint),
+    StaticBorrowed(&'a RuntimeConstraint),
+    StaticOwned(RuntimeConstraint),
+    DynamicBorrowed(&'a DynamicConstraint),
+    DynamicOwned(DynamicConstraint),
 }
 
 impl CompiledChild<'_> {
-    fn as_ref(&self) -> &RuntimeConstraint {
+    fn into_constraints(self) -> Vec<RuntimeConstraint> {
         match self {
-            Self::Borrowed(constraint) => constraint,
-            Self::Owned(constraint) => constraint,
+            Self::StaticBorrowed(constraint) => vec![constraint.clone()],
+            Self::StaticOwned(constraint) => vec![constraint],
+            Self::DynamicBorrowed(constraint) => constraint.clone_constraints(),
+            Self::DynamicOwned(constraint) => constraint.clone_constraints(),
         }
     }
 }
 
 fn static_constraint_targets(constraint: &RuntimeConstraint, vocab: &Vocab) -> bool {
-    constraint.token_bytes.as_ref() == vocab.entries_map()
+    constraint.token_bytes_match_vocab(vocab)
 }
 
 impl GrammarBinding<'_> {
     fn bind_target(&mut self, vocab: &Vocab, name: &str) -> Result<()> {
-        let dynamic_materialization = match self {
-            Self::DynamicBorrowed(constraint) => Some(constraint.composition_constraints(vocab)),
-            Self::DynamicOwned(constraint) => Some(constraint.composition_constraints(vocab)),
-            _ => None,
-        };
-        if let Some(materialized) = dynamic_materialization {
-            let alternatives = materialized.map_err(|error| {
-                Error::Compilation(format!(
-                    "external grammar {name:?} cannot be used as a compiled child: {error}",
-                ))
-            })?;
-            let constraint = collapse_alternatives(alternatives, vocab)?;
-            *self = Self::StaticOwned(Arc::new(constraint));
-            return Ok(());
-        }
-
         let compatible = match self {
             Self::Source(_) => return Ok(()),
             Self::Spec(spec) => spec.targets(vocab),
             Self::StaticBorrowed(constraint) => static_constraint_targets(constraint, vocab),
             Self::StaticOwned(constraint) => static_constraint_targets(constraint, vocab),
-            Self::DynamicBorrowed(_) | Self::DynamicOwned(_) => {
-                unreachable!("dynamic binding handled above")
-            }
+            Self::DynamicBorrowed(constraint) => constraint.targets_vocab(vocab),
+            Self::DynamicOwned(constraint) => constraint.targets_vocab(vocab),
         };
         if compatible {
             Ok(())
@@ -482,25 +556,115 @@ impl GrammarBinding<'_> {
         }
     }
 
-    fn compile<'a>(&'a self, vocab: &Vocab) -> Result<CompiledChild<'a>> {
+    fn compile<'a>(
+        &'a self,
+        vocab: &Vocab,
+        mode: ChildCompileMode,
+    ) -> Result<CompiledChild<'a>> {
         match self {
             Self::Source(grammar) => {
                 let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
-                Ok(CompiledChild::Owned(spec.compile_static_uncached()?))
+                match mode {
+                    ChildCompileMode::Static => {
+                        Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+                    }
+                    ChildCompileMode::Dynamic => {
+                        Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                    }
+                }
             }
-            Self::Spec(spec) => Ok(CompiledChild::Owned(spec.compile_static_uncached()?)),
-            Self::StaticBorrowed(constraint) => Ok(CompiledChild::Borrowed(constraint)),
-            Self::StaticOwned(constraint) => Ok(CompiledChild::Borrowed(constraint)),
-            Self::DynamicBorrowed(_) | Self::DynamicOwned(_) => {
-                unreachable!("dynamic bindings are materialized at bind time")
+            Self::Spec(spec) => match mode {
+                ChildCompileMode::Static => {
+                    Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+                }
+                ChildCompileMode::Dynamic => {
+                    Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                }
+            },
+            Self::StaticBorrowed(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
+            Self::StaticOwned(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
+            Self::DynamicBorrowed(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
+            Self::DynamicOwned(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
+        }
+    }
+
+    /// One-shot late binding can consume the user's binding. Preserve that
+    /// ownership instead of immediately downgrading an owned/Arc constraint to
+    /// a borrowed child and deep-cloning it again during preparation.
+    fn into_compiled<'a>(
+        self,
+        vocab: &Vocab,
+        mode: ChildCompileMode,
+    ) -> Result<CompiledChild<'a>>
+    where
+        Self: 'a,
+    {
+        match self {
+            Self::Source(grammar) => {
+                let spec = ConstraintSpec::builder(grammar, vocab)?.build()?;
+                match mode {
+                    ChildCompileMode::Static => {
+                        Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+                    }
+                    ChildCompileMode::Dynamic => {
+                        Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                    }
+                }
             }
+            Self::Spec(spec) => match mode {
+                ChildCompileMode::Static => {
+                    Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+                }
+                ChildCompileMode::Dynamic => {
+                    Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                }
+            },
+            Self::StaticBorrowed(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
+            Self::StaticOwned(constraint) => Ok(CompiledChild::StaticOwned(
+                Arc::try_unwrap(constraint).unwrap_or_else(|shared| (*shared).clone()),
+            )),
+            Self::DynamicBorrowed(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
+            Self::DynamicOwned(constraint) => Ok(CompiledChild::DynamicOwned(
+                Arc::try_unwrap(constraint).unwrap_or_else(|shared| (*shared).clone()),
+            )),
         }
     }
 }
 
-fn collapse_alternatives(
+fn prepare_compiled_children(
+    children: Vec<(String, CompiledChild<'_>)>,
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<Vec<(String, Arc<RuntimeConstraint>)>> {
+    children
+        .into_iter()
+        .map(|(name, child)| {
+            let mut constraint = collapse_dynamic_alternatives(
+                child.into_constraints(),
+                vocab,
+                boundary_backend,
+            )?;
+            // `compose_named_children` always uses the segmented linker. Decode
+            // composition-only metadata on this first owned child copy so the
+            // linker does not clone the whole compiled child a second time
+            // merely to materialize the same cold metadata.
+            match boundary_backend {
+                SegmentedBoundaryBackend::StaticParserDwa => constraint
+                    .materialize_composition_metadata_for_compilation()
+                    .map_err(Error::Compilation)?,
+                SegmentedBoundaryBackend::Dynamic => constraint
+                    .materialize_composition_link_metadata_for_compilation()
+                    .map_err(Error::Compilation)?,
+            }
+            Ok((name, Arc::new(constraint)))
+        })
+        .collect()
+}
+
+fn collapse_dynamic_alternatives(
     mut alternatives: Vec<RuntimeConstraint>,
     vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
 ) -> Result<RuntimeConstraint> {
     if alternatives.len() == 1 {
         return Ok(alternatives.pop().expect("length checked"));
@@ -529,10 +693,94 @@ fn collapse_alternatives(
         .collect::<Vec<_>>();
     let children = names
         .iter()
-        .zip(&alternatives)
-        .map(|(name, child)| (name.as_str(), child))
+        .cloned()
+        .zip(alternatives.into_iter().map(Arc::new))
         .collect::<Vec<_>>();
-    RuntimeConstraint::from_glrm_grammar_with_subgrammars(&source, &children, vocab)
+    let parent = RuntimeConstraint::from_glrm_grammar_with_subgrammars(&source, &[], vocab)?;
+    let mut union = compose_named_children(parent, &children, vocab, boundary_backend)?;
+    for slot in &mut union.late_grammar_slots {
+        if let Some((alternative, nested)) = slot.name.split_once('.')
+            && alternative.starts_with("alternative_")
+        {
+            slot.name = nested.to_owned();
+        }
+    }
+    Ok(union)
+}
+
+fn compose_named_children(
+    parent: RuntimeConstraint,
+    children: &[(String, Arc<RuntimeConstraint>)],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<RuntimeConstraint> {
+    let bound_names = children
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut present = Vec::new();
+    let mut matching_terminals = Vec::new();
+    for (child_index, (name, _)) in children.iter().enumerate() {
+        let terminals = parent
+            .late_grammar_slots
+            .iter()
+            .filter(|slot| slot.name == *name)
+            .map(|slot| slot.terminal_id)
+            .collect::<Vec<_>>();
+        if !terminals.is_empty() {
+            present.push(child_index);
+            matching_terminals.push(terminals);
+        }
+    }
+    if present.is_empty() {
+        return Ok(parent);
+    }
+
+    let remaining_parent_slots = parent
+        .late_grammar_slots
+        .iter()
+        .filter(|slot| !bound_names.contains(slot.name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let inputs = present
+        .iter()
+        .zip(&matching_terminals)
+        .map(|(&child_index, terminals)| CompiledSubgrammarInput {
+            placeholder_terminal: terminals[0],
+            additional_placeholder_terminals: &terminals[1..],
+            constraint: children[child_index].1.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    let shared_children = present
+        .iter()
+        .map(|&child_index| Arc::clone(&children[child_index].1))
+        .collect::<Vec<_>>();
+    let mut composition = compose_constraints_owned_parent_segmented_shared(
+        parent,
+        &inputs,
+        &shared_children,
+        vocab,
+        boundary_backend,
+    )
+    .map_err(Error::Compilation)?;
+    composition.constraint.late_grammar_slots = remaining_parent_slots;
+    for (component_index, &child_index) in present.iter().enumerate() {
+        let terminal_offset = composition.terminal_offsets[component_index + 1];
+        let (binding_name, child) = &children[child_index];
+        composition.constraint.late_grammar_slots.extend(
+            child.late_grammar_slots.iter().map(|slot| crate::runtime::LateGrammarSlot {
+                name: format!("{binding_name}.{}", slot.name),
+                terminal_id: terminal_offset + slot.terminal_id,
+            }),
+        );
+    }
+    if composition
+        .constraint
+        .sanitize_late_grammar_placeholder_token_domain()
+    {
+        composition.constraint.rebuild_runtime_caches();
+    }
+    Ok(composition.constraint)
 }
 
 fn compile_static_source(
@@ -577,94 +825,56 @@ impl RuntimeConstraint {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
 
-    /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
+    /// Bind one retained `extern grammar` slot using a fully compiled boundary.
     ///
-    /// The parent remains reusable. Loaded constraints keep their large parser
-    /// DWA and pooled weights in packed form; the first bind lazily decodes only
-    /// small composition metadata before linking. The supplied child must
-    /// already be fully bound.
-    pub fn bind_grammar(
-        &mut self,
-        name: impl AsRef<str>,
-        child: &RuntimeConstraint,
-        vocab: &Vocab,
-    ) -> Result<Self> {
-        use crate::compiler::constraint_compose::{
-            CompiledSubgrammarInput, compose_constraints_owned_parent,
-        };
-
-        self.prepare_for_composition_internal(vocab)?;
-        let name = name.as_ref();
-        let placeholder_terminal = self
-            .unbound_grammar_placeholders
-            .get(name)
-            .copied()
-            .ok_or_else(|| {
-                let available = self
-                    .unbound_grammar_placeholders
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Error::Compilation(if available.is_empty() {
-                    format!("constraint has no unresolved external grammar named {name:?}")
-                } else {
-                    format!(
-                        "constraint has no unresolved external grammar named {name:?}; available: {available}"
-                    )
-                })
-            })?;
-
-        let child_has_unbound = if child.deferred_composition_metadata_blob.is_some() {
-            let mut metadata = child.clone();
-            metadata
-                .materialize_composition_metadata_for_compilation()
-                .map_err(Error::Compilation)?;
-            !metadata.unbound_grammar_placeholders.is_empty()
-        } else {
-            !child.unbound_grammar_placeholders.is_empty()
-        };
-        if child_has_unbound {
-            return Err(Error::Compilation(
-                "a compiled child with unresolved external grammars cannot yet be bound; bind the child first"
-                    .to_owned(),
-            ));
-        }
-
-        // Preparation materializes the compiler-side views once on the cached
-        // parent. Cloning here preserves that reusable parent while the fast
-        // linker consumes its fork. Loaded automata retain shared packed row
-        // storage, so this fork is cheap in the cached-parent case.
-        let mut parent = self.clone();
-        parent.unbound_grammar_placeholders.remove(name);
-        let remaining_parent_slots = parent.unbound_grammar_placeholders.clone();
-        let input = CompiledSubgrammarInput {
-            placeholder_terminal,
-            additional_placeholder_terminals: &[],
-            constraint: child,
-        };
-        let composition = compose_constraints_owned_parent(parent, &[input], vocab)
-            .map_err(Error::Compilation)?;
-        let parent_offset = composition.terminal_offsets[0];
-        let mut result = composition.constraint;
-        result.unbound_grammar_placeholders = remaining_parent_slots
-            .into_iter()
-            .map(|(slot, terminal)| (slot, parent_offset + terminal))
-            .collect();
-        Ok(result)
+    /// Other named slots remain unresolved and may be bound by later calls.
+    /// The compiled parent and the supplied child's masking backends are reused;
+    /// only their cross-boundary behavior is compiled here.
+    #[allow(private_bounds)]
+    pub fn bind_grammar<'a, T>(&self, name: impl AsRef<str>, child: T) -> Result<Self>
+    where
+        T: IntoGrammarBinding<'a>,
+    {
+        bind_static_parent_grammar(
+            self,
+            name.as_ref(),
+            child,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
     }
 
+    /// Bind one retained `extern grammar` slot using the dynamic boundary walker.
+    ///
+    /// Component-local masking remains independently static or dynamic according
+    /// to the backend with which each component was supplied.
+    #[allow(private_bounds)]
+    pub fn bind_grammar_dynamic_boundary<'a, T>(
+        &self,
+        name: impl AsRef<str>,
+        child: T,
+    ) -> Result<Self>
+    where
+        T: IntoGrammarBinding<'a>,
+    {
+        bind_static_parent_grammar(
+            self,
+            name.as_ref(),
+            child,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+    }
+
+    /// Private compatibility hook for internal benchmark/composition callers.
+    /// Public late binding no longer requires the caller to resupply `Vocab`,
+    /// but old internal cached-parent probes still use this to eagerly prepare
+    /// only the small compiler-facing composition metadata while leaving the
+    /// packed runtime automata untouched.
     pub(crate) fn prepare_for_composition_internal(&mut self, vocab: &Vocab) -> Result<()> {
         self.bind_vocab_exact(vocab).map_err(Error::Compilation)?;
-        // Composition metadata is small and compiler-facing. Keep the large
-        // parser DWA and pooled non-DWA weights in their packed runtime forms;
-        // the segmented/two-DWA linker consumes them through runtime views.
-        // Legacy flattened linker paths materialize them on demand.
         self.materialize_composition_metadata_for_compilation()
             .map_err(Error::Compilation)?;
         Ok(())
     }
-
 }
 
 impl DynamicConstraint {
@@ -672,10 +882,1175 @@ impl DynamicConstraint {
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic()
     }
+
+    /// Bind one retained `extern grammar` slot using a fully compiled boundary.
+    ///
+    /// Dynamic parent alternatives and dynamic component-local masking remain
+    /// dynamic; the boundary choice is independent of component backends.
+    #[allow(private_bounds)]
+    pub fn bind_grammar<'a, T>(&self, name: impl AsRef<str>, child: T) -> Result<Self>
+    where
+        T: IntoGrammarBinding<'a>,
+    {
+        bind_dynamic_parent_grammar(
+            self,
+            name.as_ref(),
+            child,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+    }
+
+    /// Bind one retained `extern grammar` slot using the dynamic boundary walker.
+    #[allow(private_bounds)]
+    pub fn bind_grammar_dynamic_boundary<'a, T>(
+        &self,
+        name: impl AsRef<str>,
+        child: T,
+    ) -> Result<Self>
+    where
+        T: IntoGrammarBinding<'a>,
+    {
+        bind_dynamic_parent_grammar(
+            self,
+            name.as_ref(),
+            child,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+    }
+}
+
+fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
+    constraint
+        .late_bind_vocab
+        .get_or_init(|| {
+            Vocab::new(
+                constraint
+                    .token_bytes_iter()
+                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                    .collect(),
+            )
+        })
+        .clone()
+}
+
+fn retains_dynamic_component(constraint: &RuntimeConstraint) -> bool {
+    if constraint.uses_dynamic_runtime() {
+        return true;
+    }
+    constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .is_some_and(|overlay| {
+            overlay
+                .segmented_parser_components
+                .iter()
+                .any(|component| retains_dynamic_component(component.constraint.as_ref()))
+        })
+}
+
+fn require_late_grammar_slot(
+    parents: &[RuntimeConstraint],
+    name: &str,
+) -> Result<()> {
+    if parents.iter().any(|parent| {
+        parent
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == name)
+    }) {
+        return Ok(());
+    }
+    Err(Error::Compilation(format!(
+        "compiled constraint has no unresolved external grammar named {name:?}",
+    )))
+}
+
+fn prepare_late_child<'a, T>(
+    name: &str,
+    child: T,
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<Vec<(String, Arc<RuntimeConstraint>)>>
+where
+    T: IntoGrammarBinding<'a>,
+{
+    let mut binding = child.into_grammar_binding();
+    binding.bind_target(vocab, name)?;
+    let mode = match boundary_backend {
+        SegmentedBoundaryBackend::StaticParserDwa => ChildCompileMode::Static,
+        SegmentedBoundaryBackend::Dynamic => ChildCompileMode::Dynamic,
+    };
+    let compiled = binding.into_compiled(vocab, mode)?;
+    prepare_compiled_children(
+        vec![(name.to_owned(), compiled)],
+        vocab,
+        boundary_backend,
+    )
+}
+
+fn bind_static_parent_grammar<'a, T>(
+    parent: &RuntimeConstraint,
+    name: &str,
+    child: T,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<RuntimeConstraint>
+where
+    T: IntoGrammarBinding<'a>,
+{
+    let profile = std::env::var_os("GLRMASK_PROFILE_PUBLIC_BIND").is_some();
+    let total_started = Instant::now();
+    let phase = Instant::now();
+    require_late_grammar_slot(std::slice::from_ref(parent), name)?;
+    let require_ms = phase.elapsed().as_secs_f64() * 1000.0;
+
+    let phase = Instant::now();
+    let vocab = constraint_vocab(parent);
+    let vocab_ms = phase.elapsed().as_secs_f64() * 1000.0;
+
+    let phase = Instant::now();
+    let children = prepare_late_child(name, child, &vocab, boundary_backend)?;
+    let child_ms = phase.elapsed().as_secs_f64() * 1000.0;
+
+    let phase = Instant::now();
+    let parent = parent.clone();
+    let parent_clone_ms = phase.elapsed().as_secs_f64() * 1000.0;
+
+    let phase = Instant::now();
+    let result = compose_named_children(parent, &children, &vocab, boundary_backend)?;
+    let compose_ms = phase.elapsed().as_secs_f64() * 1000.0;
+
+    // Late binding is a construction operation, not an implicit persistence
+    // request. Serializing an all-static result here made bind latency include
+    // the full first-save cost even when the caller never saves the result.
+    // `Constraint::save()` still installs/reuses the serialized artifact cache
+    // when persistence is actually requested; ordinary `Constraint::compile()`
+    // keeps its existing eager first-save priming policy.
+    let cache_save_ms = 0.0;
+    if profile {
+        eprintln!(
+            "[glrmask/profile][public_bind_static_parent] require_ms={require_ms:.3} vocab_ms={vocab_ms:.3} child_ms={child_ms:.3} parent_clone_ms={parent_clone_ms:.3} compose_ms={compose_ms:.3} cache_save_ms={cache_save_ms:.3} total_ms={:.3}",
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(result)
+}
+
+fn bind_dynamic_parent_grammar<'a, T>(
+    parent: &DynamicConstraint,
+    name: &str,
+    child: T,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<DynamicConstraint>
+where
+    T: IntoGrammarBinding<'a>,
+{
+    let parents = parent.clone_constraints();
+    require_late_grammar_slot(&parents, name)?;
+    let first = parents.first().ok_or_else(|| {
+        Error::Compilation("dynamic parent has no alternatives".to_owned())
+    })?;
+    let vocab = constraint_vocab(first);
+    if !parents
+        .iter()
+        .all(|alternative| static_constraint_targets(alternative, &vocab))
+    {
+        return Err(Error::Compilation(
+            "dynamic parent alternatives target incompatible vocabularies".to_owned(),
+        ));
+    }
+    let children = prepare_late_child(name, child, &vocab, boundary_backend)?;
+    let alternatives = parents
+        .into_iter()
+        .map(|alternative| {
+            compose_named_children(alternative, &children, &vocab, boundary_backend)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(DynamicConstraint::from_constraints(alternatives))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn component_backend_flags(constraint: &RuntimeConstraint) -> Vec<bool> {
+        constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("bound constraint must use the explicit segmented runtime")
+            .segmented_parser_components
+            .iter()
+            .map(|component| component.constraint.uses_dynamic_runtime())
+            .collect()
+    }
+
+    fn leaf_backend_flags(constraint: &RuntimeConstraint) -> Vec<bool> {
+        match constraint.static_dynamic_overlay.as_ref() {
+            Some(overlay) if !overlay.segmented_parser_components.is_empty() => overlay
+                .segmented_parser_components
+                .iter()
+                .flat_map(|component| leaf_backend_flags(&component.constraint))
+                .collect(),
+            _ => vec![constraint.uses_dynamic_runtime()],
+        }
+    }
+
+    fn assert_static_boundary(constraint: &RuntimeConstraint) {
+        let overlay = constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("bound constraint must use the explicit segmented runtime");
+        assert!(overlay.segmented_boundary_parser.is_some());
+        assert!(overlay.segmented_boundary_terminal_trie.is_none());
+    }
+
+    fn assert_dynamic_boundary(constraint: &RuntimeConstraint) {
+        let overlay = constraint
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("bound constraint must use the explicit segmented runtime");
+        assert!(overlay.segmented_boundary_parser.is_none());
+        assert!(overlay.segmented_boundary_terminal_trie.is_none());
+        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+            shard.backend,
+            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+        )));
+    }
+
+    #[test]
+    fn segmented_composition_preserves_supplied_component_backends() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            // Forces B to carry a strictly internal parent -> child crossing.
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = Grammar::glrm(
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+        );
+        let static_child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+        let dynamic_child =
+            DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+
+        let static_with_dynamic = ConstraintSpec::builder(parent.clone(), &vocab)
+            .unwrap()
+            .bind_grammar("child", &dynamic_child)
+            .unwrap()
+            .build()
+            .unwrap()
+            .compile()
+            .unwrap();
+        assert_eq!(component_backend_flags(&static_with_dynamic), vec![false, true]);
+        assert!(
+            static_with_dynamic.serialized_artifact_cache.is_none(),
+            "compiling a hybrid must not eagerly staticify its dynamic leaf for serialization",
+        );
+        let overlay = static_with_dynamic.static_dynamic_overlay.as_ref().unwrap();
+        assert!(overlay.segmented_boundary_parser.is_some());
+        assert!(overlay.segmented_boundary_terminal_trie.is_none());
+
+        let dynamic_with_static = ConstraintSpec::builder(parent.clone(), &vocab)
+            .unwrap()
+            .bind_grammar("child", &static_child)
+            .unwrap()
+            .build()
+            .unwrap()
+            .compile_dynamic()
+            .unwrap();
+        for alternative in dynamic_with_static.clone_constraints() {
+            assert_eq!(component_backend_flags(&alternative), vec![true, false]);
+            let overlay = alternative.static_dynamic_overlay.as_ref().unwrap();
+            assert!(overlay.segmented_boundary_parser.is_none());
+            assert!(overlay.segmented_boundary_terminal_trie.is_none());
+            assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+                shard.backend,
+                crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+            )));
+        }
+
+        let dynamic_with_dynamic = ConstraintSpec::builder(parent, &vocab)
+            .unwrap()
+            .bind_grammar("child", &dynamic_child)
+            .unwrap()
+            .build()
+            .unwrap()
+            .compile_dynamic()
+            .unwrap();
+        for alternative in dynamic_with_dynamic.clone_constraints() {
+            assert_eq!(component_backend_flags(&alternative), vec![true, true]);
+        }
+    }
+
+    #[test]
+    fn compiled_parent_late_binding_preserves_leaf_backends_and_boundary_choice() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+            (3, b"z".to_vec()),
+            (4, b"yz".to_vec()),
+            (5, b"xyz".to_vec()),
+        ]);
+        let one_slot = Grammar::glrm(
+            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+        );
+        let static_parent = RuntimeConstraint::compile(one_slot.clone(), &vocab).unwrap();
+        let dynamic_parent = DynamicConstraint::compile(one_slot, &vocab).unwrap();
+        let static_child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+        let dynamic_child =
+            DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+
+        let bound = static_parent.bind_grammar("child", &static_child).unwrap();
+        assert_eq!(leaf_backend_flags(&bound), vec![false, false]);
+        assert_static_boundary(&bound);
+        assert!(
+            bound.serialized_artifact_cache.is_none(),
+            "late binding must not pay first-save serialization eagerly",
+        );
+
+        let bound = static_parent
+            .bind_grammar_dynamic_boundary("child", &static_child)
+            .unwrap();
+        assert_eq!(leaf_backend_flags(&bound), vec![false, false]);
+        assert_dynamic_boundary(&bound);
+
+        let bound = static_parent.bind_grammar("child", &dynamic_child).unwrap();
+        assert_eq!(leaf_backend_flags(&bound), vec![false, true]);
+        assert_static_boundary(&bound);
+        assert!(
+            bound.serialized_artifact_cache.is_none(),
+            "late binding a dynamic child must not trigger serialization-time staticification",
+        );
+
+        let bound = static_parent
+            .bind_grammar_dynamic_boundary("child", &dynamic_child)
+            .unwrap();
+        assert_eq!(leaf_backend_flags(&bound), vec![false, true]);
+        assert_dynamic_boundary(&bound);
+
+        let bound = dynamic_parent.bind_grammar("child", &static_child).unwrap();
+        for alternative in bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, false]);
+            assert_static_boundary(&alternative);
+        }
+
+        let bound = dynamic_parent
+            .bind_grammar_dynamic_boundary("child", &static_child)
+            .unwrap();
+        for alternative in bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, false]);
+            assert_dynamic_boundary(&alternative);
+        }
+
+        let bound = dynamic_parent.bind_grammar("child", &dynamic_child).unwrap();
+        for alternative in bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, true]);
+            assert_static_boundary(&alternative);
+        }
+
+        let bound = dynamic_parent
+            .bind_grammar_dynamic_boundary("child", &dynamic_child)
+            .unwrap();
+        for alternative in bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, true]);
+            assert_dynamic_boundary(&alternative);
+        }
+
+        let two_slots = Grammar::glrm(
+            "glrm 1; start start; extern grammar left; extern grammar right; \
+             nt start = \"x\" left right;",
+        );
+        let open = RuntimeConstraint::compile(two_slots, &vocab).unwrap();
+        let partially_bound = open.bind_grammar("left", &static_child).unwrap();
+        assert!(
+            partially_bound.late_bind_vocab.get().is_some(),
+            "partially bound constraints should carry the shared vocabulary cache into the next bind",
+        );
+        assert!(partially_bound
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == "right"));
+        let fully_bound = partially_bound
+            .bind_grammar(
+                "right",
+                DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab).unwrap(),
+            )
+            .unwrap();
+        assert!(fully_bound.late_grammar_slots.is_empty());
+        assert_eq!(leaf_backend_flags(&fully_bound), vec![false, false, true]);
+        assert_static_boundary(&fully_bound);
+
+        let fully_bound = partially_bound
+            .bind_grammar_dynamic_boundary(
+                "right",
+                DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab).unwrap(),
+            )
+            .unwrap();
+        assert!(fully_bound.late_grammar_slots.is_empty());
+        assert_eq!(leaf_backend_flags(&fully_bound), vec![false, false, true]);
+        assert_dynamic_boundary(&fully_bound);
+
+        let open = DynamicConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar left; extern grammar right; \
+                 nt start = \"x\" left right;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let partially_bound = open.bind_grammar("left", &static_child).unwrap();
+        let dynamic_right =
+            DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab).unwrap();
+        let fully_bound = partially_bound.bind_grammar("right", &dynamic_right).unwrap();
+        for alternative in fully_bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, false, true]);
+            assert_static_boundary(&alternative);
+        }
+        let fully_bound = partially_bound
+            .bind_grammar_dynamic_boundary("right", &dynamic_right)
+            .unwrap();
+        for alternative in fully_bound.clone_constraints() {
+            assert_eq!(leaf_backend_flags(&alternative), vec![true, false, true]);
+            assert_dynamic_boundary(&alternative);
+        }
+    }
+
+    #[test]
+    fn all_static_late_bound_segmented_roundtrip_preserves_fused_boundary_tokens() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+
+        for dynamic_boundary in [false, true] {
+            let bound = if dynamic_boundary {
+                parent
+                    .bind_grammar_dynamic_boundary("child", child.clone())
+                    .unwrap()
+            } else {
+                parent.bind_grammar("child", child.clone()).unwrap()
+            };
+            let live_mask = bound.start().mask();
+            assert_ne!(
+                live_mask[0] & (1 << 2),
+                0,
+                "fused parent/child token must be live before serialization",
+            );
+
+            let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+            let overlay = loaded
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("round-tripped segmented runtime must retain A/B metadata");
+            assert!(
+                !overlay.segmented_static_baseline,
+                "new segmented saves must not synthesize a flattened static parser baseline",
+            );
+            assert!(
+                overlay.segmented_parser_components.len() == 2,
+                "new segmented saves must retain the parent and child A components exactly",
+            );
+            assert!(overlay
+                .segmented_parser_components
+                .iter()
+                .all(|component| component.root_disallowed_terminal.is_none()));
+            assert_eq!(
+                loaded.start().mask(),
+                live_mask,
+                "all-static segmented A+B changed across save/load (dynamic_boundary={dynamic_boundary})",
+            );
+
+            let mut state = loaded.start();
+            state.commit_token(2).unwrap();
+            assert!(state.is_accepting());
+
+            let mut live_state = bound.start();
+            let mut loaded_state = loaded.start();
+            for token in [0, 1] {
+                assert_eq!(
+                    loaded_state.mask(),
+                    live_state.mask(),
+                    "all-static segmented state changed after round-trip before token {token} (dynamic_boundary={dynamic_boundary})",
+                );
+                live_state.commit_token(token).unwrap();
+                loaded_state.commit_token(token).unwrap();
+            }
+            assert_eq!(loaded_state.is_accepting(), live_state.is_accepting());
+            assert!(loaded_state.is_accepting());
+        }
+    }
+
+    #[test]
+    fn dynamic_boundary_token_triggers_survive_component_roundtrip() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+            (3, b"z".to_vec()),
+        ]);
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "x" "y""#),
+            &vocab,
+        )
+        .unwrap();
+        let mut parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let mut child = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "y""#),
+            &vocab,
+        )
+        .unwrap();
+
+        parent.build_boundary_token_trigger().unwrap();
+        child.build_boundary_token_trigger().unwrap();
+        assert!(parent
+            .boundary_trigger
+            .token_summary()
+            .expect("parent token trigger must be built")
+            .contains(&2));
+
+        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
+        let bound = loaded_parent
+            .bind_grammar_dynamic_boundary("child", loaded_child)
+            .unwrap();
+        assert_eq!(bound.start().mask(), reference.start().mask());
+
+        let overlay = bound
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("dynamic composition must retain component runtime metadata");
+        let parent_tokens = overlay.segmented_parser_components[0]
+            .constraint
+            .boundary_trigger
+            .token_summary()
+            .expect("parent Tokens trigger must survive save/load");
+        let child_tokens = overlay.segmented_parser_components[1]
+            .constraint
+            .boundary_trigger
+            .token_summary()
+            .expect("child Tokens trigger must survive save/load");
+        assert!(parent_tokens.contains(&2));
+        assert!(child_tokens.iter().all(|&token| token < 4));
+    }
+
+    #[test]
+    fn exact_boundary_triggers_roundtrip_and_gate_entry_and_finish() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"z".to_vec()),
+            (3, b"xy".to_vec()),
+            (4, b"yz".to_vec()),
+            (5, b"xyz".to_vec()),
+        ]);
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "x" "y" "z""#),
+            &vocab,
+        )
+        .unwrap();
+        let mut parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child \"z\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let mut child = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "y""#),
+            &vocab,
+        )
+        .unwrap();
+
+        parent.build_exact_boundary_trigger().unwrap();
+        child.build_exact_boundary_trigger().unwrap();
+        assert!(matches!(
+            parent.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+        assert!(matches!(
+            child.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+
+        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
+        assert!(matches!(
+            loaded_parent.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+        assert!(matches!(
+            loaded_child.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+        let bound = loaded_parent
+            .bind_grammar_dynamic_boundary("child", loaded_child)
+            .unwrap();
+
+        for tokens in [&[5][..], &[0, 4][..], &[3, 2][..], &[0, 1, 2][..]] {
+            let mut actual = bound.start();
+            let mut expected = reference.start();
+            for &token in tokens {
+                assert_eq!(
+                    actual.mask(),
+                    expected.mask(),
+                    "Exact-trigger dynamic boundary mismatch before {tokens:?} token {token}",
+                );
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+            assert!(actual.is_accepting(), "{tokens:?}");
+        }
+    }
+
+    #[test]
+    fn exact_triggers_survive_outer_runtime_lexer_product_multi_source_states() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"?".to_vec()),
+            (5, b"c!".to_vec()),
+            (6, b"c?".to_vec()),
+        ]);
+        let child_spec = ConstraintSpec::builder(
+            Grammar::ebnf(r#"start ::= "a" "b" "c""#),
+            &vocab,
+        )
+        .unwrap()
+        .boundary_trigger_detail(crate::BoundaryTriggerDetail::Exact)
+        .build()
+        .unwrap();
+        let parent = Grammar::glrm(
+            "glrm 1; start document; extern grammar left; extern grammar right; \
+             nt document = left \"!\" | right \"?\";",
+        );
+        let composed = ConstraintSpec::builder(parent, &vocab)
+            .unwrap()
+            .bind_grammar("left", child_spec.clone())
+            .unwrap()
+            .bind_grammar("right", child_spec)
+            .unwrap()
+            .build()
+            .unwrap()
+            .compile_dynamic()
+            .unwrap();
+        let alternatives = composed.clone_constraints();
+        assert_eq!(alternatives.len(), 1);
+        let composed = &alternatives[0];
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "a" "b" "c" "!" | "a" "b" "c" "?""#),
+            &vocab,
+        )
+        .unwrap();
+
+        let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false" | "no" | "off"
+                )
+            });
+
+        let mut actual = composed.start();
+        let mut expected = reference.start();
+        for token in [0, 1] {
+            assert_eq!(actual.mask(), expected.mask());
+            actual.commit_token(token).unwrap();
+            expected.commit_token(token).unwrap();
+        }
+
+        if !explicitly_disabled {
+            let source_offset = composed
+                .runtime_source_state_offset()
+                .expect("duplicate live child lexer lanes should select the outer runtime product");
+            let product_state = *actual.state.keys().next().unwrap();
+            assert!(product_state < source_offset);
+            assert!(
+                composed
+                    .runtime_product_source_states(product_state)
+                    .is_some_and(|sources| sources.len() >= 2),
+                "regression requires a visible product state representing both child lexer lanes",
+            );
+        }
+
+        let mask = actual.mask();
+        let reference_mask = expected.mask();
+        assert_eq!(mask, reference_mask);
+        assert_ne!(mask[0] & (1 << 5), 0, "c! must cross child -> parent internally");
+        assert_ne!(mask[0] & (1 << 6), 0, "c? must cross child -> parent internally");
+    }
+
+    #[test]
+    fn exact_trigger_detail_is_independent_of_dynamic_component_compilation() {
+        let vocab = Vocab::new(vec![
+            (0, b"y".to_vec()),
+            (1, b"z".to_vec()),
+            (2, b"yz".to_vec()),
+        ]);
+        let spec = ConstraintSpec::builder(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap()
+            .boundary_trigger_detail(crate::BoundaryTriggerDetail::Exact)
+            .build()
+            .unwrap();
+
+        let static_constraint = spec.compile().unwrap();
+        assert!(matches!(
+            static_constraint.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Exact(_)
+        ));
+
+        let dynamic_constraint = spec.compile_dynamic().unwrap();
+        assert!(dynamic_constraint.clone_constraints().iter().all(|constraint| {
+            matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
+        }));
+
+        let loaded_dynamic = DynamicConstraint::load(&dynamic_constraint.save()).unwrap();
+        assert!(loaded_dynamic.clone_constraints().iter().all(|constraint| {
+            matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
+        }));
+
+        let transfer = dynamic_constraint.clone().into_saved();
+        let loaded_transfer = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert!(loaded_transfer.clone_constraints().iter().all(|constraint| {
+            matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
+        }));
+    }
+
+    #[test]
+    fn boundary_token_trigger_follows_lexeme_resets_inside_model_token() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"q".to_vec()),
+            (2, b"y".to_vec()),
+            (3, b"xqy".to_vec()),
+        ]);
+        let mut parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" \"q\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        parent.build_boundary_token_trigger().unwrap();
+        assert!(
+            parent
+                .boundary_trigger
+                .token_summary()
+                .expect("Tokens trigger must be built")
+                .contains(&3),
+            "a token that reaches the child only after multiple local lexemes must remain boundary-relevant",
+        );
+
+        let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+        let bound = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        assert_ne!(bound.start().mask()[0] & (1 << 3), 0);
+    }
+
+    #[test]
+    fn nested_dynamic_boundaries_preserve_token_crossing_leaf_middle_and_outer() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"!".to_vec()),
+            (5, b"a]!".to_vec()),
+            (6, b"[a]!".to_vec()),
+            (7, b"X[a]!".to_vec()),
+        ]);
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let middle = middle_parent
+            .bind_grammar_dynamic_boundary("leaf", leaf)
+            .unwrap();
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", middle)
+            .unwrap();
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        for tokens in [
+            &[7][..],
+            &[0, 6][..],
+            &[0, 1, 5][..],
+            &[0, 1, 2, 3, 4][..],
+        ] {
+            let mut actual = bound.start();
+            let mut expected = monolithic.start();
+            for &token in tokens {
+                assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+            assert!(actual.is_accepting(), "{tokens:?}");
+        }
+    }
+
+    #[test]
+    fn static_boundary_shards_match_global_oracle_across_multiple_internal_crossings() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"z".to_vec()),
+            (3, b"xy".to_vec()),
+            (4, b"yz".to_vec()),
+            (5, b"xyz".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar left; extern grammar right; \
+                 nt start = \"x\" left right;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let left = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+        let right = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "z""#), &vocab)
+            .unwrap();
+        let bound = parent
+            .bind_grammar("left", left)
+            .unwrap()
+            .bind_grammar("right", right)
+            .unwrap();
+
+        let overlay = bound
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("static composition must retain segmented A+B metadata");
+        assert!(
+            !overlay.segmented_boundary_shards.is_empty(),
+            "static composition must publish component-scoped B shards",
+        );
+        assert!(
+            overlay.segmented_boundary_parser.is_some(),
+            "migration build must retain the global B oracle until shard validation is complete",
+        );
+
+        let mut global_oracle = bound.clone();
+        global_oracle
+            .static_dynamic_overlay
+            .as_mut()
+            .unwrap()
+            .segmented_boundary_shards
+            .clear();
+        let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+
+        for tokens in [&[5][..], &[0, 4][..], &[0, 1, 2][..]] {
+            let mut sharded = bound.start();
+            let mut global = global_oracle.start();
+            let mut restored = loaded.start();
+            for &token in tokens {
+                assert_eq!(
+                    sharded.mask(),
+                    global.mask(),
+                    "sharded/static-global B mismatch before {tokens:?} token {token}",
+                );
+                assert_eq!(
+                    restored.mask(),
+                    global.mask(),
+                    "v23 restored shards differ from global B before {tokens:?} token {token}",
+                );
+                sharded.commit_token(token).unwrap();
+                global.commit_token(token).unwrap();
+                restored.commit_token(token).unwrap();
+            }
+            assert_eq!(sharded.is_accepting(), global.is_accepting(), "{tokens:?}");
+            assert_eq!(restored.is_accepting(), global.is_accepting(), "{tokens:?}");
+            assert!(sharded.is_accepting(), "{tokens:?}");
+        }
+    }
+
+    #[test]
+    fn authoritative_ab_keeps_component_parser_dwas_unchanged_across_scoped_ignores() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b" ".to_vec()),
+            (2, b"\t".to_vec()),
+            (3, b"a".to_vec()),
+            (4, b"!".to_vec()),
+            (5, b"X \ta!".to_vec()),
+            (6, b"X\t a!".to_vec()),
+            (7, b"Xa\t !".to_vec()),
+            (8, b"Xa \t!".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    start document;
+                    ignore PARENT_WS;
+                    t PARENT_WS = " "+;
+                    extern grammar child;
+                    nt document = "X" child "!";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    start child;
+                    ignore CHILD_WS;
+                    t CHILD_WS = "\t"+;
+                    nt child = "a";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        assert!(
+            !parent.composition_reset_tokens_by_terminal.is_empty(),
+            "late-bind parent compilation should precompute reset-token composition metadata",
+        );
+        let mut cached_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        cached_parent
+            .materialize_composition_metadata_for_compilation()
+            .unwrap();
+        assert_eq!(
+            cached_parent.composition_reset_tokens_by_terminal,
+            parent.composition_reset_tokens_by_terminal,
+            "late-bind reset-token cache must survive save/load",
+        );
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    start document;
+                    ignore PARENT_WS;
+                    t PARENT_WS = " "+;
+                    g child = {
+                        start child;
+                        ignore CHILD_WS;
+                        t CHILD_WS = "\t"+;
+                        nt child = "a";
+                    };
+                    nt document = "X" child "!";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+
+        let parent_dwa = parent.parser_dwa.clone();
+        let child_dwa = child.parser_dwa.clone();
+        let bound = parent
+            .bind_grammar_dynamic_boundary("child", child.clone())
+            .unwrap();
+        let overlay = bound
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("authoritative A+B metadata");
+        assert!(overlay.segmented_mask_authoritative);
+        assert!(!overlay.segmented_static_baseline);
+        assert_eq!(overlay.segmented_parser_components.len(), 2);
+        assert_eq!(overlay.segmented_parser_components[0].constraint.parser_dwa, parent_dwa);
+        assert_eq!(overlay.segmented_parser_components[1].constraint.parser_dwa, child_dwa);
+        assert!(overlay
+            .segmented_parser_components
+            .iter()
+            .all(|component| component.root_disallowed_terminal.is_none()));
+
+        let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+        let loaded_overlay = loaded
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("round-tripped authoritative A+B metadata");
+        assert_eq!(loaded_overlay.segmented_parser_components.len(), 2);
+        let mut loaded_parent = loaded_overlay.segmented_parser_components[0]
+            .constraint
+            .as_ref()
+            .clone();
+        let mut loaded_child = loaded_overlay.segmented_parser_components[1]
+            .constraint
+            .as_ref()
+            .clone();
+        loaded_parent.materialize_parser_dwa_for_compilation().unwrap();
+        loaded_child.materialize_parser_dwa_for_compilation().unwrap();
+        assert_eq!(loaded_parent.parser_dwa, parent_dwa);
+        assert_eq!(loaded_child.parser_dwa, child_dwa);
+        for constraint in [&bound, &loaded] {
+            let mut actual = constraint.start();
+            let mut expected = monolithic.start();
+            assert_eq!(actual.mask(), expected.mask());
+            for token in [1, 0, 2, 3, 1, 4] {
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+                assert_eq!(actual.mask(), expected.mask(), "after token {token}");
+            }
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
+
+            for token in [5, 6, 7, 8] {
+                let mut actual = constraint.start();
+                let mut expected = monolithic.start();
+                assert_eq!(
+                    actual.commit_token(token).is_ok(),
+                    expected.commit_token(token).is_ok(),
+                    "fused token {token}",
+                );
+                assert_eq!(actual.is_accepting(), expected.is_accepting());
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_ab_handles_multi_terminal_parent_token_after_zero_width_return() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"!".to_vec()),
+            (3, b"?".to_vec()),
+            (4, b"!?".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    start document;
+                    extern grammar child;
+                    nt document = "X" child "!" "?";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start child; nt child = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm(
+                r#"
+                    glrm 1;
+                    start document;
+                    g child = { start child; nt child = "a"; };
+                    nt document = "X" child "!" "?";
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+
+        let bound = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        for constraint in [&bound, &RuntimeConstraint::load(bound.save()).unwrap()] {
+            let mut actual = constraint.start();
+            let mut expected = monolithic.start();
+            for token in [0, 1] {
+                assert_eq!(actual.mask(), expected.mask(), "before token {token}");
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            let actual_mask = actual.mask();
+            let expected_mask = expected.mask();
+            assert_eq!(actual_mask, expected_mask, "after child completion");
+            assert_ne!(actual_mask[0] & (1 << 4), 0, "fused parent token !? must be allowed");
+            actual.commit_token(4).unwrap();
+            expected.commit_token(4).unwrap();
+            assert!(actual.is_accepting());
+            assert!(expected.is_accepting());
+        }
+    }
+
+    #[test]
+    fn late_bind_vocab_cache_is_reused_and_not_serialized() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child =
+            DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+
+        assert!(
+            parent.late_bind_vocab.get().is_some(),
+            "fresh compilation should retain the supplied vocabulary for later binds",
+        );
+
+        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        assert!(
+            loaded_parent.late_bind_vocab.get().is_none(),
+            "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
+        );
+        let first = loaded_parent
+            .bind_grammar_dynamic_boundary("child", &child)
+            .unwrap();
+        assert!(loaded_parent.late_bind_vocab.get().is_some());
+        let second = loaded_parent
+            .bind_grammar_dynamic_boundary("child", &child)
+            .unwrap();
+        assert_eq!(first.start().mask(), second.start().mask());
+
+        let loaded = RuntimeConstraint::load(loaded_parent.save()).unwrap();
+        assert!(
+            loaded.late_bind_vocab.get().is_none(),
+            "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
+        );
+        let rebound = loaded
+            .bind_grammar_dynamic_boundary("child", &child)
+            .unwrap();
+        assert_eq!(first.start().mask(), rebound.start().mask());
+    }
+}
+
+#[cfg(test)]
+mod cached_parent_main_tests {
     use super::*;
 
     fn vocab() -> Vocab {
@@ -701,7 +2076,7 @@ mod tests {
     #[test]
     fn compiled_parent_can_bind_external_grammar_after_compile_and_load() {
         let vocab = vocab();
-        let mut parent = RuntimeConstraint::compile(
+        let parent = RuntimeConstraint::compile(
             Grammar::glrm(
                 r#"
                     glrm 1;
@@ -714,8 +2089,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parent.unbound_grammar_placeholders.keys().collect::<Vec<_>>(),
-            vec![&"payload".to_owned()],
+            parent
+                .late_grammar_slots
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["payload"],
         );
         assert!(accepts(&parent, b"x"));
         assert!(!accepts(&parent, b"<a>"));
@@ -731,18 +2110,21 @@ mod tests {
         )
         .unwrap();
 
-        let with_a = parent.bind_grammar("payload", &child_a, &vocab).unwrap();
-        let with_b = parent.bind_grammar("payload", &child_b, &vocab).unwrap();
+        let with_a = parent.bind_grammar("payload", &child_a).unwrap();
+        let with_b = parent.bind_grammar("payload", &child_b).unwrap();
         assert!(accepts(&with_a, b"x"));
         assert!(accepts(&with_a, b"<a>"));
         assert!(!accepts(&with_a, b"<b>"));
         assert!(accepts(&with_b, b"<b>"));
         assert!(!accepts(&with_b, b"<a>"));
-        assert!(parent.unbound_grammar_placeholders.contains_key("payload"));
+        assert!(parent
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == "payload"));
 
         let saved = parent.save();
-        let mut loaded = RuntimeConstraint::load(&saved).unwrap();
-        let loaded_with_a = loaded.bind_grammar("payload", &child_a, &vocab).unwrap();
+        let loaded = RuntimeConstraint::load(&saved).unwrap();
+        let loaded_with_a = loaded.bind_grammar("payload", &child_a).unwrap();
         assert!(accepts(&loaded_with_a, b"<a>"));
         assert!(!accepts(&loaded_with_a, b"<b>"));
     }
@@ -750,7 +2132,7 @@ mod tests {
     #[test]
     fn compiled_parent_can_fill_multiple_slots_incrementally() {
         let vocab = vocab();
-        let mut parent = RuntimeConstraint::compile(
+        let parent = RuntimeConstraint::compile(
             Grammar::glrm(
                 r#"
                     glrm 1;
@@ -773,10 +2155,13 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let mut half = parent.bind_grammar("left", &a, &vocab).unwrap();
-        assert!(half.unbound_grammar_placeholders.contains_key("right"));
-        let full = half.bind_grammar("right", &b, &vocab).unwrap();
-        assert!(full.unbound_grammar_placeholders.is_empty());
+        let half = parent.bind_grammar("left", &a).unwrap();
+        assert!(half
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == "right"));
+        let full = half.bind_grammar("right", &b).unwrap();
+        assert!(full.late_grammar_slots.is_empty());
         assert!(accepts(&full, b"<ab>"));
 
         let unresolved_child = RuntimeConstraint::compile(
@@ -786,24 +2171,46 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let err = parent
-            .bind_grammar("left", &unresolved_child, &vocab)
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("a compiled child with unresolved external grammars cannot yet be bound"));
+        // Main used to reject this because independently compiled unresolved
+        // children could collide in the private placeholder-token namespace.
+        // The successor architecture transports those slots by qualified name
+        // and sanitizes the private linker token from the public token domain.
+        let open_left = parent.bind_grammar("left", &unresolved_child).unwrap();
+        assert!(open_left
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == "left.leaf"));
+        let left = open_left.bind_grammar("left.leaf", &a).unwrap();
+        let nested_full = left.bind_grammar("right", &b).unwrap();
+        assert!(nested_full.late_grammar_slots.is_empty());
+        assert!(accepts(&nested_full, b"<ab>"));
     }
 
     #[test]
-    fn dynamic_compile_rejects_unbound_external_grammar() {
+    fn dynamic_compile_preserves_unbound_external_grammar() {
         let vocab = vocab();
-        let err = DynamicConstraint::compile(
+        let open = DynamicConstraint::compile(
             Grammar::glrm(
                 "glrm 1; extern grammar payload; start document; nt document = payload;",
             ),
             &vocab,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("dynamic compilation requires bindings"));
+        .unwrap();
+        assert!(open
+            .clone_constraints()
+            .iter()
+            .all(|alternative| alternative
+                .late_grammar_slots
+                .iter()
+                .any(|slot| slot.name == "payload")));
+        let child = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start value; nt value = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let bound = open.bind_grammar("payload", &child).unwrap();
+        let mut state = bound.start();
+        state.commit_bytes(b"a").unwrap();
+        assert!(state.is_accepting());
     }
 }

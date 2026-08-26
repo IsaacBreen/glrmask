@@ -482,11 +482,20 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
     let mut touched_right = Vec::<usize>::new();
     let mut left_only = Vec::<u32>::new();
 
-    let mut emit = |originals: Vec<u32>| {
+    let mut emit = |mut originals: Vec<u32>| {
         if originals.is_empty() {
             return;
         }
-        debug_assert!(originals.windows(2).all(|pair| pair[0] < pair[1]));
+        // Most maps are already canonical and this branch is just one linear
+        // check. Some independently/parallel-built artifacts can arrive with
+        // an equivalent class whose inverse list is not in strict ID order.
+        // The common-map relation is set-valued, so canonicalize that rare
+        // input locally instead of making the direct sparse fast path depend
+        // on incidental inverse-list construction order.
+        if !originals.windows(2).all(|pair| pair[0] < pair[1]) {
+            originals.sort_unstable();
+            originals.dedup();
+        }
         let class = internal_to_originals.len() as u32;
         for &original in &originals {
             original_to_internal[original as usize] = class;

@@ -4,7 +4,7 @@ use crate::automata::lexer::{
 };
 use crate::automata::regex::Expr;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -972,6 +972,158 @@ fn build_dynamic_reset_effect_rows(
 }
 
 impl Constraint {
+    /// Build the parser-state-independent trigger level used by dynamic
+    /// composition. This is deliberately optional: ordinary Constraint and
+    /// DynamicConstraint compilation never calls it, preserving zero trigger
+    /// build cost by default.
+    ///
+    /// The scan starts from every tokenizer state, so the resulting original
+    /// model-token set is conservative for any runtime TSID. A token is kept
+    /// when a proper prefix can complete a terminal that may either finish the
+    /// component or immediately precede one of its unresolved grammar slots.
+    pub(crate) fn build_boundary_token_trigger(&mut self) -> Result<(), String> {
+        self.materialize_composition_link_metadata_for_compilation()?;
+
+        let mut relevant = BitSet::new(self.table.num_terminals as usize);
+        if let Some(summary) = self.composition_grammar_summary.as_ref() {
+            relevant.union_with(&summary.root_last);
+            let placeholders = self
+                .unbound_grammar_placeholders
+                .values()
+                .copied()
+                .chain(self.late_grammar_slots.iter().map(|slot| slot.terminal_id));
+            for placeholder in placeholders {
+                for (terminal, follows) in summary.allowed_follows.iter().enumerate() {
+                    if follows.contains(placeholder as usize) {
+                        relevant.set(terminal);
+                    }
+                }
+            }
+            // Scoped ignore can occur immediately before an entry/finish point
+            // without appearing in grammar adjacency. A model token may
+            // therefore consume one or more ignore lexemes and then cross the
+            // component boundary internally. Tokens is intentionally an
+            // overapproximation, so treating any matched ignore as a possible
+            // boundary precursor is the sound parser-state-independent choice.
+            if let Some(ignore) = self.ignore_terminal {
+                relevant.set(ignore as usize);
+            }
+        } else {
+            // Older/stripped artifacts may lack the grammar summary. The
+            // Tokens trigger is only a pruning accelerator, so falling back to
+            // every terminal preserves exactness.
+            relevant = BitSet::all(self.table.num_terminals as usize);
+        }
+
+        if relevant.is_empty() {
+            self.boundary_trigger =
+                crate::runtime::BoundaryTrigger::Tokens(Arc::from([]));
+            self.serialized_artifact_cache = None;
+            return Ok(());
+        }
+
+        let all_states = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
+        let tokens = self.token_bytes_iter().collect::<Vec<_>>();
+        let mut candidates = tokens
+            .par_iter()
+            .filter_map(|(token_id, bytes)| {
+                if bytes.len() < 2 {
+                    return None;
+                }
+                let mut states = TokenizerStateSet::from_iter(all_states.iter().copied());
+                for &byte in &bytes[..bytes.len() - 1] {
+                    states = self.tokenizer.step_all(states.as_slice(), byte);
+                    if states.is_empty() {
+                        return None;
+                    }
+                    let mut matched_any = false;
+                    let mut matched_relevant = false;
+                    for state in states.iter().copied() {
+                        for terminal in self.tokenizer.matched_terminals_iter(state) {
+                            matched_any = true;
+                            matched_relevant |= relevant.contains(terminal as usize);
+                        }
+                    }
+                    if matched_relevant {
+                        return Some(*token_id);
+                    }
+                    if matched_any {
+                        // A real lexer commits only according to its exact
+                        // longest-match policy. Forking a reset continuation at
+                        // every match is deliberately broader: it preserves all
+                        // real multi-lexeme paths (including ignore -> reset ->
+                        // terminal -> boundary) while admitting only harmless
+                        // false-positive trigger tokens.
+                        let reset = self.tokenizer.initial_state();
+                        if !states.contains(&reset) {
+                            states.push(reset);
+                            states.sort_unstable();
+                        }
+                    }
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        self.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
+            candidates.into_boxed_slice(),
+        ));
+        self.serialized_artifact_cache = None;
+        Ok(())
+    }
+
+    /// Build reusable boundary-trigger metadata at the requested detail level.
+    ///
+    /// `None` is a no-op and preserves the zero-cost default. `Tokens` builds
+    /// only the conservative parser-state-independent token set. `Exact` first
+    /// builds that set as a candidate prefilter, then upgrades to a full local
+    /// Parser DWA when this component supports exact trigger compilation.
+    pub fn build_boundary_trigger(
+        &mut self,
+        detail: crate::runtime::BoundaryTriggerDetail,
+    ) -> Result<(), String> {
+        match detail {
+            crate::runtime::BoundaryTriggerDetail::None => Ok(()),
+            crate::runtime::BoundaryTriggerDetail::Tokens => self.build_boundary_token_trigger(),
+            crate::runtime::BoundaryTriggerDetail::Exact => self.build_exact_boundary_trigger(),
+        }
+    }
+
+    /// Build the full GSS-sensitive proper-prefix boundary trigger Parser DWA.
+    ///
+    /// This is an optional accelerator for dynamic composition and is
+    /// deliberately separate from ordinary constraint compilation. The trigger
+    /// uses raw local tokenizer-state IDs and original model-token IDs rather
+    /// than the component's whole-token TSID/token quotient. Unsupported
+    /// already-composed/control-bearing components retain the conservative
+    /// `Tokens` trigger instead of publishing an inexact `Exact` artifact.
+    pub fn build_exact_boundary_trigger(&mut self) -> Result<(), String> {
+        if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
+            return Ok(());
+        }
+        self.build_boundary_token_trigger()?;
+        let candidates = self
+            .boundary_trigger
+            .token_summary()
+            .map(|tokens| tokens.to_vec())
+            .unwrap_or_default();
+        let Some(dwa) =
+            crate::compiler::constraint_compose::build_exact_component_boundary_trigger(
+                self,
+                &candidates,
+            )?
+        else {
+            return Err(
+                "exact boundary trigger construction is not yet supported for components with live linker-control terminals"
+                    .to_owned(),
+            );
+        };
+        self.boundary_trigger = crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa));
+        self.serialized_artifact_cache = None;
+        Ok(())
+    }
+
     /// Whether the stored internal-TSID inverse is redundant with the scalar
     /// state -> TSID map. Runtime-product tokenizers can have several TSID
     /// lanes per physical state and therefore must retain their explicit
@@ -1165,12 +1317,18 @@ impl Constraint {
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
+            self.late_bind_vocab = OnceLock::from(vocab.clone());
             return Ok(());
         }
         if !self.token_bytes_match_vocab(vocab) {
             return Err("constraint was not compiled for the supplied vocabulary".to_string());
         }
         self.token_bytes = entries;
+        // A successful exact bind establishes the precise public vocabulary
+        // for every later late-subgrammar bind as well. Keep the caller's
+        // already-built `Vocab` (and its pure derived-artifact cache) instead
+        // of reconstructing the same bytes again in `constraint_vocab()`.
+        self.late_bind_vocab = OnceLock::from(vocab.clone());
         Ok(())
     }
 
@@ -1414,7 +1572,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -9096,7 +9254,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
@@ -9111,7 +9269,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
         state
@@ -9802,15 +9960,132 @@ impl Constraint {
             .chain(
                 self.special_token_terminals
                     .iter()
+                    .filter(|special| {
+                        !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+                    })
                     .map(|special| special.token_id),
             )
             .max()
     }
 
+    /// Remove compiler-only late-grammar sentinel token IDs from the runtime
+    /// model-token coordinate while retaining their terminal metadata for the
+    /// linker. Returns whether the token coordinate changed.
+    ///
+    /// External-grammar placeholders are compiled initially as exact special
+    /// tokens so the ordinary compiler can build the parent grammar. Once a
+    /// terminal is recorded in `late_grammar_slots`, that backing token ID is
+    /// no longer a public/model token. Leaving it in the original-token map
+    /// makes persisted sparse mask fragments wider than `mask_len()`, which
+    /// correctly excludes unresolved linker sentinels.
+    pub(crate) fn sanitize_late_grammar_placeholder_token_domain(&mut self) -> bool {
+        if self.late_grammar_slots.is_empty() || !self.has_original_token_map() {
+            return false;
+        }
+
+        let placeholder_terminals = self
+            .late_grammar_slots
+            .iter()
+            .map(|slot| slot.terminal_id)
+            .collect::<BTreeSet<_>>();
+        let mut placeholder_tokens = self
+            .special_token_terminals
+            .iter()
+            .filter(|special| placeholder_terminals.contains(&special.terminal_id))
+            .filter(|special| self.token_bytes_for_id(special.token_id).is_none())
+            .filter(|special| {
+                !self.special_token_terminals.iter().any(|other| {
+                    other.token_id == special.token_id
+                        && !placeholder_terminals.contains(&other.terminal_id)
+                })
+            })
+            .map(|special| special.token_id)
+            .collect::<Vec<_>>();
+        placeholder_tokens.sort_unstable();
+        placeholder_tokens.dedup();
+        if placeholder_tokens.is_empty()
+            || !placeholder_tokens.iter().any(|&token| {
+                self.original_token_internal_at(token)
+                    .is_some_and(|internal| internal != u32::MAX)
+            })
+        {
+            return false;
+        }
+
+        let group_count = self.internal_token_count();
+        let mut original_to_internal = self.original_token_map().to_vec();
+        for token in placeholder_tokens {
+            if let Some(internal) = original_to_internal.get_mut(token as usize) {
+                *internal = u32::MAX;
+            }
+        }
+        let mut internal_to_tokens = (0..group_count)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        for (original, &internal) in original_to_internal.iter().enumerate() {
+            if internal == u32::MAX {
+                continue;
+            }
+            if let Some(group) = internal_to_tokens.get_mut(internal as usize) {
+                group.push(original as u32);
+            }
+        }
+
+        self.original_token_to_internal = original_to_internal;
+        self.packed_original_token_to_internal = None;
+        self.deferred_original_token_to_internal = OnceLock::new();
+        self.internal_token_to_tokens = internal_to_tokens;
+        self.deferred_internal_token_to_tokens = OnceLock::new();
+
+        // Portable per-token fragments and every aggregate derived from them
+        // were built before the slot became linker-only. Force one rebuild in
+        // the reduced public token domain; subsequent save/load can reuse the
+        // clean caches normally.
+        self.internal_token_buf_masks.clear();
+        self.internal_token_buf_flat = Box::new([]);
+        self.backed_internal_token_buf_flat = None;
+        self.internal_token_buf_offsets = Box::new([]);
+        self.word_group_buf_masks.clear();
+        self.pair_word_group_buf_masks = Default::default();
+        self.quad_word_group_buf_masks = Default::default();
+        self.super_word_group_buf_masks = Default::default();
+        self.mega_word_group_buf_masks = Default::default();
+        self.giga_word_group_buf_masks = Default::default();
+        self.word_group_sparse_masks.clear();
+        self.word_group_prefix_buf_masks = Default::default();
+        self.word_group_sparse_prefix_entries.clear();
+        self.quad_group_sparse_masks.clear();
+        self.quad_group_dense_masks.clear();
+        self.byte_group_sparse_masks.clear();
+        self.byte_group_dense_masks.clear();
+        self.word_group_sparse_total_entries = 0;
+        self.word_group_sparse_max_entries = 0;
+        self.all_tokens_buf_mask = Box::new([]);
+        self.heavy_token_dense_masks.clear();
+        self.heavy_token_indices.clear();
+        self.internal_token_buf_op_costs.clear();
+        self.word_group_buf_op_costs.clear();
+        self.total_internal_buf_cost = 0;
+        self.heavy_total_cost = 0;
+        self.light_avg_cost_x256 = 0;
+        self.parser_runtime_caches_prebuilt = false;
+        self.serialized_artifact_cache = None;
+        true
+    }
+
+    pub(crate) fn is_late_grammar_placeholder_terminal(&self, terminal_id: u32) -> bool {
+        self.late_grammar_slots
+            .iter()
+            .any(|slot| slot.terminal_id == terminal_id)
+    }
+
     pub(crate) fn has_special_token_id(&self, token_id: u32) -> bool {
         self.special_token_terminals
             .iter()
-            .any(|special| special.token_id == token_id)
+            .any(|special| {
+                special.token_id == token_id
+                    && !self.is_late_grammar_placeholder_terminal(special.terminal_id)
+            })
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
@@ -10867,6 +11142,15 @@ mod dense_internal_token_mask_tests {
         assert!(!Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
         constraint.bind_vocab_exact(&vocab_b).unwrap();
         assert!(Arc::ptr_eq(&constraint.token_bytes, &vocab_b.entries_arc()));
+        assert!(constraint.late_bind_vocab.get().is_some());
+        assert!(Arc::ptr_eq(
+            &constraint
+                .late_bind_vocab
+                .get()
+                .expect("exact vocab bind should seed late-bind vocab")
+                .entries_arc(),
+            &vocab_b.entries_arc(),
+        ));
 
         let bound = Arc::clone(&constraint.token_bytes);
         assert!(constraint.bind_vocab_exact(&vocab_bad).is_err());

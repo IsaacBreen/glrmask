@@ -24,6 +24,53 @@ use super::mask_mapping::FinalMaskMapping;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 
+/// Compile-time detail requested for the reusable dynamic-boundary trigger.
+///
+/// This setting is orthogonal to whether ordinary component masking is static
+/// or dynamic. `None` is the zero-cost default; `Tokens` adds only a
+/// parser-state-independent candidate set; `Exact` builds the full
+/// GSS-sensitive trigger Parser DWA when the component supports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BoundaryTriggerDetail {
+    #[default]
+    None,
+    Tokens,
+    Exact,
+}
+
+/// Optional reusable hint for dynamic composition boundaries. This is an
+/// accelerator only: `None` means the composition runtime must conservatively
+/// assume that any model token may cross a component boundary.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum BoundaryTrigger {
+    #[default]
+    None,
+    /// Conservative original model-token IDs that may contain the first
+    /// internal boundary crossing. Parser-state independent.
+    Tokens(Arc<[u32]>),
+    /// Exact component-local parser DWA. Its coordinate is deliberately
+    /// independent of the ordinary parser-DWA quotient: parser labels are
+    /// local LR-state IDs, weight TSIDs are raw local tokenizer-state IDs, and
+    /// weight token IDs are original/model token IDs. Proper-prefix boundary
+    /// behavior is a stronger observation than the ordinary whole-token mask
+    /// language, so reusing the normal TSID/internal-token quotient would need
+    /// a separate equivalence proof.
+    Exact(Arc<DWA>),
+}
+
+impl BoundaryTrigger {
+    pub(crate) fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub(crate) fn token_summary(&self) -> Option<&[u32]> {
+        match self {
+            Self::Tokens(tokens) => Some(tokens),
+            Self::None | Self::Exact(_) => None,
+        }
+    }
+}
+
 /// Small composition-time grammar summary retained with a compiled component.
 ///
 /// For a nonnullable child, substituting the child's language for a parent
@@ -2345,6 +2392,32 @@ impl DynamicBoundedObservationSets {
     }
 }
 
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DynamicMaskVocabArtifactNode {
+    token_id: u32,
+    first_child: u32,
+    child_len: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DynamicMaskVocabArtifactEdge {
+    byte_start: u32,
+    byte_len: u32,
+    child: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DynamicMaskVocabArtifact {
+    nodes: Vec<DynamicMaskVocabArtifactNode>,
+    edges: Vec<DynamicMaskVocabArtifactEdge>,
+    edge_bytes: Vec<u8>,
+    alias_offsets: Vec<u32>,
+    aliases: Vec<u32>,
+    mask_tokenizer: Option<Tokenizer>,
+    full_to_mask_state: Vec<u32>,
+}
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -2983,6 +3056,182 @@ impl DynamicMaskVocab {
             state,
             mask: Arc::from(mask),
         });
+    }
+}
+
+
+impl DynamicMaskVocab {
+    pub(crate) fn to_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+        if !self.initialized || self.pending_source.is_some() {
+            return None;
+        }
+        let nodes = self
+            .trie
+            .nodes
+            .iter()
+            .map(|node| DynamicMaskVocabArtifactNode {
+                token_id: node.token_id.unwrap_or(u32::MAX),
+                first_child: node.first_child,
+                child_len: node.child_len,
+            })
+            .collect();
+        let edges = self
+            .trie
+            .edges
+            .iter()
+            .map(|edge| DynamicMaskVocabArtifactEdge {
+                byte_start: edge.byte_start,
+                byte_len: edge.byte_len,
+                child: edge.child,
+            })
+            .collect();
+        let mut alias_offsets = Vec::new();
+        let mut aliases = Vec::new();
+        let alias_count = match &self.token_aliases {
+            DynamicMaskAliasStore::Ordered(entries) => entries.len(),
+            DynamicMaskAliasStore::Packed(entries) => entries.len(),
+        };
+        alias_offsets.reserve(alias_count + 1);
+        alias_offsets.push(0);
+        for index in 0..alias_count {
+            match &self.token_aliases {
+                DynamicMaskAliasStore::Ordered(entries) => {
+                    aliases.extend_from_slice(&entries[index]);
+                }
+                DynamicMaskAliasStore::Packed(entries) => {
+                    if let Some(entry) = entries[index].as_ref() {
+                        match entry {
+                            PackedDynamicMaskTokenAliases::Single(token) => aliases.push(*token),
+                            PackedDynamicMaskTokenAliases::Many(tokens) => {
+                                aliases.extend_from_slice(tokens)
+                            }
+                        }
+                    }
+                }
+            }
+            alias_offsets.push(aliases.len() as u32);
+        }
+        Some(DynamicMaskVocabArtifact {
+            nodes,
+            edges,
+            edge_bytes: self.trie.edge_bytes.clone(),
+            alias_offsets,
+            aliases,
+            mask_tokenizer: self.mask_tokenizer.as_deref().cloned(),
+            full_to_mask_state: self.full_to_mask_state.as_ref().to_vec(),
+        })
+    }
+
+    pub(crate) fn from_artifact(artifact: DynamicMaskVocabArtifact) -> Result<Self, String> {
+        if artifact.nodes.is_empty() {
+            return Err("dynamic-mask vocabulary artifact has no trie root".to_owned());
+        }
+        if artifact.alias_offsets.first().copied() != Some(0)
+            || artifact.alias_offsets.last().copied().map(|v| v as usize)
+                != Some(artifact.aliases.len())
+            || artifact.alias_offsets.windows(2).any(|pair| pair[0] > pair[1])
+        {
+            return Err("dynamic-mask vocabulary artifact has invalid alias offsets".to_owned());
+        }
+        let node_count = artifact.nodes.len();
+        let edge_count = artifact.edges.len();
+        let mut nodes = Vec::with_capacity(node_count);
+        let alias_count = artifact.alias_offsets.len().saturating_sub(1);
+        for (index, node) in artifact.nodes.into_iter().enumerate() {
+            let first = node.first_child as usize;
+            let len = node.child_len as usize;
+            if first.checked_add(len).is_none_or(|end| end > edge_count) {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {index} has an invalid child range"
+                ));
+            }
+            let token_id = (node.token_id != u32::MAX).then_some(node.token_id);
+            if token_id.is_some_and(|token| token as usize >= alias_count) {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {index} references an invalid canonical token"
+                ));
+            }
+            nodes.push(DynamicMaskTrieNode {
+                token_id,
+                first_child: node.first_child,
+                child_len: node.child_len,
+                subtree_token_start: 0,
+                subtree_token_end: 0,
+                subtree_bytes: [0; 4],
+                subtree_first_bytes: [0; 4],
+                prefix_byte_len: 0,
+                subtree_max_byte_len: 0,
+            });
+        }
+        let mut edges = Vec::with_capacity(edge_count);
+        for (index, edge) in artifact.edges.into_iter().enumerate() {
+            if edge.child as usize >= node_count {
+                return Err(format!(
+                    "dynamic-mask vocabulary edge {index} references an invalid child"
+                ));
+            }
+            let start = edge.byte_start as usize;
+            let len = edge.byte_len as usize;
+            if start
+                .checked_add(len)
+                .is_none_or(|end| end > artifact.edge_bytes.len())
+            {
+                return Err(format!(
+                    "dynamic-mask vocabulary edge {index} has an invalid byte range"
+                ));
+            }
+            edges.push(DynamicMaskTrieEdge {
+                byte_start: edge.byte_start,
+                byte_len: edge.byte_len,
+                child: edge.child,
+            });
+        }
+        let mut trie = DynamicMaskTrie {
+            nodes,
+            edges,
+            edge_bytes: artifact.edge_bytes,
+            subtree_tokens: Vec::new(),
+            walk_edges: Vec::new(),
+        };
+        trie.finalize_subtree_metadata();
+
+        let mut packed_aliases = Vec::with_capacity(alias_count);
+        for index in 0..alias_count {
+            let start = artifact.alias_offsets[index] as usize;
+            let end = artifact.alias_offsets[index + 1] as usize;
+            packed_aliases.push(match &artifact.aliases[start..end] {
+                [] => None,
+                [token] => Some(PackedDynamicMaskTokenAliases::Single(*token)),
+                tokens => Some(PackedDynamicMaskTokenAliases::Many(
+                    tokens.to_vec().into_boxed_slice(),
+                )),
+            });
+        }
+        let mut result = DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(packed_aliases));
+        match artifact.mask_tokenizer {
+            Some(tokenizer) => {
+                if artifact.full_to_mask_state.is_empty()
+                    || artifact
+                        .full_to_mask_state
+                        .iter()
+                        .any(|&state| state >= tokenizer.num_states())
+                {
+                    return Err(
+                        "dynamic-mask vocabulary artifact has an invalid mask-tokenizer quotient"
+                            .to_owned(),
+                    );
+                }
+                result.set_mask_tokenizer_quotient(tokenizer, artifact.full_to_mask_state);
+            }
+            None if !artifact.full_to_mask_state.is_empty() => {
+                return Err(
+                    "dynamic-mask vocabulary artifact has a quotient map without a tokenizer"
+                        .to_owned(),
+                );
+            }
+            None => {}
+        }
+        Ok(result)
     }
 }
 
@@ -4147,13 +4396,23 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// region; ordinary parent reductions must not pay for that machinery.
     #[serde(default)]
     pub(crate) non_parent_only_parser_states: Vec<bool>,
-    /// Experimental exact segmented parser backend. Each source constraint
-    /// retains its own parser-DWA/token coordinate and is projected from the
-    /// composed tokenizer/LR coordinates at mask time. This deliberately stays
-    /// runtime-only until the representation is validated and compacted; the
-    /// ordinary flattened parser artifact remains the serialization fallback.
+    /// Exact segmented parser backend. Each retained source constraint keeps
+    /// its own parser/token coordinate and is projected from the composed
+    /// tokenizer/LR coordinates at mask time. Current artifacts flatten static
+    /// components into one parser DWA but retain dynamic/hybrid components.
     #[serde(skip, default)]
     pub(crate) segmented_parser_components: Vec<SegmentedParserComponent>,
+    /// The segmented A/B factorization is the masking implementation for this
+    /// constraint, rather than an optional validation view of a flattened
+    /// parser DWA. Current serialization preserves this split explicitly.
+    #[serde(skip, default)]
+    pub(crate) segmented_mask_authoritative: bool,
+    /// A serialized hybrid may flatten only its static component contribution
+    /// into `Constraint::parser_dwa` while retaining dynamic components below.
+    /// When set, segmented masking starts from that static parser-DWA mask and
+    /// ORs the retained dynamic components plus boundary B.
+    #[serde(skip, default)]
+    pub(crate) segmented_static_baseline: bool,
     /// Compressed deterministic union root for `segmented_parser_components`.
     /// Entry `g` is the unique component selected by composed LR state `g`, or
     /// `u32::MAX` when no component has a root transition on that state. When
@@ -4162,10 +4421,52 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// body. No runtime parser-NWA branching is involved.
     #[serde(skip, default)]
     pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
+    /// Authoritative cross-component accelerators, optionally restricted to
+    /// model tokens whose parser execution starts in one component.  This is
+    /// the new composition model: boundary acceleration is selected per
+    /// starting component, while the retained component constraints remain
+    /// the ordinary A contribution.  `start_component == None` is the exact
+    /// legacy/global fallback used while older artifacts and compiler paths
+    /// are migrated.
     #[serde(skip, default)]
-    pub(crate) segmented_boundary_parser: Option<Box<SegmentedBoundaryParser>>,
+    pub(crate) segmented_boundary_shards: Vec<SegmentedBoundaryShard>,
+    /// Legacy/global v22 storage.  New live compositions also publish an Arc
+    /// to the same backend through `segmented_boundary_shards`; these fields
+    /// remain until the partitioned boundary wire format is versioned.
     #[serde(skip, default)]
-    pub(crate) segmented_boundary_terminal_trie: Option<Box<SegmentedBoundaryTerminalTrie>>,
+    pub(crate) segmented_boundary_parser: Option<Arc<SegmentedBoundaryParser>>,
+    #[serde(skip, default)]
+    pub(crate) segmented_boundary_terminal_trie: Option<Arc<SegmentedBoundaryTerminalTrie>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SegmentedBoundaryShard {
+    /// Component in which the model token starts.
+    pub(crate) start_component: u32,
+    /// Exact composed LR top states that can represent this starting
+    /// component. A state may intentionally occur in more than one shard when
+    /// the composed relation is non-functional; evaluating both shards is then
+    /// conservative and exact under OR.
+    pub(crate) start_parser_states: BitSet,
+    /// Whether an empty composed parser stack belongs to this shard. Only the
+    /// outer/root component normally owns that coordinate.
+    pub(crate) accepts_empty_stack: bool,
+    /// Optional conservative model-token summary for the first internal
+    /// component crossing. `None` means no trigger information is available;
+    /// it must never be interpreted as "no crossings".
+    pub(crate) candidate_tokens: Option<Arc<[u32]>>,
+    pub(crate) backend: SegmentedBoundaryShardBackend,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SegmentedBoundaryShardBackend {
+    StaticParser(Arc<SegmentedBoundaryParser>),
+    DynamicTerminalTrie(Arc<SegmentedBoundaryTerminalTrie>),
+    /// Exact conservative dynamic crossing fallback.  This stores no
+    /// composition-specific boundary automaton: runtime invokes the ordinary
+    /// dynamic lexer/parser walker over the composed state and ORs only the
+    /// additions beyond the already-computed component-local mask.
+    DynamicDirect,
 }
 
 #[derive(Debug, Clone)]
@@ -4173,10 +4474,15 @@ pub(crate) struct SegmentedParserComponent {
     pub(crate) constraint: Arc<Constraint>,
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
-    /// Terminal to suppress only on the synthetic union-root empty-stack
-    /// projection. Shared component artifacts retain their standalone start
-    /// final weight; this root-only disallow is exactly the old cloned-artifact
-    /// start-final subtraction without mutating the shared parser DWA.
+    /// Global composed-terminal domain owned by this component.  When a
+    /// retained dynamic component is projected at the synthetic union root,
+    /// the root is live only if the current composed parser frontier can
+    /// actually advance into this component.  Keeping the domain prebuilt
+    /// makes that token-start entry test one exact bitset admission query.
+    pub(crate) root_entry_terminals: BitSet,
+    /// Legacy v22 compatibility metadata. New authoritative A+B compositions
+    /// leave this `None`: component parser DWAs keep their standalone semantics
+    /// unchanged, and scope/link behavior lives in the composed parser view/B.
     pub(crate) root_disallowed_terminal: Option<u32>,
     pub(crate) global_to_local_parser_state: Vec<u32>,
 }
@@ -4184,8 +4490,33 @@ pub(crate) struct SegmentedParserComponent {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct BoundaryTerminalTrieNode {
     pub(crate) children: Vec<(u32, u32)>,
-    /// Bit i means private boundary token class i is accepted at this node.
-    pub(crate) outputs: u64,
+    /// Legacy v21 representation: private boundary token classes accepted at
+    /// this node after expanding the TSID dimension during construction.
+    pub(crate) outputs: Vec<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundaryTerminalNwaTransition {
+    pub(crate) terminal: u32,
+    pub(crate) target: u32,
+    pub(crate) weight: Weight,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundaryTerminalNwaNode {
+    pub(crate) final_weight: Option<Weight>,
+    pub(crate) transitions: Vec<BoundaryTerminalNwaTransition>,
+    pub(crate) epsilons: Vec<(u32, Weight)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundaryTerminalNwa {
+    pub(crate) nodes: Vec<BoundaryTerminalNwaNode>,
+    pub(crate) start_states: Vec<u32>,
+    /// A topological order of `nodes`, validated when the artifact is loaded.
+    /// Runtime evaluation uses it to coalesce equal token domains at converged
+    /// NWA states without materializing the exponentially large prefix trie.
+    pub(crate) topological_order: Vec<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -4194,6 +4525,10 @@ pub(crate) struct SegmentedBoundaryTerminalTrie {
     pub(crate) root_by_tsid: Vec<u32>,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
+    /// Current representation. The legacy v21 serde shape above is retained so
+    /// old artifacts still decode; v22 persists this DAG explicitly.
+    #[serde(skip, default)]
+    pub(crate) symbolic_nwa: Option<BoundaryTerminalNwa>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -4206,6 +4541,13 @@ pub(crate) struct SegmentedBoundaryParser {
     #[serde(skip, default)]
     pub(crate) compact_parser_dwa:
         Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
+    /// New static boundary shards are compiled directly in the authoritative
+    /// composed constraint TSID coordinate. They therefore need no private
+    /// raw-tokenizer-state map; runtime reads `Constraint::state_to_internal_tsid`
+    /// instead. Legacy/global boundary artifacts keep this false and retain the
+    /// explicit private map below.
+    #[serde(skip, default)]
+    pub(crate) uses_composed_tsid_coordinate: bool,
     pub(crate) tokenizer_state_to_tsid: Vec<u32>,
     pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
 }
@@ -4262,6 +4604,17 @@ impl DeferredCompositionMetadataBytes {
     }
 }
 
+/// Compact persisted metadata for an unresolved external-grammar slot.
+///
+/// The terminal ID is an internal linker coordinate, never a public/model
+/// token ID. Keeping this record beside the compiled parser artifact lets a
+/// loaded parent be linked without parsing or recompiling its source grammar.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LateGrammarSlot {
+    pub(crate) name: String,
+    pub(crate) terminal_id: TerminalID,
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
@@ -4270,6 +4623,20 @@ impl DeferredCompositionMetadataBytes {
 pub struct Constraint {
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    /// Reusable component-local trigger metadata for dynamic composition.
+    /// Ordinary static/dynamic compilation leaves this at `None` so there is
+    /// no trigger construction cost unless explicitly requested in the future.
+    pub(crate) boundary_trigger: BoundaryTrigger,
+    /// Named, compiler-generated linker terminals for unresolved
+    /// `extern grammar` declarations. The token IDs backing these terminals
+    /// are deliberately private and outside the model vocabulary; callers
+    /// address slots only by `name` through the late-binding API.
+    pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
+    /// Runtime-only public vocabulary reconstructed from this immutable
+    /// constraint for late subgrammar binding. Keeping it here lets repeated
+    /// binds share `Vocab`'s pure derived-artifact cache (adjacent-byte index,
+    /// tries, etc.) instead of rebuilding those structures for every child.
+    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore
@@ -4603,6 +4970,10 @@ pub struct Constraint {
     /// loads keep this cold section backed by the artifact and materialize it
     /// only if the constraint is later used as a composition component.
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    /// Runtime-only marker distinguishing "the lightweight linking metadata
+    /// has already been decoded" from "the heavy static compiler-cache blob is
+    /// still deferred". Dynamic A+B intentionally keeps the latter deferred.
+    pub(crate) composition_link_metadata_materialized: bool,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through
@@ -4623,6 +4994,12 @@ pub(crate) struct ConstraintSerde {
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(skip, default)]
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
+    #[serde(skip, default)]
+    pub(crate) boundary_trigger: BoundaryTrigger,
+    #[serde(skip, default)]
+    pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
+    #[serde(skip, default)]
+    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
     /// Runtime-derived exact original-token sets for `Skip` terminals in a
     /// composed grammar. Each token is wholly in `L(skip)+`: it can be
     /// consumed as one or more complete instances of that scoped-ignore
@@ -5046,6 +5423,8 @@ pub(crate) struct ConstraintSerde {
     /// only if the constraint is later used as a composition component.
     #[serde(skip, default)]
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
+    #[serde(skip, default)]
+    pub(crate) composition_link_metadata_materialized: bool,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through

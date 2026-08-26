@@ -1301,15 +1301,6 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
     if children.len() != child_rules.len() {
         return Err("child table/rule override count mismatch".to_owned());
     }
-    if children
-        .iter()
-        .any(|child| !child.additional_placeholder_terminals.is_empty())
-    {
-        return Err(
-            "explicit-control subgrammar composition does not support multiple placeholders for one child"
-                .into(),
-        );
-    }
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
     terminal_offsets.push(0);
     let mut next_terminal = parent.num_terminals;
@@ -1372,8 +1363,8 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
         boundary_nonterminals.insert(child_root);
         let child_start = 0u32;
         let child_accept = accept_state(child)?;
-        let control = child_input.placeholder_terminal;
-        control_terminals.insert(control);
+        let controls = child_input.placeholder_terminals().collect::<Vec<_>>();
+        control_terminals.extend(controls.iter().copied());
         control_terminals.extend(
             child
                 .control_terminals
@@ -1392,29 +1383,36 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
 
         for rule in &mut rules[..parent_rule_count] {
             for symbol in &mut rule.rhs {
-                if *symbol == Symbol::Terminal(control) {
+                if controls
+                    .iter()
+                    .any(|&control| *symbol == Symbol::Terminal(control))
+                {
                     *symbol = Symbol::Nonterminal(child_root);
                 }
             }
         }
 
-        let mut call_sites = Vec::<(u32, u32, bool)>::new();
-        for state in 0..parent.num_states {
-            let Some(placeholder_action) = parent.action(state, control) else {
-                continue;
-            };
-            if let Some((target, replace)) = simple_shift(placeholder_action) {
-                call_sites.push((state, target, replace));
-            } else if !reduction_only(placeholder_action) {
+        let mut call_sites = Vec::<(TerminalID, u32, u32, bool)>::new();
+        for &control in &controls {
+            let mut control_has_call_site = false;
+            for state in 0..parent.num_states {
+                let Some(placeholder_action) = parent.action(state, control) else {
+                    continue;
+                };
+                if let Some((target, replace)) = simple_shift(placeholder_action) {
+                    call_sites.push((control, state, target, replace));
+                    control_has_call_site = true;
+                } else if !reduction_only(placeholder_action) {
+                    return Err(format!(
+                        "placeholder terminal {control} has unsupported action {placeholder_action:?} in parent state {state}",
+                    ));
+                }
+            }
+            if !control_has_call_site {
                 return Err(format!(
-                    "placeholder terminal {control} has unsupported action {placeholder_action:?} in parent state {state}",
+                    "placeholder terminal {control} has no shift call sites in the parent table",
                 ));
             }
-        }
-        if call_sites.is_empty() {
-            return Err(format!(
-                "placeholder terminal {control} has no shift call sites in the parent table",
-            ));
         }
 
         let Some(&(child_root_target, child_root_replace)) =
@@ -1435,7 +1433,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
         // continuation and active ignore scope explicit in the parser-state
         // identity.  Sharing internal states is a later optimization which can
         // be proved against this representation.
-        for &(caller_state, placeholder_target, placeholder_replace) in &call_sites {
+        for &(control, caller_state, placeholder_target, placeholder_replace) in &call_sites {
             let mut state_map = vec![u32::MAX; child.num_states as usize];
             for local_state in 0..child.num_states {
                 state_map[local_state as usize] = next_state;
@@ -2082,8 +2080,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_control_rejects_multiple_placeholders_for_one_child() {
-        let (child, _) = table(
+    fn explicit_control_supports_multiple_placeholders_for_one_child() {
+        let (child, child_analysis) = table(
             r#"
                 start child;
                 nt child ::= "a";
@@ -2099,7 +2097,7 @@ mod tests {
         );
         let left = terminal(&parent_analysis, "LEFT");
         let right = terminal(&parent_analysis, "RIGHT");
-        let error = compose_subgrammar_tables_explicit(
+        let composed = compose_subgrammar_tables_explicit(
             &parent,
             None,
             &[SubgrammarTableInput {
@@ -2110,8 +2108,19 @@ mod tests {
                 start_nullable: false,
             }],
         )
-        .unwrap_err();
-        assert!(error.contains("does not support multiple placeholders"));
+        .unwrap();
+        assert_eq!(composed.placeholder_terminals, vec![left, right]);
+        assert_eq!(composed.placeholder_component_indices, vec![1, 1]);
+        assert!(composed.control_terminals.contains(&left));
+        assert!(composed.control_terminals.contains(&right));
+        let child_relation = &composed.state_relations[1];
+        assert!(
+            child_relation.iter().all(|targets| targets.len() == 2),
+            "each local child LR state should have one explicit copy per placeholder",
+        );
+
+        let child_a = composed.terminal_offsets[1] + terminal(&child_analysis, "a");
+        assert!(accepts(&composed.table, &[child_a, child_a]));
     }
 
     #[test]

@@ -1342,6 +1342,12 @@ pub(crate) fn or_blocked_internal_tokens_for_exclusions(
 fn update_special_token_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut previous_token_id = None;
     for special in &state.constraint.special_token_terminals {
+        if state
+            .constraint
+            .is_late_grammar_placeholder_terminal(special.terminal_id)
+        {
+            continue;
+        }
         if previous_token_id == Some(special.token_id) {
             continue;
         }
@@ -4519,6 +4525,7 @@ fn fill_mask_dynamic_impl(
             *dst = base | ((*dst & !base) & candidate);
         }
     }
+    state.clear_late_grammar_placeholder_mask(buf);
     if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_ORACLE_COVER").is_some() {
         profile_dynamic_oracle_cover(state.generation, vocab, trie, buf);
     }

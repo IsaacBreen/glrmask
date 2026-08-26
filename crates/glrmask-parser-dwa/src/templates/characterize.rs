@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::stages::templates::commit_template_dfas_enabled;
 use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, TerminalID};
@@ -80,6 +80,30 @@ pub struct TerminalCharacterization {
     pub nt_escapes: Vec<NtEscape>,
     pub nt_rereduces: Vec<NtRereduce>,
     pub all_nts: BTreeSet<NonterminalID>,
+}
+
+/// Characterize a synthetic zero-width finish probe.
+///
+/// Runtime component completion after control closure is exactly the predicate
+/// `table.action(top, EOF).is_some()`. The probe therefore has an identity
+/// stack effect on precisely those parser tops and no behavior elsewhere. It
+/// deliberately does not execute the EOF action itself: EOF reductions/shifts
+/// are linker/control semantics, while the trigger only asks whether the
+/// component may finish at this byte boundary.
+pub fn characterize_finish_probe(table: &GLRTable) -> TerminalCharacterization {
+    TerminalCharacterization {
+        escapes: (0..table.num_states)
+            .filter(|&state| table.action(state, EOF).is_some())
+            .map(|state| InitialEscape {
+                pop: vec![StackMatcher::State(state)],
+                pushes: vec![state],
+            })
+            .collect(),
+        reduces: Vec::new(),
+        nt_escapes: Vec::new(),
+        nt_rereduces: Vec::new(),
+        all_nts: BTreeSet::new(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1007,21 +1031,30 @@ pub fn characterize_selected_terminals(
     grammar: &AnalyzedGrammar,
     selected: &[bool],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    characterize_selected_terminals_for_terminal_count(table, grammar.num_terminals, selected)
+}
+
+/// Count-only form of [`characterize_selected_terminals`]. The terminal
+/// characterization relation depends on the GLR table and terminal domain, not
+/// on retained grammar analysis. This is used by optional post-build trigger
+/// compilation, including for `DynamicConstraint`, which intentionally does not
+/// retain an `AnalyzedGrammar` or ordinary parser templates by default.
+pub fn characterize_selected_terminals_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    selected: &[bool],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
     assert_eq!(
         selected.len(),
-        grammar.num_terminals as usize,
-        "selected template mask must cover the merged terminal domain",
+        num_terminals as usize,
+        "selected template mask must cover the terminal domain",
     );
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let total_started = profile.then(Instant::now);
     let index_started = profile.then(Instant::now);
-    let index = build_characterization_index(table, grammar);
+    let index = build_characterization_index_for_terminal_count(table, num_terminals);
     let index_ms = index_started.map_or(0.0, elapsed_ms);
 
-    // The full-grammar path already quotients equal sparse LR action signatures
-    // and characterizes representatives in parallel.  Selected composition
-    // templates need the same exact optimization: without it a small boundary
-    // set is paradoxically characterized serially one terminal at a time.
     let signature_started = profile.then(Instant::now);
     let mut groups_by_signature: FxHashMap<TerminalActionSignature<'_>, Vec<TerminalID>> =
         FxHashMap::default();
@@ -1066,12 +1099,7 @@ pub fn characterize_selected_terminals(
     result
 }
 
-/// Characterize terminal behavior starting only from caller-supplied LR action
-/// states. The full composed goto/reduction graph is still used after each
-/// seed, so this computes the exact closure attributable to those initial
-/// action sites. Composition uses this to isolate behavior introduced by a
-/// table splice without re-characterizing the unchanged component action
-/// sites already represented by cached parser templates.
+
 pub fn characterize_terminal_action_state_seeds(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,

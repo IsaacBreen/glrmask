@@ -923,16 +923,20 @@ impl Constraint {
             }
 
             let mut external_bindings = Vec::with_capacity(parsed.placeholders.len());
+            let mut unresolved_placeholders = Vec::new();
             for placeholder in &parsed.placeholders {
-                let child = children_by_name
-                    .remove(placeholder.binding_name.as_str())
-                    .ok_or_else(|| {
-                        crate::GlrMaskError::Compilation(format!(
-                            "GLRM declares external subgrammar {:?}, but no compiled child was supplied",
-                            placeholder.binding_name,
-                        ))
-                    })?;
-                external_bindings.push((placeholder.token_id, placeholder.binding_name.as_str(), child));
+                if let Some(child) = children_by_name.remove(placeholder.binding_name.as_str()) {
+                    external_bindings.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.as_str(),
+                        child,
+                    ));
+                } else {
+                    unresolved_placeholders.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.clone(),
+                    ));
+                }
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
                 return Err(crate::GlrMaskError::Compilation(format!(
@@ -940,19 +944,43 @@ impl Constraint {
                 )));
             }
 
-            let parent = compile_from_named_grammar(
+            let mut parent = compile_from_named_grammar(
                 parsed.grammar,
                 vocab,
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
                 end_token_ids,
             )?;
+            for (placeholder_token_id, binding_name) in unresolved_placeholders {
+                let mut matching_terminals = parent
+                    .special_token_terminals
+                    .iter()
+                    .filter(|special| special.token_id == placeholder_token_id)
+                    .map(|special| special.terminal_id);
+                let terminal_id = matching_terminals.next().ok_or_else(|| {
+                    crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {binding_name:?} lost its hidden linker terminal",
+                    ))
+                })?;
+                if matching_terminals.next().is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "compiled GLRM external subgrammar {binding_name:?} has multiple hidden linker terminals",
+                    )));
+                }
+                parent.late_grammar_slots.push(crate::runtime::LateGrammarSlot {
+                    name: binding_name,
+                    terminal_id,
+                });
+            }
+            if parent.sanitize_late_grammar_placeholder_token_domain() {
+                parent.rebuild_runtime_caches();
+            }
             if external_bindings.is_empty() {
                 return Ok(parent);
             }
 
             let mut composition_inputs = Vec::with_capacity(external_bindings.len());
-            for (placeholder_token_id, binding_name, child) in external_bindings {
+            for &(placeholder_token_id, binding_name, child) in &external_bindings {
                 let mut matching_terminals = parent
                     .special_token_terminals
                     .iter()
@@ -976,13 +1004,33 @@ impl Constraint {
                     },
                 );
             }
-            crate::compiler::constraint_compose::compose_constraints_owned_parent(
+            let parent_late_slots = parent.late_grammar_slots.clone();
+            let mut composition = crate::compiler::constraint_compose::compose_constraints_owned_parent(
                 parent,
                 &composition_inputs,
                 vocab,
             )
-            .map(|composition| composition.constraint)
-            .map_err(crate::GlrMaskError::Compilation)
+            .map_err(crate::GlrMaskError::Compilation)?;
+            // Parent terminals keep offset zero. Child slots are rebased into
+            // the unified table and qualified to avoid collisions.
+            let mut retained_slots = parent_late_slots;
+            for (child_index, (_, binding_name, child)) in external_bindings.iter().enumerate() {
+                let offset = composition.terminal_offsets[child_index + 1];
+                retained_slots.extend(child.late_grammar_slots.iter().map(|slot| {
+                    crate::runtime::LateGrammarSlot {
+                        name: format!("{binding_name}::{}", slot.name),
+                        terminal_id: offset + slot.terminal_id,
+                    }
+                }));
+            }
+            composition.constraint.late_grammar_slots = retained_slots;
+            if composition
+                .constraint
+                .sanitize_late_grammar_placeholder_token_domain()
+            {
+                composition.constraint.rebuild_runtime_caches();
+            }
+            Ok(composition.constraint)
         })
     }
 }
@@ -1267,20 +1315,20 @@ impl DynamicConstraint {
             }
 
             let mut external_bindings = Vec::with_capacity(parsed.placeholders.len());
+            let mut unresolved_placeholders = Vec::new();
             for placeholder in &parsed.placeholders {
-                let child = children_by_name
-                    .remove(placeholder.binding_name.as_str())
-                    .ok_or_else(|| {
-                        crate::GlrMaskError::Compilation(format!(
-                            "GLRM declares external subgrammar {:?}, but no compiled child was supplied",
-                            placeholder.binding_name,
-                        ))
-                    })?;
-                external_bindings.push((
-                    placeholder.token_id,
-                    placeholder.binding_name.as_str(),
-                    child,
-                ));
+                if let Some(child) = children_by_name.remove(placeholder.binding_name.as_str()) {
+                    external_bindings.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.as_str(),
+                        child,
+                    ));
+                } else {
+                    unresolved_placeholders.push((
+                        placeholder.token_id,
+                        placeholder.binding_name.clone(),
+                    ));
+                }
             }
             if let Some((&unknown, _)) = children_by_name.first_key_value() {
                 return Err(crate::GlrMaskError::Compilation(format!(
@@ -1288,13 +1336,17 @@ impl DynamicConstraint {
                 )));
             }
 
-            let parents = compile_dynamic_from_named(
+            let mut dynamic_parent = compile_dynamic_from_named(
                 parsed.grammar,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
                 &[],
-            )?
-            .composition_constraints(vocab)?;
+            )?;
+            dynamic_parent.attach_late_grammar_placeholders(&unresolved_placeholders)?;
+            if external_bindings.is_empty() {
+                return Ok(dynamic_parent);
+            }
+            let parents = dynamic_parent.clone_constraints();
             let mut composed = Vec::with_capacity(parents.len());
             for parent in parents {
                 let mut composition_inputs = Vec::new();
@@ -1324,10 +1376,11 @@ impl DynamicConstraint {
                     composed.push(parent);
                 } else {
                     composed.push(
-                        crate::compiler::constraint_compose::compose_constraints_owned_parent(
+                        crate::compiler::constraint_compose::compose_constraints_owned_parent_segmented(
                             parent,
                             &composition_inputs,
                             vocab,
+                            crate::compiler::constraint_compose::SegmentedBoundaryBackend::Dynamic,
                         )
                         .map_err(crate::GlrMaskError::Compilation)?
                         .constraint,

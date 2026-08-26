@@ -4508,6 +4508,9 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut constraint = Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
+            boundary_trigger: crate::runtime::BoundaryTrigger::None,
+            late_grammar_slots: Vec::new(),
+            late_bind_vocab: std::sync::OnceLock::from(vocab.clone()),
             scoped_ignore_only_tokens: Vec::new(),
             scoped_ignore_prefix_fusions: Vec::new(),
             parser_dwa,
@@ -4616,6 +4619,7 @@ fn compile_prepared_with_profile_and_table_construction(
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
             deferred_composition_metadata_blob: None,
+            composition_link_metadata_materialized: true,
             deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         };
