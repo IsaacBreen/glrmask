@@ -1894,6 +1894,41 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_bounded_unicode_pattern_keeps_raw_and_escaped_spellings_exact() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, "é".as_bytes().to_vec()),
+            (2, br"\u00e9".to_vec()),
+            (3, br"\u00E9".to_vec()),
+            (4, b"x".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^é+$",
+            "minLength": 2,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts("\"é\"".as_bytes()));
+        assert!(accepts("\"éé\"".as_bytes()));
+        assert!(accepts(br#""\u00e9\u00E9""#));
+        assert!(accepts("\"é\\u00e9\"".as_bytes()));
+        assert!(!accepts("\"éx\"".as_bytes()));
+    }
+
+    #[test]
     fn dynamic_constraint_save_load_round_trip() {
         let vocab = vocab();
         let constraint = DynamicConstraint::from_glrm_grammar(

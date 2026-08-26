@@ -999,7 +999,13 @@ impl BoundedCodeIntersectionOracle {
         {
             return None;
         }
-        let bits = usize::BITS as usize - max.leading_zeros() as usize;
+        // `apply_up_to(k)` represents the inclusive range 0..=k as `k + 1`
+        // binary blocks.  Size the doubling table for `max + 1`, not `max`:
+        // when max = 2^n - 1 the inclusive range needs the R^(2^n) block even
+        // though an exact count <= max does not. `usize::MAX` was rejected
+        // above, so the addition is exact.
+        let range_block_count = max + 1;
+        let bits = usize::BITS as usize - range_block_count.leading_zeros() as usize;
         let words_per_row = pattern_states.div_ceil(64);
         let relation_bytes = pattern_states
             .checked_mul(words_per_row)?
@@ -1403,6 +1409,7 @@ struct ResidualRuntimeStore {
     residual_by_state: FxHashMap<u32, ResidualId>,
     liveness_oracle: Option<BoundedCodeIntersectionOracle>,
     oracle_coordinates: Vec<BoundedCodeOracleSlot>,
+    oracle_futures: Vec<Option<bool>>,
 }
 
 /// Exact general symbolic tokenizer component. The regex upper bounds live in
@@ -1463,6 +1470,7 @@ impl VirtualResidualRuntime {
         let mut state_by_residual = vec![u32::MAX; root as usize + 1];
         state_by_residual[root as usize] = root_state;
         let mut oracle_coordinates = vec![BoundedCodeOracleSlot::Unknown; arena.state_count()];
+        let oracle_futures = vec![None; arena.state_count()];
         if let Some(coordinate) = root_oracle_coordinate {
             oracle_coordinates[root as usize] = BoundedCodeOracleSlot::Exact(coordinate);
         }
@@ -1488,6 +1496,7 @@ impl VirtualResidualRuntime {
                 residual_by_state: FxHashMap::default(),
                 liveness_oracle,
                 oracle_coordinates,
+                oracle_futures,
             }),
         })
     }
@@ -1560,23 +1569,36 @@ impl VirtualResidualRuntime {
                 store.arena.state_count(),
                 BoundedCodeOracleSlot::Unknown,
             );
+            store.oracle_futures.resize(store.arena.state_count(), None);
         }
-        if let BoundedCodeOracleSlot::Exact(source_coordinate) = source_coordinate
-            && let Some(oracle) = store.liveness_oracle.as_ref()
-        {
-            let target_slot = if let Some(target_coordinate) =
-                oracle.step_coordinate(source_coordinate, byte)
-            {
-                BoundedCodeOracleSlot::Exact(target_coordinate)
-            } else {
-                // A structurally non-empty residual can still denote the empty
-                // language.  Do not trust that mismatch as a dead proof here;
-                // merely stop using the sidecar for this residual and let the
-                // exact general solver decide it.
-                BoundedCodeOracleSlot::Ambiguous
+        if let Some(oracle) = store.liveness_oracle.as_ref() {
+            let target_slot = match source_coordinate {
+                BoundedCodeOracleSlot::Exact(source_coordinate) => {
+                    if let Some(target_coordinate) =
+                        oracle.step_coordinate(source_coordinate, byte)
+                    {
+                        BoundedCodeOracleSlot::Exact(target_coordinate)
+                    } else {
+                        // A structurally non-empty residual can still denote
+                        // the empty language. Do not trust that mismatch as a
+                        // dead proof here; stop certifying this residual and
+                        // let the exact general solver decide it.
+                        BoundedCodeOracleSlot::Ambiguous
+                    }
+                }
+                // Once canonical residual sharing has erased a unique oracle
+                // coordinate, every successor reached from that state is also
+                // uncertified. Leaving an already-interned successor tagged
+                // Exact would let a coordinate from some earlier path stand in
+                // for this ambiguous path.
+                BoundedCodeOracleSlot::Ambiguous | BoundedCodeOracleSlot::Unknown => {
+                    BoundedCodeOracleSlot::Ambiguous
+                }
             };
-            let slot = &mut store.oracle_coordinates[target as usize];
-            *slot = match (*slot, target_slot) {
+            let target_index = target as usize;
+            let slot = &mut store.oracle_coordinates[target_index];
+            let previous = *slot;
+            *slot = match (previous, target_slot) {
                 (BoundedCodeOracleSlot::Unknown, next) => next,
                 (BoundedCodeOracleSlot::Exact(existing), BoundedCodeOracleSlot::Exact(next))
                     if existing == next =>
@@ -1590,6 +1612,9 @@ impl VirtualResidualRuntime {
                 }
                 (existing, BoundedCodeOracleSlot::Unknown) => existing,
             };
+            if *slot != previous {
+                store.oracle_futures[target_index] = None;
+            }
         }
         self.intern_locked(store, target)
     }
@@ -1603,6 +1628,27 @@ impl VirtualResidualRuntime {
         self.step_residual_locked(&mut store, residual, byte)
     }
 
+    fn certified_oracle_future(
+        store: &mut ResidualRuntimeStore,
+        residual: ResidualId,
+    ) -> Option<bool> {
+        let index = residual as usize;
+        let BoundedCodeOracleSlot::Exact(coordinate) = store
+            .oracle_coordinates
+            .get(index)
+            .copied()
+            .unwrap_or(BoundedCodeOracleSlot::Unknown)
+        else {
+            return None;
+        };
+        if let Some(cached) = store.oracle_futures.get(index).copied().flatten() {
+            return Some(cached);
+        }
+        let future = store.liveness_oracle.as_mut()?.has_future(coordinate);
+        store.oracle_futures[index] = Some(future);
+        Some(future)
+    }
+
     fn observation(&self, state: u32) -> Option<(bool, bool)> {
         let mut store = self.store.lock().unwrap();
         let residual = Self::residual_for_state(&store, self.root_state, state)?;
@@ -1610,7 +1656,19 @@ impl VirtualResidualRuntime {
         // root is the drained zero-byte configuration and must not emit a
         // terminal match before any input is consumed.
         let accepting = state != self.root_state && store.arena.is_nullable(residual);
-        let future = if state == self.root_state {
+        // A certified bounded-code coordinate has an infallible exact future
+        // query once its oracle has been constructed. Surface that answer
+        // through the ordinary tokenizer metadata path as well as through
+        // `exact_has_future`: dynamic mask/commit contain several generic
+        // consumers of `possible_future_terminals`, and those consumers should
+        // observe the same exact liveness bit for this certified family.
+        //
+        // Unknown/ambiguous coordinates deliberately retain the old
+        // conservative contract. Their exact query remains fallible and is
+        // resolved only at the explicit dynamic residual boundary.
+        let future = if let Some(future) = Self::certified_oracle_future(&mut store, residual) {
+            future
+        } else if state == self.root_state {
             self.root_has_future
         } else {
             store.arena.conservative_has_future(residual)
@@ -1630,15 +1688,8 @@ impl VirtualResidualRuntime {
         let Some(residual) = Self::residual_for_state(&store, self.root_state, state) else {
             return Ok(None);
         };
-        let coordinate = store
-            .oracle_coordinates
-            .get(residual as usize)
-            .copied()
-            .unwrap_or(BoundedCodeOracleSlot::Unknown);
-        if let BoundedCodeOracleSlot::Exact(coordinate) = coordinate
-            && let Some(oracle) = store.liveness_oracle.as_mut()
-        {
-            return Ok(Some(oracle.has_future(coordinate)));
+        if let Some(future) = Self::certified_oracle_future(&mut store, residual) {
+            return Ok(Some(future));
         }
         store.arena.has_future(residual).map(Some)
     }
@@ -2150,6 +2201,18 @@ mod tests {
         ])
     }
 
+    fn bounded_code_envelope_with_body(body: Expr, min: usize, max: usize) -> Expr {
+        Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(body),
+                min,
+                max: Some(max),
+            },
+            bytes(b">"),
+        ])
+    }
+
     fn exact_code_count_pattern(count: usize) -> Expr {
         let mut parts = Vec::with_capacity(count + 2);
         parts.push(bytes(b"<"));
@@ -2183,6 +2246,44 @@ mod tests {
     }
 
     #[test]
+    fn bounded_code_oracle_rejects_ambiguous_code_boundaries() {
+        let pattern = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::all())),
+                min: 0,
+                max: None,
+            },
+            bytes(b">"),
+        ]);
+
+        // "a" is a prefix of "ab", so greedily treating the first accepting
+        // body state as one completed code word would not be exact.
+        let non_prefix_free = Expr::Intersect {
+            expr: Box::new(pattern.clone()),
+            intersect: Box::new(bounded_code_envelope_with_body(
+                Expr::Choice(vec![bytes(b"a"), bytes(b"ab")]),
+                0,
+                4,
+            )),
+        };
+        assert!(BoundedCodeIntersectionOracle::from_expr(&non_prefix_free).is_none());
+
+        // At a code boundary, '>' could either begin another productive body
+        // word or begin the fixed suffix. The sidecar deliberately refuses
+        // such an envelope rather than choosing one interpretation.
+        let suffix_ambiguous = Expr::Intersect {
+            expr: Box::new(pattern),
+            intersect: Box::new(bounded_code_envelope_with_body(
+                Expr::Choice(vec![bytes(b"a"), bytes(b">x")]),
+                0,
+                4,
+            )),
+        };
+        assert!(BoundedCodeIntersectionOracle::from_expr(&suffix_ambiguous).is_none());
+    }
+
+    #[test]
     fn bounded_code_oracle_matches_materialized_future_at_every_small_prefix() {
         let pattern = Expr::Choice(vec![
             exact_code_count_pattern(1),
@@ -2213,6 +2314,17 @@ mod tests {
                         .contains(0)
                 ),
                 "future mismatch after prefix {:?}",
+                String::from_utf8_lossy(&prefix),
+            );
+            assert_eq!(
+                runtime
+                    .futures(residual_state)
+                    .expect("reached residual state must have metadata")
+                    .contains(0),
+                materialized
+                    .possible_future_group_ids(materialized_state)
+                    .contains(0),
+                "ordinary future metadata mismatch after prefix {:?}",
                 String::from_utf8_lossy(&prefix),
             );
             if prefix.len() >= 12 {
@@ -2251,6 +2363,74 @@ mod tests {
     }
 
     #[test]
+    fn bounded_code_oracle_sizes_doubling_for_inclusive_power_of_two_ranges() {
+        for max in [0usize, 1, 3, 7, 15] {
+            let expr = Expr::Intersect {
+                expr: Box::new(exact_code_count_pattern(max)),
+                intersect: Box::new(bounded_code_envelope_expr(0, max)),
+            };
+            let mut oracle = BoundedCodeIntersectionOracle::from_expr(&expr)
+                .unwrap_or_else(|| panic!("bounded-code oracle should certify max={max}"));
+            assert!(
+                oracle.has_future(oracle.root_coordinate()),
+                "exactly {max} code words must be reachable inside 0..={max}",
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_code_oracle_ambiguity_propagates_to_existing_successors() {
+        let expr = Expr::Intersect {
+            expr: Box::new(exact_code_count_pattern(1)),
+            intersect: Box::new(bounded_code_envelope_expr(0, 4)),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
+        let runtime =
+            VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
+
+        let body_boundary = runtime.step(1, b'<').unwrap();
+        let after_one = runtime.step(body_boundary, b'a').unwrap();
+        assert!(runtime.futures(after_one).unwrap().contains(0));
+
+        {
+            let mut store = runtime.store.lock().unwrap();
+            let source = VirtualResidualRuntime::residual_for_state(
+                &store,
+                runtime.root_state,
+                body_boundary,
+            )
+            .unwrap() as usize;
+            let target = VirtualResidualRuntime::residual_for_state(
+                &store,
+                runtime.root_state,
+                after_one,
+            )
+            .unwrap() as usize;
+            assert!(matches!(
+                store.oracle_coordinates[target],
+                BoundedCodeOracleSlot::Exact(_)
+            ));
+            assert_eq!(store.oracle_futures[target], Some(true));
+            store.oracle_coordinates[source] = BoundedCodeOracleSlot::Ambiguous;
+        }
+
+        assert_eq!(runtime.step(body_boundary, b'a'), Some(after_one));
+        let store = runtime.store.lock().unwrap();
+        let target = VirtualResidualRuntime::residual_for_state(
+            &store,
+            runtime.root_state,
+            after_one,
+        )
+        .unwrap() as usize;
+        assert_eq!(
+            store.oracle_coordinates[target],
+            BoundedCodeOracleSlot::Ambiguous
+        );
+        assert_eq!(store.oracle_futures[target], None);
+    }
+
+    #[test]
     fn bounded_code_runtime_liveness_does_not_fall_back_to_boolean_search() {
         let expr = Expr::Intersect {
             expr: Box::new(Expr::Choice(vec![
@@ -2265,6 +2445,10 @@ mod tests {
             VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         assert!(runtime.has_bounded_code_liveness_oracle());
         assert_eq!(runtime.exact_has_future(1).unwrap(), Some(false));
+        assert!(
+            runtime.futures(1).unwrap().is_empty(),
+            "certified exact liveness must be visible through ordinary tokenizer future metadata",
+        );
         let store = runtime.store.lock().unwrap();
         assert_eq!(
             store.arena.nonempty_cache[store.root as usize],
