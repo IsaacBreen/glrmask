@@ -1445,9 +1445,17 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
 
             let mapped_start = state_map[child_start as usize];
             let mapped_accept = state_map[child_accept as usize];
+            // Preserve the ordinary parent continuation directly on the GSS
+            // beneath the child start state. This is the representation the
+            // scoped-component runtime needs: no per-call-site child identity,
+            // caller frame, or boundary marker is required to remember where
+            // the child returns.
             action[caller_state as usize].insert(
                 control,
-                Action::Shift(mapped_start, placeholder_replace),
+                Action::StackShifts(vec![StackShift {
+                    pop: u32::from(placeholder_replace),
+                    pushes: vec![placeholder_target, mapped_start],
+                }]),
             );
 
             // A compiled child can retain exact root-nullability metadata even
@@ -1455,16 +1463,15 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
             // the LR action rows.  The explicit-control linker must therefore
             // make the empty child derivation explicit too.  From the mapped
             // child start, reducing an empty root and then taking the ordinary
-            // child-return control has net stack effect `pop start; push parent
-            // continuation`, independent of whether the child's root goto
-            // itself uses replace semantics.
+            // child-return control simply pops the child start and exposes the
+            // parent continuation already stored beneath it.
             if child_input.start_nullable {
                 merge_action_cell(
                     &mut action[mapped_start as usize],
                     control,
                     Action::StackShifts(vec![StackShift {
                         pop: 1,
-                        pushes: vec![placeholder_target],
+                        pushes: Vec::new(),
                     }]),
                 )?;
             }
@@ -1483,7 +1490,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                             control,
                             Action::StackShifts(vec![StackShift {
                                 pop: return_pop,
-                                pushes: vec![placeholder_target],
+                                pushes: Vec::new(),
                             }]),
                         )?;
                         continue;
