@@ -82,7 +82,6 @@ use crate::compiler::constraint_possible_matches::{
 use crate::compiler::glr::table::{
     Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput,
     compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
-    subgrammar_child_return_pop,
 };
 use crate::grammar::flat::Symbol;
 use crate::ds::bitset::BitSet;
@@ -476,20 +475,17 @@ impl<'a> CompiledSubgrammarInput<'a> {
 
 fn build_segmented_parser_links(
     children: &[CompiledSubgrammarInput<'_>],
-    child_rules: &[&[crate::grammar::flat::Rule]],
 ) -> Result<Vec<crate::runtime::SegmentedParserLink>, String> {
-    if children.len() != child_rules.len() {
-        return Err("child/rule count mismatch while building segmented parser links".to_owned());
-    }
     let link_count = children
         .iter()
         .map(|child| 1 + child.additional_placeholder_terminals.len())
         .sum();
     let mut links = Vec::with_capacity(link_count);
-    for (child_index, (child, rules)) in children.iter().zip(child_rules).enumerate() {
+    for (child_index, child) in children.iter().enumerate() {
         let child_component = u32::try_from(child_index + 1)
             .map_err(|_| "segmented parser component index overflow".to_owned())?;
-        let return_pop = subgrammar_child_return_pop(&child.constraint.table, rules)?;
+        let return_pop = child.constraint.composition_child_return_pop()?;
+        let child_start_nullable = child.constraint.composition_start_nullable()?;
         for slot_terminal in child.placeholder_terminals() {
             links.push(crate::runtime::SegmentedParserLink {
                 parent_component: 0,
@@ -497,7 +493,7 @@ fn build_segmented_parser_links(
                 child_component,
                 child_start: 0,
                 return_pop,
-                child_start_nullable: child.constraint.table.embedded_start_nullable(),
+                child_start_nullable,
             });
         }
     }
@@ -19785,7 +19781,7 @@ fn compose_constraints_owned_parent_impl(
         .map(|child| child.constraint.retained_table_rules())
         .collect::<Result<Vec<_>, String>>()?;
     let segmented_parser_links = segmented_runtime_requested
-        .then(|| build_segmented_parser_links(children, &child_rules))
+        .then(|| build_segmented_parser_links(children))
         .transpose()?
         .unwrap_or_default();
     let segmented_parser_state_offsets = (segmented_runtime_requested
@@ -25145,7 +25141,7 @@ constraint: &third,
         let rules = child.retained_table_rules().unwrap();
         assert_eq!(
             link.return_pop,
-            subgrammar_child_return_pop(&child.table, rules).unwrap(),
+            crate::compiler::glr::table::subgrammar_child_return_pop(&child.table, rules).unwrap(),
         );
         let layout = composed
             .recursive_parser_layout()

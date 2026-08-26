@@ -22,7 +22,7 @@ use crate::compiler::glr::parser::{
     materialize_control_eliminated_scoped_provider_table,
     stack_may_advance_on_with_provider, stacks_finished_with_provider,
 };
-use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity};
+use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity, subgrammar_child_return_pop};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -1295,6 +1295,47 @@ impl Constraint {
             .get()
             .map(Arc::as_ref)
             .ok_or_else(|| "failed to install deferred GLR rules".to_owned())
+    }
+
+    /// Exact root nullability as seen by a later linker.
+    ///
+    /// A composed child's descendants can change whether its root language is
+    /// nullable, so the intact root leaf table is not sufficient here. The
+    /// retained composition grammar summary is the exact wrapper-language
+    /// fact when available. Older/transitional artifacts fall back to the
+    /// materialized compiler-oracle table; ordinary constraints use that table
+    /// directly as before.
+    pub(crate) fn composition_start_nullable(&self) -> Result<bool, String> {
+        if self.uses_compact_segmented_parser_runtime() {
+            if let Some(summary) = self.composition_grammar_summary.as_ref() {
+                return Ok(summary.root_nullable);
+            }
+        }
+        Ok(self.table.embedded_start_nullable())
+    }
+
+    /// Exact zero-width pop depth for returning from this constraint when it is
+    /// used as an opaque subgrammar by a later composition.
+    ///
+    /// Descendant bindings do not change the augmented-root goto of the
+    /// outermost intact grammar frame. Recursive runtimes therefore derive the
+    /// invariant from the first/root leaf instead of the materialized composed
+    /// table; ordinary constraints keep the historical direct derivation.
+    pub(crate) fn composition_child_return_pop(&self) -> Result<u32, String> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return subgrammar_child_return_pop(&self.table, self.retained_table_rules()?);
+        }
+        let layout = self
+            .recursive_parser_layout_ref()
+            .ok_or_else(|| "recursive composition layout is unavailable".to_owned())?;
+        let root_leaf = layout
+            .leaves
+            .first()
+            .ok_or_else(|| "recursive composition has no root leaf".to_owned())?;
+        let root = self
+            .constraint_at_recursive_component_path(&root_leaf.component_path)
+            .ok_or_else(|| "recursive composition root leaf does not resolve".to_owned())?;
+        subgrammar_child_return_pop(&root.table, root.retained_table_rules()?)
     }
 
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
