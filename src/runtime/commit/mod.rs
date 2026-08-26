@@ -2743,7 +2743,8 @@ fn commit_bytes_fast_path(
 ) -> Option<Result<(), String>> {
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
-    let has_linker_controls = !constraint.table.control_terminals.is_empty();
+    let has_linker_controls = !constraint.table.control_terminals.is_empty()
+        || constraint.uses_compact_segmented_parser_runtime();
 
     // Find exactly 1 non-ignored, actionable terminal match consuming all bytes
     let mut sole_terminal: Option<u32> = None;
@@ -2884,7 +2885,8 @@ fn commit_bytes_full_width_fast_path(
     state: &mut ParserStateMap,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-    let has_linker_controls = !constraint.table.control_terminals.is_empty();
+    let has_linker_controls = !constraint.table.control_terminals.is_empty()
+        || constraint.uses_compact_segmented_parser_runtime();
     if constraint.tokenizer_has_epsilon_transitions
         && state_has_nonempty_accumulators(state)
     {
@@ -3834,7 +3836,8 @@ fn commit_bytes_small_queue_fast_path(
     admission_cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
     prune_tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
 ) -> Option<Result<(), String>> {
-    let has_linker_controls = !constraint.table.control_terminals.is_empty();
+    let has_linker_controls = !constraint.table.control_terminals.is_empty()
+        || constraint.uses_compact_segmented_parser_runtime();
     if bytes.len() > 16 || state.len() > 8 {
         return None;
     }
@@ -6887,6 +6890,7 @@ fn maybe_normalize_lookahead_invariant_reductions(
     state: &mut ParserStateMap,
 ) {
     if constraint.static_dynamic_overlay.is_none()
+        || constraint.uses_compact_segmented_parser_runtime()
         || std::env::var_os("GLRMASK_EXPERIMENT_EAGER_INVARIANT_REDUCTIONS").is_none()
     {
         return;
