@@ -1908,6 +1908,14 @@ mod tests {
                 layout
                     .leaves
                     .iter()
+                    .map(|leaf| leaf.component_path.clone())
+                    .collect::<Vec<_>>(),
+                vec![vec![0], vec![1, 0], vec![1, 1]],
+            );
+            assert_eq!(
+                layout
+                    .leaves
+                    .iter()
                     .map(|leaf| (leaf.state_offset, leaf.state_count, leaf.top_component))
                     .collect::<Vec<_>>(),
                 vec![
@@ -1925,6 +1933,294 @@ mod tests {
                 outer_parent_states + middle_parent_states + leaf_states,
             );
             assert_eq!(constraint.recursive_parser_state_span().unwrap(), layout.total_states);
+            assert_eq!(layout.links.len(), 2);
+            assert!(layout
+                .links
+                .iter()
+                .any(|link| link.parent_component == 1 && link.child_component == 2));
+            assert!(layout
+                .links
+                .iter()
+                .any(|link| link.parent_component == 0 && link.child_component == 1));
+        }
+    }
+
+    #[test]
+    fn recursive_parser_reference_executes_nested_calls_without_materialized_child_table() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"!".to_vec()),
+        ]);
+        let terminal = |constraint: &RuntimeConstraint, name: &str| {
+            constraint
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap() as u32
+        };
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; t A = \"a\"; nt leaf = A;"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; t L = \"[\"; t R = \"]\"; nt middle = L leaf R;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let middle = middle_parent
+            .bind_grammar_dynamic_boundary("leaf", &leaf)
+            .unwrap();
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", &middle)
+            .unwrap();
+
+        let outer_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
+        let middle_outer_offset = outer_overlay.segmented_parser_components[1].terminal_offset;
+        let middle_overlay = middle.static_dynamic_overlay.as_ref().unwrap();
+        let middle_parent_offset = middle_overlay.segmented_parser_components[0].terminal_offset;
+        let leaf_offset = middle_overlay.segmented_parser_components[1].terminal_offset;
+        let terminals = [
+            outer_overlay.segmented_parser_components[0].terminal_offset
+                + terminal(&outer_parent, "X"),
+            middle_outer_offset + middle_parent_offset + terminal(&middle_parent, "L"),
+            middle_outer_offset + leaf_offset + terminal(&leaf, "A"),
+            middle_outer_offset + middle_parent_offset + terminal(&middle_parent, "R"),
+            outer_overlay.segmented_parser_components[0].terminal_offset
+                + terminal(&outer_parent, "BANG"),
+        ];
+
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+            let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
+                vec![0],
+                crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
+            );
+            let mut parser = constraint
+                .close_recursive_segmented_parser_reference(&start)
+                .unwrap()
+                .unwrap();
+            for &terminal in &terminals {
+                parser = constraint
+                    .advance_recursive_segmented_parser_reference(&parser, terminal)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    !parser.is_empty(),
+                    "recursive parser rejected terminal {terminal}",
+                );
+            }
+            assert_eq!(
+                constraint
+                    .recursive_segmented_parser_is_finished_reference(&parser)
+                    .unwrap(),
+                Some(true),
+            );
+
+            let mut invalid = constraint
+                .close_recursive_segmented_parser_reference(&start)
+                .unwrap()
+                .unwrap();
+            for &terminal in &[terminals[0], terminals[1], terminals[3]] {
+                invalid = constraint
+                    .advance_recursive_segmented_parser_reference(&invalid, terminal)
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(invalid.is_empty(), "recursive parser accepted a missing leaf token");
+        }
+    }
+
+    #[test]
+    fn recursive_parser_reference_resolves_new_link_through_precomposed_parent() {
+        let vocab = Vocab::new(vec![
+            (0, b"<".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b">".to_vec()),
+        ]);
+        let terminal = |constraint: &RuntimeConstraint, name: &str| {
+            constraint
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap() as u32
+        };
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar left; extern grammar right; t LT = \"<\"; t GT = \">\"; nt document = LT left right GT;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let left = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start left; t A = \"a\"; nt left = A;"),
+            &vocab,
+        )
+        .unwrap();
+        let right = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start right; t B = \"b\"; nt right = B;"),
+            &vocab,
+        )
+        .unwrap();
+        let half = parent
+            .bind_grammar_dynamic_boundary("left", &left)
+            .unwrap();
+        let full = half
+            .bind_grammar_dynamic_boundary("right", &right)
+            .unwrap();
+
+        let full_overlay = full.static_dynamic_overlay.as_ref().unwrap();
+        let half_offset = full_overlay.segmented_parser_components[0].terminal_offset;
+        let right_offset = full_overlay.segmented_parser_components[1].terminal_offset;
+        let half_overlay = half.static_dynamic_overlay.as_ref().unwrap();
+        let original_parent_offset = half_overlay.segmented_parser_components[0].terminal_offset;
+        let left_offset = half_overlay.segmented_parser_components[1].terminal_offset;
+        let terminals = [
+            half_offset + original_parent_offset + terminal(&parent, "LT"),
+            half_offset + left_offset + terminal(&left, "A"),
+            right_offset + terminal(&right, "B"),
+            half_offset + original_parent_offset + terminal(&parent, "GT"),
+        ];
+
+        for constraint in [&full, &RuntimeConstraint::load(&full.save()).unwrap()] {
+            let layout = constraint.recursive_parser_layout().unwrap().unwrap();
+            assert_eq!(
+                layout
+                    .leaves
+                    .iter()
+                    .map(|leaf| leaf.component_path.clone())
+                    .collect::<Vec<_>>(),
+                vec![vec![0, 0], vec![0, 1], vec![1]],
+            );
+            assert_eq!(layout.links.len(), 2);
+            assert!(layout
+                .links
+                .iter()
+                .any(|link| link.parent_component == 0 && link.child_component == 1));
+            assert!(layout
+                .links
+                .iter()
+                .any(|link| link.parent_component == 0 && link.child_component == 2));
+
+            let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
+                vec![0],
+                crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
+            );
+            let mut parser = constraint
+                .close_recursive_segmented_parser_reference(&start)
+                .unwrap()
+                .unwrap();
+            for &terminal in &terminals {
+                parser = constraint
+                    .advance_recursive_segmented_parser_reference(&parser, terminal)
+                    .unwrap()
+                    .unwrap();
+                assert!(!parser.is_empty(), "recursive parser rejected terminal {terminal}");
+            }
+            assert_eq!(
+                constraint
+                    .recursive_segmented_parser_is_finished_reference(&parser)
+                    .unwrap(),
+                Some(true),
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_parser_reference_preserves_nested_nullable_wrapper_return() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"!".to_vec()),
+        ]);
+        let terminal = |constraint: &RuntimeConstraint, name: &str| {
+            constraint
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap() as u32
+        };
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; t A = \"a\"; nt leaf = A?;"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf;"),
+            &vocab,
+        )
+        .unwrap();
+        assert!(!middle_parent.table.embedded_start_nullable());
+        let middle = middle_parent
+            .bind_grammar_dynamic_boundary("leaf", &leaf)
+            .unwrap();
+        assert!(middle.table.embedded_start_nullable());
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; t X = \"X\"; t BANG = \"!\"; nt document = X middle BANG;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", &middle)
+            .unwrap();
+
+        let outer_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
+        let middle_outer_offset = outer_overlay.segmented_parser_components[1].terminal_offset;
+        let middle_overlay = middle.static_dynamic_overlay.as_ref().unwrap();
+        let leaf_offset = middle_overlay.segmented_parser_components[1].terminal_offset;
+        let x = outer_overlay.segmented_parser_components[0].terminal_offset
+            + terminal(&outer_parent, "X");
+        let a = middle_outer_offset + leaf_offset + terminal(&leaf, "A");
+        let bang = outer_overlay.segmented_parser_components[0].terminal_offset
+            + terminal(&outer_parent, "BANG");
+
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+            let layout = constraint.recursive_parser_layout().unwrap().unwrap();
+            let outer_link = layout
+                .links
+                .iter()
+                .find(|link| link.parent_component == 0 && link.child_component == 1)
+                .expect("outer link must target the middle wrapper root leaf");
+            assert!(outer_link.child_start_nullable);
+
+            for terminals in [&[x, bang][..], &[x, a, bang][..]] {
+                let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
+                    vec![0],
+                    crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
+                );
+                let mut parser = constraint
+                    .close_recursive_segmented_parser_reference(&start)
+                    .unwrap()
+                    .unwrap();
+                for &terminal in terminals {
+                    parser = constraint
+                        .advance_recursive_segmented_parser_reference(&parser, terminal)
+                        .unwrap()
+                        .unwrap();
+                    assert!(!parser.is_empty(), "recursive nullable parser rejected {terminals:?}");
+                }
+                assert_eq!(
+                    constraint
+                        .recursive_segmented_parser_is_finished_reference(&parser)
+                        .unwrap(),
+                    Some(true),
+                    "{terminals:?}",
+                );
+            }
         }
     }
 
