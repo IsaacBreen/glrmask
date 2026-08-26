@@ -624,21 +624,29 @@ impl ResidualArena {
                 Some(live)
             }
             ResidualNode::Seq(parts) => {
-                let mut any_positive = false;
-                let mut language_nonempty = true;
-                for &part in parts.iter() {
-                    if self.is_nullable(part) {
-                        if self.has_future_with_work_budget(part, budget)? {
-                            any_positive = true;
+                let has_nonnullable = parts.iter().any(|&part| !self.is_nullable(part));
+                if has_nonnullable {
+                    let mut live = true;
+                    for &part in parts.iter().filter(|&&part| !self.is_nullable(part)) {
+                        if !self.has_future_with_work_budget(part, budget)? {
+                            live = false;
+                            break;
                         }
-                    } else if self.has_future_with_work_budget(part, budget)? {
-                        any_positive = true;
-                    } else {
-                        language_nonempty = false;
-                        break;
                     }
+                    // Every live nonnullable component contributes at least one
+                    // byte, while nullable siblings can always contribute
+                    // epsilon. Their positive-word languages are irrelevant.
+                    Some(live)
+                } else {
+                    let mut live = false;
+                    for &part in parts.iter() {
+                        if self.has_future_with_work_budget(part, budget)? {
+                            live = true;
+                            break;
+                        }
+                    }
+                    Some(live)
                 }
-                Some(language_nonempty && any_positive)
             }
             ResidualNode::Repeat { body, max, .. } => Some(
                 max != Some(0) && self.has_future_with_work_budget(body, budget)?,
@@ -1056,6 +1064,32 @@ mod tests {
         assert!(
             arena.has_future_with_budget(root, 8, 16).unwrap(),
             "repeat liveness must solve the body language once rather than walk the billion-copy counter",
+        );
+    }
+
+    #[test]
+    fn sequence_liveness_skips_hard_nullable_siblings() {
+        let hard_nullable = Expr::Repeat {
+            expr: Box::new(Expr::Intersect {
+                expr: Box::new(Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 100,
+                    max: Some(100),
+                }),
+                intersect: Box::new(Expr::Repeat {
+                    expr: Box::new(bytes(b"aa")),
+                    min: 50,
+                    max: Some(50),
+                }),
+            }),
+            min: 0,
+            max: Some(1_000_000_000),
+        };
+        let expr = Expr::Seq(vec![hard_nullable, bytes(b"z")]);
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        assert!(
+            arena.has_future_with_budget(root, 0, 0).unwrap(),
+            "the nonnullable literal proves a positive sequence word without solving the nullable sibling",
         );
     }
 
