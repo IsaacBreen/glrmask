@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn glrm_external_subgrammar_api_rejects_invalid_bindings() {
+    fn glrm_external_subgrammar_api_retains_missing_slot_and_rejects_invalid_bindings() {
         let vocab = vocab(&["a"]);
         let child = Constraint::from_glrm_grammar(
             "start child; nt child ::= \"a\";",
@@ -1957,10 +1957,16 @@ mod tests {
         .unwrap();
         let source = "start document; extern grammar child; nt document ::= child;";
 
-        let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
-            .unwrap_err()
-            .to_string();
-        assert!(missing.contains("no compiled child"), "{missing}");
+        let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
+            .expect("an unresolved extern grammar is a valid late-binding slot");
+        assert_eq!(unresolved.late_grammar_slots.len(), 1);
+        assert_eq!(unresolved.late_grammar_slots[0].name, "child");
+        let late_bound = unresolved
+            .bind_grammar("child", child.clone())
+            .expect("the retained external slot must remain bindable");
+        let mut state = late_bound.start();
+        state.commit_token(0).unwrap();
+        assert!(state.is_accepting());
 
         let duplicate = Constraint::from_glrm_grammar_with_subgrammars(
             source,
