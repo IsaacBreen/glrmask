@@ -3249,18 +3249,14 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!(
+            "expected the anchored fixed-width pattern to absorb the exact length bound: {:?}",
+            rule.expr
+        );
     };
-    let GrammarExpr::RawRegex(pattern_regex) = expr.as_ref() else {
-        panic!("expected raw regex pattern envelope: {:?}", expr);
-    };
-    let GrammarExpr::RawRegex(length_regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
-    };
-
-    assert!(pattern_regex.contains("[A-Za-z]"), "{pattern_regex}");
-    assert!(length_regex.contains("{2,8}"), "{length_regex}");
+    assert!(regex.contains("[A-Za-z]"), "{regex}");
+    assert!(regex.contains("{2,8}"), "{regex}");
 
     let glrm = to_glrm(&grammar);
     assert!(!glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
@@ -3772,14 +3768,164 @@ fn simple_pattern_max_length_above_former_cap_preserves_upper_bound() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
-    };
-    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!(
+            "expected the anchored repetition to absorb the exact length bound: {:?}",
+            rule.expr
+        );
     };
     assert!(regex.contains("{2,120}"), "{regex}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn fully_anchored_pattern_that_implies_length_omits_redundant_envelope() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^a{5000}$",
+        "minLength": 2,
+        "maxLength": 6000
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+    assert!(
+        !matches!(rule.expr, GrammarExpr::Intersect { .. }),
+        "the fully anchored pattern already proves the sibling length bounds: {:?}",
+        rule.expr
+    );
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn fully_anchored_pattern_disjoint_from_length_lowers_to_empty_language() {
+    for schema in [
+        json!({
+            "type": "string",
+            "pattern": "^a{5001}$",
+            "maxLength": 5000
+        }),
+        json!({
+            "type": "string",
+            "pattern": "^a{5}$",
+            "minLength": 6,
+            "maxLength": 10
+        }),
+        json!({
+            "type": "string",
+            "pattern": "^(?:ab){1,2}$",
+            "minLength": 3,
+            "maxLength": 3
+        }),
+    ] {
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        let rule = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+            .expect("expected terminalized constrained string rule");
+        assert!(
+            matches!(&rule.expr, GrammarExpr::Choice(parts) if parts.is_empty()),
+            "disjoint pattern/length ranges must lower to the empty language: {:?}",
+            rule.expr
+        );
+        lower(&grammar).unwrap();
+    }
+}
+
+#[test]
+fn fully_anchored_fixed_width_repeat_clamps_sibling_length_exactly() {
+    let giant_schema = json!({
+        "type": "string",
+        "pattern": "^a{4000,6000}$",
+        "maxLength": 5000
+    });
+    let grammar = schema_to_named_grammar(&giant_schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+    assert!(
+        !matches!(rule.expr, GrammarExpr::Intersect { .. }),
+        "the sibling maxLength should be compiled into the anchored repetition count: {:?}",
+        rule.expr
+    );
+    lower(&grammar).unwrap();
+
+    let exact_schema = json!({
+        "type": "string",
+        "pattern": "^(?:ab){2,5}$",
+        "minLength": 5,
+        "maxLength": 7
+    });
+    assert!(!schema_accepts_bytes(&exact_schema, br#""abab""#));
+    assert!(schema_accepts_bytes(&exact_schema, br#""ababab""#));
+    assert!(!schema_accepts_bytes(&exact_schema, br#""abababab""#));
+}
+
+#[test]
+fn fully_anchored_fixed_context_repeat_clamps_sibling_length_exactly() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^pre(?:ab){40,60}post$",
+        "minLength": 90,
+        "maxLength": 107
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!(
+            "fixed prefix/suffix should allow the sibling length interval to clamp the one variable repetition directly: {:?}",
+            rule.expr
+        );
+    };
+    assert!(!regex.contains("{40,60}"), "{regex}");
+    assert!(regex.contains("{42,50}"), "{regex}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unanchored_or_multiline_pattern_keeps_exact_length_envelope() {
+    for pattern in ["a{5000}", "(?m)^a{5000}$"] {
+        let schema = json!({
+            "type": "string",
+            "pattern": pattern,
+            "maxLength": 5000
+        });
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        let rule = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+            .expect("expected terminalized constrained string rule");
+        assert!(
+            matches!(rule.expr, GrammarExpr::Intersect { .. }),
+            "the sibling maxLength is still semantically constraining for {pattern:?}: {:?}",
+            rule.expr
+        );
+        lower(&grammar).unwrap();
+    }
+}
+
+#[test]
+fn invalid_bounded_pattern_keeps_pattern_parse_error() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "[",
+        "maxLength": 5000
+    });
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("invalid string pattern"), "{error}");
 }
 
 #[test]
@@ -3830,11 +3976,11 @@ fn large_pattern_max_length_is_preserved_by_default() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
-    };
-    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!(
+            "expected the anchored repetition to absorb the exact length bound: {:?}",
+            rule.expr
+        );
     };
     assert!(regex.contains("{2,80}"), "{regex}");
     lower(&grammar).unwrap();
