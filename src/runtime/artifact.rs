@@ -4442,8 +4442,10 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// intentionally scoped to this composition level only.
     #[serde(skip, default)]
     pub(crate) segmented_parser_links: Vec<SegmentedParserLink>,
-    /// Prefix offsets for the compact disjoint-union parser state coordinate.
-    /// `offset[i] + local_state` is the runtime GSS value for component `i`.
+    /// Legacy v24 prefix offsets for the old immediate-component compact parser
+    /// coordinate. New recursive runtimes derive wrapper/leaf intervals from
+    /// `segmented_parser_components` and leave this empty; retained only for
+    /// loading older current-version artifacts and legacy experiment paths.
     #[serde(skip, default)]
     pub(crate) segmented_parser_state_offsets: Vec<u32>,
     /// Runtime-derived endpoint parser view. The semantic component tree stays

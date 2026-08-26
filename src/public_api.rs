@@ -1959,11 +1959,45 @@ mod tests {
         .unwrap();
         let bound = outer_parent.bind_grammar("middle", middle).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
+        assert!(
+            bound
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_component_union_root_dispatch
+                .is_empty(),
+            "recursive runtime must not retain materialized-state component dispatch",
+        );
+        assert!(
+            bound
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_state_offsets
+                .is_empty(),
+            "recursive runtime must derive state intervals from its component tree",
+        );
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
         let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
+        assert!(
+            loaded
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_component_union_root_dispatch
+                .is_empty(),
+        );
+        assert!(
+            loaded
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_state_offsets
+                .is_empty(),
+        );
         assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
 
         let monolithic = RuntimeConstraint::compile(

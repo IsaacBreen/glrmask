@@ -19644,7 +19644,8 @@ fn compose_constraints_owned_parent_impl(
         .then(|| build_segmented_parser_links(children, &child_rules))
         .transpose()?
         .unwrap_or_default();
-    let segmented_parser_state_offsets = segmented_runtime_requested
+    let segmented_parser_state_offsets = (segmented_runtime_requested
+        && explicit_segmented_boundary.is_none())
         .then(|| build_segmented_parser_state_offsets(&parent, children))
         .transpose()?
         .unwrap_or_default();
@@ -21070,6 +21071,19 @@ fn compose_constraints_owned_parent_impl(
         }
         if partitioned_static_boundary_complete {
             result.constraint.rebuild_recursive_static_boundary_views()?;
+        }
+        if result.constraint.uses_compact_segmented_parser_runtime() {
+            // Recursive wrapper intervals are now the authoritative component
+            // ownership coordinate. The materialized composed-state dispatch
+            // was useful only to certify the transitional deterministic-union
+            // representation; do not retain it in the live runtime.
+            result
+                .constraint
+                .static_dynamic_overlay
+                .as_mut()
+                .expect("compact segmented runtime requires overlay")
+                .segmented_component_union_root_dispatch
+                .clear();
         }
 
         if compose_profile_enabled() {

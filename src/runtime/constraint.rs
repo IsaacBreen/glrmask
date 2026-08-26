@@ -1598,8 +1598,6 @@ impl Constraint {
         self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
             !overlay.segmented_parser_components.is_empty()
                 && !overlay.segmented_parser_links.is_empty()
-                && overlay.segmented_parser_state_offsets.len()
-                    == overlay.segmented_parser_components.len()
         })
     }
 
@@ -2207,8 +2205,6 @@ impl Constraint {
             });
             overlay.segmented_mask_authoritative
                 && !overlay.segmented_parser_components.is_empty()
-                && overlay.segmented_parser_state_offsets.len()
-                    == overlay.segmented_parser_components.len()
                 && !overlay.segmented_parser_links.is_empty()
                 && boundary_is_provider_native
         })

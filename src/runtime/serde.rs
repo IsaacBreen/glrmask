@@ -3171,7 +3171,7 @@ fn restore_segmented_runtime_v24(
     overlay.segmented_parser_links = links;
     overlay.segmented_parser_state_offsets = segmented_parser_state_offsets;
 
-    if !overlay.segmented_parser_links.is_empty() || !overlay.segmented_parser_state_offsets.is_empty() {
+    if !overlay.segmented_parser_state_offsets.is_empty() {
         let tables = crate::runtime::SegmentedParserComponentTables::new(
             &overlay.segmented_parser_components,
         );
@@ -3185,6 +3185,14 @@ fn restore_segmented_runtime_v24(
     constraint
         .rebuild_recursive_static_boundary_views()
         .map_err(crate::GlrMaskError::Serialization)?;
+    if constraint.uses_compact_segmented_parser_runtime() {
+        constraint
+            .static_dynamic_overlay
+            .as_mut()
+            .expect("compact v24 runtime requires overlay")
+            .segmented_parser_state_offsets
+            .clear();
+    }
     Ok(())
 }
 
@@ -6424,6 +6432,59 @@ mod tests {
         loaded_state.commit_token(0).unwrap();
         assert_eq!(current_state.is_accepting(), loaded_state.is_accepting());
         assert!(current_state.is_accepting());
+    }
+
+    #[test]
+    fn v24_legacy_immediate_parser_offsets_load_and_migrate_to_recursive_layout() {
+        let vocab = Vocab::new(vec![
+            (0, b"<a>".to_vec()),
+            (1, b"<".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b">".to_vec()),
+        ]);
+        let parent = Constraint::compile(
+            crate::Grammar::glrm(
+                r#"glrm 1; start document; extern grammar child; nt document = "<" child ">";"#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::compile(
+            crate::Grammar::glrm(r#"glrm 1; start child; nt child = "a";"#),
+            &vocab,
+        )
+        .unwrap();
+        let mut legacy_v24 = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        let overlay = legacy_v24.static_dynamic_overlay.as_mut().unwrap();
+        let mut next = 0u32;
+        overlay.segmented_parser_state_offsets = overlay
+            .segmented_parser_components
+            .iter()
+            .map(|component| {
+                let offset = next;
+                next += component.constraint.table.num_states;
+                offset
+            })
+            .collect();
+        assert!(!overlay.segmented_parser_state_offsets.is_empty());
+
+        let loaded = Constraint::load(legacy_v24.save()).unwrap();
+        assert!(loaded.uses_compact_segmented_parser_runtime());
+        assert!(
+            loaded
+                .static_dynamic_overlay
+                .as_ref()
+                .unwrap()
+                .segmented_parser_state_offsets
+                .is_empty(),
+            "legacy v24 offsets should be validated and discarded after recursive migration",
+        );
+        let mut state = loaded.start();
+        assert_ne!(state.mask()[0] & 1, 0);
+        state.commit_token(0).unwrap();
+        assert!(state.is_accepting());
     }
 
     #[test]

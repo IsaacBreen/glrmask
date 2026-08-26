@@ -2814,7 +2814,9 @@ impl<'a> ConstraintState<'a> {
             return false;
         };
         let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+        if overlay.segmented_parser_components.is_empty()
+            || (!self.constraint.uses_compact_segmented_parser_runtime() && dispatch.is_empty())
+        {
             return false;
         }
         if overlay.segmented_static_baseline {
@@ -2899,14 +2901,16 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Evaluate the compressed deterministic union A.  Its synthetic root is
-    /// represented by `segmented_component_union_root_dispatch`; after the
-    /// first parser-state read each concrete stack path is in exactly one
-    /// cached component DWA body.  Root final weights are the union of every
+    /// Evaluate deterministic component A. In the recursive parser runtime,
+    /// immediate-wrapper state intervals select the component directly. Legacy
+    /// materialized-coordinate runtimes use `segmented_component_union_root_dispatch`
+    /// for the same selection. Root final weights are the union of every
     /// component start final, so we also project an empty stack into each
     /// component coordinate for the same branch accumulator.
     fn try_fill_mask_segmented_deterministic_union(&self, buf: &mut [u32]) -> bool {
-        if std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some() {
+        if !self.constraint.uses_compact_segmented_parser_runtime()
+            && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some()
+        {
             return self.try_fill_mask_segmented_deterministic_union_direct(buf);
         }
         let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
@@ -2915,7 +2919,9 @@ impl<'a> ConstraintState<'a> {
             return false;
         };
         let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if dispatch.is_empty() || overlay.segmented_parser_components.is_empty() {
+        if overlay.segmented_parser_components.is_empty()
+            || (!self.constraint.uses_compact_segmented_parser_runtime() && dispatch.is_empty())
+        {
             return false;
         }
 
@@ -3113,7 +3119,9 @@ impl<'a> ConstraintState<'a> {
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
-        if !overlay.segmented_component_union_root_dispatch.is_empty() {
+        if self.constraint.uses_compact_segmented_parser_runtime()
+            || !overlay.segmented_component_union_root_dispatch.is_empty()
+        {
             return self.try_fill_mask_segmented_deterministic_union(buf);
         }
         // v22 deliberately flattens all-static retained components into one
