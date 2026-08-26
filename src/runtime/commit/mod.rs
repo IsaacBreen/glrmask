@@ -433,6 +433,9 @@ fn advance_parser_stacks(
     stack: &ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
+    if let Some(advanced) = constraint.advance_compact_segmented_parser(stack, terminal) {
+        return advanced;
+    }
     if let Some(cached) = constraint.direct_regular_cached_advance(stack, terminal) {
         return cached;
     }
@@ -463,6 +466,9 @@ fn advance_parser_stacks_owned(
     stack: ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
+    if let Some(advanced) = constraint.advance_compact_segmented_parser(&stack, terminal) {
+        return advanced;
+    }
     if let Some(cached) = constraint.direct_regular_cached_advance(&stack, terminal) {
         return cached;
     }
@@ -495,6 +501,19 @@ fn advance_parser_stacks_profiled(
     terminal: u32,
 ) -> (ParserGSS, AdvanceProfile) {
     let template_start = std::time::Instant::now();
+    if let Some(advanced) = constraint.advance_compact_segmented_parser(stack, terminal) {
+        let elapsed = template_start.elapsed().as_nanos() as u64;
+        return (
+            advanced,
+            AdvanceProfile {
+                total_ns: elapsed,
+                fast_path_ns: elapsed,
+                top_states: stack.top_value_count() as u32,
+                gss_depth: stack.max_depth(),
+                ..AdvanceProfile::default()
+            },
+        );
+    }
     if let Some(cached) = constraint.direct_regular_cached_advance(stack, terminal) {
         let elapsed = template_start.elapsed().as_nanos() as u64;
         return (
@@ -546,6 +565,9 @@ fn advance_parser_stacks_profiled(
 /// same reduction closure once for admission and again for the actual advance.
 #[inline]
 fn parser_may_advance_on(constraint: &Constraint, stack: &ParserGSS, terminal: u32) -> bool {
+    if let Some(result) = constraint.compact_segmented_parser_may_advance_on(stack, terminal) {
+        return result;
+    }
     constraint
         .direct_regular_admissible_terminals(stack)
         .map_or_else(
@@ -678,6 +700,9 @@ fn parser_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &crate::ds::bitset::BitSet,
 ) -> bool {
+    if let Some(result) = constraint.compact_segmented_parser_may_advance_on_any(stack, terminals) {
+        return result;
+    }
     if let Some(result) = exact_simulation_prefilter_may_advance_on_any(
         constraint,
         stack,
@@ -731,6 +756,9 @@ pub(crate) fn advance_parser_stacks_table_exact(
     stack: &ParserGSS,
     terminal: u32,
 ) -> Option<ParserGSS> {
+    if let Some(advanced) = constraint.advance_compact_segmented_parser(stack, terminal) {
+        return (!advanced.is_empty()).then_some(advanced);
+    }
     let advanced = if constraint.table.control_terminals.is_empty() {
         advance_stacks(&constraint.table, stack, terminal)
     } else {
@@ -1448,6 +1476,18 @@ fn batched_end_state_admitted_terminals(
     if non_initial <= 1 {
         return None;
     }
+    if constraint.uses_compact_segmented_parser_runtime() {
+        let mut admitted = crate::ds::bitset::BitSet::new(candidates.len());
+        for terminal in candidates.iter_ones() {
+            if constraint
+                .compact_segmented_parser_may_advance_on(gss, terminal as u32)
+                .unwrap_or(false)
+            {
+                admitted.set(terminal);
+            }
+        }
+        return Some(admitted);
+    }
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
         let mut admitted = candidates;
         admitted.intersect_with(&direct);
@@ -1510,6 +1550,18 @@ fn exact_admitted_terminals_for_candidates(
     gss: &ParserGSS,
     candidates: &crate::ds::bitset::BitSet,
 ) -> crate::ds::bitset::BitSet {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        let mut admitted = crate::ds::bitset::BitSet::new(candidates.len());
+        for terminal in candidates.iter_ones() {
+            if constraint
+                .compact_segmented_parser_may_advance_on(gss, terminal as u32)
+                .unwrap_or(false)
+            {
+                admitted.set(terminal);
+            }
+        }
+        return admitted;
+    }
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
         let mut admitted = candidates.clone();
         admitted.intersect_with(&direct);
@@ -1548,7 +1600,8 @@ fn try_local_row_presence_admission_words(
     end_states: &[u32],
 ) -> Option<[u64; 32]> {
     const WORDS: usize = 32;
-    if constraint.table.admission_policy != AdmissionPolicy::ExactSimulation
+    if constraint.uses_compact_segmented_parser_runtime()
+        || constraint.table.admission_policy != AdmissionPolicy::ExactSimulation
         || !constraint.table.control_terminals.is_empty()
         || constraint.tokenizer.num_terminals() as usize > WORDS * 64
         || constraint.table.advance.len() != constraint.table.num_states as usize
@@ -1748,6 +1801,9 @@ enum ActionableTerminals {
 
 impl ActionableTerminals {
     fn from_gss(constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
+        if constraint.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
         if let Some(terminals) = constraint.direct_regular_admissible_terminals(gss) {
             return Some(Self::DirectDynamic(terminals));
         }
@@ -6882,7 +6938,8 @@ fn commit_bytes_impl_inner(
     // control closure between lexemes.  Keep explicit-control tables on the
     // authoritative queue path until each fast path has its own equivalence
     // proof/implementation.
-    let has_linker_controls = !constraint.table.control_terminals.is_empty();
+    let has_linker_controls = !constraint.table.control_terminals.is_empty()
+        || constraint.uses_compact_segmented_parser_runtime();
     let direct_dynamic = constraint.uses_dynamic_runtime()
         && constraint.direct_regular_automaton.is_some();
     if state.len() <= 1 && !bufs.admission_cache.is_empty() {

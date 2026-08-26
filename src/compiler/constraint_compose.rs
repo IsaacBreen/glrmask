@@ -717,6 +717,8 @@ fn build_segmented_runtime_metadata(
     two_dwa_runtime_requested: bool,
     parser_default_domains: &ParserDefaultDomainPlan,
     id_num_tsids: u32,
+    canonical_terminal: Option<u32>,
+    terminal_aliases: &[u32],
 ) -> Result<(Vec<crate::runtime::SegmentedParserComponent>, Option<Vec<u32>>, f64), String> {
     let started_at = Instant::now();
     let global_terminal_count = source_constraints
@@ -748,11 +750,21 @@ fn build_segmented_runtime_metadata(
         for local_terminal in 0..source.table.num_terminals {
             root_entry_terminals.set((terminal_offset + local_terminal) as usize);
         }
+        let mut global_terminal_aliases = Vec::new();
+        if let Some(canonical) = canonical_terminal {
+            let component_end = terminal_offset + source.table.num_terminals;
+            for &alias in terminal_aliases {
+                if alias >= terminal_offset && alias < component_end {
+                    global_terminal_aliases.push((canonical, alias - terminal_offset));
+                }
+            }
+        }
         segmented_components.push(crate::runtime::SegmentedParserComponent {
             constraint: source,
             boundary: None,
             tokenizer_state_offset: tokenizer_state_offsets[component_index],
             terminal_offset,
+            global_terminal_aliases,
             root_entry_terminals,
             root_disallowed_terminal,
             global_to_local_parser_state,
@@ -20750,6 +20762,8 @@ fn compose_constraints_owned_parent_impl(
                 two_dwa_runtime_requested,
                 &parser_default_domains,
                 id_num_tsids,
+                merged_ignores.canonical,
+                &merged_ignores.aliases,
             ),
             )
         };
@@ -21145,6 +21159,7 @@ fn compose_constraints_owned_parent_impl(
                     boundary: None,
                     tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
                     terminal_offset,
+                    global_terminal_aliases: Vec::new(),
                     root_entry_terminals,
                     root_disallowed_terminal: None,
                     global_to_local_parser_state,

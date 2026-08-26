@@ -279,7 +279,9 @@ impl Constraint {
 	pub(crate) fn initial_state_map(&self) -> crate::runtime::state::ParserStateMap {
 		let initial_tok_state = self.tokenizer.initial_state();
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
-		let parser_gss = if self.table.control_terminals.is_empty() {
+		let parser_gss = if let Some(closed) = self.close_compact_segmented_parser(&parser_gss) {
+			closed
+		} else if self.table.control_terminals.is_empty() {
 			parser_gss
 		} else {
 			close_control_stacks(&self.table, &parser_gss)

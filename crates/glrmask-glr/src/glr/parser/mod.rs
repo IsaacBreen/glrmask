@@ -425,6 +425,14 @@ impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
         let Some(table) = self.table(component) else {
             return;
         };
+        // A retained component may itself already be a composed constraint.
+        // Its local linker controls remain ordinary zero-width actions in that
+        // component table during the migration to recursively literal wrappers.
+        // Scope them exactly like any other local terminal rather than flattening
+        // or rewriting the component.
+        for &terminal in &table.control_terminals {
+            out.push(ScopedParserSymbol::Terminal { component, terminal });
+        }
         for (index, link) in self.links.iter().enumerate() {
             if link.parent_component == component
                 && table.action(local_state, link.slot_terminal).is_some()

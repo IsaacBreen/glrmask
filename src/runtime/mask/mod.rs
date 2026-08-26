@@ -2609,6 +2609,41 @@ impl<'a> ConstraintState<'a> {
         locals
     }
 
+    #[inline]
+    fn segmented_local_parser_state(
+        &self,
+        component_index: usize,
+        component: &crate::runtime::SegmentedParserComponent,
+        parser_state: u32,
+    ) -> Option<u32> {
+        if self.constraint.uses_compact_segmented_parser_runtime() {
+            return self
+                .constraint
+                .compact_segmented_parser_local_state(component_index, parser_state);
+        }
+        component
+            .global_to_local_parser_state
+            .get(parser_state as usize)
+            .copied()
+            .filter(|&local| local != u32::MAX)
+    }
+
+    #[inline]
+    fn segmented_component_for_parser_state(
+        &self,
+        dispatch: &[u32],
+        parser_state: u32,
+    ) -> Option<usize> {
+        if self.constraint.uses_compact_segmented_parser_runtime() {
+            return self
+                .constraint
+                .compact_segmented_parser_component(parser_state)
+                .map(|(component, _)| component);
+        }
+        let component = dispatch.get(parser_state as usize).copied()?;
+        (component != u32::MAX).then_some(component as usize)
+    }
+
     fn segmented_local_disallowed(
         &self,
         component: &crate::runtime::SegmentedParserComponent,
@@ -2627,6 +2662,11 @@ impl<'a> ConstraintState<'a> {
                             local_tokenizer_state,
                             terminal - terminal_start,
                         );
+                    }
+                    for &(alias, local_terminal) in &component.global_terminal_aliases {
+                        if alias == terminal {
+                            result = result.with_insert(local_tokenizer_state, local_terminal);
+                        }
                     }
                 }
             }
@@ -2810,30 +2850,27 @@ impl<'a> ConstraintState<'a> {
                 let Some(&global_top) = top_first.first() else {
                     return;
                 };
-                let component_index = dispatch
-                    .get(global_top as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if component_index == u32::MAX {
+                let Some(component_index) =
+                    self.segmented_component_for_parser_state(dispatch, global_top)
+                else {
                     return;
-                }
+                };
                 let Some(component) = overlay
                     .segmented_parser_components
-                    .get(component_index as usize)
+                    .get(component_index)
                 else {
                     complete = false;
                     return;
                 };
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 for &global_parser_state in top_first {
-                    let local = component
-                        .global_to_local_parser_state
-                        .get(global_parser_state as usize)
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    if local == u32::MAX {
+                    let Some(local) = self.segmented_local_parser_state(
+                        component_index,
+                        component,
+                        global_parser_state,
+                    ) else {
                         break;
-                    }
+                    };
                     local_top_first.push(local);
                 }
                 if local_top_first.is_empty() {
@@ -2927,16 +2964,14 @@ impl<'a> ConstraintState<'a> {
                 let Some(&global_top) = top_first.first() else {
                     return;
                 };
-                let component_index = dispatch
-                    .get(global_top as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if component_index == u32::MAX {
+                let Some(component_index) =
+                    self.segmented_component_for_parser_state(dispatch, global_top)
+                else {
                     return;
-                }
+                };
                 let Some(component) = overlay
                     .segmented_parser_components
-                    .get(component_index as usize)
+                    .get(component_index)
                 else {
                     return;
                 };
@@ -2948,14 +2983,13 @@ impl<'a> ConstraintState<'a> {
 
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 for &global_parser_state in top_first {
-                    let local = component
-                        .global_to_local_parser_state
-                        .get(global_parser_state as usize)
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    if local == u32::MAX {
+                    let Some(local) = self.segmented_local_parser_state(
+                        component_index,
+                        component,
+                        global_parser_state,
+                    ) else {
                         break;
-                    }
+                    };
                     local_top_first.push(local);
                 }
                 if local_top_first.is_empty() {
@@ -2965,7 +2999,7 @@ impl<'a> ConstraintState<'a> {
                 let local_stack = local_top_first.into_vec();
                 let local_disallowed = self.segmented_local_disallowed(component, acc);
                 for local_tokenizer_state in local_tokenizer_states {
-                    projected_states[component_index as usize].merge_insert(
+                    projected_states[component_index].merge_insert(
                         local_tokenizer_state,
                         ParserGSS::from_single_stack(
                             local_stack.clone(),
@@ -3110,14 +3144,13 @@ impl<'a> ConstraintState<'a> {
 
                     let mut local_top_first = SmallVec::<[u32; 64]>::new();
                     for &global_parser_state in top_first {
-                        let local = component
-                            .global_to_local_parser_state
-                            .get(global_parser_state as usize)
-                            .copied()
-                            .unwrap_or(u32::MAX);
-                        if local == u32::MAX {
+                        let Some(local) = self.segmented_local_parser_state(
+                            component_index,
+                            component,
+                            global_parser_state,
+                        ) else {
                             break;
-                        }
+                        };
                         local_top_first.push(local);
                     }
                     let local_disallowed = self.segmented_local_disallowed(component, acc);
@@ -3688,7 +3721,15 @@ impl<'a> ConstraintState<'a> {
                 }
                 match top_first.first().copied() {
                     Some(top) => {
-                        active = shard.start_parser_states.contains(top as usize);
+                        active = if self.constraint.uses_compact_segmented_parser_runtime() {
+                            self.constraint
+                                .compact_segmented_parser_component(top)
+                                .is_some_and(|(component, _)| {
+                                    component == shard.start_component as usize
+                                })
+                        } else {
+                            shard.start_parser_states.contains(top as usize)
+                        };
                     }
                     None => {
                         active = shard.accepts_empty_stack;
@@ -3736,6 +3777,11 @@ impl<'a> ConstraintState<'a> {
                             return;
                         }
                         active = match top_first.first().copied() {
+                            Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
+                                self.constraint
+                                    .compact_segmented_parser_component(top)
+                                    .is_some_and(|(owner, _)| owner == shard.start_component as usize)
+                            }
                             Some(top) => shard.start_parser_states.contains(top as usize),
                             None => shard.accepts_empty_stack,
                         };
@@ -3748,6 +3794,15 @@ impl<'a> ConstraintState<'a> {
             let mut complete = true;
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
                 match top_first.first().copied() {
+                    Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
+                        if !self
+                            .constraint
+                            .compact_segmented_parser_component(top)
+                            .is_some_and(|(owner, _)| owner == shard.start_component as usize)
+                        {
+                            return;
+                        }
+                    }
                     Some(top) if !shard.start_parser_states.contains(top as usize) => return,
                     None if !shard.accepts_empty_stack => return,
                     _ => {}
@@ -3756,15 +3811,16 @@ impl<'a> ConstraintState<'a> {
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 let mut projection_truncated = false;
                 for &global_parser_state in top_first {
-                    let local = component
-                        .global_to_local_parser_state
-                        .get(global_parser_state as usize)
-                        .copied()
-                        .unwrap_or(u32::MAX);
-                    if local == u32::MAX {
-                        projection_truncated = true;
+                    let Some(local) = self.segmented_local_parser_state(
+                        shard.start_component as usize,
+                        component,
+                        global_parser_state,
+                    ) else {
+                        if !self.constraint.uses_compact_segmented_parser_runtime() {
+                            projection_truncated = true;
+                        }
                         break;
-                    }
+                    };
                     local_top_first.push(local);
                 }
                 if projection_truncated || (!top_first.is_empty() && local_top_first.is_empty()) {

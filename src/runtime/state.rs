@@ -519,7 +519,11 @@ impl<'a> ConstraintState<'a> {
                         .constraint
                         .sparse_direct_regular_gss_is_complete(stack)
                         .unwrap_or_else(|| {
-                            if self.constraint.table.control_terminals.is_empty() {
+                            if let Some(finished) =
+                                self.constraint.compact_segmented_parser_is_finished(stack)
+                            {
+                                finished
+                            } else if self.constraint.table.control_terminals.is_empty() {
                                 stacks_finished(&self.constraint.table, stack)
                             } else {
                                 stacks_finished_control_closed(&self.constraint.table, stack)

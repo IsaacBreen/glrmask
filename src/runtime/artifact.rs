@@ -4491,6 +4491,11 @@ pub(crate) struct SegmentedParserComponent {
     pub(crate) boundary: Option<SegmentedBoundaryShard>,
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
+    /// Outer composed terminals which are canonical aliases for a local
+    /// terminal of this component. Direct interval mapping remains implicit;
+    /// this stores only exceptional many-scope aliases (currently globally
+    /// equivalent ignore terminals).
+    pub(crate) global_terminal_aliases: Vec<(u32, u32)>,
     /// Global composed-terminal domain owned by this component.  When a
     /// retained dynamic component is projected at the synthetic union root,
     /// the root is live only if the current composed parser frontier can

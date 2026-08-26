@@ -2705,6 +2705,7 @@ fn restore_segmented_runtime_v22(
             boundary: None,
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
+            global_terminal_aliases: Vec::new(),
             root_entry_terminals: component.root_entry_terminals,
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: component.global_to_local_parser_state,

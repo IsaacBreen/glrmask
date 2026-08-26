@@ -1525,11 +1525,17 @@ fn parser_child(
     // The actual structural advance is already the definitive admissibility
     // test. Running exact admission first would duplicate reduction simulation
     // for every terminal branch explored by the dynamic traversal.
-    let advanced = constraint
-        .direct_regular_cached_advance(&parser_gss, terminal)
-        .or_else(|| super::commit::advance_stacks_template_dfa(constraint, &parser_gss, terminal))
-        .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
-        .apply(|_| ());
+    let advanced = if let Some(advanced) =
+        constraint.advance_compact_segmented_parser(&parser_gss, terminal)
+    {
+        advanced
+    } else {
+        constraint
+            .direct_regular_cached_advance(&parser_gss, terminal)
+            .or_else(|| super::commit::advance_stacks_template_dfa(constraint, &parser_gss, terminal))
+            .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
+    }
+    .apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
 
@@ -1547,6 +1553,7 @@ fn parser_child_cached(
         return result;
     }
     if cache.profile_interaction_hash.is_some()
+        && !constraint.uses_compact_segmented_parser_runtime()
         && let Some(top) = stacks.single_top_value()
     {
         if !cache.profile_parser_child_terminals.contains(&terminal) {
@@ -1590,7 +1597,8 @@ fn token_boundary_allowed(
     }
     let parser_gss = with_empty_accumulators(stacks);
     constraint
-        .direct_regular_may_advance_on_any(&parser_gss, accessible)
+        .compact_segmented_parser_may_advance_on_any(&parser_gss, accessible)
+        .or_else(|| constraint.direct_regular_may_advance_on_any(&parser_gss, accessible))
         .unwrap_or_else(|| stack_may_advance_on_any(&constraint.table, &parser_gss, accessible))
 }
 
@@ -1602,12 +1610,25 @@ fn admissible_terminals_cached<'a>(
     let key = parser_stacks_cache_key(stacks);
     if !cache.admissible_terminals.contains_key(&key) {
         let parser_gss = with_empty_accumulators(stacks);
-        let admitted = constraint
-            .direct_regular_admissible_terminals(&parser_gss)
-            .unwrap_or_else(|| {
-                let candidates = BitSet::all(constraint.table.num_terminals as usize);
-                stack_admissible_terminals(&constraint.table, &parser_gss, &candidates)
-            });
+        let admitted = if constraint.uses_compact_segmented_parser_runtime() {
+            let mut admitted = BitSet::new(constraint.table.num_terminals as usize);
+            for terminal in 0..constraint.table.num_terminals {
+                if constraint
+                    .compact_segmented_parser_may_advance_on(&parser_gss, terminal)
+                    .unwrap_or(false)
+                {
+                    admitted.set(terminal as usize);
+                }
+            }
+            admitted
+        } else {
+            constraint
+                .direct_regular_admissible_terminals(&parser_gss)
+                .unwrap_or_else(|| {
+                    let candidates = BitSet::all(constraint.table.num_terminals as usize);
+                    stack_admissible_terminals(&constraint.table, &parser_gss, &candidates)
+                })
+        };
         cache
             .admissible_terminals
             .insert(key, (stacks.clone(), admitted));
@@ -1646,7 +1667,8 @@ fn parser_terminal_admissible_cached(
     }
     let parser_gss = with_empty_accumulators(stacks);
     let result = constraint
-        .direct_regular_may_advance_on(&parser_gss, terminal)
+        .compact_segmented_parser_may_advance_on(&parser_gss, terminal)
+        .or_else(|| constraint.direct_regular_may_advance_on(&parser_gss, terminal))
         .unwrap_or_else(|| {
             admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
         });
@@ -3910,7 +3932,12 @@ fn fill_mask_dynamic_impl(
                         })
                 };
                 let root_relevant_signature = relevant_signature(root_admissible);
-                let top_action_fingerprint = stacks.single_top_value().map(|top| {
+                let top_action_fingerprint = (!state
+                    .constraint
+                    .uses_compact_segmented_parser_runtime())
+                .then(|| stacks.single_top_value())
+                .flatten()
+                .map(|top| {
                     let mut hasher = rustc_hash::FxHasher::default();
                     top.hash(&mut hasher);
                     for terminal in 0..state.constraint.table.num_terminals {
@@ -3928,7 +3955,12 @@ fn fill_mask_dynamic_impl(
                     .tokenizer
                     .possible_future_terminals_iter(tokenizer_state);
                 let sole_future = futures.next().filter(|_| futures.next().is_none());
-                let sole_future_action = sole_future.and_then(|terminal| {
+                let sole_future_action = (!state
+                    .constraint
+                    .uses_compact_segmented_parser_runtime())
+                .then_some(sole_future)
+                .flatten()
+                .and_then(|terminal| {
                     stacks.single_top_value().map(|top| {
                         (
                             terminal,
@@ -4254,6 +4286,12 @@ fn fill_mask_dynamic_impl(
                 gss: &ParserStacks,
                 terminal: TerminalID,
             ) -> bool {
+                if constraint.uses_compact_segmented_parser_runtime() {
+                    let parser_gss = with_empty_accumulators(gss);
+                    return constraint
+                        .compact_segmented_parser_may_advance_on(&parser_gss, terminal)
+                        .unwrap_or(false);
+                }
                 let mut found = false;
                 gss.for_each_top_value(|top| {
                     if found {

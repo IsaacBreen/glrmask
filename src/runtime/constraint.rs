@@ -16,10 +16,15 @@ use crate::automata::weighted::dwa::{
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{
+    DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol,
+    advance_provider_control_closed_stacks, close_provider_control_stacks,
+    stack_may_advance_on_with_provider, stacks_finished_with_provider,
+};
 use crate::compiler::glr::table::{Action, TableAmbiguity};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 use crate::ds::bitset::BitSet;
+use crate::ds::leveled_gss::Merge;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
 use crate::grammar::flat::TerminalID;
@@ -1555,6 +1560,238 @@ impl Constraint {
             self.runtime_backend,
             super::artifact::ConstraintRuntimeBackend::Dynamic
         )
+    }
+
+    /// Whether this live, source-built composition can use the compact parser
+    /// coordinate directly in the ordinary `ParserGSS<u32>`. Serialized legacy
+    /// overlays intentionally omit links/offsets and therefore stay on the old
+    /// composed-table coordinate until the wire format is versioned.
+    #[inline]
+    pub(crate) fn uses_compact_segmented_parser_runtime(&self) -> bool {
+        self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+            let mut saw_dynamic = false;
+            let boundary_is_provider_native = overlay.segmented_parser_components.iter().all(|component| {
+                match component.boundary.as_ref().map(|shard| &shard.backend) {
+                    Some(super::artifact::SegmentedBoundaryShardBackend::DynamicDirect) => {
+                        saw_dynamic = true;
+                        true
+                    }
+                    None => true,
+                    _ => false,
+                }
+            });
+            overlay.segmented_mask_authoritative
+                && !overlay.segmented_parser_components.is_empty()
+                && overlay.segmented_parser_state_offsets.len()
+                    == overlay.segmented_parser_components.len()
+                && !overlay.segmented_parser_links.is_empty()
+                && boundary_is_provider_native
+                && saw_dynamic
+        })
+    }
+
+    #[inline]
+    fn segmented_parser_symbols_for_global_terminal(
+        &self,
+        global_terminal: u32,
+        out: &mut SmallVec<[ScopedParserSymbol; 8]>,
+    ) -> bool {
+        out.clear();
+        let Some(overlay) = self.static_dynamic_overlay.as_ref() else {
+            return false;
+        };
+        if !self.uses_compact_segmented_parser_runtime() {
+            return false;
+        }
+        for (component_index, component) in
+            overlay.segmented_parser_components.iter().enumerate()
+        {
+            let offset = component.terminal_offset;
+            let end = offset.saturating_add(component.constraint.table.num_terminals);
+            if global_terminal >= offset && global_terminal < end {
+                let symbol = ScopedParserSymbol::Terminal {
+                    component: component_index as u32,
+                    terminal: global_terminal - offset,
+                };
+                if !out.contains(&symbol) {
+                    out.push(symbol);
+                }
+            }
+            for &(alias, local_terminal) in &component.global_terminal_aliases {
+                if alias == global_terminal {
+                    let symbol = ScopedParserSymbol::Terminal {
+                        component: component_index as u32,
+                        terminal: local_terminal,
+                    };
+                    if !out.contains(&symbol) {
+                        out.push(symbol);
+                    }
+                }
+            }
+        }
+        !out.is_empty()
+    }
+
+    pub(crate) fn close_compact_segmented_parser(
+        &self,
+        stack: &ParserGSS,
+    ) -> Option<ParserGSS> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let tables = super::artifact::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .expect("validated compact segmented parser metadata");
+        Some(close_provider_control_stacks(&provider, stack))
+    }
+
+    pub(crate) fn advance_compact_segmented_parser(
+        &self,
+        stack: &ParserGSS,
+        global_terminal: u32,
+    ) -> Option<ParserGSS> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let tables = super::artifact::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .expect("validated compact segmented parser metadata");
+        let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
+        if !self.segmented_parser_symbols_for_global_terminal(global_terminal, &mut symbols) {
+            return Some(ParserGSS::empty());
+        }
+        let mut advanced = ParserGSS::empty();
+        for symbol in symbols {
+            let branch = advance_provider_control_closed_stacks(&provider, stack, symbol);
+            if advanced.is_empty() {
+                advanced = branch;
+            } else if !branch.is_empty() {
+                advanced = advanced.merge(&branch);
+            }
+        }
+        Some(advanced)
+    }
+
+    pub(crate) fn compact_segmented_parser_may_advance_on(
+        &self,
+        stack: &ParserGSS,
+        global_terminal: u32,
+    ) -> Option<bool> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let tables = super::artifact::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .expect("validated compact segmented parser metadata");
+        let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
+        if !self.segmented_parser_symbols_for_global_terminal(global_terminal, &mut symbols) {
+            return Some(false);
+        }
+        Some(
+            symbols
+                .into_iter()
+                .any(|symbol| stack_may_advance_on_with_provider(&provider, stack, symbol)),
+        )
+    }
+
+    pub(crate) fn compact_segmented_parser_may_advance_on_any(
+        &self,
+        stack: &ParserGSS,
+        terminals: &BitSet,
+    ) -> Option<bool> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        for terminal in terminals.iter_ones() {
+            if self
+                .compact_segmented_parser_may_advance_on(stack, terminal as u32)
+                .unwrap_or(false)
+            {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    pub(crate) fn compact_segmented_parser_is_finished(
+        &self,
+        stack: &ParserGSS,
+    ) -> Option<bool> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let tables = super::artifact::SegmentedParserComponentTables::new(
+            &overlay.segmented_parser_components,
+        );
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &overlay.segmented_parser_links,
+            &overlay.segmented_parser_state_offsets,
+        )
+        .expect("validated compact segmented parser metadata");
+        Some(stacks_finished_with_provider(
+            &provider,
+            stack,
+            ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: crate::compiler::glr::analysis::EOF,
+            },
+        ))
+    }
+
+    #[inline]
+    pub(crate) fn compact_segmented_parser_local_state(
+        &self,
+        component_index: usize,
+        scoped_state: u32,
+    ) -> Option<u32> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let component = overlay.segmented_parser_components.get(component_index)?;
+        let offset = *overlay.segmented_parser_state_offsets.get(component_index)?;
+        let local = scoped_state.checked_sub(offset)?;
+        (local < component.constraint.table.num_states).then_some(local)
+    }
+
+    #[inline]
+    pub(crate) fn compact_segmented_parser_component(
+        &self,
+        scoped_state: u32,
+    ) -> Option<(usize, u32)> {
+        let overlay = self.static_dynamic_overlay.as_ref()?;
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let component_index = overlay
+            .segmented_parser_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)?;
+        let local = self.compact_segmented_parser_local_state(component_index, scoped_state)?;
+        Some((component_index, local))
     }
 
     #[inline]
