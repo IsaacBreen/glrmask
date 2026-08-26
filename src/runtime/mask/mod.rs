@@ -3338,6 +3338,7 @@ impl<'a> ConstraintState<'a> {
                         self.or_segmented_boundary_parser_mask(
                             boundary,
                             Some(&shard.start_parser_states),
+                            Some(shard.start_component),
                             shard.accepts_empty_stack,
                             buf,
                         )
@@ -3407,7 +3408,7 @@ impl<'a> ConstraintState<'a> {
         // v22/legacy in-memory compatibility while boundary shards are being
         // versioned into the wire format.
         if let Some(boundary) = overlay.segmented_boundary_parser.as_deref()
-            && !self.or_segmented_boundary_parser_mask(boundary, None, true, buf)
+            && !self.or_segmented_boundary_parser_mask(boundary, None, None, true, buf)
         {
             return false;
         }
@@ -3881,6 +3882,7 @@ impl<'a> ConstraintState<'a> {
         &self,
         boundary: &crate::runtime::SegmentedBoundaryParser,
         start_parser_states: Option<&crate::ds::bitset::BitSet>,
+        start_component: Option<u32>,
         accepts_empty_stack: bool,
         buf: &mut [u32],
     ) -> bool {
@@ -3988,6 +3990,15 @@ impl<'a> ConstraintState<'a> {
             })
         }
 
+        let recursive_parser = self.constraint.uses_compact_segmented_parser_runtime();
+        let parser_dwa = if recursive_parser {
+            boundary
+                .recursive_parser_dwa
+                .as_ref()
+                .unwrap_or(&boundary.parser_dwa)
+        } else {
+            &boundary.parser_dwa
+        };
         let debug_boundary = std::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let boundary_tsid = if boundary.uses_composed_tsid_coordinate {
@@ -4016,7 +4027,22 @@ impl<'a> ConstraintState<'a> {
             }
             let mut complete = true;
             let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                if let Some(start_parser_states) = start_parser_states {
+                if recursive_parser {
+                    if let Some(start_component) = start_component {
+                        match top_first.first().copied() {
+                            Some(top)
+                                if !self
+                                    .constraint
+                                    .compact_segmented_parser_component(top)
+                                    .is_some_and(|(owner, _)| owner == start_component as usize) =>
+                            {
+                                return;
+                            }
+                            None if !accepts_empty_stack => return,
+                            _ => {}
+                        }
+                    }
+                } else if let Some(start_parser_states) = start_parser_states {
                     match top_first.first().copied() {
                         Some(top) if !start_parser_states.contains(top as usize) => return,
                         None if !accepts_empty_stack => return,
@@ -4033,7 +4059,9 @@ impl<'a> ConstraintState<'a> {
                     complete = false;
                     return;
                 };
-                if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+                if !recursive_parser
+                    && let Some(compact) = boundary.compact_parser_dwa.as_ref()
+                {
                     let mut accepted = accepted_mask_for_stack(compact, boundary_tsid, top_first);
                     if debug_boundary {
                         let internal = (0..compact.token_count as u32)
@@ -4072,7 +4100,7 @@ impl<'a> ConstraintState<'a> {
                         }
                     }
                 } else {
-                    let accepted = accepted_for_stack(&boundary.parser_dwa, top_first);
+                    let accepted = accepted_for_stack(parser_dwa, top_first);
                     let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
                         if debug_boundary {
                             eprintln!(

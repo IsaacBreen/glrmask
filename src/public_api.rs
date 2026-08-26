@@ -1153,9 +1153,7 @@ mod tests {
             static_with_dynamic.serialized_artifact_cache.is_none(),
             "compiling a hybrid must not eagerly staticify its dynamic leaf for serialization",
         );
-        let overlay = static_with_dynamic.static_dynamic_overlay.as_ref().unwrap();
-        assert!(overlay.segmented_boundary_parser.is_some());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
+        assert_static_boundary(&static_with_dynamic);
 
         let dynamic_with_static = ConstraintSpec::builder(parent.clone(), &vocab)
             .unwrap()
@@ -1860,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_live_parser_keeps_unmigrated_static_nested_component_opaque() {
+    fn recursive_live_parser_expands_static_nested_component_via_boundary_preimage() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
             (1, b"[".to_vec()),
@@ -1883,11 +1881,10 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        // Static B has not moved to the recursive leaf coordinate yet, so this
-        // nested composition must remain one opaque parser leaf to its outer
-        // compact-dynamic parent.
+        // Static B is transported exactly onto the recursive parser coordinate,
+        // so the middle wrapper can expose its intact parent/child leaves.
         let middle = middle_parent.bind_grammar("leaf", leaf).unwrap();
-        assert!(!middle.uses_compact_segmented_parser_runtime());
+        assert!(middle.uses_compact_segmented_parser_runtime());
         let outer_parent = RuntimeConstraint::compile(
             Grammar::glrm(
                 "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
@@ -1899,7 +1896,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
-        assert_eq!(layout.leaves.len(), 2);
+        assert_eq!(layout.leaves.len(), 3);
         let monolithic = RuntimeConstraint::compile(
             Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
             &vocab,
@@ -1913,6 +1910,173 @@ mod tests {
                 &[0, 1, 5][..],
                 &[0, 1, 2, 3, 4][..],
             ] {
+                let mut actual = constraint.start();
+                let mut expected = monolithic.start();
+                for &token in tokens {
+                    assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
+                    actual.commit_token(token).unwrap();
+                    expected.commit_token(token).unwrap();
+                }
+                assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+                assert!(actual.is_accepting(), "{tokens:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_static_boundaries_use_recursive_parser_coordinate_live_and_loaded() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"!".to_vec()),
+            (5, b"a]!".to_vec()),
+            (6, b"[a]!".to_vec()),
+            (7, b"X[a]!".to_vec()),
+        ]);
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let middle = middle_parent.bind_grammar("leaf", leaf).unwrap();
+        assert!(middle.uses_compact_segmented_parser_runtime());
+
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent.bind_grammar("middle", middle).unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+        let layout = bound.recursive_parser_layout().unwrap().unwrap();
+        assert_eq!(layout.leaves.len(), 3);
+
+        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        assert!(loaded.uses_compact_segmented_parser_runtime());
+        assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
+
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            &vocab,
+        )
+        .unwrap();
+        fn compare_reachable_prefix_tree(
+            actual_constraint: &RuntimeConstraint,
+            expected_constraint: &RuntimeConstraint,
+            max_depth: usize,
+        ) {
+            let mut pending = vec![Vec::<u32>::new()];
+            while let Some(path) = pending.pop() {
+                let mut actual = actual_constraint.start();
+                let mut expected = expected_constraint.start();
+                for &token in &path {
+                    actual.commit_token(token).unwrap();
+                    expected.commit_token(token).unwrap();
+                }
+                let actual_mask = actual.mask();
+                let expected_mask = expected.mask();
+                assert_eq!(actual_mask, expected_mask, "mask mismatch at {path:?}");
+                assert_eq!(
+                    actual.is_accepting(),
+                    expected.is_accepting(),
+                    "acceptance mismatch at {path:?}",
+                );
+                if path.len() == max_depth {
+                    continue;
+                }
+                for token in 0..8u32 {
+                    let word = token as usize / 32;
+                    let bit = token % 32;
+                    if actual_mask
+                        .get(word)
+                        .is_none_or(|word| *word & (1u32 << bit) == 0)
+                    {
+                        continue;
+                    }
+                    let mut next = path.clone();
+                    next.push(token);
+                    pending.push(next);
+                }
+            }
+        }
+        for constraint in [&bound, &loaded] {
+            compare_reachable_prefix_tree(constraint, &monolithic, 5);
+            for tokens in [
+                &[7][..],
+                &[0, 6][..],
+                &[0, 1, 5][..],
+                &[0, 1, 2, 3, 4][..],
+            ] {
+                let mut actual = constraint.start();
+                let mut expected = monolithic.start();
+                for &token in tokens {
+                    assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
+                    actual.commit_token(token).unwrap();
+                    expected.commit_token(token).unwrap();
+                }
+                assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+                assert!(actual.is_accepting(), "{tokens:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_static_nullable_wrapper_returns_in_recursive_live_runtime() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"!".to_vec()),
+            (3, b"X!".to_vec()),
+            (4, b"Xa!".to_vec()),
+            (5, b"a!".to_vec()),
+        ]);
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start middle; extern grammar leaf; nt middle = leaf?;"),
+            &vocab,
+        )
+        .unwrap();
+        assert!(middle_parent.table.embedded_start_nullable());
+        let middle = middle_parent.bind_grammar("leaf", leaf).unwrap();
+        assert!(middle.table.embedded_start_nullable());
+        assert!(middle.uses_compact_segmented_parser_runtime());
+
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", middle)
+            .unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        assert!(loaded.uses_compact_segmented_parser_runtime());
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\"? \"!\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        for constraint in [&bound, &loaded] {
+            for tokens in [&[3][..], &[4][..], &[0, 2][..], &[0, 5][..], &[0, 1, 2][..]] {
                 let mut actual = constraint.start();
                 let mut expected = monolithic.start();
                 for &token in tokens {

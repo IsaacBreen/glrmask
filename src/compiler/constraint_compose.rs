@@ -2394,6 +2394,7 @@ fn publish_static_boundary_shard_work(
         boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
             parser_dwa,
             compact_parser_dwa: None,
+            recursive_parser_dwa: None,
             uses_composed_tsid_coordinate: true,
             tokenizer_state_to_tsid: Vec::new(),
             internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
@@ -20913,6 +20914,7 @@ fn compose_constraints_owned_parent_impl(
                     let boundary = Arc::new(crate::runtime::SegmentedBoundaryParser {
                             parser_dwa,
                             compact_parser_dwa: None,
+                            recursive_parser_dwa: None,
                             uses_composed_tsid_coordinate: false,
                             tokenizer_state_to_tsid,
                             internal_token_to_originals,
@@ -20987,6 +20989,7 @@ fn compose_constraints_owned_parent_impl(
                     let boundary = Arc::new(crate::runtime::SegmentedBoundaryParser {
                             parser_dwa: DWA::new(0, 0),
                             compact_parser_dwa: Some(parser_dwa),
+                            recursive_parser_dwa: None,
                             uses_composed_tsid_coordinate: false,
                             tokenizer_state_to_tsid,
                             internal_token_to_originals,
@@ -21064,6 +21067,9 @@ fn compose_constraints_owned_parent_impl(
             if let Some(static_components) = static_boundary_components {
                 append_dynamic_direct_boundary_shards_for_unselected(overlay, static_components);
             }
+        }
+        if partitioned_static_boundary_complete {
+            result.constraint.rebuild_recursive_static_boundary_views()?;
         }
 
         if compose_profile_enabled() {
@@ -21308,6 +21314,7 @@ fn compose_constraints_owned_parent_impl(
         let boundary = Arc::new(crate::runtime::SegmentedBoundaryParser {
             parser_dwa,
             compact_parser_dwa: None,
+            recursive_parser_dwa: None,
             uses_composed_tsid_coordinate: false,
             tokenizer_state_to_tsid,
             internal_token_to_originals,

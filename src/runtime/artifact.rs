@@ -4406,6 +4406,11 @@ pub(crate) struct RecursiveParserLayout {
     /// This keeps terminal routing out of the commit hot path while the
     /// tokenizer still uses the composed terminal coordinate.
     pub(crate) terminal_targets: Vec<SmallVec<[(u32, TerminalID); 4]>>,
+    /// Exact preimage relation from one recursive runtime parser-state symbol
+    /// to the materialized composed-table parser-state symbols it represents.
+    /// This is used only to transport legacy/compiler-oracle parser languages
+    /// (notably static B) onto the endpoint runtime coordinate.
+    pub(crate) materialized_states_by_recursive_state: Vec<Vec<u32>>,
     pub(crate) total_states: u32,
 }
 
@@ -4628,6 +4633,11 @@ pub(crate) struct SegmentedBoundaryParser {
     #[serde(skip, default)]
     pub(crate) compact_parser_dwa:
         Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
+    /// Runtime-only exact preimage of `parser_dwa` onto the recursive leaf
+    /// parser-state coordinate. The legacy/materialized DWA remains the wire
+    /// representation so v24 save/load compatibility is unchanged.
+    #[serde(skip, default)]
+    pub(crate) recursive_parser_dwa: Option<DWA>,
     /// New static boundary shards are compiled directly in the authoritative
     /// composed constraint TSID coordinate. They therefore need no private
     /// raw-tokenizer-state map; runtime reads `Constraint::state_to_internal_tsid`

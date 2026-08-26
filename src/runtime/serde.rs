@@ -2929,6 +2929,7 @@ fn restore_boundary_parser_v23(
     Ok(crate::runtime::artifact::SegmentedBoundaryParser {
         parser_dwa: boundary.parser_dwa,
         compact_parser_dwa: None,
+        recursive_parser_dwa: None,
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
         tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
         internal_token_to_originals: boundary.internal_token_to_originals,
@@ -3181,6 +3182,9 @@ fn restore_segmented_runtime_v24(
         )
         .map_err(crate::GlrMaskError::Serialization)?;
     }
+    constraint
+        .rebuild_recursive_static_boundary_views()
+        .map_err(crate::GlrMaskError::Serialization)?;
     Ok(())
 }
 
