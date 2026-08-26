@@ -2939,6 +2939,7 @@ fn restore_boundary_parser_v23(
 fn restore_segmented_runtime_v23(
     constraint: &mut Constraint,
     runtime: SegmentedRuntimeArtifactV23,
+    allow_empty_component_start_states: bool,
 ) -> crate::Result<()> {
     let SegmentedRuntimeArtifactV23 {
         materialized_static_component_parser,
@@ -3037,7 +3038,9 @@ fn restore_segmented_runtime_v23(
                     )));
                 }
                 seen_components[component_index] = true;
-                if start_parser_states.len() != global_state_count {
+                if start_parser_states.len() != global_state_count
+                    && !(allow_empty_component_start_states && start_parser_states.len() == 0)
+                {
                     return Err(crate::GlrMaskError::Serialization(format!(
                         "boundary shard {index} start-state set has length {} for {global_state_count} outer states",
                         start_parser_states.len(),
@@ -3129,6 +3132,7 @@ fn restore_segmented_runtime_v24(
             segmented_component_union_root_dispatch,
             boundary_shards,
         },
+        !segmented_parser_links.is_empty(),
     )?;
 
     let global_terminal_count = constraint.table.num_terminals;
@@ -3192,6 +3196,7 @@ fn restore_segmented_runtime_v24(
             .expect("compact v24 runtime requires overlay")
             .segmented_parser_state_offsets
             .clear();
+        constraint.clear_recursive_legacy_boundary_start_states();
     }
     Ok(())
 }
@@ -6130,7 +6135,7 @@ impl Constraint {
                     restore_segmented_runtime_v22(&mut constraint, segmented_runtime)?;
                 }
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v23 {
-                    restore_segmented_runtime_v23(&mut constraint, segmented_runtime)?;
+                    restore_segmented_runtime_v23(&mut constraint, segmented_runtime, false)?;
                 }
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v24 {
                     restore_segmented_runtime_v24(&mut constraint, segmented_runtime)?;
@@ -6339,8 +6344,38 @@ mod tests {
                 segmented_parser_state_offsets: _,
                 segmented_mask_authoritative,
                 segmented_component_union_root_dispatch,
-                boundary_shards,
+                mut boundary_shards,
             } = runtime;
+            let legacy_start_states = components
+                .iter()
+                .map(|component| {
+                    let mut states = crate::ds::bitset::BitSet::new(
+                        component.global_to_local_parser_state.len(),
+                    );
+                    for (global_state, &local_state) in
+                        component.global_to_local_parser_state.iter().enumerate()
+                    {
+                        if local_state != u32::MAX {
+                            states.set(global_state);
+                        }
+                    }
+                    states
+                })
+                .collect::<Vec<_>>();
+            for shard in &mut boundary_shards {
+                if let SegmentedBoundaryShardScopeV23::Component {
+                    start_component,
+                    start_parser_states,
+                    ..
+                } = &mut shard.scope
+                    && start_parser_states.len() == 0
+                {
+                    *start_parser_states = legacy_start_states
+                        .get(*start_component as usize)
+                        .cloned()
+                        .expect("downgraded shard must reference a component");
+                }
+            }
             SegmentedRuntimeArtifactV23 {
                 materialized_static_component_parser,
                 materialized_static_parser_state_domain_labels,

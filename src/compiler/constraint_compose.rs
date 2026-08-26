@@ -21084,6 +21084,7 @@ fn compose_constraints_owned_parent_impl(
                 .expect("compact segmented runtime requires overlay")
                 .segmented_component_union_root_dispatch
                 .clear();
+            result.constraint.clear_recursive_legacy_boundary_start_states();
         }
 
         if compose_profile_enabled() {

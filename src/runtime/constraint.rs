@@ -2071,6 +2071,28 @@ impl Constraint {
         Ok(())
     }
 
+    /// Drop the materialized-table start-state ownership sets once recursive
+    /// wrapper ownership is authoritative. v23 requires those bitsets on the
+    /// wire; v24 recursive runtimes do not need them after load/build.
+    pub(crate) fn clear_recursive_legacy_boundary_start_states(&mut self) {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return;
+        }
+        let Some(overlay) = self.static_dynamic_overlay.as_mut() else {
+            return;
+        };
+        for component in &mut overlay.segmented_parser_components {
+            if let Some(shard) = component.boundary.as_mut() {
+                shard.start_parser_states = BitSet::new(0);
+            }
+        }
+        overlay.segmented_boundary_shards = overlay
+            .segmented_parser_components
+            .iter()
+            .filter_map(|component| component.boundary.clone())
+            .collect();
+    }
+
     fn recursive_parser_symbols_for_global_terminal(
         &self,
         layout: &RecursiveParserLayout,

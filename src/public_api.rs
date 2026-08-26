@@ -1977,6 +1977,16 @@ mod tests {
                 .is_empty(),
             "recursive runtime must derive state intervals from its component tree",
         );
+        let bound_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
+        assert!(bound_overlay.segmented_boundary_shards.iter().all(|shard| {
+            shard.start_parser_states.len() == 0
+        }));
+        assert!(bound_overlay.segmented_parser_components.iter().all(|component| {
+            component
+                .boundary
+                .as_ref()
+                .is_none_or(|shard| shard.start_parser_states.len() == 0)
+        }));
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
@@ -1998,6 +2008,16 @@ mod tests {
                 .segmented_parser_state_offsets
                 .is_empty(),
         );
+        let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
+        assert!(loaded_overlay.segmented_boundary_shards.iter().all(|shard| {
+            shard.start_parser_states.len() == 0
+        }));
+        assert!(loaded_overlay.segmented_parser_components.iter().all(|component| {
+            component
+                .boundary
+                .as_ref()
+                .is_none_or(|shard| shard.start_parser_states.len() == 0)
+        }));
         assert_eq!(loaded.recursive_parser_layout().unwrap().unwrap().leaves.len(), 3);
 
         let monolithic = RuntimeConstraint::compile(
