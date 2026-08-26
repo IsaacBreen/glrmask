@@ -1584,15 +1584,17 @@ mod tests {
         .boundary_trigger_detail(crate::BoundaryTriggerDetail::Exact)
         .build()
         .unwrap();
+        // Keep one child component so its local-LR -> composed-LR relation is
+        // functional, while the parent also has an equivalent local lexical
+        // lane. The outer lexer product can then coalesce parent + child lanes
+        // after `a`/`b` without relying on duplicate child call sites.
         let parent = Grammar::glrm(
-            "glrm 1; start document; extern grammar left; extern grammar right; \
-             nt document = left \"!\" | right \"?\";",
+            "glrm 1; start document; extern grammar child; \
+             nt document = child \"!\" | \"a\" \"b\" \"c\" \"?\";",
         );
         let composed = ConstraintSpec::builder(parent, &vocab)
             .unwrap()
-            .bind_grammar("left", child_spec.clone())
-            .unwrap()
-            .bind_grammar("right", child_spec)
+            .bind_grammar("child", child_spec)
             .unwrap()
             .build()
             .unwrap()
@@ -1627,14 +1629,14 @@ mod tests {
         if !explicitly_disabled {
             let source_offset = composed
                 .runtime_source_state_offset()
-                .expect("duplicate live child lexer lanes should select the outer runtime product");
+                .expect("equivalent live parent/child lexer lanes should select the outer runtime product");
             let product_state = *actual.state.keys().next().unwrap();
             assert!(product_state < source_offset);
             assert!(
                 composed
                     .runtime_product_source_states(product_state)
                     .is_some_and(|sources| sources.len() >= 2),
-                "regression requires a visible product state representing both child lexer lanes",
+                "regression requires a visible product state representing parent and child lexer lanes",
             );
         }
 
@@ -1642,7 +1644,7 @@ mod tests {
         let reference_mask = expected.mask();
         assert_eq!(mask, reference_mask);
         assert_ne!(mask[0] & (1 << 5), 0, "c! must cross child -> parent internally");
-        assert_ne!(mask[0] & (1 << 6), 0, "c? must cross child -> parent internally");
+        assert_ne!(mask[0] & (1 << 6), 0, "c? must remain valid on the parent-local branch");
     }
 
     #[test]
