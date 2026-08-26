@@ -4534,6 +4534,13 @@ impl ParserComponentTableSource for SegmentedParserComponentTables<'_> {
             .get(component as usize)
             .map(|component| &component.constraint.table)
     }
+
+    #[inline]
+    fn component_ignore_terminal(&self, component: u32) -> Option<u32> {
+        self.components
+            .get(component as usize)
+            .and_then(|component| component.constraint.ignore_terminal)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -56,6 +56,9 @@ pub struct ScopedSubgrammarLink {
 /// lazily only when a state is actually pushed onto the existing `u32` GSS.
 pub enum ProvidedActionRef<'a> {
     Local { scope: u32, action: &'a Action },
+    /// Composition-scoped identity action, used primarily to expose an intact
+    /// component's standalone ignore terminal without rewriting every LR row.
+    Identity,
     Call {
         parent_target: u32,
         child_start: u32,
@@ -145,6 +148,14 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
 pub trait ParserComponentTableSource {
     fn component_count(&self) -> usize;
     fn component_table(&self, component: u32) -> Option<&GLRTable>;
+
+    /// Optional terminal whose parser effect is identity throughout this
+    /// component scope. Standalone constraints normally implement `ignore`
+    /// outside their LR rows; composition makes that scope explicit here.
+    #[inline]
+    fn component_ignore_terminal(&self, _component: u32) -> Option<TerminalID> {
+        None
+    }
 }
 
 impl<const N: usize> ParserComponentTableSource for [&GLRTable; N] {
@@ -313,6 +324,13 @@ impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
                 component: symbol_component,
                 terminal,
             } if symbol_component == component => {
+                if self.components.component_ignore_terminal(component) == Some(terminal) {
+                    return Some(ProvidedAction {
+                        action: ProvidedActionRef::Identity,
+                        reduction_scope: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    });
+                }
                 let action = table.action(local_state, terminal)?;
                 Some(ProvidedAction {
                     action: ProvidedActionRef::Local {
@@ -4432,6 +4450,9 @@ pub fn advance_stacks_with_provider<P: ParserActionProvider>(
                             merge_into(&mut next, branch);
                         }
                     });
+                }
+                ProvidedActionRef::Identity => {
+                    merge_into(&mut shifted, isolated.clone());
                 }
                 ProvidedActionRef::Call {
                     parent_target,
