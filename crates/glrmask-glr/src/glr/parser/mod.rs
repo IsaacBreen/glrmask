@@ -5608,8 +5608,9 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
 mod tests {
     use super::{
         GLRTableActionProvider, ScopedActionRef, ScopedParserActionProvider,
-        ScopedParserGSS, ScopedParserState, ScopedProvidedAction, ScopedStackShift,
-        advance_scoped_stacks_with_provider,
+        ScopedComponentActionProvider, ScopedParserGSS, ScopedParserState, ScopedParserSymbol,
+        ScopedProvidedAction, ScopedStackShift, ScopedSubgrammarLink,
+        advance_scoped_stacks_with_provider, close_scoped_control_stacks_with_provider,
         close_scoped_control_stacks_with_provider,
         ParserGSS,
         advance_concrete_stacks_reference,
@@ -5644,6 +5645,82 @@ mod tests {
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
     use smallvec::SmallVec;
+
+    #[test]
+    fn direct_scoped_component_provider_parses_across_link_without_composed_table() {
+        let slot = 0;
+        let parent_tail = 1;
+        let child_token = 0;
+        let parent = build_test_table(
+            3,
+            2,
+            &[
+                &[(slot, Action::Shift(1, false))],
+                &[(parent_tail, Action::Shift(2, false))],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+        let child = build_test_table(
+            2,
+            1,
+            &[
+                &[(child_token, Action::Shift(1, false))],
+                &[(EOF, Action::Accept)],
+            ],
+            &[&[], &[]],
+        );
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+        }];
+        let provider = ScopedComponentActionProvider::new(&components, &links);
+        let start = ScopedParserGSS::from_single_stack(
+            vec![ScopedParserState::new(0, 0)],
+            TerminalsDisallowed::new(),
+        );
+
+        let called = advance_scoped_stacks_with_provider(
+            &provider,
+            start,
+            ScopedParserSymbol::Entry { link: 0 },
+        );
+        assert_eq!(called.single_top_value(), Some(ScopedParserState::new(1, 0)));
+
+        let child_advanced = advance_scoped_stacks_with_provider(
+            &provider,
+            called,
+            ScopedParserSymbol::Terminal {
+                component: 1,
+                terminal: child_token,
+            },
+        );
+        assert_eq!(
+            child_advanced.single_top_value(),
+            Some(ScopedParserState::new(1, 1)),
+        );
+
+        let returned = advance_scoped_stacks_with_provider(
+            &provider,
+            child_advanced,
+            ScopedParserSymbol::Finish { component: 1 },
+        );
+        assert_eq!(returned.single_top_value(), Some(ScopedParserState::new(0, 1)));
+
+        let finished = advance_scoped_stacks_with_provider(
+            &provider,
+            returned,
+            ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: parent_tail,
+            },
+        );
+        assert_eq!(finished.single_top_value(), Some(ScopedParserState::new(0, 2)));
+    }
 
     #[test]
     fn scoped_provider_call_and_return_use_only_ordinary_gss_stack_effects() {
