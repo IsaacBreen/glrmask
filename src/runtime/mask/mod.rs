@@ -3761,6 +3761,15 @@ impl<'a> ConstraintState<'a> {
         dwa: &crate::automata::weighted_u32::dwa::DWA,
         buf: &mut [u32],
     ) -> bool {
+        if component.constraint.has_recursive_segmented_parser_tree() {
+            // Exact trigger labels are still compiled in this component's
+            // transitional materialized-table coordinate. Once its parser is
+            // projected recursively, feeding those leaf-scoped states to the
+            // trigger DWA would be unsound. Decline the accelerator and let the
+            // exact composed dynamic recognizer run instead. Trigger metadata
+            // is pruning only, never semantics.
+            return false;
+        }
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let local_tokenizer_states =
                 self.segmented_local_tokenizer_states(component, global_tokenizer_state);

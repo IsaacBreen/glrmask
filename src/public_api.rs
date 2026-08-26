@@ -1860,6 +1860,73 @@ mod tests {
     }
 
     #[test]
+    fn recursive_live_parser_keeps_unmigrated_static_nested_component_opaque() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"]".to_vec()),
+            (4, b"!".to_vec()),
+            (5, b"a]!".to_vec()),
+            (6, b"[a]!".to_vec()),
+            (7, b"X[a]!".to_vec()),
+        ]);
+        let leaf = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start leaf; nt leaf = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let middle_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        // Static B has not moved to the recursive leaf coordinate yet, so this
+        // nested composition must remain one opaque parser leaf to its outer
+        // compact-dynamic parent.
+        let middle = middle_parent.bind_grammar("leaf", leaf).unwrap();
+        assert!(!middle.uses_compact_segmented_parser_runtime());
+        let outer_parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar middle; nt document = \"X\" middle \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", middle)
+            .unwrap();
+        let layout = bound.recursive_parser_layout().unwrap().unwrap();
+        assert_eq!(layout.leaves.len(), 2);
+        let monolithic = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"[\" \"a\" \"]\" \"!\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+            for tokens in [
+                &[7][..],
+                &[0, 6][..],
+                &[0, 1, 5][..],
+                &[0, 1, 2, 3, 4][..],
+            ] {
+                let mut actual = constraint.start();
+                let mut expected = monolithic.start();
+                for &token in tokens {
+                    assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
+                    actual.commit_token(token).unwrap();
+                    expected.commit_token(token).unwrap();
+                }
+                assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
+                assert!(actual.is_accepting(), "{tokens:?}");
+            }
+        }
+    }
+
+    #[test]
     fn recursive_parser_layout_flattens_state_coordinate_but_preserves_outer_wrapper_owner() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),

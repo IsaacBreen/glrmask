@@ -43,6 +43,7 @@ use super::artifact::{
     DynamicSelfLoopProjection,
     DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
+    RecursiveParserLayout, RecursiveParserLeafLayout,
     DynamicMaskTrie,
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
@@ -58,30 +59,6 @@ pub use super::artifact::Constraint;
 pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
 use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecursiveParserLeafLayout {
-    pub(crate) state_offset: u32,
-    pub(crate) state_count: u32,
-    /// Immediate wrapper of the composition whose layout was requested. Inner
-    /// leaf changes within one nested component deliberately keep this owner.
-    pub(crate) top_component: u32,
-    /// Immediate-component path from the requested composition root to this
-    /// intact LR table. Keeping the semantic tree in the metadata lets the
-    /// runtime recover a leaf table without retaining a flattened table graph.
-    pub(crate) component_path: Vec<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecursiveParserLayout {
-    pub(crate) component_offsets: Vec<u32>,
-    pub(crate) leaves: Vec<RecursiveParserLeafLayout>,
-    /// Linker controls rewritten only into the leaf-component coordinate.
-    /// LR state and terminal IDs remain local to the corresponding intact
-    /// leaf table.
-    pub(crate) links: Vec<super::artifact::SegmentedParserLink>,
-    pub(crate) total_states: u32,
-}
 
 struct RecursiveSegmentedParserTables<'a> {
     root: &'a Constraint,
@@ -1617,7 +1594,7 @@ impl Constraint {
     }
 
     #[inline]
-    fn has_recursive_segmented_parser_tree(&self) -> bool {
+    pub(crate) fn has_recursive_segmented_parser_tree(&self) -> bool {
         self.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
             !overlay.segmented_parser_components.is_empty()
                 && !overlay.segmented_parser_links.is_empty()
@@ -1631,7 +1608,7 @@ impl Constraint {
     /// union of their intact descendants, not the size of their transitional
     /// materialized composed table.
     pub(crate) fn recursive_parser_state_span(&self) -> Result<u32, String> {
-        if !self.has_recursive_segmented_parser_tree() {
+        if !self.uses_compact_segmented_parser_runtime() {
             return Ok(self.table.num_states);
         }
         let overlay = self
@@ -1667,7 +1644,7 @@ impl Constraint {
         leaves: &[RecursiveParserLeafLayout],
         out: &mut SmallVec<[(u32, TerminalID); 4]>,
     ) -> Result<(), String> {
-        if !self.has_recursive_segmented_parser_tree() {
+        if !self.uses_compact_segmented_parser_runtime() {
             if terminal >= self.table.num_terminals {
                 return Ok(());
             }
@@ -1723,7 +1700,7 @@ impl Constraint {
         leaves: &mut Vec<RecursiveParserLeafLayout>,
         links: &mut Vec<super::artifact::SegmentedParserLink>,
     ) -> Result<(u32, u32), String> {
-        if !self.has_recursive_segmented_parser_tree() {
+        if !self.uses_compact_segmented_parser_runtime() {
             let leaf_index = u32::try_from(leaves.len())
                 .map_err(|_| "recursive parser leaf index overflow".to_owned())?;
             leaves.push(RecursiveParserLeafLayout {
@@ -1828,14 +1805,19 @@ impl Constraint {
     /// occupy contiguous intervals. Descendant leaves inside the same wrapper
     /// retain the same `top_component`, which is the level-local ownership
     /// relation needed by dynamic B.
-    pub(crate) fn recursive_parser_layout(&self) -> Result<Option<RecursiveParserLayout>, String> {
-        if !self.has_recursive_segmented_parser_tree() {
+    pub(crate) fn recursive_parser_layout(
+        &self,
+    ) -> Result<Option<Arc<RecursiveParserLayout>>, String> {
+        if !self.uses_compact_segmented_parser_runtime() {
             return Ok(None);
         }
         let overlay = self
             .static_dynamic_overlay
             .as_ref()
             .expect("recursive segmented parser tree requires overlay");
+        if let Some(layout) = overlay.recursive_parser_layout.get() {
+            return Ok(Some(Arc::clone(layout)));
+        }
         let mut component_offsets = Vec::with_capacity(overlay.segmented_parser_components.len());
         let mut leaves = Vec::new();
         let mut links = Vec::new();
@@ -1862,12 +1844,34 @@ impl Constraint {
             &component_root_leaves,
             &mut links,
         )?;
-        Ok(Some(RecursiveParserLayout {
+        let leaf_state_offsets = leaves.iter().map(|leaf| leaf.state_offset).collect();
+        let mut terminal_targets = Vec::with_capacity(self.table.num_terminals as usize);
+        for terminal in 0..self.table.num_terminals {
+            let mut targets = SmallVec::<[(u32, TerminalID); 4]>::new();
+            self.append_recursive_terminal_targets(
+                terminal,
+                &mut Vec::new(),
+                &leaves,
+                &mut targets,
+            )?;
+            terminal_targets.push(targets);
+        }
+        let layout = Arc::new(RecursiveParserLayout {
             component_offsets,
             leaves,
+            leaf_state_offsets,
             links,
+            terminal_targets,
             total_states: next,
-        }))
+        });
+        let _ = overlay.recursive_parser_layout.set(Arc::clone(&layout));
+        Ok(Some(
+            overlay
+                .recursive_parser_layout
+                .get()
+                .cloned()
+                .unwrap_or(layout),
+        ))
     }
 
     fn recursive_parser_symbols_for_global_terminal(
@@ -1875,16 +1879,12 @@ impl Constraint {
         layout: &RecursiveParserLayout,
         global_terminal: TerminalID,
         out: &mut SmallVec<[ScopedParserSymbol; 8]>,
-    ) -> Result<bool, String> {
+    ) -> bool {
         out.clear();
-        let mut targets = SmallVec::<[(u32, TerminalID); 4]>::new();
-        self.append_recursive_terminal_targets(
-            global_terminal,
-            &mut Vec::new(),
-            &layout.leaves,
-            &mut targets,
-        )?;
-        for (component, terminal) in targets {
+        let Some(targets) = layout.terminal_targets.get(global_terminal as usize) else {
+            return false;
+        };
+        for &(component, terminal) in targets {
             let symbol = ScopedParserSymbol::Terminal {
                 component,
                 terminal,
@@ -1893,7 +1893,7 @@ impl Constraint {
                 out.push(symbol);
             }
         }
-        Ok(!out.is_empty())
+        !out.is_empty()
     }
 
     /// Correctness/reference entry point for the recursive endpoint parser
@@ -1911,7 +1911,11 @@ impl Constraint {
             root: self,
             layout: &layout,
         };
-        let provider = DisjointComponentActionProvider::new(&tables, &layout.links)?;
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &layout.links,
+            &layout.leaf_state_offsets,
+        )?;
         for (component, leaf) in layout.leaves.iter().enumerate() {
             if provider.scoped_state(component as u32, 0) != Some(leaf.state_offset) {
                 return Err(format!(
@@ -1937,13 +1941,14 @@ impl Constraint {
             root: self,
             layout: &layout,
         };
-        let provider = DisjointComponentActionProvider::new(&tables, &layout.links)?;
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &layout.links,
+            &layout.leaf_state_offsets,
+        )?;
         let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
-        if !self.recursive_parser_symbols_for_global_terminal(
-            &layout,
-            global_terminal,
-            &mut symbols,
-        )? {
+        if !self.recursive_parser_symbols_for_global_terminal(&layout, global_terminal, &mut symbols)
+        {
             return Ok(Some(ParserGSS::empty()));
         }
         let mut advanced = ParserGSS::empty();
@@ -1969,7 +1974,11 @@ impl Constraint {
             root: self,
             layout: &layout,
         };
-        let provider = DisjointComponentActionProvider::new(&tables, &layout.links)?;
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables,
+            &layout.links,
+            &layout.leaf_state_offsets,
+        )?;
         Ok(Some(stacks_finished_with_provider(
             &provider,
             stack,
@@ -2008,63 +2017,24 @@ impl Constraint {
         })
     }
 
-    #[inline]
-    fn segmented_parser_symbols_for_global_terminal(
-        &self,
-        global_terminal: u32,
-        out: &mut SmallVec<[ScopedParserSymbol; 8]>,
-    ) -> bool {
-        out.clear();
-        let Some(overlay) = self.static_dynamic_overlay.as_ref() else {
-            return false;
-        };
-        if !self.uses_compact_segmented_parser_runtime() {
-            return false;
-        }
-        for (component_index, component) in
-            overlay.segmented_parser_components.iter().enumerate()
-        {
-            let offset = component.terminal_offset;
-            let end = offset.saturating_add(component.constraint.table.num_terminals);
-            if global_terminal >= offset && global_terminal < end {
-                let symbol = ScopedParserSymbol::Terminal {
-                    component: component_index as u32,
-                    terminal: global_terminal - offset,
-                };
-                if !out.contains(&symbol) {
-                    out.push(symbol);
-                }
-            }
-            for &(alias, local_terminal) in &component.global_terminal_aliases {
-                if alias == global_terminal {
-                    let symbol = ScopedParserSymbol::Terminal {
-                        component: component_index as u32,
-                        terminal: local_terminal,
-                    };
-                    if !out.contains(&symbol) {
-                        out.push(symbol);
-                    }
-                }
-            }
-        }
-        !out.is_empty()
-    }
-
     pub(crate) fn close_compact_segmented_parser(
         &self,
         stack: &ParserGSS,
     ) -> Option<ParserGSS> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let tables = super::artifact::SegmentedParserComponentTables::new(
-            &overlay.segmented_parser_components,
-        );
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables {
+            root: self,
+            layout: &layout,
+        };
         let provider = DisjointComponentActionProvider::with_state_offsets(
             &tables,
-            &overlay.segmented_parser_links,
-            &overlay.segmented_parser_state_offsets,
+            &layout.links,
+            &layout.leaf_state_offsets,
         )
         .expect("validated compact segmented parser metadata");
         Some(close_provider_control_stacks(&provider, stack))
@@ -2075,21 +2045,28 @@ impl Constraint {
         stack: &ParserGSS,
         global_terminal: u32,
     ) -> Option<ParserGSS> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let tables = super::artifact::SegmentedParserComponentTables::new(
-            &overlay.segmented_parser_components,
-        );
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables {
+            root: self,
+            layout: &layout,
+        };
         let provider = DisjointComponentActionProvider::with_state_offsets(
             &tables,
-            &overlay.segmented_parser_links,
-            &overlay.segmented_parser_state_offsets,
+            &layout.links,
+            &layout.leaf_state_offsets,
         )
         .expect("validated compact segmented parser metadata");
         let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
-        if !self.segmented_parser_symbols_for_global_terminal(global_terminal, &mut symbols) {
+        if !self.recursive_parser_symbols_for_global_terminal(
+            &layout,
+            global_terminal,
+            &mut symbols,
+        ) {
             return Some(ParserGSS::empty());
         }
         let mut advanced = ParserGSS::empty();
@@ -2109,21 +2086,28 @@ impl Constraint {
         stack: &ParserGSS,
         global_terminal: u32,
     ) -> Option<bool> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let tables = super::artifact::SegmentedParserComponentTables::new(
-            &overlay.segmented_parser_components,
-        );
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables {
+            root: self,
+            layout: &layout,
+        };
         let provider = DisjointComponentActionProvider::with_state_offsets(
             &tables,
-            &overlay.segmented_parser_links,
-            &overlay.segmented_parser_state_offsets,
+            &layout.links,
+            &layout.leaf_state_offsets,
         )
         .expect("validated compact segmented parser metadata");
         let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
-        if !self.segmented_parser_symbols_for_global_terminal(global_terminal, &mut symbols) {
+        if !self.recursive_parser_symbols_for_global_terminal(
+            &layout,
+            global_terminal,
+            &mut symbols,
+        ) {
             return Some(false);
         }
         Some(
@@ -2156,17 +2140,20 @@ impl Constraint {
         &self,
         stack: &ParserGSS,
     ) -> Option<bool> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let tables = super::artifact::SegmentedParserComponentTables::new(
-            &overlay.segmented_parser_components,
-        );
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables {
+            root: self,
+            layout: &layout,
+        };
         let provider = DisjointComponentActionProvider::with_state_offsets(
             &tables,
-            &overlay.segmented_parser_links,
-            &overlay.segmented_parser_state_offsets,
+            &layout.links,
+            &layout.leaf_state_offsets,
         )
         .expect("validated compact segmented parser metadata");
         Some(stacks_finished_with_provider(
@@ -2185,14 +2172,23 @@ impl Constraint {
         component_index: usize,
         scoped_state: u32,
     ) -> Option<u32> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let component = overlay.segmented_parser_components.get(component_index)?;
-        let offset = *overlay.segmented_parser_state_offsets.get(component_index)?;
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let offset = *layout.component_offsets.get(component_index)?;
+        let end = layout
+            .component_offsets
+            .get(component_index + 1)
+            .copied()
+            .unwrap_or(layout.total_states);
+        if scoped_state < offset || scoped_state >= end {
+            return None;
+        }
         let local = scoped_state.checked_sub(offset)?;
-        (local < component.constraint.table.num_states).then_some(local)
+        Some(local)
     }
 
     #[inline]
@@ -2200,15 +2196,21 @@ impl Constraint {
         &self,
         scoped_state: u32,
     ) -> Option<(usize, u32)> {
-        let overlay = self.static_dynamic_overlay.as_ref()?;
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        let component_index = overlay
-            .segmented_parser_state_offsets
+        let layout = self
+            .recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        if scoped_state >= layout.total_states {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_state_offsets
             .partition_point(|&offset| offset <= scoped_state)
             .checked_sub(1)?;
-        let local = self.compact_segmented_parser_local_state(component_index, scoped_state)?;
+        let component_index = layout.leaves.get(leaf_index)?.top_component as usize;
+        let local = scoped_state.checked_sub(*layout.component_offsets.get(component_index)?)?;
         Some((component_index, local))
     }
 

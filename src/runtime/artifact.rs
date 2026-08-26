@@ -4383,6 +4383,32 @@ pub(crate) enum ConstraintRuntimeBackend {
 
 pub(crate) type SegmentedParserLink = ScopedSubgrammarLink;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecursiveParserLeafLayout {
+    pub(crate) state_offset: u32,
+    pub(crate) state_count: u32,
+    /// Immediate wrapper of the composition whose layout was requested. Inner
+    /// leaf changes within one nested component deliberately keep this owner.
+    pub(crate) top_component: u32,
+    /// Immediate-component path from the requested composition root to this
+    /// intact LR table.
+    pub(crate) component_path: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecursiveParserLayout {
+    pub(crate) component_offsets: Vec<u32>,
+    pub(crate) leaves: Vec<RecursiveParserLeafLayout>,
+    pub(crate) leaf_state_offsets: Vec<u32>,
+    /// Linker controls rewritten only into the leaf-component coordinate.
+    pub(crate) links: Vec<SegmentedParserLink>,
+    /// Transitional outer/global terminal -> intact leaf-local terminals.
+    /// This keeps terminal routing out of the commit hot path while the
+    /// tokenizer still uses the composed terminal coordinate.
+    pub(crate) terminal_targets: Vec<SmallVec<[(u32, TerminalID); 4]>>,
+    pub(crate) total_states: u32,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StaticDynamicOverlayMetadata {
     /// Global terminal-id offsets for the transported composition components.
@@ -4415,6 +4441,11 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// `offset[i] + local_state` is the runtime GSS value for component `i`.
     #[serde(skip, default)]
     pub(crate) segmented_parser_state_offsets: Vec<u32>,
+    /// Runtime-derived endpoint parser view. The semantic component tree stays
+    /// literal; this cache contains only the flat leaf coordinate required by
+    /// the existing `LeveledGSS<u32, ...>` action provider.
+    #[serde(skip, default)]
+    pub(crate) recursive_parser_layout: OnceLock<Arc<RecursiveParserLayout>>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.
