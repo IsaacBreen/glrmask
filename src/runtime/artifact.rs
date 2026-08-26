@@ -4400,6 +4400,11 @@ pub(crate) struct RecursiveParserLayout {
     pub(crate) component_offsets: Vec<u32>,
     pub(crate) leaves: Vec<RecursiveParserLeafLayout>,
     pub(crate) leaf_state_offsets: Vec<u32>,
+    /// Disjoint-union tokenizer-state coordinate over the same intact leaves.
+    /// Parser and tokenizer leaves have identical ordering/component paths, but
+    /// independent offsets because their local state counts differ.
+    pub(crate) leaf_tokenizer_state_offsets: Vec<u32>,
+    pub(crate) total_tokenizer_states: u32,
     /// Linker controls rewritten only into the leaf-component coordinate.
     pub(crate) links: Vec<SegmentedParserLink>,
     /// Transitional outer/global terminal -> intact leaf-local terminals.

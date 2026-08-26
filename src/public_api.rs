@@ -1071,6 +1071,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::lexer::tokenizer::Lexer;
 
     fn component_backend_flags(constraint: &RuntimeConstraint) -> Vec<bool> {
         constraint
@@ -2159,6 +2160,8 @@ mod tests {
         )
         .unwrap();
         let leaf_states = leaf.table.num_states;
+        let leaf_tokenizer_states = leaf.tokenizer.num_states();
+        let leaf_tokenizer_reset = leaf.runtime_commit_initial_state();
         let middle_parent = RuntimeConstraint::compile(
             Grammar::glrm(
                 "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
@@ -2167,6 +2170,8 @@ mod tests {
         )
         .unwrap();
         let middle_parent_states = middle_parent.table.num_states;
+        let middle_parent_tokenizer_states = middle_parent.tokenizer.num_states();
+        let middle_parent_tokenizer_reset = middle_parent.runtime_commit_initial_state();
         let middle = middle_parent
             .bind_grammar_dynamic_boundary("leaf", leaf)
             .unwrap();
@@ -2178,6 +2183,8 @@ mod tests {
         )
         .unwrap();
         let outer_parent_states = outer_parent.table.num_states;
+        let outer_parent_tokenizer_states = outer_parent.tokenizer.num_states();
+        let outer_parent_tokenizer_reset = outer_parent.runtime_commit_initial_state();
         let bound = outer_parent
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
@@ -2217,6 +2224,48 @@ mod tests {
                 layout.total_states,
                 outer_parent_states + middle_parent_states + leaf_states,
             );
+            assert_eq!(
+                layout.leaf_tokenizer_state_offsets,
+                vec![
+                    0,
+                    outer_parent_tokenizer_states,
+                    outer_parent_tokenizer_states + middle_parent_tokenizer_states,
+                ],
+            );
+            assert_eq!(
+                layout.total_tokenizer_states,
+                outer_parent_tokenizer_states
+                    + middle_parent_tokenizer_states
+                    + leaf_tokenizer_states,
+            );
+            let tokenizer_counts = [
+                outer_parent_tokenizer_states,
+                middle_parent_tokenizer_states,
+                leaf_tokenizer_states,
+            ];
+            let tokenizer_resets = [
+                outer_parent_tokenizer_reset,
+                middle_parent_tokenizer_reset,
+                leaf_tokenizer_reset,
+            ];
+            for leaf_index in 0..layout.leaves.len() {
+                for local_state in 0..tokenizer_counts[leaf_index] {
+                    let scoped = constraint
+                        .recursive_tokenizer_scoped_state(leaf_index, local_state)
+                        .unwrap();
+                    assert_eq!(
+                        constraint.recursive_tokenizer_leaf_state(scoped),
+                        Some((leaf_index, local_state)),
+                    );
+                }
+                assert_eq!(
+                    constraint.recursive_tokenizer_reset_state(leaf_index),
+                    constraint.recursive_tokenizer_scoped_state(
+                        leaf_index,
+                        tokenizer_resets[leaf_index],
+                    ),
+                );
+            }
             assert_eq!(constraint.recursive_parser_state_span().unwrap(), layout.total_states);
             assert_eq!(layout.links.len(), 2);
             assert!(layout

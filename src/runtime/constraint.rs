@@ -1950,6 +1950,22 @@ impl Constraint {
             &mut links,
         )?;
         let leaf_state_offsets = leaves.iter().map(|leaf| leaf.state_offset).collect();
+        let mut leaf_tokenizer_state_offsets = Vec::with_capacity(leaves.len());
+        let mut next_tokenizer_state = 0u32;
+        for leaf in &leaves {
+            let constraint = self
+                .constraint_at_recursive_component_path(&leaf.component_path)
+                .ok_or_else(|| {
+                    format!(
+                        "recursive tokenizer leaf path {:?} does not resolve to a constraint",
+                        leaf.component_path,
+                    )
+                })?;
+            leaf_tokenizer_state_offsets.push(next_tokenizer_state);
+            next_tokenizer_state = next_tokenizer_state
+                .checked_add(constraint.tokenizer.num_states())
+                .ok_or_else(|| "recursive tokenizer-state coordinate overflow".to_owned())?;
+        }
         let mut terminal_targets = Vec::with_capacity(self.table.num_terminals as usize);
         for terminal in 0..self.table.num_terminals {
             let mut targets = SmallVec::<[(u32, TerminalID); 4]>::new();
@@ -2009,6 +2025,8 @@ impl Constraint {
             component_offsets,
             leaves,
             leaf_state_offsets,
+            leaf_tokenizer_state_offsets,
+            total_tokenizer_states: next_tokenizer_state,
             links,
             terminal_targets,
             materialized_states_by_recursive_state,
@@ -2045,6 +2063,55 @@ impl Constraint {
             return Ok(None);
         }
         self.build_recursive_parser_layout_root_expanded().map(Some)
+    }
+
+    #[inline]
+    pub(crate) fn recursive_tokenizer_leaf_state(
+        &self,
+        scoped_state: u32,
+    ) -> Option<(usize, u32)> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        if scoped_state >= layout.total_tokenizer_states {
+            return None;
+        }
+        let leaf_index = layout
+            .leaf_tokenizer_state_offsets
+            .partition_point(|&offset| offset <= scoped_state)
+            .checked_sub(1)?;
+        let offset = *layout.leaf_tokenizer_state_offsets.get(leaf_index)?;
+        let local_state = scoped_state.checked_sub(offset)?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        (local_state < constraint.tokenizer.num_states()).then_some((leaf_index, local_state))
+    }
+
+    #[inline]
+    pub(crate) fn recursive_tokenizer_scoped_state(
+        &self,
+        leaf_index: usize,
+        local_state: u32,
+    ) -> Option<u32> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        if local_state >= constraint.tokenizer.num_states() {
+            return None;
+        }
+        layout
+            .leaf_tokenizer_state_offsets
+            .get(leaf_index)?
+            .checked_add(local_state)
+    }
+
+    #[inline]
+    pub(crate) fn recursive_tokenizer_reset_state(&self, leaf_index: usize) -> Option<u32> {
+        let layout = self.recursive_parser_layout().ok().flatten()?;
+        let leaf = layout.leaves.get(leaf_index)?;
+        let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+        self.recursive_tokenizer_scoped_state(
+            leaf_index,
+            constraint.runtime_commit_initial_state(),
+        )
     }
 
     /// Exact ordinary-terminal GLR table for compiler-side analyses that still
