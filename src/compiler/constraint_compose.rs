@@ -812,6 +812,27 @@ fn install_dynamic_direct_boundary_shards(
     }
 }
 
+fn append_dynamic_direct_boundary_shards_for_unselected(
+    overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
+    static_components: &BitSet,
+) {
+    for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
+        if static_components.contains(component_index) {
+            continue;
+        }
+        overlay.segmented_boundary_shards.push(crate::runtime::SegmentedBoundaryShard {
+            start_component: component_index as u32,
+            start_parser_states: segmented_boundary_start_parser_states(component),
+            accepts_empty_stack: component_index == 0,
+            candidate_tokens: None,
+            backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
+        });
+    }
+    overlay
+        .segmented_boundary_shards
+        .sort_unstable_by_key(|shard| shard.start_component);
+}
+
 fn deterministic_component_union_root_dispatch(
     components: &[crate::runtime::SegmentedParserComponent],
     parser_state_relations: &[Vec<Vec<u32>>],
@@ -7961,6 +7982,7 @@ fn build_static_boundary_shard_work(
     tokenizer_state_offsets: &[u32],
     plan: &ConcreteBoundaryDeltaPlan,
     candidate_tokens_by_component: &[Vec<u32>],
+    static_boundary_components: Option<&BitSet>,
     parser_num_terminals: u32,
     templates: &Templates,
     parser_table_override: Option<Arc<crate::compiler::glr::table::GLRTable>>,
@@ -7968,7 +7990,11 @@ fn build_static_boundary_shard_work(
     candidate_tokens_by_component
         .par_iter()
         .enumerate()
-        .filter(|(_, tokens)| !tokens.is_empty())
+        .filter(|(component_index, tokens)| {
+            !tokens.is_empty()
+                && static_boundary_components
+                    .is_none_or(|selected| selected.contains(*component_index))
+        })
         .map(|(component_index, tokens)| {
             let artifact = direct_boundary_terminal_automaton(
                 merged_tokenizer_state_count,
@@ -15783,6 +15809,7 @@ fn build_boundary_repair(
     selected_boundary_tokens: Option<&OnceLock<Result<Option<Vec<u32>>, String>>>,
     authoritative_segmented_boundary: bool,
     dynamic_boundary_backend: bool,
+    static_boundary_components: Option<&BitSet>,
 ) -> Result<Option<BoundaryRepair>, String> {
     let total_started_at = Instant::now();
     if std::env::var_os("GLRMASK_PROFILE_COMPONENT_GRAMMAR_ANALYSIS").is_some() {
@@ -17255,6 +17282,7 @@ fn build_boundary_repair(
             tokenizer_state_offsets,
             plan,
             &boundary_tokens_by_start_component,
+            static_boundary_components,
             plan.synthetic_num_terminals,
             &templates,
             static_boundary_parser_table.clone(),
@@ -19081,6 +19109,7 @@ pub(crate) fn compose_constraints(
                     None,
                     false,
                     false,
+                    None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
@@ -19136,6 +19165,7 @@ pub(crate) fn compose_constraints(
                                 None,
                                 false,
                                 false,
+                                None,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -19279,7 +19309,7 @@ pub(crate) fn compose_constraints_owned_parent(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    compose_constraints_owned_parent_impl(parent, children, None, None, vocab)
+    compose_constraints_owned_parent_impl(parent, children, None, None, None, vocab)
 }
 
 /// Boundary policy for the exact segmented composition runtime. Component
@@ -19303,6 +19333,35 @@ pub(crate) fn compose_constraints_owned_parent_segmented(
         children,
         None,
         Some(boundary_backend),
+        None,
+        vocab,
+    )
+}
+
+/// Compose with a per-starting-component boundary policy. `static_components`
+/// is indexed in component order (parent first, then supplied children). A set
+/// bit compiles and uses that component's static boundary shard; an unset bit
+/// uses the zero-data exact dynamic boundary walker, gated by the component's
+/// reusable trigger metadata.
+pub(crate) fn compose_constraints_owned_parent_segmented_hybrid(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    vocab: &Vocab,
+    static_components: &BitSet,
+) -> Result<ConstraintComposition, String> {
+    if static_components.len() != children.len() + 1 {
+        return Err(format!(
+            "hybrid boundary policy has {} components for a {}-component composition",
+            static_components.len(),
+            children.len() + 1,
+        ));
+    }
+    compose_constraints_owned_parent_impl(
+        parent,
+        children,
+        None,
+        Some(SegmentedBoundaryBackend::StaticParserDwa),
+        Some(static_components),
         vocab,
     )
 }
@@ -19327,6 +19386,7 @@ pub(crate) fn compose_constraints_owned_parent_segmented_shared(
         children,
         Some(shared_children),
         Some(boundary_backend),
+        None,
         vocab,
     )
 }
@@ -19345,7 +19405,7 @@ pub(crate) fn compose_constraints_owned_parent_shared(
             return Err(format!("shared child {index} does not match borrowed composition input"));
         }
     }
-    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), None, vocab)
+    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), None, None, vocab)
 }
 
 fn compose_constraints_owned_parent_impl(
@@ -19353,6 +19413,7 @@ fn compose_constraints_owned_parent_impl(
     children: &[CompiledSubgrammarInput<'_>],
     shared_children: Option<&[Arc<Constraint>]>,
     explicit_segmented_boundary: Option<SegmentedBoundaryBackend>,
+    static_boundary_components: Option<&BitSet>,
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
     let direct_dynamic_boundary =
@@ -20063,6 +20124,7 @@ fn compose_constraints_owned_parent_impl(
                     explicit_segmented_boundary.is_some(),
                     explicit_segmented_boundary
                         == Some(SegmentedBoundaryBackend::Dynamic),
+                    static_boundary_components,
                 );
                 if selected_boundary_tokens_cell.get().is_none() {
                     let publication = match &result {
@@ -20857,6 +20919,9 @@ fn compose_constraints_owned_parent_impl(
                 "segmented component metadata must exist before static boundary shards",
             );
             install_published_static_boundary_shards(overlay, published_static_boundary_shards)?;
+            if let Some(static_components) = static_boundary_components {
+                append_dynamic_direct_boundary_shards_for_unselected(overlay, static_components);
+            }
         }
 
         if compose_profile_enabled() {
