@@ -2505,11 +2505,11 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_distinct_nonzero_min_giant_intersection_still_fails_closed() {
+    fn dynamic_distinct_nonzero_min_giant_intersection_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
-        let grammar = GrammarDef {
+        let grammar_for = |max| GrammarDef {
             start: 0,
             rules: vec![Rule {
                 lhs: 0,
@@ -2521,28 +2521,50 @@ mod tests {
                     expr: Box::new(Expr::Repeat {
                         expr: Box::new(Expr::U8Seq(b"a".to_vec())),
                         min: 3,
-                        max: Some(10_000),
+                        max: Some(max),
                     }),
                     intersect: Box::new(Expr::Repeat {
                         expr: Box::new(Expr::U8Seq(b"aa".to_vec())),
                         min: 2,
-                        max: Some(10_000),
+                        max: Some(max),
                     }),
                 },
             }],
             ..GrammarDef::default()
         };
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
-        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
-            grammar,
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(10_000),
             &vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("refusing eager materialization"),
-            "unexpected error: {error}",
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         );
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+        for sequence in [
+            vec![0u32],
+            vec![1u32],
+            vec![0u32, 0, 0],
+            vec![1u32, 1],
+            vec![0u32, 1, 0],
+        ] {
+            let mut dynamic_state = dynamic.start();
+            let mut oracle_state = oracle.start();
+            for token in sequence {
+                dynamic_state.commit_token(token).unwrap();
+                oracle_state.commit_token(token).unwrap();
+                assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+                assert_eq!(dynamic_state.mask(), oracle_state.mask());
+            }
+        }
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
 
     #[test]
@@ -2606,11 +2628,11 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_unsupported_large_plain_repeat_fails_closed() {
+    fn dynamic_non_prefix_free_large_repeat_uses_general_residual_runtime() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
-        let grammar = GrammarDef {
+        let grammar_for = |max| GrammarDef {
             start: 0,
             rules: vec![Rule {
                 lhs: 0,
@@ -2626,30 +2648,119 @@ mod tests {
                         Expr::U8Seq(b"aa".to_vec()),
                     ])),
                     min: 0,
-                    max: Some(10_000),
+                    max: Some(max),
                 },
             }],
             ..GrammarDef::default()
         };
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
-        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
-            grammar,
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(10_000),
             &vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("refusing eager materialization"),
-            "unexpected error: {error}",
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         );
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+        for sequence in [vec![0u32], vec![1u32], vec![0u32, 1], vec![1u32, 1, 0]] {
+            let mut dynamic_state = dynamic.start();
+            let mut oracle_state = oracle.start();
+            for token in sequence {
+                dynamic_state.commit_token(token).unwrap();
+                oracle_state.commit_token(token).unwrap();
+                assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+                assert_eq!(dynamic_state.mask(), oracle_state.mask());
+            }
+        }
     }
 
     #[test]
-    fn dynamic_unsupported_nested_large_repeat_fails_closed() {
+    fn dynamic_general_residual_prunes_semantically_dead_token_prefix() {
         use crate::automata::regex::Expr;
         use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
-        let grammar = GrammarDef {
+        let grammar_for = |max| {
+            let giant_branch = |suffix: &[u8]| {
+                Expr::Seq(vec![
+                    Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"x".to_vec())),
+                        min: 0,
+                        max: Some(max),
+                    },
+                    Expr::U8Seq(suffix.to_vec()),
+                ])
+            };
+            GrammarDef {
+                start: 0,
+                rules: vec![Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                }],
+                terminals: vec![Terminal::Expr {
+                    id: 0,
+                    expr: Expr::Intersect {
+                        expr: Box::new(Expr::Choice(vec![giant_branch(b"ab"), Expr::U8Seq(b"c".to_vec())])),
+                        intersect: Box::new(Expr::Choice(vec![
+                            giant_branch(b"ac"),
+                            Expr::U8Seq(b"c".to_vec()),
+                        ])),
+                    },
+                }],
+                ..GrammarDef::default()
+            }
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"c".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"b".to_vec()),
+        ]);
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(10_000),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+
+        let start_mask = dynamic.start().mask();
+        let allowed = |token: u32| {
+            let word = token as usize / 32;
+            let bit = token % 32;
+            start_mask[word] & (1u32 << bit) != 0
+        };
+        assert!(!allowed(0), "a leads to the dead residual b ∩ c and must be pruned");
+        assert!(allowed(1), "c is the one common accepted word");
+        assert!(!allowed(2), "entering the giant x* branches can never reach a common suffix");
+
+        let mut rejected = dynamic.start();
+        assert!(rejected.commit_token(0).is_err());
+        let mut accepted = dynamic.start();
+        accepted.commit_token(1).unwrap();
+        assert!(accepted.is_accepting());
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(loaded.start().mask(), start_mask);
+    }
+
+    #[test]
+    fn dynamic_nested_large_repeat_suffix_compiles_lazily_and_exactly() {
+        use crate::automata::regex::Expr;
+        use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+        let grammar_for = |max| GrammarDef {
             start: 0,
             rules: vec![Rule {
                 lhs: 0,
@@ -2661,7 +2772,7 @@ mod tests {
                     Expr::Repeat {
                         expr: Box::new(Expr::U8Seq(b"a".to_vec())),
                         min: 0,
-                        max: Some(10_000),
+                        max: Some(max),
                     },
                     Expr::U8Seq(b"b".to_vec()),
                 ]),
@@ -2669,16 +2780,28 @@ mod tests {
             ..GrammarDef::default()
         };
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let error = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
-            grammar,
+        let dynamic = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar_for(10_000),
             &vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("nested large bounded repeat"),
-            "unexpected error: {error}",
+        .unwrap();
+        let oracle = crate::compiler::pipeline::compile_owned_with_table_construction(
+            grammar_for(8),
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
         );
+        assert_eq!(dynamic.start().mask(), oracle.start().mask());
+        for sequence in [vec![1u32], vec![0u32, 1], vec![0u32, 0, 1]] {
+            let mut dynamic_state = dynamic.start();
+            let mut oracle_state = oracle.start();
+            for token in sequence {
+                dynamic_state.commit_token(token).unwrap();
+                oracle_state.commit_token(token).unwrap();
+                assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
+                assert_eq!(dynamic_state.mask(), oracle_state.mask());
+            }
+        }
     }
 
     #[test]
