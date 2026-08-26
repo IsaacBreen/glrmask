@@ -1429,23 +1429,27 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
 
         let mut child_relation = vec![Vec::<u32>::new(); child.num_states as usize];
 
-        // The parent continuation is now stored directly on the ordinary GSS,
-        // so one child-state copy is sufficient for every call site. The child
-        // no longer needs a call-site-specific state identity to know where to
-        // return.
-        let mut state_map = vec![u32::MAX; child.num_states as usize];
-        for local_state in 0..child.num_states {
-            state_map[local_state as usize] = next_state;
-            child_relation[local_state as usize].push(next_state);
-            next_state += 1;
-            action.push(ActionRow::default());
-            goto.push(GotoRow::default());
-        }
-
-        let mapped_start = state_map[child_start as usize];
-        let mapped_accept = state_map[child_accept as usize];
-
+        // Deliberately copy the whole child once per call site.  This makes the
+        // continuation and active ignore scope explicit in the parser-state
+        // identity.  Sharing internal states is a later optimization which can
+        // be proved against this representation.
         for &(control, caller_state, placeholder_target, placeholder_replace) in &call_sites {
+            let mut state_map = vec![u32::MAX; child.num_states as usize];
+            for local_state in 0..child.num_states {
+                state_map[local_state as usize] = next_state;
+                child_relation[local_state as usize].push(next_state);
+                next_state += 1;
+                action.push(ActionRow::default());
+                goto.push(GotoRow::default());
+            }
+
+            let mapped_start = state_map[child_start as usize];
+            let mapped_accept = state_map[child_accept as usize];
+            // Preserve the ordinary parent continuation directly on the GSS
+            // beneath the child start state. This is the representation the
+            // scoped-component runtime needs: no per-call-site child identity,
+            // caller frame, or boundary marker is required to remember where
+            // the child returns.
             action[caller_state as usize].insert(
                 control,
                 Action::StackShifts(vec![StackShift {
@@ -1453,13 +1457,15 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                     pushes: vec![placeholder_target, mapped_start],
                 }]),
             );
-        }
 
-        // A nullable child can immediately return under any of its parent slot
-        // controls. Popping the shared child start exposes the call-site-
-        // specific parent continuation already beneath it.
-        if child_input.start_nullable {
-            for &control in &controls {
+            // A compiled child can retain exact root-nullability metadata even
+            // after its internal epsilon reduction has been normalized out of
+            // the LR action rows.  The explicit-control linker must therefore
+            // make the empty child derivation explicit too.  From the mapped
+            // child start, reducing an empty root and then taking the ordinary
+            // child-return control simply pops the child start and exposes the
+            // parent continuation already stored beneath it.
+            if child_input.start_nullable {
                 merge_action_cell(
                     &mut action[mapped_start as usize],
                     control,
@@ -1469,28 +1475,24 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                     }]),
                 )?;
             }
-        }
 
-        for local_state in 0..child.num_states {
-            let merged_state = state_map[local_state as usize] as usize;
-            for (terminal, child_action) in child.action[local_state as usize].iter() {
-                if terminal == EOF {
-                    if local_state == child_accept {
+            for local_state in 0..child.num_states {
+                let merged_state = state_map[local_state as usize] as usize;
+                for (terminal, child_action) in child.action[local_state as usize].iter() {
+                    if terminal == EOF && local_state == child_accept {
                         if !matches!(child_action, Action::Accept) {
                             return Err(format!(
                                 "child accept state {child_accept} has unsupported EOF action {child_action:?}",
                             ));
                         }
-                        for &control in &controls {
-                            merge_action_cell(
-                                &mut action[merged_state],
-                                control,
-                                Action::StackShifts(vec![StackShift {
-                                    pop: return_pop,
-                                    pushes: Vec::new(),
-                                }]),
-                            )?;
-                        }
+                        merge_action_cell(
+                            &mut action[merged_state],
+                            control,
+                            Action::StackShifts(vec![StackShift {
+                                pop: return_pop,
+                                pushes: Vec::new(),
+                            }]),
+                        )?;
                         continue;
                     }
 
@@ -1504,65 +1506,53 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                         child_start,
                         child_accept,
                     )?;
-                    for &control in &controls {
-                        merge_action_cell(
-                            &mut action[merged_state],
-                            control,
-                            mapped_action.clone(),
-                        )?;
-                    }
-                    continue;
+                    let mapped_terminal = if terminal == EOF {
+                        control
+                    } else {
+                        terminal + terminal_offset
+                    };
+                    merge_action_cell(
+                        &mut action[merged_state],
+                        mapped_terminal,
+                        mapped_action,
+                    )?;
                 }
 
-                let mapped_action = remap_action(
-                    child_action,
-                    &state_map,
-                    terminal_offset,
-                    nonterminal_offset,
-                    Some(mapped_start),
-                    Some(mapped_accept),
-                    child_start,
-                    child_accept,
-                )?;
-                merge_action_cell(
-                    &mut action[merged_state],
+                if let Some(local_ignore) = child_input.ignore_terminal {
+                    merge_action_cell(
+                        &mut action[merged_state],
+                        local_ignore + terminal_offset,
+                        identity_skip_action(),
+                    )?;
+                }
+
+                for (nonterminal, &(target, replace)) in child.goto[local_state as usize].iter() {
+                    goto[merged_state].insert(
+                        nonterminal + nonterminal_offset,
+                        (state_map[target as usize], replace),
+                    );
+                }
+            }
+
+            for &(state, terminal) in &child.forwarded_shifts {
+                forwarded_shifts.insert((
+                    state_map[state as usize],
                     terminal + terminal_offset,
-                    mapped_action,
-                )?;
+                ));
             }
-
-            if let Some(local_ignore) = child_input.ignore_terminal {
-                merge_action_cell(
-                    &mut action[merged_state],
-                    local_ignore + terminal_offset,
-                    identity_skip_action(),
-                )?;
-            }
-
-            for (nonterminal, &(target, replace)) in child.goto[local_state as usize].iter() {
-                goto[merged_state].insert(
-                    nonterminal + nonterminal_offset,
-                    (state_map[target as usize], replace),
+            for frontier in &child.direct_regular_wide_frontiers {
+                direct_regular_wide_frontiers.push(
+                    super::DirectRegularWideFrontierDescriptor {
+                        source_state: state_map[frontier.source_state as usize],
+                        terminal: frontier.terminal + terminal_offset,
+                        target_states: frontier
+                            .target_states
+                            .iter()
+                            .map(|&target| state_map[target as usize])
+                            .collect(),
+                    },
                 );
             }
-        }
-
-        for &(state, terminal) in &child.forwarded_shifts {
-            forwarded_shifts.insert((
-                state_map[state as usize],
-                terminal + terminal_offset,
-            ));
-        }
-        for frontier in &child.direct_regular_wide_frontiers {
-            direct_regular_wide_frontiers.push(super::DirectRegularWideFrontierDescriptor {
-                source_state: state_map[frontier.source_state as usize],
-                terminal: frontier.terminal + terminal_offset,
-                target_states: frontier
-                    .target_states
-                    .iter()
-                    .map(|&target| state_map[target as usize])
-                    .collect(),
-            });
         }
 
         for targets in &mut child_relation {
