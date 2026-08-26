@@ -69,6 +69,14 @@ pub mod __private {
             pub mod tokenizer {
                 pub use crate::automata::lexer::tokenizer::*;
             }
+            #[doc(hidden)]
+            pub mod runtime_unit_repeat {
+                pub use crate::automata::lexer::runtime_unit_repeat::*;
+            }
+            #[doc(hidden)]
+            pub mod runtime_repeat_product {
+                pub use crate::automata::lexer::runtime_repeat_product::*;
+            }
             pub mod regex {
                 pub use crate::automata::lexer::regex::*;
             }

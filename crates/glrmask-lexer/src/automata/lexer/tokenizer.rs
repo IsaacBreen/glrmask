@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
+use super::runtime_unit_repeat::{
+    VirtualZeroMinUnitRepeatMaskProjection, VirtualZeroMinUnitRepeatRuntime,
+};
+use super::runtime_repeat_product::{
+    VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
+    VirtualBinaryRepeatIntersectionRuntime, VirtualRuntimeStateOwners, VirtualStateAllocator,
+};
+use super::runtime_residual::VirtualResidualRuntime;
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
@@ -64,6 +72,22 @@ impl MatchedTerminalLists {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub enum VirtualTokenizerRuntimeKind {
+    UnitRepeat,
+    RepeatProduct,
+    ResidualExpr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct VirtualTokenizerRuntimeMetadata {
+    pub kind: VirtualTokenizerRuntimeKind,
+    pub terminal: TerminalID,
+    pub root_state: u32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tokenizer {
     pub(super) dfa: DFA,
@@ -104,6 +128,21 @@ pub struct Tokenizer {
     /// targets as source-relative deltas.
     #[serde(default, skip)]
     pub(super) packed_compressed_transition_segments: Arc<[PackedCompressedTransitionSegment]>,
+    /// Exact arithmetic residuals for the supported standalone bounded-repeat
+    /// runtime lane. Shared across clones; it has no per-residual allocation.
+    #[serde(default, skip)]
+    pub(super) virtual_unit_repeat: Option<Arc<VirtualZeroMinUnitRepeatRuntime>>,
+    /// Exact lazily interned product residuals for pathological bounded-repeat
+    /// terminals. Bounds do not size these stores; only states actually
+    /// reached by runtime input are interned, with globally unique handles
+    /// allocated across all components.
+    #[serde(default, skip)]
+    pub(super) virtual_repeat_intersections: Vec<Arc<VirtualBinaryRepeatIntersectionRuntime>>,
+    /// General exact lazy regex residuals. Specialized repeat runtimes are
+    /// selected first; this is the compositional fallback for expressions that
+    /// should stay symbolic instead of being eagerly determinized.
+    #[serde(default, skip)]
+    pub(super) virtual_residuals: Vec<Arc<VirtualResidualRuntime>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -895,6 +934,9 @@ pub mod artifact_serde {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
+                virtual_unit_repeat: None,
+                virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -920,6 +962,9 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -1629,6 +1674,9 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -2939,6 +2987,9 @@ pub mod artifact_serde {
             packed_runtime_metadata: Some(metadata),
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from(packed_segments.into_boxed_slice()),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -3291,6 +3342,9 @@ pub mod artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures,
             matched_terminals_cache: OnceLock::new(),
@@ -3570,6 +3624,9 @@ pub mod compact_artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -4108,6 +4165,9 @@ mod packed_artifact_serde {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -4239,6 +4299,11 @@ enum TokenizerTransitionsIterInner<'a> {
         state: u32,
         next_byte: u16,
     },
+    Virtual {
+        bytes: crate::ds::u8set::U8SetIter,
+        target: u32,
+    },
+    VirtualProduct(std::vec::IntoIter<(u8, u32)>),
     Empty,
 }
 
@@ -4305,6 +4370,10 @@ impl Iterator for TokenizerTransitionsIter<'_> {
                 }
                 None
             }
+            TokenizerTransitionsIterInner::Virtual { bytes, target } => {
+                bytes.next().map(|byte| (byte, *target))
+            }
+            TokenizerTransitionsIterInner::VirtualProduct(iter) => iter.next(),
             TokenizerTransitionsIterInner::Empty => None,
         }
     }
@@ -4326,6 +4395,8 @@ impl Iterator for TokenizerTransitionsIter<'_> {
                 let count = segment.transition_count(*state);
                 (count, Some(count))
             }
+            TokenizerTransitionsIterInner::Virtual { bytes, .. } => bytes.size_hint(),
+            TokenizerTransitionsIterInner::VirtualProduct(iter) => iter.size_hint(),
             TokenizerTransitionsIterInner::Empty => (0, Some(0)),
         }
     }
@@ -4343,6 +4414,8 @@ impl Iterator for TokenizerTransitionsIter<'_> {
             TokenizerTransitionsIterInner::PackedCompressed { segment, state, .. } => {
                 segment.transition_count(state)
             }
+            TokenizerTransitionsIterInner::Virtual { bytes, .. } => bytes.count(),
+            TokenizerTransitionsIterInner::VirtualProduct(iter) => iter.count(),
             TokenizerTransitionsIterInner::Empty => 0,
         }
     }
@@ -4576,6 +4649,21 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    #[inline]
+    fn virtual_repeat_runtime_for_state(
+        &self,
+        state: u32,
+    ) -> Option<&VirtualBinaryRepeatIntersectionRuntime> {
+        let owner = self.virtual_repeat_intersections.first()?.owner_index(state)?;
+        self.virtual_repeat_intersections.get(owner).map(Arc::as_ref)
+    }
+
+    #[inline]
+    fn virtual_residual_runtime_for_state(&self, state: u32) -> Option<&VirtualResidualRuntime> {
+        let owner = self.virtual_residuals.first()?.owner_index(state)?;
+        self.virtual_residuals.get(owner).map(Arc::as_ref)
+    }
+
     /// Exact finite-horizon quotient for the Boolean observation
     /// `terminal is still a possible future terminal`.
     ///
@@ -5065,7 +5153,17 @@ impl Tokenizer {
         state_limit: usize,
         transition_limit: usize,
     ) -> Option<FullTokenizerDeterminization> {
-        if state_limit == 0 || transition_limit == 0 || !self.has_epsilon_transitions() {
+        // Virtual states live outside the materialized DFA state array. A
+        // physical subset construction cannot represent or epsilon-close
+        // those coordinates, so it must never be used as an implicit
+        // materialization fallback for any virtual runtime family.
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || state_limit == 0
+            || transition_limit == 0
+            || !self.has_epsilon_transitions()
+        {
             return None;
         }
 
@@ -5190,6 +5288,9 @@ impl Tokenizer {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
+                virtual_unit_repeat: None,
+                virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: self.exprs.clone(),
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -5328,6 +5429,9 @@ impl Tokenizer {
                 packed_runtime_metadata: None,
                 packed_runtime_metadata_segments: Arc::from([]),
                 packed_compressed_transition_segments: Arc::from([]),
+                virtual_unit_repeat: None,
+                virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
@@ -5476,6 +5580,9 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5721,6 +5828,9 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -5750,6 +5860,9 @@ impl Tokenizer {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
@@ -6000,6 +6113,19 @@ impl Tokenizer {
 
     #[inline]
     pub fn state_has_epsilon_transitions(&self, state: u32) -> bool {
+        if self.virtual_residual_runtime_for_state(state).is_some() {
+            return false;
+        }
+        if self.virtual_repeat_runtime_for_state(state).is_some() {
+            return false;
+        }
+        if self
+            .virtual_unit_repeat
+            .as_deref()
+            .is_some_and(|runtime| runtime.is_virtual_state(state))
+        {
+            return false;
+        }
         if let Some(metadata) = self
             .packed_runtime_metadata
             .as_deref()
@@ -6021,6 +6147,25 @@ impl Tokenizer {
 
     #[inline]
     fn state_finalizers(&self, state: u32) -> &BitSet {
+        if let Some(finalizers) = self
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizers(state))
+        {
+            return finalizers;
+        }
+        if let Some(finalizers) = self
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizers(state))
+        {
+            return finalizers;
+        }
+        if let Some(finalizers) = self
+            .virtual_unit_repeat
+            .as_deref()
+            .and_then(|runtime| runtime.finalizers(state))
+        {
+            return finalizers;
+        }
         if let Some(metadata) = self
             .packed_runtime_metadata
             .as_deref()
@@ -6041,6 +6186,25 @@ impl Tokenizer {
 
     #[inline]
     fn state_futures(&self, state: u32) -> &BitSet {
+        if let Some(futures) = self
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.futures(state))
+        {
+            return futures;
+        }
+        if let Some(futures) = self
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.futures(state))
+        {
+            return futures;
+        }
+        if let Some(futures) = self
+            .virtual_unit_repeat
+            .as_deref()
+            .and_then(|runtime| runtime.futures(state))
+        {
+            return futures;
+        }
         if let Some(metadata) = self
             .packed_runtime_metadata
             .as_deref()
@@ -6060,7 +6224,10 @@ impl Tokenizer {
     }
 
     fn epsilon_closure_states(&self, roots: &[u32]) -> SmallVec<[u32; 1]> {
-        if self.packed_runtime_metadata.is_none() && self.packed_runtime_metadata_segments.is_empty() {
+        if self.packed_runtime_metadata.is_none()
+            && self.packed_runtime_metadata_segments.is_empty()
+            && roots.iter().all(|&state| state < self.num_states())
+        {
             return self.dfa.epsilon_closure(roots);
         }
         if roots.iter().all(|&state| !self.state_has_epsilon_transitions(state)) {
@@ -6107,10 +6274,39 @@ impl Tokenizer {
         self.exprs.as_deref()
     }
 
-    /// Restore terminal expressions carried by a versioned outer artifact.
-    /// Invalid-length metadata is rejected rather than silently associating
-    /// expressions with the wrong terminal IDs.
-    pub fn restore_terminal_exprs(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
+    #[doc(hidden)]
+    pub fn virtual_runtime_metadata(&self) -> Vec<VirtualTokenizerRuntimeMetadata> {
+        let mut metadata = Vec::with_capacity(
+            self.virtual_repeat_intersections.len()
+                + self.virtual_residuals.len()
+                + usize::from(self.virtual_unit_repeat.is_some()),
+        );
+        if let Some(runtime) = self.virtual_unit_repeat.as_deref() {
+            metadata.push(VirtualTokenizerRuntimeMetadata {
+                kind: VirtualTokenizerRuntimeKind::UnitRepeat,
+                terminal: runtime.terminal(),
+                root_state: runtime.root_state(),
+            });
+        }
+        metadata.extend(self.virtual_repeat_intersections.iter().map(|runtime| {
+            VirtualTokenizerRuntimeMetadata {
+                kind: VirtualTokenizerRuntimeKind::RepeatProduct,
+                terminal: runtime.terminal(),
+                root_state: runtime.root_state(),
+            }
+        }));
+        metadata.extend(self.virtual_residuals.iter().map(|runtime| {
+            VirtualTokenizerRuntimeMetadata {
+                kind: VirtualTokenizerRuntimeKind::ResidualExpr,
+                terminal: runtime.terminal(),
+                root_state: runtime.root_state(),
+            }
+        }));
+        metadata.sort_unstable_by_key(|entry| (entry.terminal, entry.root_state));
+        metadata
+    }
+
+    fn restore_terminal_exprs_only(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
         let Some(exprs) = exprs else {
             self.exprs = None;
             return Ok(());
@@ -6122,6 +6318,992 @@ impl Tokenizer {
             ));
         }
         self.exprs = Some(Arc::from(exprs.into_boxed_slice()));
+        Ok(())
+    }
+
+    /// Restore terminal expressions carried by a versioned outer artifact.
+    /// Invalid-length metadata is rejected rather than silently associating
+    /// expressions with the wrong terminal IDs.
+    pub fn restore_terminal_exprs(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
+        self.restore_terminal_exprs_only(exprs)?;
+        if self.exprs.is_none() {
+            return Ok(());
+        }
+        self.restore_virtual_unit_repeat_runtime()?;
+        self.restore_virtual_repeat_intersection_runtime()?;
+        Ok(())
+    }
+
+    /// Attach compile-time terminal expressions without invoking legacy
+    /// structural virtual-runtime reconstruction. Fresh dynamic compilation
+    /// uses this before explicitly installing the selected virtual runtime
+    /// family, so ownership is deterministic rather than inferred from proxy
+    /// shape.
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_without_virtual_runtime(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_only(exprs)
+    }
+
+    /// Restore virtual sidecars from explicit outer-artifact metadata. Unlike
+    /// the legacy structural heuristic, this requires every virtualizable
+    /// giant terminal to have exactly one declared runtime owner.
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_with_virtual_runtime_metadata(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        allow_legacy_exact_dead_residual_roots: bool,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_only(exprs)?;
+        self.virtual_unit_repeat = None;
+        self.virtual_repeat_intersections.clear();
+        self.virtual_residuals.clear();
+        let Some(expressions) = self.exprs.as_deref() else {
+            if metadata.is_empty() {
+                return Ok(());
+            }
+            return Err("serialized virtual runtime metadata has no terminal expressions".to_owned());
+        };
+
+        let declared_terminals = metadata
+            .iter()
+            .map(|entry| entry.terminal)
+            .collect::<BTreeSet<_>>();
+        let expected_virtual_terminals = expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, expression)| {
+                super::compile::expression_contains_large_bounded_repeat(expression)
+                    .then_some(terminal as TerminalID)
+            })
+            .collect::<BTreeSet<_>>();
+        if expected_virtual_terminals != declared_terminals {
+            return Err(format!(
+                "serialized virtual runtime terminal ownership mismatch: expected {:?}, found {:?}",
+                expected_virtual_terminals, declared_terminals,
+            ));
+        }
+        if metadata.len() != declared_terminals.len() {
+            return Err("serialized virtual runtime metadata contains duplicate terminal owners".to_owned());
+        }
+        if metadata.is_empty() {
+            return Ok(());
+        }
+
+        let physical_state_count = self.num_states();
+        let start_state = self.start_state();
+        let reset_closure = self.epsilon_closure_states(&[start_state]);
+        let validate_root = |tokenizer: &Self,
+                             entry: &VirtualTokenizerRuntimeMetadata|
+         -> Result<(), String> {
+            let standalone_unit_root = metadata.len() == 1
+                && entry.kind == VirtualTokenizerRuntimeKind::UnitRepeat
+                && physical_state_count == 1
+                && self.num_terminals == 1
+                && entry.terminal == 0
+                && entry.root_state == start_state
+                && start_state == 0;
+            if (!standalone_unit_root && entry.root_state == start_state)
+                || entry.root_state >= physical_state_count
+                || !reset_closure.contains(&entry.root_state)
+                || tokenizer.state_has_epsilon_transitions(entry.root_state)
+                || tokenizer.transitions_from(entry.root_state).next().is_some()
+                || !tokenizer.state_finalizers(entry.root_state).is_empty()
+            {
+                return Err(format!(
+                    "serialized virtual runtime has invalid physical proxy root {}",
+                    entry.root_state,
+                ));
+            }
+            Ok(())
+        };
+        let mut seen_roots = BTreeSet::new();
+        for entry in metadata {
+            if entry.terminal >= self.num_terminals || !seen_roots.insert(entry.root_state) {
+                return Err("serialized virtual runtime metadata has invalid terminal/root ownership".to_owned());
+            }
+            validate_root(self, entry)?;
+        }
+
+        if metadata.iter().any(|entry| entry.kind == VirtualTokenizerRuntimeKind::UnitRepeat) {
+            let [entry] = metadata else {
+                return Err("serialized arithmetic unit runtime cannot coexist with other virtual runtimes".to_owned());
+            };
+            if entry.kind != VirtualTokenizerRuntimeKind::UnitRepeat {
+                unreachable!();
+            }
+            let expression = expressions
+                .get(entry.terminal as usize)
+                .ok_or_else(|| "serialized virtual unit terminal is out of range".to_owned())?;
+            let (body, min, max) = super::compile::virtual_unit_repeat_descriptor(expression)
+                .ok_or_else(|| "serialized virtual unit runtime descriptor no longer matches terminal expression".to_owned())?;
+            if self.terminal_byte_support(entry.terminal) != Some(body) {
+                return Err(
+                    "serialized virtual unit runtime byte support does not match terminal metadata"
+                        .to_owned(),
+                );
+            }
+            if !super::compile::virtual_zero_min_unit_repeat_fits_state_ids(max, physical_state_count) {
+                return Err("serialized virtual unit runtime exceeds tokenizer state-id space".to_owned());
+            }
+            let mut expected_future = BitSet::new(self.num_terminals as usize);
+            expected_future.set(entry.terminal as usize);
+            // Validate the serialized physical metadata before attaching the
+            // reconstructed sidecar. Once installed, `state_futures()` for a
+            // unit-runtime state intentionally dispatches through the sidecar,
+            // which would make these checks self-validating instead of checking
+            // the artifact that was actually loaded.
+            let serialized_root_futures = self.state_futures(entry.root_state).clone();
+            let serialized_start_futures = self.state_futures(start_state).clone();
+            if serialized_root_futures != expected_future
+                || !serialized_start_futures.contains(entry.terminal as usize)
+            {
+                return Err(
+                    "serialized virtual unit runtime has inconsistent future metadata".to_owned(),
+                );
+            }
+            let runtime = VirtualZeroMinUnitRepeatRuntime::new(
+                body,
+                min,
+                max,
+                entry.terminal,
+                self.num_terminals,
+                physical_state_count,
+                entry.root_state,
+            )
+            .ok_or_else(|| "serialized virtual unit runtime metadata is invalid".to_owned())?;
+            self.virtual_unit_repeat = Some(Arc::new(runtime));
+            self.invalidate_derived_caches();
+            return Ok(());
+        }
+
+        if metadata
+            .iter()
+            .any(|entry| entry.kind == VirtualTokenizerRuntimeKind::ResidualExpr)
+        {
+            if metadata
+                .iter()
+                .any(|entry| entry.kind != VirtualTokenizerRuntimeKind::ResidualExpr)
+            {
+                return Err(
+                    "serialized residual runtime cannot coexist with another virtual runtime family"
+                        .to_owned(),
+                );
+            }
+            let allocator = Arc::new(
+                VirtualStateAllocator::new(physical_state_count).ok_or_else(|| {
+                    "serialized residual runtime has no virtual state-id namespace".to_owned()
+                })?,
+            );
+            let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
+            let owners = Arc::new(
+                VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                    "serialized residual runtime has invalid state ownership metadata".to_owned()
+                })?,
+            );
+            let mut runtimes = Vec::with_capacity(metadata.len());
+            let mut legacy_exact_dead_roots = Vec::<(u32, TerminalID, BitSet)>::new();
+            for (runtime_index, entry) in metadata.into_iter().enumerate() {
+                let expression = expressions
+                    .get(entry.terminal as usize)
+                    .ok_or_else(|| "serialized residual terminal is out of range".to_owned())?;
+                let expected_support = super::compile::expr_u8set(expression);
+                if self.terminal_byte_support(entry.terminal) != Some(expected_support) {
+                    return Err(format!(
+                        "serialized residual terminal {} has inconsistent byte support",
+                        entry.terminal,
+                    ));
+                }
+                let runtime = Arc::new(
+                    VirtualResidualRuntime::new(
+                        expression,
+                        u32::try_from(runtime_index).map_err(|_| {
+                            "serialized residual runtime count exceeds u32".to_owned()
+                        })?,
+                        entry.terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        entry.root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )
+                    .ok_or_else(|| "serialized residual runtime metadata is invalid".to_owned())?,
+                );
+                let mut expected_future = BitSet::new(self.num_terminals as usize);
+                if runtime.root_has_future() {
+                    expected_future.set(entry.terminal as usize);
+                }
+                if self.state_futures(entry.root_state) != &expected_future {
+                    // Residual artifacts written before conservative root
+                    // futures were introduced stored the exact root liveness
+                    // bit. Accept only that one legacy mismatch: current
+                    // metadata is conservatively live, the serialized root is
+                    // dead, and an exact residual query proves the root really
+                    // has no positive continuation. Any missing bit for a live
+                    // root (or any other bit mismatch) remains corruption.
+                    let serialized_root_future = self.state_futures(entry.root_state).clone();
+                    let legacy_exact_dead = allow_legacy_exact_dead_residual_roots
+                        && runtime.root_has_future()
+                        && serialized_root_future.is_empty()
+                        && !self.state_futures(start_state).contains(entry.terminal as usize)
+                        && runtime.exact_has_future(entry.root_state)? == Some(false);
+                    if !legacy_exact_dead {
+                        return Err(format!(
+                            "serialized residual root {} has inconsistent future metadata",
+                            entry.root_state,
+                        ));
+                    }
+                    legacy_exact_dead_roots.push((
+                        entry.root_state,
+                        entry.terminal,
+                        expected_future.clone(),
+                    ));
+                }
+                if runtime.root_has_future()
+                    && !self.state_futures(start_state).contains(entry.terminal as usize)
+                    && !legacy_exact_dead_roots
+                        .iter()
+                        .any(|&(root, terminal, _)| {
+                            root == entry.root_state && terminal == entry.terminal
+                        })
+                {
+                    return Err(format!(
+                        "serialized residual terminal {} is missing from reset-state futures",
+                        entry.terminal,
+                    ));
+                }
+                runtimes.push(runtime);
+            }
+            if !legacy_exact_dead_roots.is_empty() {
+                let start_finalizers = self.state_finalizers(start_state).clone();
+                let mut start_futures = self.state_futures(start_state).clone();
+                for (root_state, terminal, expected_future) in legacy_exact_dead_roots {
+                    let root_finalizers = self.state_finalizers(root_state).clone();
+                    self.dfa.overwrite_state_metadata(
+                        root_state,
+                        root_finalizers,
+                        expected_future,
+                    );
+                    start_futures.set(terminal as usize);
+                }
+                self.dfa.overwrite_state_metadata(
+                    start_state,
+                    start_finalizers,
+                    start_futures,
+                );
+            }
+            self.virtual_residuals = runtimes;
+            self.invalidate_derived_caches();
+            return Ok(());
+        }
+
+        let allocator = Arc::new(
+            VirtualStateAllocator::new(physical_state_count)
+                .ok_or_else(|| "serialized virtual runtime has no state-id namespace".to_owned())?,
+        );
+        let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
+        let owners = Arc::new(
+            VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                "serialized virtual product runtime has invalid state ownership metadata".to_owned()
+            })?,
+        );
+        let mut runtimes = Vec::with_capacity(metadata.len());
+        for (runtime_index, entry) in metadata.iter().enumerate() {
+            if entry.kind != VirtualTokenizerRuntimeKind::RepeatProduct {
+                return Err("serialized virtual runtime has unknown mixed runtime kind".to_owned());
+            }
+            let expression = expressions
+                .get(entry.terminal as usize)
+                .ok_or_else(|| "serialized virtual product terminal is out of range".to_owned())?;
+            let descriptor = super::compile::virtual_binary_bounded_repeat_intersection_descriptor(expression)
+                .or_else(|| super::compile::virtual_large_bounded_repeat_descriptor(expression))
+                .ok_or_else(|| "serialized virtual product descriptor no longer matches terminal expression".to_owned())?;
+            if self.terminal_byte_support(entry.terminal) != Some(descriptor.byte_support) {
+                return Err(format!(
+                    "serialized virtual product terminal {} has inconsistent byte support",
+                    entry.terminal,
+                ));
+            }
+            let runtime = Arc::new(
+                VirtualBinaryRepeatIntersectionRuntime::new(
+                    descriptor,
+                    u32::try_from(runtime_index).map_err(|_| {
+                        "serialized virtual product runtime count exceeds u32".to_owned()
+                    })?,
+                    entry.terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    entry.root_state,
+                    Arc::clone(&allocator),
+                    Arc::clone(&owners),
+                )
+                .ok_or_else(|| "serialized virtual product runtime metadata is invalid".to_owned())?,
+            );
+            let expected_future = {
+                let mut bits = BitSet::new(self.num_terminals as usize);
+                if runtime.root_has_future() {
+                    bits.set(entry.terminal as usize);
+                }
+                bits
+            };
+            if self.state_futures(entry.root_state) != &expected_future {
+                return Err(format!(
+                    "serialized virtual product root {} has inconsistent future metadata",
+                    entry.root_state,
+                ));
+            }
+            if runtime.root_has_future()
+                && !self.state_futures(start_state).contains(entry.terminal as usize)
+            {
+                return Err(format!(
+                    "serialized virtual product terminal {} is missing from reset-state futures",
+                    entry.terminal,
+                ));
+            }
+            runtimes.push(runtime);
+        }
+        self.virtual_repeat_intersections = runtimes;
+        self.invalidate_derived_caches();
+        Ok(())
+    }
+
+    pub(super) fn install_virtual_unit_repeat(
+        &mut self,
+        body: U8Set,
+        min: usize,
+        max: usize,
+    ) -> Option<()> {
+        if !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || self.num_terminals != 1
+            || self.num_states() != 1
+            || self.dfa.has_epsilon_transitions()
+            || self.dfa.states()[0].transitions.iter().next().is_some()
+        {
+            return None;
+        }
+        let runtime = VirtualZeroMinUnitRepeatRuntime::new(body, min, max, 0, 1, 1, 0)?;
+        self.dfa.ensure_group_capacity(1);
+        self.dfa.set_group_u8set(0, body);
+        let mut futures = BitSet::new(1);
+        futures.set(0);
+        self.dfa
+            .overwrite_state_metadata(0, BitSet::new(1), futures);
+        self.virtual_unit_repeat = Some(Arc::new(runtime));
+        self.invalidate_derived_caches();
+        Some(())
+    }
+
+    pub(super) fn install_virtual_zero_min_unit_repeat(
+        &mut self,
+        body: U8Set,
+        max: usize,
+    ) -> Option<()> {
+        self.install_virtual_unit_repeat(body, 0, max)
+    }
+
+    /// Add one exact arithmetic repeat as an NFA component beside the already
+    /// materialized physical lexer components. The caller must have drained
+    /// ordinary nullable terminals first: adding physical states afterward
+    /// would collide with the arithmetic state interval which begins at the
+    /// final physical state count recorded here.
+    #[doc(hidden)]
+    pub fn install_virtual_unit_repeat_component(
+        &mut self,
+        body: U8Set,
+        min: usize,
+        max: usize,
+        terminal: TerminalID,
+    ) -> Option<()> {
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || terminal >= self.num_terminals
+            || body.is_empty()
+            || max == 0
+            || min > max
+        {
+            return None;
+        }
+        self.invalidate_derived_caches();
+        self.dfa.ensure_group_capacity(self.num_terminals as usize);
+        self.dfa.set_group_u8set(terminal, body);
+        let root_state = self.dfa.add_state();
+        let physical_state_count = self.dfa.num_states() as u32;
+
+        let mut root_futures = BitSet::new(self.num_terminals as usize);
+        root_futures.set(terminal as usize);
+        self.dfa.overwrite_state_metadata(
+            root_state,
+            BitSet::new(self.num_terminals as usize),
+            root_futures,
+        );
+        self.dfa.add_epsilon_transition(self.start_state(), root_state);
+
+        // `recompute_possible_futures` cannot see the arithmetic byte edges.
+        // Propagate the new component's future bit to the reset state by hand;
+        // the epsilon closure exposes the proxy root everywhere else.
+        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
+        start_futures.set(terminal as usize);
+        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
+        self.dfa.overwrite_state_metadata(
+            self.start_state(),
+            start_finalizers,
+            start_futures,
+        );
+
+        self.virtual_unit_repeat = Some(Arc::new(VirtualZeroMinUnitRepeatRuntime::new(
+            body,
+            min,
+            max,
+            terminal,
+            self.num_terminals,
+            physical_state_count,
+            root_state,
+        )?));
+        self.invalidate_derived_caches();
+        Some(())
+    }
+
+    #[doc(hidden)]
+    pub fn install_virtual_zero_min_unit_repeat_component(
+        &mut self,
+        body: U8Set,
+        max: usize,
+        terminal: TerminalID,
+    ) -> Option<()> {
+        self.install_virtual_unit_repeat_component(body, 0, max, terminal)
+    }
+
+    /// Add one exact lazy binary bounded-repeat intersection beside the
+    /// already-materialized lexer components. The product-state IDs are stable
+    /// runtime handles; the two repetition bounds never size an allocation.
+    #[doc(hidden)]
+    pub fn install_virtual_binary_repeat_intersection_component(
+        &mut self,
+        descriptor: VirtualBinaryRepeatIntersectionDescriptor,
+        terminal: TerminalID,
+    ) -> Option<()> {
+        self.install_virtual_binary_repeat_intersection_components(vec![(descriptor, terminal)])
+    }
+
+    /// Add multiple independent exact lazy bounded-repeat components. All
+    /// physical proxy roots are installed first; their lazily reached product
+    /// residuals then draw globally unique handles from one shared allocator
+    /// below the dynamic-NFA high-bit tag.
+    #[doc(hidden)]
+    pub fn install_virtual_binary_repeat_intersection_components(
+        &mut self,
+        components: Vec<(VirtualBinaryRepeatIntersectionDescriptor, TerminalID)>,
+    ) -> Option<()> {
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || components.is_empty()
+            || components.iter().any(|(descriptor, terminal)| {
+                *terminal >= self.num_terminals || descriptor.byte_support.is_empty()
+            })
+        {
+            return None;
+        }
+        let mut seen_terminals = BTreeSet::new();
+        if components
+            .iter()
+            .any(|(_, terminal)| !seen_terminals.insert(*terminal))
+        {
+            return None;
+        }
+        // Prove every runtime can be constructed before mutating the physical
+        // tokenizer. This keeps the virtual selection transaction-like: a
+        // rejected descriptor cannot leave proxy roots behind before the
+        // caller chooses another exact path.
+        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
+        let physical_state_count = existing_physical_state_count
+            .checked_add(u32::try_from(components.len()).ok()?)?;
+        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let roots = (0..components.len())
+            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
+            .collect::<Option<Vec<_>>>()?;
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
+        let mut pending = Vec::with_capacity(components.len());
+        for (index, (descriptor, terminal)) in components.into_iter().enumerate() {
+            let root_state = roots[index];
+            let byte_support = descriptor.byte_support;
+            let runtime = Arc::new(VirtualBinaryRepeatIntersectionRuntime::new(
+                descriptor,
+                u32::try_from(index).ok()?,
+                terminal,
+                self.num_terminals,
+                physical_state_count,
+                root_state,
+                Arc::clone(&allocator),
+                Arc::clone(&owners),
+            )?);
+            pending.push((terminal, root_state, byte_support, runtime));
+        }
+
+        self.invalidate_derived_caches();
+        self.dfa.ensure_group_capacity(self.num_terminals as usize);
+        for &(terminal, expected_root, byte_support, _) in &pending {
+            self.dfa.set_group_u8set(terminal, byte_support);
+            let root_state = self.dfa.add_state();
+            debug_assert_eq!(root_state, expected_root);
+            self.dfa.add_epsilon_transition(self.start_state(), root_state);
+        }
+
+        let mut runtimes = Vec::with_capacity(pending.len());
+        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
+        for (terminal, root_state, _, runtime) in pending {
+            let mut root_futures = BitSet::new(self.num_terminals as usize);
+            if runtime.root_has_future() {
+                root_futures.set(terminal as usize);
+                start_futures.set(terminal as usize);
+            }
+            self.dfa.overwrite_state_metadata(
+                root_state,
+                BitSet::new(self.num_terminals as usize),
+                root_futures,
+            );
+            runtimes.push(runtime);
+        }
+        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
+        self.dfa.overwrite_state_metadata(
+            self.start_state(),
+            start_finalizers,
+            start_futures,
+        );
+        self.virtual_repeat_intersections = runtimes;
+        self.invalidate_derived_caches();
+        Some(())
+    }
+
+    /// Add general exact symbolic regex components beside the materialized
+    /// ordinary lexer. Every component shares one virtual-state allocator;
+    /// bounds inside `Expr::Repeat` never determine an allocation size.
+    #[doc(hidden)]
+    pub fn install_virtual_residual_components(
+        &mut self,
+        components: Vec<(Expr, TerminalID)>,
+    ) -> Option<()> {
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || components.is_empty()
+            || components
+                .iter()
+                .any(|(_, terminal)| *terminal >= self.num_terminals)
+        {
+            return None;
+        }
+        let mut seen_terminals = BTreeSet::new();
+        if components
+            .iter()
+            .any(|(_, terminal)| !seen_terminals.insert(*terminal))
+        {
+            return None;
+        }
+
+        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
+        let physical_state_count = existing_physical_state_count
+            .checked_add(u32::try_from(components.len()).ok()?)?;
+        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let roots = (0..components.len())
+            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
+            .collect::<Option<Vec<_>>>()?;
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
+        let mut pending = Vec::with_capacity(components.len());
+        for (index, (expression, terminal)) in components.into_iter().enumerate() {
+            let root_state = roots[index];
+            let byte_support = super::compile::expr_u8set(&expression);
+            let runtime = Arc::new(VirtualResidualRuntime::new(
+                &expression,
+                u32::try_from(index).ok()?,
+                terminal,
+                self.num_terminals,
+                physical_state_count,
+                root_state,
+                Arc::clone(&allocator),
+                Arc::clone(&owners),
+            )?);
+            pending.push((terminal, root_state, byte_support, runtime));
+        }
+
+        self.invalidate_derived_caches();
+        self.dfa.ensure_group_capacity(self.num_terminals as usize);
+        for &(terminal, expected_root, byte_support, _) in &pending {
+            self.dfa.set_group_u8set(terminal, byte_support);
+            let root_state = self.dfa.add_state();
+            debug_assert_eq!(root_state, expected_root);
+            self.dfa.add_epsilon_transition(self.start_state(), root_state);
+        }
+
+        let mut runtimes = Vec::with_capacity(pending.len());
+        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
+        for (terminal, root_state, _, runtime) in pending {
+            let mut root_futures = BitSet::new(self.num_terminals as usize);
+            if runtime.root_has_future() {
+                root_futures.set(terminal as usize);
+                start_futures.set(terminal as usize);
+            }
+            self.dfa.overwrite_state_metadata(
+                root_state,
+                BitSet::new(self.num_terminals as usize),
+                root_futures,
+            );
+            runtimes.push(runtime);
+        }
+        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
+        self.dfa.overwrite_state_metadata(
+            self.start_state(),
+            start_finalizers,
+            start_futures,
+        );
+        self.virtual_residuals = runtimes;
+        self.invalidate_derived_caches();
+        Some(())
+    }
+
+    #[doc(hidden)]
+    pub fn has_virtual_residual_runtime(&self) -> bool {
+        !self.virtual_residuals.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_residual_interned_state_count(&self) -> usize {
+        self.virtual_residuals
+            .iter()
+            .map(|runtime| runtime.interned_state_count())
+            .sum()
+    }
+
+    /// Exact liveness at a dynamic token boundary. Ordinary and specialized
+    /// tokenizer states already carry exact future metadata. General symbolic
+    /// residuals deliberately expose a conservative infallible future bitset,
+    /// so they are resolved through their bounded exact derivative search here.
+    /// Resource exhaustion is an error rather than a false dead/live answer.
+    #[doc(hidden)]
+    pub fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
+        if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
+            return runtime
+                .exact_has_future(state)?
+                .ok_or_else(|| "residual runtime owner index lost state ownership".to_owned());
+        }
+        Ok(!self.is_end(state))
+    }
+
+    #[doc(hidden)]
+    pub fn has_virtual_binary_repeat_intersection(&self) -> bool {
+        !self.virtual_repeat_intersections.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_binary_repeat_intersection_interned_state_count(&self) -> usize {
+        self.virtual_repeat_intersections
+            .iter()
+            .map(|runtime| runtime.interned_state_count())
+            .sum()
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_binary_repeat_intersection_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, VirtualBinaryRepeatIntersectionMaskProjection)> {
+        let (tokenizer, mut projections) =
+            self.virtual_binary_repeat_intersections_mask_tokenizer(horizon)?;
+        (projections.len() == 1).then(|| (tokenizer, projections.remove(0)))
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_binary_repeat_intersections_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, Vec<VirtualBinaryRepeatIntersectionMaskProjection>)> {
+        if self.virtual_repeat_intersections.is_empty() {
+            return None;
+        }
+        let mut dfa = self.materialized_dfa();
+        let mut projections = Vec::with_capacity(self.virtual_repeat_intersections.len());
+        for runtime in &self.virtual_repeat_intersections {
+            let (next_dfa, projection) =
+                runtime.build_mask_projection(horizon, dfa, self.num_terminals)?;
+            dfa = next_dfa;
+            projections.push(projection);
+        }
+        Some((Tokenizer::from_parts(dfa, self.num_terminals, None), projections))
+    }
+
+    /// Build the ordinary finite DFA used only while generating one model-token
+    /// mask for an arithmetic unit repeat. Commit retains this tokenizer's
+    /// exact virtual counter; callers reproject that counter at the beginning
+    /// of every mask operation.
+    #[doc(hidden)]
+    pub fn virtual_unit_repeat_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, VirtualZeroMinUnitRepeatMaskProjection)> {
+        let runtime = self.virtual_unit_repeat.as_deref()?;
+        let projection = VirtualZeroMinUnitRepeatMaskProjection::new(
+            runtime.min(),
+            runtime.max(),
+            horizon,
+            runtime.physical_state_count(),
+        )?;
+        let mut dfa = self.materialized_dfa();
+        let physical_state_count = runtime.physical_state_count();
+        debug_assert_eq!(dfa.num_states() as u32, physical_state_count);
+        let positive_state_count = projection.mask_state_count() - physical_state_count;
+        for offset in 0..positive_state_count {
+            let state = dfa.add_state();
+            debug_assert_eq!(state, physical_state_count + offset);
+        }
+        let first_positive = projection.first_positive_state()?;
+        for byte in runtime.body().iter() {
+            dfa.add_transition(runtime.root_state(), byte, first_positive);
+        }
+        for offset in 0..positive_state_count {
+            let state = physical_state_count + offset;
+            let exact_consumed = projection.full_consumed_for_exact_mask_state(state);
+            let self_looping = projection.deep_lower_state() == Some(state)
+                || projection.interior_state() == Some(state);
+            if self_looping {
+                for byte in runtime.body().iter() {
+                    dfa.add_transition(state, byte, state);
+                }
+            } else if let Some(consumed) = exact_consumed
+                && consumed < runtime.max() as u32
+            {
+                let next_full_state = physical_state_count.checked_add(consumed)?;
+                let target = projection.project(next_full_state)?;
+                for byte in runtime.body().iter() {
+                    dfa.add_transition(state, byte, target);
+                }
+            }
+
+            let mut finalizers = BitSet::new(self.num_terminals as usize);
+            let accepting = projection.interior_state() == Some(state)
+                || exact_consumed.is_some_and(|consumed| consumed >= runtime.min() as u32);
+            if accepting {
+                finalizers.set(runtime.terminal() as usize);
+            }
+            let mut futures = BitSet::new(self.num_terminals as usize);
+            let live = self_looping
+                || exact_consumed.is_some_and(|consumed| consumed < runtime.max() as u32);
+            if live {
+                futures.set(runtime.terminal() as usize);
+            }
+            dfa.overwrite_state_metadata(state, finalizers, futures);
+        }
+        Some((Tokenizer::from_parts(dfa, self.num_terminals, None), projection))
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_zero_min_unit_repeat_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, VirtualZeroMinUnitRepeatMaskProjection)> {
+        let runtime = self.virtual_unit_repeat.as_deref()?;
+        (runtime.min() == 0)
+            .then(|| self.virtual_unit_repeat_mask_tokenizer(horizon))
+            .flatten()
+    }
+
+    fn restore_virtual_unit_repeat_runtime(&mut self) -> Result<(), String> {
+        if self.virtual_unit_repeat.is_some() {
+            return Ok(());
+        }
+        let Some(expressions) = self.exprs.as_deref() else {
+            return Ok(());
+        };
+        let descriptors = expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, expression)| {
+                super::compile::virtual_unit_repeat_descriptor(expression)
+                    .map(|(body, min, max)| (terminal as TerminalID, body, min, max))
+            })
+            .collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+        // If more than one terminal is eligible for the general exact repeat
+        // product lane, a multi-component artifact deliberately represents all
+        // of them through the shared product-runtime allocator. Do not restore
+        // one arithmetic unit sidecar first and thereby steal its proxy root.
+        let product_descriptor_count = expressions
+            .iter()
+            .filter(|expression| {
+                super::compile::virtual_binary_bounded_repeat_intersection_descriptor(expression)
+                    .or_else(|| super::compile::virtual_large_bounded_repeat_descriptor(expression))
+                    .is_some()
+            })
+            .count();
+        if product_descriptor_count > 1 {
+            return Ok(());
+        }
+
+        let physical_state_count = self.num_states();
+        let mut restored = Vec::<(TerminalID, U8Set, usize, usize, u32)>::new();
+        for (terminal, body, min, max) in descriptors {
+            // The same one-byte repeat expression may deliberately have used
+            // the repeat-product runtime when a hybrid proxy left too little
+            // room below the reserved high state bit. Do not misidentify that
+            // proxy as an arithmetic-unit runtime during reconstruction; the
+            // repeat-product restoration pass below will recover it exactly.
+            if !super::compile::virtual_zero_min_unit_repeat_fits_state_ids(
+                max,
+                physical_state_count,
+            ) {
+                continue;
+            }
+            if physical_state_count == 1 && self.num_terminals == 1 && terminal == 0 {
+                restored.push((terminal, body, min, max, 0));
+                continue;
+            }
+            let expected_future = {
+                let mut bits = BitSet::new(self.num_terminals as usize);
+                bits.set(terminal as usize);
+                bits
+            };
+            let candidates = self
+                .epsilon_closure_states(&[self.start_state()])
+                .into_iter()
+                .filter(|&state| state != self.start_state())
+                .filter(|&state| !self.state_has_epsilon_transitions(state))
+                .filter(|&state| self.transitions_from(state).next().is_none())
+                .filter(|&state| self.state_finalizers(state).is_empty())
+                .filter(|&state| self.state_futures(state) == &expected_future)
+                .collect::<Vec<_>>();
+            if let [root] = candidates.as_slice() {
+                restored.push((terminal, body, min, max, *root));
+            }
+        }
+        let ([] | [_, _, ..]) = restored.as_slice() else {
+            let (terminal, body, min, max, root_state) = restored[0];
+            self.virtual_unit_repeat = Some(Arc::new(
+                VirtualZeroMinUnitRepeatRuntime::new(
+                    body,
+                    min,
+                    max,
+                    terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    root_state,
+                )
+                .ok_or_else(|| {
+                    "serialized virtual bounded-repeat tokenizer has an invalid physical proxy"
+                        .to_owned()
+                })?,
+            ));
+            self.invalidate_derived_caches();
+            return Ok(());
+        };
+        if restored.len() > 1 {
+            return Err(
+                "serialized tokenizer contains multiple virtual bounded-repeat proxy roots"
+                    .to_owned(),
+            );
+        }
+        // No proxy root means these expressions were materialized normally;
+        // there is no virtual runtime state to restore.
+        Ok(())
+    }
+
+    fn restore_virtual_repeat_intersection_runtime(&mut self) -> Result<(), String> {
+        if self.virtual_unit_repeat.is_some() || !self.virtual_repeat_intersections.is_empty() {
+            return Ok(());
+        }
+        let Some(expressions) = self.exprs.as_deref() else {
+            return Ok(());
+        };
+        let descriptors = expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, expression)| {
+                super::compile::virtual_binary_bounded_repeat_intersection_descriptor(expression)
+                    .or_else(|| super::compile::virtual_large_bounded_repeat_descriptor(expression))
+                    .map(|descriptor| (terminal as TerminalID, descriptor))
+            })
+            .collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+
+        let physical_state_count = self.num_states();
+        let mut restored = Vec::<(
+            TerminalID,
+            VirtualBinaryRepeatIntersectionDescriptor,
+            u32,
+        )>::new();
+        for (terminal, descriptor) in descriptors {
+            let expected_future = {
+                let mut bits = BitSet::new(self.num_terminals as usize);
+                bits.set(terminal as usize);
+                bits
+            };
+            let candidates = self
+                .epsilon_closure_states(&[self.start_state()])
+                .into_iter()
+                .filter(|&state| state != self.start_state())
+                .filter(|&state| !self.state_has_epsilon_transitions(state))
+                .filter(|&state| self.transitions_from(state).next().is_none())
+                .filter(|&state| self.state_finalizers(state).is_empty())
+                .filter(|&state| self.state_futures(state) == &expected_future)
+                .collect::<Vec<_>>();
+            if let [root] = candidates.as_slice() {
+                restored.push((terminal, descriptor, *root));
+            }
+        }
+        if restored.is_empty() {
+            return Ok(());
+        }
+        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count).ok_or_else(|| {
+            "serialized virtual repeat-intersection tokenizer has no virtual state-id space"
+                .to_owned()
+        })?);
+        let mut seen_roots = BTreeSet::new();
+        for &(_, _, root_state) in &restored {
+            if !seen_roots.insert(root_state) {
+                return Err(
+                    "serialized tokenizer maps multiple virtual repeat components to one proxy root"
+                        .to_owned(),
+                );
+            }
+        }
+        let roots = restored.iter().map(|(_, _, root)| *root).collect::<Vec<_>>();
+        let owners = Arc::new(
+            VirtualRuntimeStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                "serialized virtual repeat-intersection tokenizer has invalid state ownership"
+                    .to_owned()
+            })?,
+        );
+        let mut runtimes = Vec::with_capacity(restored.len());
+        for (runtime_index, (terminal, descriptor, root_state)) in restored.into_iter().enumerate() {
+            runtimes.push(Arc::new(
+                VirtualBinaryRepeatIntersectionRuntime::new(
+                    descriptor,
+                    u32::try_from(runtime_index).map_err(|_| {
+                        "serialized virtual repeat-intersection runtime count exceeds u32"
+                            .to_owned()
+                    })?,
+                    terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    root_state,
+                    Arc::clone(&allocator),
+                    Arc::clone(&owners),
+                )
+                .ok_or_else(|| {
+                    "serialized virtual repeat-intersection tokenizer has an invalid physical proxy"
+                        .to_owned()
+                })?,
+            ));
+        }
+        self.virtual_repeat_intersections = runtimes;
+        self.invalidate_derived_caches();
         Ok(())
     }
 
@@ -6663,6 +7845,32 @@ impl Tokenizer {
     }
 
     fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
+        if let Some(transitions) = self
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.transitions(state))
+        {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::VirtualProduct(transitions.into_iter()),
+            };
+        }
+        if let Some(transitions) = self
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.transitions(state))
+        {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::VirtualProduct(transitions.into_iter()),
+            };
+        }
+        if let Some(runtime) = self.virtual_unit_repeat.as_deref()
+            && let Some(target) = runtime.transition_target(state)
+        {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::Virtual {
+                    bytes: runtime.body().iter(),
+                    target,
+                },
+            };
+        }
         if let Some(packed) = &self.packed_runtime_transitions {
             if let Some((bytes, targets)) = packed.row(state) {
                 return TokenizerTransitionsIter {
@@ -7271,6 +8479,17 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
+            return runtime.step(state, byte);
+        }
+        if let Some(runtime) = self.virtual_repeat_runtime_for_state(state) {
+            return runtime.step(state, byte);
+        }
+        if let Some(runtime) = self.virtual_unit_repeat.as_deref()
+            && runtime.handles_state(state)
+        {
+            return runtime.step(state, byte);
+        }
         if let Some(packed) = &self.packed_runtime_transitions {
             if (state as usize) < packed.state_count() {
                 return packed.transition(state, byte);
@@ -7290,7 +8509,10 @@ impl Tokenizer {
         let has_any_compressed = !self.compressed_transition_segments.is_empty()
             || !self.packed_compressed_transition_segments.is_empty()
             || !self.packed_runtime_transition_segments.is_empty();
-        if !has_any_compressed
+        if self.virtual_unit_repeat.is_none()
+            && self.virtual_repeat_intersections.is_empty()
+            && self.virtual_residuals.is_empty()
+            && !has_any_compressed
             && self.packed_runtime_metadata.is_none()
             && self.packed_runtime_metadata_segments.is_empty()
             && self.packed_runtime_transitions.is_none()
@@ -7355,6 +8577,25 @@ impl Tokenizer {
 
     #[inline]
     pub fn matched_terminals_slice(&self, state: u32) -> &[TerminalID] {
+        if let Some(finalizers) = self
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizer_list(state))
+        {
+            return finalizers;
+        }
+        if let Some(finalizers) = self
+            .virtual_repeat_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizer_list(state))
+        {
+            return finalizers;
+        }
+        if let Some(finalizers) = self
+            .virtual_unit_repeat
+            .as_deref()
+            .and_then(|runtime| runtime.finalizer_list(state))
+        {
+            return finalizers;
+        }
         if let Some(metadata) = self
             .packed_runtime_metadata
             .as_deref()
@@ -7431,10 +8672,11 @@ impl Tokenizer {
                     let Some(target) = self.step(state, byte) else {
                         continue;
                     };
-                    let closure = closures
-                        .get(target as usize)
-                        .expect("tokenizer transition target must have an epsilon closure");
-                    targets.extend(closure.iter().copied());
+                    if let Some(closure) = closures.get(target as usize) {
+                        targets.extend(closure.iter().copied());
+                    } else {
+                        targets.extend(self.epsilon_closure_states(&[target]));
+                    }
                 }
                 targets.sort_unstable();
                 targets.dedup();
@@ -8182,6 +9424,864 @@ mod tests {
         rec(alphabet, max_len, &mut Vec::new(), &mut visit);
     }
 
+    fn semantic_exec(tokenizer: &Tokenizer, input: &[u8]) -> (bool, Vec<(u32, usize)>) {
+        let result = tokenizer.execute_from_state_all_widths(input, tokenizer.initial_state());
+        let mut matches = result
+            .matches
+            .into_iter()
+            .map(|matched| (matched.id, matched.width))
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        matches.dedup();
+        (!result.end_state.is_empty(), matches)
+    }
+
+    #[test]
+    fn hybrid_virtual_unit_repeat_proxy_root_steps_exactly() {
+        let mut tokenizer = tokenizer_from_exprs(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Class(U8Set::empty()),
+        ]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        tokenizer
+            .install_virtual_zero_min_unit_repeat_component(
+                U8Set::single(b'a'),
+                1_000_000_000,
+                1,
+            )
+            .unwrap();
+        let root = tokenizer
+            .epsilon_closure_states(&[tokenizer.initial_state()])
+            .into_iter()
+            .find(|&state| {
+                state != tokenizer.initial_state()
+                    && tokenizer.possible_future_terminals(state).contains(1)
+            })
+            .expect("virtual repeat proxy root");
+        let target = tokenizer.get_transition(root, b'a');
+        assert_ne!(target, u32::MAX);
+        assert_eq!(tokenizer.matched_terminals_iter(target).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn lazy_binary_repeat_intersection_matches_materialized_small_oracle() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let left_body = Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]);
+        let right_body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]);
+        let left_max = 4usize;
+        let right_max = 3usize;
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(left_body.clone()),
+                min: 0,
+                max: Some(left_max),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(right_body.clone()),
+                min: 0,
+                max: Some(right_max),
+            }),
+        };
+
+        let mut ordinary = tokenizer_from_exprs(vec![expression]);
+        ordinary.isolate_start_state_and_drain_nullable_terminals();
+
+        let left_dfa = Arc::new(compile_terminal_expr_dfa(&left_body));
+        let right_dfa = Arc::new(compile_terminal_expr_dfa(&right_body));
+        let mut virtualized = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        virtualized.isolate_start_state_and_drain_nullable_terminals();
+        virtualized
+            .install_virtual_binary_repeat_intersection_component(
+                VirtualBinaryRepeatIntersectionDescriptor {
+                    byte_support: U8Set::from_bytes(b"abc"),
+                    left: VirtualBoundedRepeatSpec {
+                        base_dfa: left_dfa,
+                        min: 0,
+                        max: left_max as u32,
+                    },
+                    right: VirtualBoundedRepeatSpec {
+                        base_dfa: right_dfa,
+                        min: 0,
+                        max: right_max as u32,
+                    },
+                },
+                0,
+            )
+            .unwrap();
+
+        enumerate_bytes(b"abcx", 8, |input| {
+            let (_, ordinary_matches) = semantic_exec(&ordinary, input);
+            let (_, virtual_matches) = semantic_exec(&virtualized, input);
+            assert_eq!(
+                virtual_matches, ordinary_matches,
+                "lazy repeat product changed exact matches on {input:?}",
+            );
+        });
+        assert!(virtualized.virtual_binary_repeat_intersection_interned_state_count() < 128);
+    }
+
+    #[test]
+    fn repeat_product_state_owner_index_dispatches_multiple_components_directly() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let descriptor = |byte| {
+            let base = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(vec![byte])));
+            VirtualBinaryRepeatIntersectionDescriptor {
+                byte_support: U8Set::single(byte),
+                left: VirtualBoundedRepeatSpec {
+                    base_dfa: Arc::clone(&base),
+                    min: 0,
+                    max: 32,
+                },
+                right: VirtualBoundedRepeatSpec {
+                    base_dfa: base,
+                    min: 0,
+                    max: 32,
+                },
+            }
+        };
+
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 2, None);
+        tokenizer
+            .install_virtual_binary_repeat_intersection_components(vec![
+                (descriptor(b'a'), 0),
+                (descriptor(b'b'), 1),
+            ])
+            .expect("two repeat-product components must install");
+
+        let a_state = tokenizer.step(1, b'a').expect("first product must advance");
+        let b_state = tokenizer.step(2, b'b').expect("second product must advance");
+        assert_ne!(a_state, b_state);
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(a_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(b_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(1),
+        );
+
+        let aa_state = tokenizer
+            .step(a_state, b'a')
+            .expect("interleaved first product must remain owned");
+        let bb_state = tokenizer
+            .step(b_state, b'b')
+            .expect("interleaved second product must remain owned");
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(aa_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_repeat_runtime_for_state(bb_state)
+                .map(VirtualBinaryRepeatIntersectionRuntime::terminal),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn lazy_binary_repeat_body_product_budget_fails_before_proxy_install() {
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        // 257^2 exceeds the exact body-product analysis budget. The installer
+        // must reject this before appending any proxy root to the physical DFA.
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::from_bytes(b"a"),
+            left: VirtualBoundedRepeatSpec {
+                base_dfa: Arc::new(DFA::new(257)),
+                min: 0,
+                max: 10_000,
+            },
+            right: VirtualBoundedRepeatSpec {
+                base_dfa: Arc::new(DFA::new(257)),
+                min: 0,
+                max: 10_000,
+            },
+        };
+        let mut tokenizer = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        let before_states = tokenizer.num_states();
+        assert!(
+            tokenizer
+                .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+                .is_none(),
+        );
+        assert_eq!(tokenizer.num_states(), before_states);
+        assert!(!tokenizer.has_virtual_binary_repeat_intersection());
+    }
+
+    #[test]
+    fn nonzero_min_repeat_product_rejects_unsynchronized_manual_descriptor() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let left = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(b"a".to_vec())));
+        let right = Arc::new(compile_terminal_expr_dfa(&Expr::U8Seq(b"aa".to_vec())));
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::single(b'a'),
+            left: VirtualBoundedRepeatSpec {
+                base_dfa: left,
+                min: 4,
+                max: 4,
+            },
+            right: VirtualBoundedRepeatSpec {
+                base_dfa: right,
+                min: 1,
+                max: 1,
+            },
+        };
+        let mut tokenizer = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        let before_states = tokenizer.num_states();
+        assert!(
+            tokenizer
+                .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+                .is_none()
+        );
+        assert_eq!(tokenizer.num_states(), before_states);
+        assert!(!tokenizer.has_virtual_binary_repeat_intersection());
+    }
+
+    #[test]
+    fn nonzero_min_repeat_product_rejects_empty_body_language() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let empty_body = Expr::Seq(vec![
+            Expr::U8Class(U8Set::empty()),
+            Expr::U8Seq(b"a".to_vec()),
+        ]);
+        let base = Arc::new(compile_terminal_expr_dfa(&empty_body));
+        assert!(!base.possible_future_group_ids(0).contains(0));
+        let spec = VirtualBoundedRepeatSpec {
+            base_dfa: Arc::clone(&base),
+            min: 1,
+            max: 10_000,
+        };
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::single(b'a'),
+            left: spec.clone(),
+            right: spec,
+        };
+        let mut tokenizer = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        let before_states = tokenizer.num_states();
+        assert!(
+            tokenizer
+                .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+                .is_none()
+        );
+        assert_eq!(tokenizer.num_states(), before_states);
+        assert!(!tokenizer.has_virtual_binary_repeat_intersection());
+    }
+
+    #[test]
+    fn lazy_binary_repeat_mask_projection_is_exact_within_vocab_horizon() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        const HORIZON: usize = 3;
+        let left_body = Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]);
+        let right_body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]);
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::from_bytes(b"abc"),
+            left: VirtualBoundedRepeatSpec {
+                base_dfa: Arc::new(compile_terminal_expr_dfa(&left_body)),
+                min: 0,
+                max: 20,
+            },
+            right: VirtualBoundedRepeatSpec {
+                base_dfa: Arc::new(compile_terminal_expr_dfa(&right_body)),
+                min: 0,
+                max: 17,
+            },
+        };
+        let mut exact = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        exact.isolate_start_state_and_drain_nullable_terminals();
+        exact
+            .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+            .unwrap();
+        let (mask, projection) = exact
+            .virtual_binary_repeat_intersection_mask_tokenizer(HORIZON)
+            .unwrap();
+
+        let exact_root = exact
+            .epsilon_closure_states(&[exact.initial_state()])
+            .into_iter()
+            .find(|&state| state != exact.initial_state())
+            .unwrap();
+
+        // Reach a representative collection of exact interior residuals. The
+        // prefixes themselves may be longer than HORIZON; only each suffix
+        // comparison is horizon-bounded.
+        enumerate_bytes(b"abc", 8, |prefix| {
+            let mut exact_state = exact_root;
+            for &byte in prefix {
+                let next = exact.get_transition(exact_state, byte);
+                if next == u32::MAX {
+                    return;
+                }
+                exact_state = next;
+            }
+            let mask_state = projection
+                .project(exact_state)
+                .expect("every exact lazy residual must have a static mask state");
+            assert_eq!(
+                exact.matched_terminal_bitset(exact_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ after prefix {prefix:?}",
+            );
+
+            enumerate_bytes(b"abcx", HORIZON, |suffix| {
+                let mut full = exact_state;
+                let mut projected = mask_state;
+                for (offset, &byte) in suffix.iter().enumerate() {
+                    let full_next = exact.get_transition(full, byte);
+                    let projected_next = mask.get_transition(projected, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        projected_next == u32::MAX,
+                        "liveness differs after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        exact.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(projected_next),
+                        "finalizers differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    assert_eq!(
+                        exact.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(projected_next),
+                        "futures differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    full = full_next;
+                    projected = projected_next;
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn synchronized_nonzero_min_repeat_projection_matches_materialized_oracle() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        const HORIZON: usize = 3;
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]);
+        let expression = Expr::Repeat {
+            expr: Box::new(body.clone()),
+            min: 6,
+            max: Some(9),
+        };
+        let mut ordinary = tokenizer_from_exprs(vec![expression]);
+        ordinary.isolate_start_state_and_drain_nullable_terminals();
+
+        let base = Arc::new(compile_terminal_expr_dfa(&body));
+        let spec = VirtualBoundedRepeatSpec {
+            base_dfa: base,
+            min: 6,
+            max: 9,
+        };
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::from_bytes(b"abc"),
+            left: spec.clone(),
+            right: spec,
+        };
+        let mut exact = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        exact.isolate_start_state_and_drain_nullable_terminals();
+        exact
+            .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+            .unwrap();
+        let (mask, projection) = exact
+            .virtual_binary_repeat_intersection_mask_tokenizer(HORIZON)
+            .unwrap();
+
+        enumerate_bytes(b"abcx", 10, |input| {
+            let (_, ordinary_matches) = semantic_exec(&ordinary, input);
+            let (_, exact_matches) = semantic_exec(&exact, input);
+            assert_eq!(
+                exact_matches, ordinary_matches,
+                "nonzero-min lazy repeat changed exact matches on {input:?}",
+            );
+        });
+
+        let exact_root = exact
+            .epsilon_closure_states(&[exact.initial_state()])
+            .into_iter()
+            .find(|&state| state != exact.initial_state())
+            .unwrap();
+        enumerate_bytes(b"abc", 8, |prefix| {
+            let mut exact_state = exact_root;
+            for &byte in prefix {
+                let next = exact.get_transition(exact_state, byte);
+                if next == u32::MAX {
+                    return;
+                }
+                exact_state = next;
+            }
+            let mask_state = projection
+                .project(exact_state)
+                .expect("every synchronized exact residual must have a finite projection");
+            assert_eq!(
+                exact.matched_terminal_bitset(exact_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ after prefix {prefix:?}",
+            );
+            assert_eq!(
+                exact.possible_future_terminals(exact_state),
+                mask.possible_future_terminals(mask_state),
+                "source futures differ after prefix {prefix:?}",
+            );
+
+            enumerate_bytes(b"abcx", HORIZON, |suffix| {
+                let mut full = exact_state;
+                let mut projected = mask_state;
+                for (offset, &byte) in suffix.iter().enumerate() {
+                    let full_next = exact.get_transition(full, byte);
+                    let projected_next = mask.get_transition(projected, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        projected_next == u32::MAX,
+                        "liveness differs after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        exact.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(projected_next),
+                        "finalizers differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    assert_eq!(
+                        exact.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(projected_next),
+                        "futures differ after prefix {prefix:?}, suffix {suffix:?} at {offset}",
+                    );
+                    full = full_next;
+                    projected = projected_next;
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn lazy_binary_repeat_mask_projection_declines_quadratic_horizon_before_allocation() {
+        use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+        use crate::automata::lexer::runtime_repeat_product::{
+            VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+        };
+
+        let body = Expr::U8Seq(b"a".to_vec());
+        let base = Arc::new(compile_terminal_expr_dfa(&body));
+        let descriptor = VirtualBinaryRepeatIntersectionDescriptor {
+            byte_support: U8Set::from_bytes(b"a"),
+            left: VirtualBoundedRepeatSpec {
+                base_dfa: Arc::clone(&base),
+                min: 0,
+                max: 1_000_000_000,
+            },
+            right: VirtualBoundedRepeatSpec {
+                base_dfa: base,
+                min: 0,
+                max: 900_000_000,
+            },
+        };
+        let mut exact = tokenizer_from_exprs(vec![Expr::U8Class(U8Set::empty())]);
+        exact.isolate_start_state_and_drain_nullable_terminals();
+        exact
+            .install_virtual_binary_repeat_intersection_component(descriptor, 0)
+            .unwrap();
+
+        assert!(
+            exact
+                .virtual_binary_repeat_intersection_mask_tokenizer(600)
+                .is_none(),
+            "a pathological finite-token horizon must decline the optional quotient instead of eagerly seeding its quadratic boundary grid",
+        );
+        assert!(
+            exact.virtual_binary_repeat_intersection_interned_state_count() <= 1,
+            "declining the quotient must not materialize exact residual states",
+        );
+    }
+
+    #[test]
+    fn virtual_unit_repeat_mask_projection_is_exact_for_every_bounded_word() {
+        use crate::automata::lexer::compile::build_virtual_zero_min_unit_repeat_tokenizer;
+
+        const FULL_MAX: usize = 20;
+        const HORIZON: usize = 3;
+        let expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+            min: 0,
+            max: Some(FULL_MAX),
+        };
+        let full = build_virtual_zero_min_unit_repeat_tokenizer(&[expression]).unwrap();
+        let (mask, projection) = full
+            .virtual_zero_min_unit_repeat_mask_tokenizer(HORIZON)
+            .unwrap();
+
+        assert_eq!(full.num_states(), 1, "the exact billion-style counter is not materialized");
+        assert_eq!(mask.num_states(), HORIZON as u32 + 3);
+
+        for full_state in 0..=FULL_MAX as u32 {
+            let mask_state = projection.project(full_state).unwrap();
+            assert_eq!(
+                full.matched_terminal_bitset(full_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ at exact state {full_state}",
+            );
+            assert_eq!(
+                full.possible_future_terminals(full_state),
+                mask.possible_future_terminals(mask_state),
+                "source futures differ at exact state {full_state}",
+            );
+
+            enumerate_bytes(b"ab", HORIZON, |input| {
+                let mut full_cursor = full_state;
+                let mut mask_cursor = mask_state;
+                for (offset, &byte) in input.iter().enumerate() {
+                    let full_next = full.get_transition(full_cursor, byte);
+                    let mask_next = mask.get_transition(mask_cursor, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        mask_next == u32::MAX,
+                        "liveness differs from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        full.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(mask_next),
+                        "finalizers differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    assert_eq!(
+                        full.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(mask_next),
+                        "futures differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    full_cursor = full_next;
+                    mask_cursor = mask_next;
+                }
+            });
+        }
+
+        let billion = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+            min: 0,
+            max: Some(1_000_000_000),
+        };
+        let billion = build_virtual_zero_min_unit_repeat_tokenizer(&[billion]).unwrap();
+        let (billion_mask, _) = billion
+            .virtual_zero_min_unit_repeat_mask_tokenizer(HORIZON)
+            .unwrap();
+        assert_eq!(billion.num_states(), 1);
+        assert_eq!(billion_mask.num_states(), HORIZON as u32 + 3);
+    }
+
+    #[test]
+    fn virtual_nonzero_min_unit_repeat_projection_matches_exact_counter() {
+        use crate::automata::lexer::compile::build_virtual_unit_repeat_tokenizer;
+
+        const FULL_MIN: usize = 8;
+        const FULL_MAX: usize = 20;
+        const HORIZON: usize = 3;
+        let expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::single(b'a'))),
+            min: FULL_MIN,
+            max: Some(FULL_MAX),
+        };
+        let full = build_virtual_unit_repeat_tokenizer(&[expression]).unwrap();
+        let (mask, projection) = full.virtual_unit_repeat_mask_tokenizer(HORIZON).unwrap();
+
+        assert_eq!(full.num_states(), 1, "the exact counter must stay arithmetic");
+        assert!(projection.deep_lower_state().is_some());
+        assert!(projection.interior_state().is_some());
+
+        for full_state in 0..=FULL_MAX as u32 {
+            let mask_state = projection.project(full_state).unwrap();
+            assert_eq!(
+                full.matched_terminal_bitset(full_state),
+                mask.matched_terminal_bitset(mask_state),
+                "source finalizers differ at exact state {full_state}",
+            );
+            assert_eq!(
+                full.possible_future_terminals(full_state),
+                mask.possible_future_terminals(mask_state),
+                "source futures differ at exact state {full_state}",
+            );
+
+            enumerate_bytes(b"ab", HORIZON, |input| {
+                let mut full_cursor = full_state;
+                let mut mask_cursor = mask_state;
+                for (offset, &byte) in input.iter().enumerate() {
+                    let full_next = full.get_transition(full_cursor, byte);
+                    let mask_next = mask.get_transition(mask_cursor, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        mask_next == u32::MAX,
+                        "liveness differs from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        full.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(mask_next),
+                        "finalizers differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    assert_eq!(
+                        full.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(mask_next),
+                        "futures differ from exact state {full_state} on {input:?} at {offset}",
+                    );
+                    full_cursor = full_next;
+                    mask_cursor = mask_next;
+                }
+            });
+        }
+
+        let counts = projection.multiplicities();
+        assert_eq!(counts.iter().sum::<usize>(), FULL_MAX + 1);
+        let unique = projection.unique_full_states();
+        for (mask_state, &multiplicity) in counts.iter().enumerate() {
+            assert_eq!(
+                unique[mask_state] != u32::MAX,
+                multiplicity == 1,
+                "unique-full-state metadata disagrees at mask state {mask_state}",
+            );
+        }
+    }
+
+    #[test]
+    fn exact_unit_runtime_restore_rejects_corrupt_serialized_futures() {
+        use crate::automata::lexer::compile::build_virtual_zero_min_unit_repeat_tokenizer;
+
+        let expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+            min: 0,
+            max: Some(10_000),
+        };
+        let original = build_virtual_zero_min_unit_repeat_tokenizer(&[expression.clone()])
+            .expect("standalone unit repeat should use the arithmetic runtime");
+        let metadata = original.virtual_runtime_metadata();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].kind, VirtualTokenizerRuntimeKind::UnitRepeat);
+
+        let mut loaded = serialized_roundtrip(&original);
+        // Simulate a decodable but inconsistent artifact. Exact restoration
+        // must validate this physical row before attaching the sidecar, rather
+        // than reading the reconstructed runtime's own future set.
+        loaded.dfa.overwrite_state_metadata(
+            loaded.start_state(),
+            BitSet::new(1),
+            BitSet::new(1),
+        );
+        let error = loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("inconsistent future metadata"),
+            "unexpected restoration error: {error}",
+        );
+        assert!(
+            loaded.virtual_unit_repeat.is_none(),
+            "failed exact restoration must not leave a reconstructed sidecar installed",
+        );
+    }
+
+    #[test]
+    fn residual_runtime_restore_migrates_legacy_exact_dead_root_futures() {
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: Some(10_000),
+                },
+                bytes(b"b"),
+            ])),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 0,
+                max: None,
+            }),
+        };
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("dead Boolean residual must install conservatively");
+        let metadata = original.virtual_runtime_metadata();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].kind, VirtualTokenizerRuntimeKind::ResidualExpr);
+        let root = metadata[0].root_state;
+        assert!(original.state_futures(root).contains(0));
+        assert_eq!(original.exact_dynamic_state_has_future(root).unwrap(), false);
+
+        let mut loaded = serialized_roundtrip(&original);
+        assert!(!loaded.has_packed_runtime_metadata());
+        // Pre-conservative artifacts stored the exact-dead root as future=false
+        // and consequently omitted that terminal from the reset-state future
+        // set as well.
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                true,
+            )
+            .expect("exact-dead legacy residual metadata must migrate");
+        assert!(loaded.has_virtual_residual_runtime());
+        assert!(loaded.state_futures(root).contains(0));
+        assert!(loaded.state_futures(start).contains(0));
+        assert_eq!(loaded.exact_dynamic_state_has_future(root).unwrap(), false);
+    }
+
+    #[test]
+    fn residual_runtime_restore_rejects_exact_dead_root_without_legacy_provenance() {
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: Some(10_000),
+                },
+                bytes(b"b"),
+            ])),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 0,
+                max: None,
+            }),
+        };
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("dead Boolean residual must install conservatively");
+        let metadata = original.virtual_runtime_metadata();
+        let root = metadata[0].root_state;
+
+        let mut loaded = serialized_roundtrip(&original);
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        let error = loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("inconsistent future metadata"),
+            "current-version exact-dead corruption must not be mistaken for legacy metadata: {error}",
+        );
+        assert!(loaded.virtual_residuals.is_empty());
+    }
+
+    #[test]
+    fn residual_runtime_restore_rejects_missing_future_for_live_root() {
+        let expression = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"aa")])),
+                min: 0,
+                max: Some(10_000),
+            },
+            bytes(b"z"),
+        ]);
+        let mut original = Tokenizer::from_parts(DFA::new(1), 1, None);
+        original
+            .install_virtual_residual_components(vec![(expression.clone(), 0)])
+            .expect("live residual must install");
+        let metadata = original.virtual_runtime_metadata();
+        let root = metadata[0].root_state;
+        assert_eq!(original.exact_dynamic_state_has_future(root).unwrap(), true);
+
+        let mut loaded = serialized_roundtrip(&original);
+        let root_finalizers = loaded.state_finalizers(root).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(root, root_finalizers, BitSet::new(1));
+        let start = loaded.start_state();
+        let start_finalizers = loaded.state_finalizers(start).clone();
+        loaded
+            .dfa
+            .overwrite_state_metadata(start, start_finalizers, BitSet::new(1));
+
+        let error = loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &metadata,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("inconsistent future metadata"),
+            "unexpected restoration error: {error}",
+        );
+        assert!(loaded.virtual_residuals.is_empty());
+    }
+
     #[test]
     fn grouped_summary_execution_matches_independent_scans() {
         let tokenizer = tokenizer_from_exprs(vec![
@@ -8313,6 +10413,87 @@ mod tests {
             };
             assert_eq!(normalize(product.matches), normalize(source.matches));
         });
+    }
+
+    #[test]
+    fn full_determinization_refuses_virtual_residual_state_space() {
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 1, None);
+        let expression = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"aa")])),
+                min: 0,
+                max: Some(1_000_000_000),
+            },
+            bytes(b"z"),
+        ]);
+        tokenizer
+            .install_virtual_residual_components(vec![(expression, 0)])
+            .expect("general residual component must install");
+        assert!(tokenizer.has_epsilon_transitions());
+        assert!(tokenizer.has_virtual_residual_runtime());
+        assert!(
+            tokenizer.try_full_determinization(128, 4_096).is_none(),
+            "physical subset construction must not discard virtual residual states",
+        );
+    }
+
+    #[test]
+    fn residual_state_owner_index_dispatches_multiple_components_directly() {
+        let repeated_suffix = |byte, suffix| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::Choice(vec![
+                        bytes(&[byte]),
+                        bytes(&[byte, byte]),
+                    ])),
+                    min: 0,
+                    max: Some(1_000_000_000),
+                },
+                bytes(&[suffix]),
+            ])
+        };
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 2, None);
+        tokenizer
+            .install_virtual_residual_components(vec![
+                (repeated_suffix(b'a', b'z'), 0),
+                (repeated_suffix(b'b', b'y'), 1),
+            ])
+            .expect("two general residual components must install");
+
+        let a_state = tokenizer.step(1, b'a').expect("first residual must advance");
+        let b_state = tokenizer.step(2, b'b').expect("second residual must advance");
+        assert_ne!(a_state, b_state);
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(a_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(b_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(1),
+        );
+
+        let aa_state = tokenizer
+            .step(a_state, b'a')
+            .expect("interleaved first residual must remain owned");
+        let bb_state = tokenizer
+            .step(b_state, b'b')
+            .expect("interleaved second residual must remain owned");
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(aa_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(bb_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(1),
+        );
     }
 
     use crate::automata::lexer::dfa::DFA;

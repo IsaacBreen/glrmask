@@ -4793,10 +4793,61 @@ impl Constraint {
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
+        if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
+            let max_token_len = self
+                .token_bytes
+                .values()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0);
+            if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_binary_repeat_intersections_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_repeat_intersection exact_states=lazy components={} mask_states={} horizon={}",
+                        projection.len(),
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab.set_virtual_repeat_intersections_mask_projection(
+                    mask_tokenizer,
+                    projection,
+                );
+            } else if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_unit_repeat full_states=arithmetic mask_states={} horizon={}",
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab
+                    .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
+            }
+        }
+        let has_virtual_residual_runtime = self.tokenizer.has_virtual_residual_runtime();
         let bounded_sets_started_at = profile.then(std::time::Instant::now);
-        let (bounded16, bounded64) = self
-            .tokenizer
-            .precompute_bounded_observation_safe_byte_sets();
+        let observation_tokenizer = dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        let (bounded16, bounded64) = if has_virtual_residual_runtime {
+            // General residual states are created lazily outside the physical
+            // DFA domain, and dynamic traversal deliberately does not consume
+            // physical observation certificates for this runtime family.
+            // Avoid computing tables that cannot be used.
+            (
+                Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
+            )
+        } else {
+            observation_tokenizer.precompute_bounded_observation_safe_byte_sets()
+        };
         let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
         let bounded_state_count = bounded_sets.state_count();
         let bounded_unique_set_count = bounded_sets.unique_set_count();
@@ -4804,16 +4855,17 @@ impl Constraint {
         let bounded_sets_ms = bounded_sets_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_started_at = profile.then(std::time::Instant::now);
-        let build_self_loop_projections = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty()
-                    || (value != "0"
-                        && !value.eq_ignore_ascii_case("false")
-                        && !value.eq_ignore_ascii_case("no")
-                        && !value.eq_ignore_ascii_case("off"))
-            })
-            .unwrap_or(true);
+        let build_self_loop_projections = !has_virtual_residual_runtime
+            && std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
+                .map(|value| {
+                    let value = value.trim();
+                    value.is_empty()
+                        || (value != "0"
+                            && !value.eq_ignore_ascii_case("false")
+                            && !value.eq_ignore_ascii_case("no")
+                            && !value.eq_ignore_ascii_case("off"))
+                })
+                .unwrap_or(true);
         let (self_loop_projections, projection_alias_vocab) = if build_self_loop_projections {
             self.build_dynamic_self_loop_projections(
                 &dynamic_mask_vocab,
@@ -4825,7 +4877,8 @@ impl Constraint {
         let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_count = self_loop_projections.len();
-        let projection_alias_h64 = if std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
+        let projection_alias_h64 = if !has_virtual_residual_runtime
+            && std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
         {
             self.build_dynamic_projection_alias_h64(&dynamic_mask_vocab, &self_loop_projections)
         } else {

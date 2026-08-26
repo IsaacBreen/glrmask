@@ -396,7 +396,7 @@ fn compile_dynamic_from_named(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     Ok(DynamicConstraint::from_alternatives(compiled))
 }
@@ -417,7 +417,7 @@ fn compile_dynamic_from_source(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     Ok(DynamicConstraint::from_alternatives(compiled))
 }
@@ -449,7 +449,7 @@ fn compile_dynamic_serialized_from_source_profiled(
             grammar,
             vocab,
             default_table_construction,
-        ));
+        )?);
     }
     let compile_ms = compile_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -862,8 +862,8 @@ impl Constraint {
     /// nested inside inline subgrammars use qualified names such as
     /// `outer::leaf`. Hidden non-vocabulary linker-control IDs are allocated
     /// automatically; callers never need to manufacture `@token(...)`
-    /// sentinels. Missing, duplicate, and unknown bindings are rejected before
-    /// compilation or linking.
+    /// sentinels. Missing bindings are retained as reusable late-binding slots;
+    /// duplicate and unknown supplied bindings are rejected before linking.
     pub(crate) fn from_glrm_grammar_with_subgrammars(
         glrm: &str,
         children: &[(&str, &Constraint)],
@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn glrm_external_subgrammar_api_rejects_invalid_bindings() {
+    fn glrm_external_subgrammar_api_preserves_missing_and_rejects_invalid_bindings() {
         let vocab = vocab(&["a"]);
         let child = Constraint::from_glrm_grammar(
             "start child; nt child ::= \"a\";",
@@ -1957,10 +1957,9 @@ mod tests {
         .unwrap();
         let source = "start document; extern grammar child; nt document ::= child;";
 
-        let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
-            .unwrap_err()
-            .to_string();
-        assert!(missing.contains("no compiled child"), "{missing}");
+        let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab).unwrap();
+        assert_eq!(missing.late_grammar_slots.len(), 1);
+        assert_eq!(missing.late_grammar_slots[0].name, "child");
 
         let duplicate = Constraint::from_glrm_grammar_with_subgrammars(
             source,
