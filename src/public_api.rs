@@ -1852,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn static_boundary_shards_match_global_oracle_across_multiple_internal_crossings() {
+    fn static_boundary_shards_are_authoritative_across_multiple_internal_crossings() {
         let vocab = Vocab::new(vec![
             (0, b"x".to_vec()),
             (1, b"y".to_vec()),
@@ -1888,40 +1888,43 @@ mod tests {
             "static composition must publish component-scoped B shards",
         );
         assert!(
-            overlay.segmented_boundary_parser.is_some(),
-            "migration build must retain the global B oracle until shard validation is complete",
+            overlay.segmented_boundary_parser.is_none(),
+            "partitioned static B must not retain a redundant global boundary parser",
         );
+        assert!(overlay.segmented_boundary_terminal_trie.is_none());
 
-        let mut global_oracle = bound.clone();
-        global_oracle
-            .static_dynamic_overlay
-            .as_mut()
-            .unwrap()
-            .segmented_boundary_shards
-            .clear();
         let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+        let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
+        assert!(loaded_overlay.segmented_boundary_parser.is_none());
+        assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
+        assert!(!loaded_overlay.segmented_boundary_shards.is_empty());
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "x" "y" "z""#),
+            &vocab,
+        )
+        .unwrap();
 
         for tokens in [&[5][..], &[0, 4][..], &[0, 1, 2][..]] {
             let mut sharded = bound.start();
-            let mut global = global_oracle.start();
             let mut restored = loaded.start();
+            let mut expected = reference.start();
             for &token in tokens {
                 assert_eq!(
                     sharded.mask(),
-                    global.mask(),
-                    "sharded/static-global B mismatch before {tokens:?} token {token}",
+                    expected.mask(),
+                    "partitioned static B mismatch before {tokens:?} token {token}",
                 );
                 assert_eq!(
                     restored.mask(),
-                    global.mask(),
-                    "v23 restored shards differ from global B before {tokens:?} token {token}",
+                    expected.mask(),
+                    "v24 restored static shards differ before {tokens:?} token {token}",
                 );
                 sharded.commit_token(token).unwrap();
-                global.commit_token(token).unwrap();
                 restored.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
             }
-            assert_eq!(sharded.is_accepting(), global.is_accepting(), "{tokens:?}");
-            assert_eq!(restored.is_accepting(), global.is_accepting(), "{tokens:?}");
+            assert_eq!(sharded.is_accepting(), expected.is_accepting(), "{tokens:?}");
+            assert_eq!(restored.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert!(sharded.is_accepting(), "{tokens:?}");
         }
     }

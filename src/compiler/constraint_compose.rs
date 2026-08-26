@@ -20293,6 +20293,12 @@ fn compose_constraints_owned_parent_impl(
             None,
         ),
     };
+    // A present partitioned-static work set is a complete composition-specific
+    // B representation, including the intentionally empty-shard case. Once it
+    // exists, building the legacy/global B is redundant: live masking and v24
+    // serialization use the component-owned shards. Keep global publication
+    // only for legacy/oracle paths where partitioned work is unavailable.
+    let partitioned_static_boundary_complete = static_boundary_shard_work.is_some();
 
     // Build the signed/resolved/hash-consed positive boundary parser as soon as
     // boundary repair has produced its terminal automaton and templates.  This
@@ -20306,6 +20312,7 @@ fn compose_constraints_owned_parent_impl(
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_positive = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
+        && !partitioned_static_boundary_complete
         && early_boundary_positive_requested
         && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
         && let Some(work) = boundary_work.take()
@@ -20465,6 +20472,7 @@ fn compose_constraints_owned_parent_impl(
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_publish = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
+        && !partitioned_static_boundary_complete
         && early_boundary_publish_requested
         && let Some(work) = boundary_work.take()
     {
@@ -20544,6 +20552,9 @@ fn compose_constraints_owned_parent_impl(
                 (sources, elapsed_ms)
             },
             || -> Result<Option<BoundaryRuntimeCandidate>, String> {
+                if partitioned_static_boundary_complete {
+                    return Ok(None);
+                }
                 if early_boundary_positive.is_some() || early_boundary_publish.is_some() {
                     return Ok(None);
                 }
@@ -20610,7 +20621,6 @@ fn compose_constraints_owned_parent_impl(
         let segment_prepare_ms = segment_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
         let (mut source_constraints, child_clone_ms) = child_clone_result;
         let boundary_candidate = boundary_positive_result?;
-        let partitioned_static_boundary_complete = static_boundary_shard_work.is_some();
         let static_shard_publish_started_at = Instant::now();
         let published_static_boundary_shards = static_boundary_shard_work
             .unwrap_or_default()
@@ -21046,6 +21056,8 @@ fn compose_constraints_owned_parent_impl(
             let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
                 "segmented component metadata must exist before static boundary shards",
             );
+            overlay.segmented_boundary_parser = None;
+            overlay.segmented_boundary_terminal_trie = None;
             install_published_static_boundary_shards(overlay, published_static_boundary_shards)?;
             if let Some(static_components) = static_boundary_components {
                 append_dynamic_direct_boundary_shards_for_unselected(overlay, static_components);
