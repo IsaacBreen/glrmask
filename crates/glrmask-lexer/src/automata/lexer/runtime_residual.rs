@@ -25,7 +25,7 @@ enum ResidualNode {
     Epsilon,
     Literal { bytes: Arc<[u8]>, offset: u32 },
     Class(U8Set),
-    Dfa { dfa: Arc<DFA>, state: u32 },
+    Dfa { dfa: Arc<DFA>, states: Box<[u32]> },
     Seq(Box<[ResidualId]>),
     Choice(Box<[ResidualId]>),
     Intersect(ResidualId, ResidualId),
@@ -102,10 +102,10 @@ impl ResidualArena {
             Expr::U8Seq(bytes) => self.literal(bytes),
             Expr::U8Class(bytes) => self.class(*bytes),
             Expr::Dfa(dfa) => {
-                if dfa.has_epsilon_transitions() || dfa.num_states() == 0 {
+                if dfa.num_states() == 0 {
                     return None;
                 }
-                self.dfa(Arc::clone(dfa), 0)
+                self.dfa(Arc::clone(dfa), &[0])
             }
             Expr::Intersect { expr, intersect } => {
                 let left = self.compile_expr(expr)?;
@@ -168,12 +168,24 @@ impl ResidualArena {
         }
     }
 
-    fn dfa(&mut self, dfa: Arc<DFA>, state: u32) -> Option<ResidualId> {
-        if state as usize >= dfa.num_states() {
+    fn dfa(&mut self, dfa: Arc<DFA>, roots: &[u32]) -> Option<ResidualId> {
+        if roots.iter().any(|&state| state as usize >= dfa.num_states()) {
             return Some(self.empty);
         }
-        let nullable = !dfa.finalizers(state).is_empty();
-        self.intern_raw(ResidualNode::Dfa { dfa, state }, nullable)
+        let mut states = dfa.epsilon_closure(roots);
+        states.sort_unstable();
+        states.dedup();
+        if states.is_empty() {
+            return Some(self.empty);
+        }
+        let nullable = states.iter().any(|&state| !dfa.finalizers(state).is_empty());
+        self.intern_raw(
+            ResidualNode::Dfa {
+                dfa,
+                states: states.into_vec().into_boxed_slice(),
+            },
+            nullable,
+        )
     }
 
     fn seq(&mut self, parts: Vec<ResidualId>) -> Option<ResidualId> {
@@ -331,10 +343,15 @@ impl ResidualArena {
             ResidualNode::Class(bytes) => {
                 Some(if bytes.contains(byte) { self.epsilon } else { self.empty })
             }
-            ResidualNode::Dfa { dfa, state } => match dfa.step(state, byte) {
-                Some(target) => self.dfa(dfa, target),
-                None => Some(self.empty),
-            },
+            ResidualNode::Dfa { dfa, states } => {
+                let mut targets = Vec::new();
+                for &state in states.iter() {
+                    if let Some(target) = dfa.step(state, byte) {
+                        targets.push(target);
+                    }
+                }
+                self.dfa(dfa, &targets)
+            }
             ResidualNode::Choice(parts) => {
                 let derivatives = parts
                     .iter()
@@ -385,9 +402,11 @@ impl ResidualArena {
         match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => Some(false),
             ResidualNode::Literal { .. } | ResidualNode::Class(_) => Some(true),
-            ResidualNode::Dfa { dfa, state } => {
-                Some(!dfa.possible_future_group_ids(state).is_empty())
-            }
+            ResidualNode::Dfa { dfa, states } => Some(
+                states
+                    .iter()
+                    .any(|&state| !dfa.possible_future_group_ids(state).is_empty()),
+            ),
             ResidualNode::Choice(parts) => {
                 let mut unknown = false;
                 for &part in parts.iter() {
@@ -452,12 +471,10 @@ impl ResidualArena {
                 U8Set::single(*bytes.get(offset as usize)?)
             }
             ResidualNode::Class(bytes) => bytes,
-            ResidualNode::Dfa { dfa, state } => {
+            ResidualNode::Dfa { dfa, states } => {
                 let mut bytes = U8Set::empty();
-                for (byte, &target) in dfa.states().get(state as usize)?.transitions.iter() {
-                    if !dfa.finalizers(target).is_empty()
-                        || !dfa.possible_future_group_ids(target).is_empty()
-                    {
+                for &state in states.iter() {
+                    for (byte, _) in dfa.states().get(state as usize)?.transitions.iter() {
                         bytes.insert(byte);
                     }
                 }
@@ -869,6 +886,28 @@ mod tests {
         assert!(accepts(&mut arena, root, b"aab"));
         assert!(!accepts(&mut arena, root, b"ab"));
         assert!(!accepts(&mut arena, root, b"c"));
+    }
+
+    #[test]
+    fn embedded_dfa_epsilon_closure_is_a_compositional_residual() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_epsilon_transition(2, 3);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(3, accepting, BitSet::new(1));
+        dfa.recompute_possible_futures();
+
+        let expr = Expr::Dfa(Arc::new(dfa));
+        let (mut arena, root) = ResidualArena::from_expr(&expr)
+            .expect("epsilon-bearing embedded DFA must stay in the general residual algebra");
+        assert!(!arena.is_nullable(root));
+        assert!(arena.has_future(root).unwrap());
+        assert!(accepts(&mut arena, root, b"a"));
+        assert!(!accepts(&mut arena, root, b""));
+        assert!(!accepts(&mut arena, root, b"aa"));
     }
 
     #[test]
