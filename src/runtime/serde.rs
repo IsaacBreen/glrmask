@@ -2702,6 +2702,7 @@ fn restore_segmented_runtime_v22(
         }
         components.push(crate::runtime::SegmentedParserComponent {
             constraint: std::sync::Arc::new(child),
+            boundary: None,
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             root_entry_terminals: component.root_entry_terminals,
@@ -2963,6 +2964,17 @@ fn restore_segmented_runtime_v23(
     let overlay = constraint
         .static_dynamic_overlay
         .get_or_insert_with(Default::default);
+    for component in &mut overlay.segmented_parser_components {
+        component.boundary = None;
+    }
+    for shard in &restored_shards {
+        if let Some(component) = overlay
+            .segmented_parser_components
+            .get_mut(shard.start_component as usize)
+        {
+            component.boundary = Some(shard.clone());
+        }
+    }
     overlay.segmented_boundary_shards = restored_shards;
     overlay.segmented_boundary_parser = global_static;
     overlay.segmented_boundary_terminal_trie = global_dynamic;

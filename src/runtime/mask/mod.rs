@@ -3285,11 +3285,21 @@ impl<'a> ConstraintState<'a> {
         overlay: &crate::runtime::StaticDynamicOverlayMetadata,
         buf: &mut [u32],
     ) -> bool {
-        if !overlay.segmented_boundary_shards.is_empty() {
+        if overlay
+            .segmented_parser_components
+            .iter()
+            .any(|component| component.boundary.is_some())
+        {
             let mut needs_direct_dynamic = false;
             let mut direct_candidates = vec![0u32; self.constraint.mask_len()];
             let mut direct_candidates_complete = true;
-            for shard in &overlay.segmented_boundary_shards {
+            for (component_index, component) in
+                overlay.segmented_parser_components.iter().enumerate()
+            {
+                let Some(shard) = component.boundary.as_ref() else {
+                    continue;
+                };
+                debug_assert_eq!(shard.start_component as usize, component_index);
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
@@ -3312,24 +3322,14 @@ impl<'a> ConstraintState<'a> {
                             continue;
                         }
                         needs_direct_dynamic = true;
-                        let trigger = overlay
-                            .segmented_parser_components
-                            .get(shard.start_component as usize)
-                            .map(|component| &component.constraint.boundary_trigger);
+                        let trigger = &component.constraint.boundary_trigger;
                         match trigger {
-                            Some(crate::runtime::BoundaryTrigger::Tokens(tokens)) => {
+                            crate::runtime::BoundaryTrigger::Tokens(tokens) => {
                                 for &token in tokens.iter() {
                                     set_original_mask_bit(&mut direct_candidates, token);
                                 }
                             }
-                            Some(crate::runtime::BoundaryTrigger::Exact(dwa)) => {
-                                let Some(component) = overlay
-                                    .segmented_parser_components
-                                    .get(shard.start_component as usize)
-                                else {
-                                    direct_candidates_complete = false;
-                                    continue;
-                                };
+                            crate::runtime::BoundaryTrigger::Exact(dwa) => {
                                 if !self.or_exact_component_trigger_candidates(
                                     component,
                                     shard,
@@ -3339,7 +3339,7 @@ impl<'a> ConstraintState<'a> {
                                     direct_candidates_complete = false;
                                 }
                             }
-                            Some(crate::runtime::BoundaryTrigger::None) | None => {
+                            crate::runtime::BoundaryTrigger::None => {
                                 // Required zero-build-cost conservative level.
                                 direct_candidates_complete = false;
                             }

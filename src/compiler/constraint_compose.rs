@@ -703,6 +703,7 @@ fn build_segmented_runtime_metadata(
         }
         segmented_components.push(crate::runtime::SegmentedParserComponent {
             constraint: source,
+            boundary: None,
             tokenizer_state_offset: tokenizer_state_offsets[component_index],
             terminal_offset,
             root_entry_terminals,
@@ -753,18 +754,27 @@ fn install_segmented_boundary_shards(
     boundary_tokens_by_start_component: Option<&[Vec<u32>]>,
 ) {
     overlay.segmented_boundary_shards.clear();
-    for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
-        let start_parser_states = segmented_boundary_start_parser_states(component);
+    for component in &mut overlay.segmented_parser_components {
+        component.boundary = None;
+    }
+    for component_index in 0..overlay.segmented_parser_components.len() {
+        let start_parser_states = segmented_boundary_start_parser_states(
+            &overlay.segmented_parser_components[component_index],
+        );
         let candidate_tokens = boundary_tokens_by_start_component
             .and_then(|rows| rows.get(component_index))
             .map(|tokens| Arc::<[u32]>::from(tokens.clone()));
-        overlay.segmented_boundary_shards.push(crate::runtime::SegmentedBoundaryShard {
+        let shard = crate::runtime::SegmentedBoundaryShard {
             start_component: component_index as u32,
             start_parser_states,
             accepts_empty_stack: component_index == 0,
             candidate_tokens,
             backend: backend.clone(),
-        });
+        };
+        overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
+        // Temporary wire-format compatibility: v23 still serializes shards as
+        // a parallel list. Live runtime dispatch uses the wrapper field above.
+        overlay.segmented_boundary_shards.push(shard);
     }
 }
 
@@ -773,6 +783,9 @@ fn install_published_static_boundary_shards(
     shards: Vec<PublishedStaticBoundaryShard>,
 ) -> Result<(), String> {
     overlay.segmented_boundary_shards.clear();
+    for component in &mut overlay.segmented_parser_components {
+        component.boundary = None;
+    }
     for shard in shards {
         let component_index = shard.start_component as usize;
         let component = overlay
@@ -784,13 +797,15 @@ fn install_published_static_boundary_shards(
                     shard.start_component,
                 )
             })?;
-        overlay.segmented_boundary_shards.push(crate::runtime::SegmentedBoundaryShard {
+        let runtime_shard = crate::runtime::SegmentedBoundaryShard {
             start_component: shard.start_component,
             start_parser_states: segmented_boundary_start_parser_states(component),
             accepts_empty_stack: component_index == 0,
             candidate_tokens: Some(shard.candidate_tokens),
             backend: crate::runtime::SegmentedBoundaryShardBackend::StaticParser(shard.boundary),
-        });
+        };
+        overlay.segmented_parser_components[component_index].boundary = Some(runtime_shard.clone());
+        overlay.segmented_boundary_shards.push(runtime_shard);
     }
     Ok(())
 }
@@ -799,16 +814,21 @@ fn install_dynamic_direct_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
 ) {
     overlay.segmented_boundary_shards.clear();
-    for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
-        overlay.segmented_boundary_shards.push(crate::runtime::SegmentedBoundaryShard {
+    for component in &mut overlay.segmented_parser_components {
+        component.boundary = None;
+    }
+    for component_index in 0..overlay.segmented_parser_components.len() {
+        let shard = crate::runtime::SegmentedBoundaryShard {
             start_component: component_index as u32,
-            start_parser_states: segmented_boundary_start_parser_states(component),
+            start_parser_states: segmented_boundary_start_parser_states(
+                &overlay.segmented_parser_components[component_index],
+            ),
             accepts_empty_stack: component_index == 0,
-            // No reusable trigger has been requested yet.  `None` is the
-            // zero-build-cost, maximally conservative trigger level.
             candidate_tokens: None,
             backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
-        });
+        };
+        overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
+        overlay.segmented_boundary_shards.push(shard);
     }
 }
 
@@ -816,17 +836,21 @@ fn append_dynamic_direct_boundary_shards_for_unselected(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     static_components: &BitSet,
 ) {
-    for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
+    for component_index in 0..overlay.segmented_parser_components.len() {
         if static_components.contains(component_index) {
             continue;
         }
-        overlay.segmented_boundary_shards.push(crate::runtime::SegmentedBoundaryShard {
+        let shard = crate::runtime::SegmentedBoundaryShard {
             start_component: component_index as u32,
-            start_parser_states: segmented_boundary_start_parser_states(component),
+            start_parser_states: segmented_boundary_start_parser_states(
+                &overlay.segmented_parser_components[component_index],
+            ),
             accepts_empty_stack: component_index == 0,
             candidate_tokens: None,
             backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
-        });
+        };
+        overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
+        overlay.segmented_boundary_shards.push(shard);
     }
     overlay
         .segmented_boundary_shards
@@ -21057,6 +21081,7 @@ fn compose_constraints_owned_parent_impl(
                 }
                 segmented_components.push(crate::runtime::SegmentedParserComponent {
                     constraint: Arc::new(source),
+                    boundary: None,
                     tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
                     terminal_offset,
                     root_entry_terminals,

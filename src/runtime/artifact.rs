@@ -4472,6 +4472,10 @@ pub(crate) enum SegmentedBoundaryShardBackend {
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedParserComponent {
     pub(crate) constraint: Arc<Constraint>,
+    /// Composition-specific crossing backend for model tokens that start in
+    /// this component. This lives on the wrapper, not on the reusable
+    /// underlying constraint.
+    pub(crate) boundary: Option<SegmentedBoundaryShard>,
     pub(crate) tokenizer_state_offset: u32,
     pub(crate) terminal_offset: u32,
     /// Global composed-terminal domain owned by this component.  When a
