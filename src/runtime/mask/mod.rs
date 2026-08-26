@@ -1047,7 +1047,7 @@ mod tests {
     use crate::automata::lexer::Lexer;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::{Constraint as Constraint, Vocab};
+    use crate::{Constraint as Constraint, Grammar, Vocab};
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
@@ -1128,6 +1128,75 @@ mod tests {
             "placeholder reached only at model-token end is handled by next-call control closure",
         );
         assert!(!exact_start_trigger_contains(&parent, 2));
+    }
+
+    #[test]
+    fn recursive_exact_commit_mask_fallback_ignores_outer_table_and_tokenizer() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"!".to_vec()),
+            (3, b"Xa!".to_vec()),
+            (4, b"a!".to_vec()),
+        ]);
+        let child = Constraint::compile(
+            Grammar::glrm("glrm 1; start child; nt child = \"a\";"),
+            &vocab,
+        )
+        .unwrap();
+        let parent = Constraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        let monolithic = Constraint::compile(
+            Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\" \"!\";"),
+            &vocab,
+        )
+        .unwrap();
+
+        let mut poisoned = Constraint::load(bound.save()).unwrap();
+        poisoned.recursive_parser_layout().unwrap().unwrap();
+        let root = poisoned
+            .static_dynamic_overlay
+            .as_ref()
+            .unwrap()
+            .segmented_parser_components[0]
+            .constraint
+            .clone();
+        poisoned.tokenizer = root.tokenizer.clone();
+        poisoned.tokenizer_fast_transitions = root.tokenizer_fast_transitions.clone();
+        poisoned.tokenizer_has_epsilon_transitions = root.tokenizer_has_epsilon_transitions;
+        poisoned.table.action.clear();
+        poisoned.table.goto.clear();
+        poisoned.table.advance.clear();
+        poisoned.table.unconditional_advance.clear();
+        poisoned.table.rules.clear();
+        poisoned.table.forwarded_shifts.clear();
+        poisoned.table.control_terminals.clear();
+        poisoned.table.skip_terminals.clear();
+        poisoned.table.guarded_shift_index.clear();
+        poisoned.table.direct_regular_wide_frontiers.clear();
+        poisoned.table.num_states = 0;
+        poisoned.table.num_terminals = 0;
+        poisoned.table.num_rules = 0;
+
+        let mut actual = poisoned.start();
+        let mut expected = monolithic.start();
+        for prefix_token in [None, Some(0), Some(1)] {
+            if let Some(token) = prefix_token {
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            let mut fallback = vec![0u32; poisoned.mask_len()];
+            actual.fill_recursive_mask_by_exact_commits(&mut fallback);
+            assert_eq!(fallback, expected.mask());
+        }
     }
 
     #[test]
@@ -3558,6 +3627,45 @@ impl<'a> ConstraintState<'a> {
         token_ids.dedup();
         for token_id in token_ids {
             probe(token_id, buf);
+        }
+    }
+
+    /// Correctness fallback for a recursive authoritative A/B state whose GSS
+    /// shape cannot be projected by the bounded segmented-mask evaluator.
+    /// Probe every consumable model token through the same scoped commit engine
+    /// used by the live runtime. This is intentionally rare/slow, but unlike
+    /// the historical unified-dynamic fallback it has no dependency on the
+    /// transitional outer composed tokenizer or GLR table.
+    fn fill_recursive_mask_by_exact_commits(&self, buf: &mut [u32]) {
+        buf.fill(0);
+        let mut buffers = CommitBuffers::default();
+        let mut token_ids = self
+            .constraint
+            .token_bytes_iter()
+            .map(|(token_id, _)| token_id)
+            .collect::<Vec<_>>();
+        token_ids.extend(
+            self.constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| {
+                    !self
+                        .constraint
+                        .is_late_grammar_placeholder_terminal(special.terminal_id)
+                })
+                .map(|special| special.token_id),
+        );
+        token_ids.sort_unstable();
+        token_ids.dedup();
+        for token_id in token_ids {
+            if crate::runtime::commit::token_admissible_from_state_exact(
+                self.constraint,
+                &self.state,
+                &mut buffers,
+                token_id,
+            ) {
+                set_original_mask_bit(buf, token_id);
+            }
         }
     }
 
@@ -6672,12 +6780,16 @@ impl<'a> ConstraintState<'a> {
                 self.clear_late_grammar_placeholder_mask(mask);
                 return;
             }
-            // Segmented projection is the common authoritative A/B path. For
-            // an exceptional GSS shape it cannot represent, retain exactness
-            // by evaluating the unified composed table dynamically. This is a
-            // fallback only: supported states continue to reuse every retained
-            // component backend independently.
-            self.fill_mask_dynamic(mask);
+            // Segmented projection is the common authoritative A/B path. A
+            // recursive exceptional GSS must stay in the same scoped provider
+            // coordinate: exact-commit real model tokens rather than escaping
+            // to the transitional outer parser/tokenizer. Historical
+            // materialized segmented runtimes retain their old fallback.
+            if self.constraint.uses_compact_segmented_parser_runtime() {
+                self.fill_recursive_mask_by_exact_commits(mask);
+            } else {
+                self.fill_mask_dynamic(mask);
+            }
             self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
