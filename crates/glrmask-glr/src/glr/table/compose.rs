@@ -1627,7 +1627,14 @@ mod tests {
     use std::collections::{BTreeSet, VecDeque};
 
     use super::*;
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::parser::{
+        ParserGSS, ScopedComponentActionProvider, ScopedParserGSS, ScopedParserState,
+        ScopedParserSymbol, ScopedSubgrammarLink, advance_control_closed_stacks,
+        advance_scoped_stacks_with_provider, close_control_stacks,
+        close_scoped_control_stacks_with_provider,
+    };
     use crate::grammar::ast::lower;
     use crate::grammar::glrm::from_glrm;
 
@@ -1919,6 +1926,113 @@ mod tests {
             }
         }
         rec(alphabet, max_len, &mut Vec::new(), &mut visit);
+    }
+
+    #[test]
+    fn scoped_provider_matches_explicit_control_trace_language_for_nullable_repeated_child() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "<" SUB ">" SUB "!";
+            "#,
+        );
+        let slot = terminal(&parent_analysis, "SUB");
+        let input = SubgrammarTableInput {
+            placeholder_terminal: slot,
+            additional_placeholder_terminals: &[],
+            table: &child,
+            ignore_terminal: None,
+            start_nullable: true,
+        };
+        let explicit =
+            compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
+                .unwrap();
+
+        let child_root = child_root_nonterminal_from_rules(&child.rules).unwrap();
+        let child_accept = accept_state(&child).unwrap();
+        let &(root_target, root_replace) = child.goto[0].get(&child_root).unwrap();
+        assert_eq!(root_target, child_accept);
+        let return_pop = if root_replace { 1 } else { 2 };
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop,
+            child_start_nullable: true,
+        }];
+        let provider = ScopedComponentActionProvider::new(&components, &links);
+
+        let visible = [
+            (
+                terminal(&parent_analysis, "<"),
+                ScopedParserSymbol::Terminal {
+                    component: 0,
+                    terminal: terminal(&parent_analysis, "<"),
+                },
+            ),
+            (
+                explicit.terminal_offsets[1] + terminal(&child_analysis, "a"),
+                ScopedParserSymbol::Terminal {
+                    component: 1,
+                    terminal: terminal(&child_analysis, "a"),
+                },
+            ),
+            (
+                terminal(&parent_analysis, ">"),
+                ScopedParserSymbol::Terminal {
+                    component: 0,
+                    terminal: terminal(&parent_analysis, ">"),
+                },
+            ),
+            (
+                terminal(&parent_analysis, "!"),
+                ScopedParserSymbol::Terminal {
+                    component: 0,
+                    terminal: terminal(&parent_analysis, "!"),
+                },
+            ),
+        ];
+
+        let alphabet = (0..visible.len() as u32).collect::<Vec<_>>();
+        enumerate_words(&alphabet, 5, |word| {
+            let mut explicit_stack = close_control_stacks(
+                &explicit.table,
+                &ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new()),
+            );
+            let mut scoped_stack = close_scoped_control_stacks_with_provider(
+                &provider,
+                &ScopedParserGSS::from_single_stack(
+                    vec![ScopedParserState::new(0, 0)],
+                    TerminalsDisallowed::new(),
+                ),
+            );
+            for &index in word {
+                let (global_terminal, scoped_symbol) = visible[index as usize];
+                explicit_stack =
+                    advance_control_closed_stacks(&explicit.table, &explicit_stack, global_terminal);
+                scoped_stack = advance_scoped_stacks_with_provider(
+                    &provider,
+                    scoped_stack,
+                    scoped_symbol,
+                );
+                scoped_stack = close_scoped_control_stacks_with_provider(&provider, &scoped_stack);
+            }
+            assert_eq!(
+                explicit_stack.is_empty(),
+                scoped_stack.is_empty(),
+                "explicit/scoped trace-language mismatch for alphabet indexes {word:?}",
+            );
+        });
     }
 
     #[test]
