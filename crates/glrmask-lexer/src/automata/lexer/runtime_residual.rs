@@ -402,6 +402,112 @@ impl ResidualArena {
         Some(target)
     }
 
+    fn sparse_step(
+        &mut self,
+        id: ResidualId,
+        byte: u8,
+        budget: &mut ResidualLivenessBudget,
+        cache: &mut FxHashMap<u64, ResidualId>,
+    ) -> Result<ResidualId, String> {
+        let key = (u64::from(id) << 8) | u64::from(byte);
+        if let Some(&target) = cache.get(&key) {
+            return Ok(target);
+        }
+        // Charge every actual derivative computation, including recursive
+        // child derivatives. This makes the transition budget a real bound on
+        // the temporary sparse cache/work rather than only on outer BFS edges.
+        budget.consume_transition()?;
+        let target = self.derive_uncached_sparse(id, byte, budget, cache)?;
+        cache.insert(key, target);
+        Ok(target)
+    }
+
+    /// Derivative used only by exact liveness reachability. Unlike `step`, it
+    /// must not populate the persistent dense 256-entry transition row for
+    /// every explored residual: a hard Boolean liveness proof can visit many
+    /// states that normal token traversal will never touch. A temporary sparse
+    /// cache keeps repeated sub-derivatives cheap without retaining
+    /// `O(256 * visited_states)` memory after the query completes.
+    fn derive_uncached_sparse(
+        &mut self,
+        id: ResidualId,
+        byte: u8,
+        budget: &mut ResidualLivenessBudget,
+        cache: &mut FxHashMap<u64, ResidualId>,
+    ) -> Result<ResidualId, String> {
+        let overflow = || "dynamic residual state-id overflow".to_owned();
+        match self.nodes[id as usize].clone() {
+            ResidualNode::Empty | ResidualNode::Epsilon => Ok(self.empty),
+            ResidualNode::SigmaStar => Ok(self.sigma_star),
+            ResidualNode::Literal { bytes, offset } => {
+                if bytes[offset as usize] != byte {
+                    Ok(self.empty)
+                } else {
+                    self.literal_at(bytes, offset + 1).ok_or_else(overflow)
+                }
+            }
+            ResidualNode::Class(bytes) => Ok(if bytes.contains(byte) {
+                self.epsilon
+            } else {
+                self.empty
+            }),
+            ResidualNode::Dfa { dfa, states } => {
+                let mut targets = Vec::new();
+                for &state in states.iter() {
+                    if let Some(target) = dfa.step(state, byte) {
+                        targets.push(target);
+                    }
+                }
+                self.dfa(dfa, &targets).ok_or_else(overflow)
+            }
+            ResidualNode::Choice(parts) => {
+                let mut derivatives = Vec::with_capacity(parts.len());
+                for &part in parts.iter() {
+                    derivatives.push(self.sparse_step(part, byte, budget, cache)?);
+                }
+                self.choice(derivatives).ok_or_else(overflow)
+            }
+            ResidualNode::Seq(parts) => {
+                let mut alternatives = Vec::new();
+                for index in 0..parts.len() {
+                    let head = parts[index];
+                    let derivative = self.sparse_step(head, byte, budget, cache)?;
+                    if derivative != self.empty {
+                        let mut sequence = Vec::with_capacity(parts.len() - index);
+                        sequence.push(derivative);
+                        sequence.extend_from_slice(&parts[index + 1..]);
+                        alternatives.push(self.seq(sequence).ok_or_else(overflow)?);
+                    }
+                    if !self.is_nullable(head) {
+                        break;
+                    }
+                }
+                self.choice(alternatives).ok_or_else(overflow)
+            }
+            ResidualNode::Intersect(left, right) => {
+                let left = self.sparse_step(left, byte, budget, cache)?;
+                let right = self.sparse_step(right, byte, budget, cache)?;
+                self.intersect(left, right).ok_or_else(overflow)
+            }
+            ResidualNode::Exclude(left, right) => {
+                let left = self.sparse_step(left, byte, budget, cache)?;
+                let right = self.sparse_step(right, byte, budget, cache)?;
+                self.exclude(left, right).ok_or_else(overflow)
+            }
+            ResidualNode::Repeat { body, min, max } => {
+                let derivative = self.sparse_step(body, byte, budget, cache)?;
+                if derivative == self.empty {
+                    return Ok(self.empty);
+                }
+                let next_max = max.map(|max| max - 1);
+                let tail = self
+                    .repeat(body, min.saturating_sub(1), next_max)
+                    .ok_or_else(overflow)?;
+                self.seq(vec![derivative, tail]).ok_or_else(overflow)
+            }
+        }
+    }
+
     fn derive_uncached(&mut self, id: ResidualId, byte: u8) -> Option<ResidualId> {
         match self.nodes[id as usize].clone() {
             ResidualNode::Empty | ResidualNode::Epsilon => Some(self.empty),
@@ -692,6 +798,7 @@ impl ResidualArena {
 
         let mut seen = FxHashSet::<ResidualId>::default();
         let mut queue = VecDeque::from([id]);
+        let mut sparse_transitions = FxHashMap::<u64, ResidualId>::default();
         seen.insert(id);
         budget.consume_state()?;
         while let Some(state) = queue.pop_front() {
@@ -699,10 +806,8 @@ impl ResidualArena {
                 .first_bytes(state)
                 .ok_or_else(|| "dynamic residual FIRST-set construction overflow".to_owned())?;
             for byte in first_bytes.iter() {
-                budget.consume_transition()?;
-                let target = self
-                    .step(state, byte)
-                    .ok_or_else(|| "dynamic residual state-id overflow".to_owned())?;
+                let target =
+                    self.sparse_step(state, byte, budget, &mut sparse_transitions)?;
                 if target == self.empty {
                     continue;
                 }
@@ -1154,6 +1259,43 @@ mod tests {
             .expect_err("a deliberately tiny resource ceiling must not become a false dead result");
         assert!(error.contains("budget"), "unexpected liveness error: {error}");
         assert!(arena.has_future_with_budget(root, 256, 512).unwrap());
+    }
+
+    #[test]
+    fn boolean_liveness_does_not_retain_dense_transition_rows() {
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(bytes(b"a")),
+                min: 2,
+                max: Some(4),
+            }),
+            intersect: Box::new(bytes(b"aa")),
+        };
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        assert!(arena.transitions.iter().all(Option::is_none));
+        assert!(arena.has_future(root).unwrap());
+        assert!(
+            arena.transitions.iter().all(Option::is_none),
+            "exact liveness must keep derivative caching query-local rather than retaining dense rows",
+        );
+
+        // Normal runtime stepping deliberately keeps the dense hot-path cache.
+        assert_ne!(arena.step(root, b'a').unwrap(), arena.empty);
+        assert!(arena.transitions[root as usize].is_some());
+    }
+
+    #[test]
+    fn boolean_liveness_budget_charges_recursive_sparse_derivatives() {
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"b"), bytes(b"c")])),
+            intersect: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"b")])),
+        };
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        let error = arena
+            .has_future_with_budget(root, 16, 1)
+            .expect_err("recursive sparse derivative work must consume the transition budget");
+        assert!(error.contains("transition budget"), "unexpected error: {error}");
+        assert!(arena.has_future_with_budget(root, 16, 32).unwrap());
     }
 
     #[test]
