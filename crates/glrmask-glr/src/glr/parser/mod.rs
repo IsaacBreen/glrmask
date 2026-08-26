@@ -16,7 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 mod profile;
 
@@ -4321,6 +4321,14 @@ fn scoped_push_local_states(
     gss
 }
 
+fn merge_scoped_into(dst: &mut ScopedParserGSS, branch: ScopedParserGSS) {
+    if dst.is_empty() {
+        *dst = branch;
+    } else if !branch.is_empty() {
+        *dst = dst.merge(&branch);
+    }
+}
+
 fn scoped_push_states(
     mut gss: ScopedParserGSS,
     states: &[ScopedParserState],
@@ -4383,14 +4391,14 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
                             for shift in shifts.iter().filter(|shift| shift.guards.is_empty()) {
                                 let base = isolated.clone().popn(shift.pop as isize);
                                 let branch = scoped_push_local_states(base, component, &shift.pushes);
-                                merge_into(&mut shifted, branch);
+                                merge_scoped_into(&mut shifted, branch);
                             }
                         }
                         _ => {
                             action.for_each_stack_shift(|pop, pushes| {
                                 let base = isolated.clone().popn(pop as isize);
                                 let branch = scoped_push_local_states(base, component, pushes);
-                                merge_into(&mut shifted, branch);
+                                merge_scoped_into(&mut shifted, branch);
                             });
                         }
                     }
@@ -4411,7 +4419,7 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
                             } else {
                                 base.push(target)
                             };
-                            merge_into(&mut next, branch);
+                            merge_scoped_into(&mut next, branch);
                         }
                     });
                 }
@@ -4419,7 +4427,7 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
                     for shift in shifts {
                         let base = isolated.clone().popn(shift.pop as isize);
                         let branch = scoped_push_states(base, &shift.pushes);
-                        merge_into(&mut shifted, branch);
+                        merge_scoped_into(&mut shifted, branch);
                     }
                 }
             }
