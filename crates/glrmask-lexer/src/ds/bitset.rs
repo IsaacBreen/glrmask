@@ -406,6 +406,28 @@ mod tests {
     }
 
     #[test]
+    fn prefix_domain_operations_treat_omitted_high_bits_as_false() {
+        let mut wide = BitSet::new(9);
+        wide.set(8);
+        let mut short = BitSet::new(6);
+        short.set(2);
+
+        wide.union_with_prefix(&short);
+        assert!(wide.contains(2));
+        assert!(wide.contains(8));
+
+        let mut wide_membership = BitSet::new(9);
+        wide_membership.set(2);
+        wide_membership.set(8);
+        assert!(short.is_subset_of_extended(&wide_membership));
+        assert!(!wide_membership.is_disjoint_prefix(&short));
+
+        let mut disjoint_short = BitSet::new(6);
+        disjoint_short.set(3);
+        assert!(wide_membership.is_disjoint_prefix(&disjoint_short));
+    }
+
+    #[test]
     fn union_intersection_with_accumulates_exact_intersection() {
         let mut accumulated = BitSet::new(130);
         accumulated.set(1);
