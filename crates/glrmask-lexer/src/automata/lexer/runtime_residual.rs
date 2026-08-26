@@ -584,16 +584,72 @@ struct ResidualRuntimeStore {
     residual_by_state: FxHashMap<u32, ResidualId>,
 }
 
+/// Shared O(1)-ish owner index for one residual-runtime family. Proxy roots
+/// are immutable physical states; lazily allocated virtual handles use a dense
+/// owner vector indexed by `state - physical_state_count`. State allocation is
+/// globally monotonic, so this grows only with residual states actually
+/// reached at runtime, never with any regex repeat bound.
+#[derive(Debug)]
+pub(super) struct VirtualResidualStateOwners {
+    physical_state_count: u32,
+    root_owners: FxHashMap<u32, u32>,
+    virtual_owners: Mutex<Vec<u32>>,
+}
+
+impl VirtualResidualStateOwners {
+    pub(super) fn new(physical_state_count: u32, roots: &[u32]) -> Option<Self> {
+        let mut root_owners = FxHashMap::default();
+        for (owner, &root) in roots.iter().enumerate() {
+            if root >= physical_state_count
+                || root_owners.insert(root, u32::try_from(owner).ok()?).is_some()
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            physical_state_count,
+            root_owners,
+            virtual_owners: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn register_virtual(&self, state: u32, owner: u32) -> Option<()> {
+        let index = state.checked_sub(self.physical_state_count)? as usize;
+        let mut owners = self.virtual_owners.lock().unwrap();
+        if owners.len() <= index {
+            owners.resize(index + 1, u32::MAX);
+        }
+        let slot = &mut owners[index];
+        if *slot != u32::MAX && *slot != owner {
+            return None;
+        }
+        *slot = owner;
+        Some(())
+    }
+
+    pub(super) fn owner_index(&self, state: u32) -> Option<usize> {
+        let owner = if state < self.physical_state_count {
+            *self.root_owners.get(&state)?
+        } else {
+            let index = state.checked_sub(self.physical_state_count)? as usize;
+            *self.virtual_owners.lock().unwrap().get(index)?
+        };
+        (owner != u32::MAX).then_some(owner as usize)
+    }
+}
+
 /// Exact general symbolic tokenizer component. The regex upper bounds live in
 /// `ResidualNode::Repeat`; this store grows only when runtime bytes discover a
 /// new canonical language residual.
 #[derive(Debug)]
 pub(super) struct VirtualResidualRuntime {
+    runtime_index: u32,
     terminal: TerminalID,
     physical_state_count: u32,
     root_state: u32,
     root_has_future: bool,
     state_allocator: Arc<VirtualStateAllocator>,
+    state_owners: Arc<VirtualResidualStateOwners>,
     accepting: BitSet,
     live: BitSet,
     dead: BitSet,
@@ -604,15 +660,18 @@ pub(super) struct VirtualResidualRuntime {
 impl VirtualResidualRuntime {
     pub(super) fn new(
         expr: &Expr,
+        runtime_index: u32,
         terminal: TerminalID,
         num_terminals: u32,
         physical_state_count: u32,
         root_state: u32,
         state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualResidualStateOwners>,
     ) -> Option<Self> {
         if terminal >= num_terminals
             || physical_state_count == 0
             || root_state >= physical_state_count
+            || state_owners.owner_index(root_state) != Some(runtime_index as usize)
         {
             return None;
         }
@@ -626,11 +685,13 @@ impl VirtualResidualRuntime {
         accepting.set(terminal as usize);
         let live = accepting.clone();
         Some(Self {
+            runtime_index,
             terminal,
             physical_state_count,
             root_state,
             root_has_future: root_live,
             state_allocator,
+            state_owners,
             accepting,
             live,
             dead: BitSet::new(num_terminals as usize),
@@ -674,19 +735,20 @@ impl VirtualResidualRuntime {
         let state = self.state_allocator.allocate().expect(
             "exact residual tokenizer state-id space exhausted below the dynamic-NFA high-bit tag",
         );
+        self.state_owners
+            .register_virtual(state, self.runtime_index)
+            .expect("residual virtual state owner index must follow shared allocator");
         store.state_by_residual.insert(residual, state);
         store.residual_by_state.insert(state, residual);
         Some(state)
     }
 
     pub(super) fn handles_state(&self, state: u32) -> bool {
-        if state == self.root_state {
-            return true;
-        }
-        if state < self.physical_state_count {
-            return false;
-        }
-        self.store.lock().unwrap().residual_by_state.contains_key(&state)
+        self.state_owners.owner_index(state) == Some(self.runtime_index as usize)
+    }
+
+    pub(super) fn owner_index(&self, state: u32) -> Option<usize> {
+        self.state_owners.owner_index(state)
     }
 
     pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
@@ -894,7 +956,9 @@ mod tests {
             intersect: Box::new(Expr::Choice(vec![bytes(b"ac"), bytes(b"c")])),
         };
         let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
-        let runtime = VirtualResidualRuntime::new(&expr, 0, 1, 2, 1, allocator).unwrap();
+        let owners = Arc::new(VirtualResidualStateOwners::new(2, &[1]).unwrap());
+        let runtime =
+            VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         let dead_prefix = runtime
             .step(1, b'a')
             .expect("syntactic derivative is retained until the exact boundary check");
@@ -918,7 +982,9 @@ mod tests {
             intersect: Box::new(Expr::Seq(vec![a_star(), bytes(b"c")])),
         };
         let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
-        let runtime = VirtualResidualRuntime::new(&expr, 0, 1, 2, 1, allocator).unwrap();
+        let owners = Arc::new(VirtualResidualStateOwners::new(2, &[1]).unwrap());
+        let runtime =
+            VirtualResidualRuntime::new(&expr, 0, 0, 1, 2, 1, allocator, owners).unwrap();
         assert!(!runtime.root_has_future());
         assert!(runtime.step(1, b'a').is_none());
         assert!(runtime.transitions(1).unwrap().is_empty());

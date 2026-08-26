@@ -18,7 +18,7 @@ use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
     VirtualBinaryRepeatIntersectionRuntime, VirtualStateAllocator,
 };
-use super::runtime_residual::VirtualResidualRuntime;
+use super::runtime_residual::{VirtualResidualRuntime, VirtualResidualStateOwners};
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
@@ -4649,6 +4649,12 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    #[inline]
+    fn virtual_residual_runtime_for_state(&self, state: u32) -> Option<&VirtualResidualRuntime> {
+        let owner = self.virtual_residuals.first()?.owner_index(state)?;
+        self.virtual_residuals.get(owner).map(Arc::as_ref)
+    }
+
     /// Exact finite-horizon quotient for the Boolean observation
     /// `terminal is still a possible future terminal`.
     ///
@@ -6098,11 +6104,7 @@ impl Tokenizer {
 
     #[inline]
     pub fn state_has_epsilon_transitions(&self, state: u32) -> bool {
-        if self
-            .virtual_residuals
-            .iter()
-            .any(|runtime| runtime.handles_state(state))
-        {
+        if self.virtual_residual_runtime_for_state(state).is_some() {
             return false;
         }
         if self
@@ -6141,9 +6143,8 @@ impl Tokenizer {
     #[inline]
     fn state_finalizers(&self, state: u32) -> &BitSet {
         if let Some(finalizers) = self
-            .virtual_residuals
-            .iter()
-            .find_map(|runtime| runtime.finalizers(state))
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizers(state))
         {
             return finalizers;
         }
@@ -6182,9 +6183,8 @@ impl Tokenizer {
     #[inline]
     fn state_futures(&self, state: u32) -> &BitSet {
         if let Some(futures) = self
-            .virtual_residuals
-            .iter()
-            .find_map(|runtime| runtime.futures(state))
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.futures(state))
         {
             return futures;
         }
@@ -6494,8 +6494,14 @@ impl Tokenizer {
                     "serialized residual runtime has no virtual state-id namespace".to_owned()
                 })?,
             );
+            let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
+            let owners = Arc::new(
+                VirtualResidualStateOwners::new(physical_state_count, &roots).ok_or_else(|| {
+                    "serialized residual runtime has invalid state ownership metadata".to_owned()
+                })?,
+            );
             let mut runtimes = Vec::with_capacity(metadata.len());
-            for entry in metadata {
+            for (runtime_index, entry) in metadata.into_iter().enumerate() {
                 let expression = expressions
                     .get(entry.terminal as usize)
                     .ok_or_else(|| "serialized residual terminal is out of range".to_owned())?;
@@ -6515,11 +6521,15 @@ impl Tokenizer {
                 let runtime = Arc::new(
                     VirtualResidualRuntime::new(
                         expression,
+                        u32::try_from(runtime_index).map_err(|_| {
+                            "serialized residual runtime count exceeds u32".to_owned()
+                        })?,
                         entry.terminal,
                         self.num_terminals,
                         physical_state_count,
                         entry.root_state,
                         Arc::clone(&allocator),
+                        Arc::clone(&owners),
                     )
                     .ok_or_else(|| "serialized residual runtime metadata is invalid".to_owned())?,
                 );
@@ -6843,18 +6853,23 @@ impl Tokenizer {
         let physical_state_count = existing_physical_state_count
             .checked_add(u32::try_from(components.len()).ok()?)?;
         let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let roots = (0..components.len())
+            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
+            .collect::<Option<Vec<_>>>()?;
+        let owners = Arc::new(VirtualResidualStateOwners::new(physical_state_count, &roots)?);
         let mut pending = Vec::with_capacity(components.len());
         for (index, (expression, terminal)) in components.into_iter().enumerate() {
-            let root_state = existing_physical_state_count
-                .checked_add(u32::try_from(index).ok()?)?;
+            let root_state = roots[index];
             let byte_support = super::compile::expr_u8set(&expression);
             let runtime = Arc::new(VirtualResidualRuntime::new(
                 &expression,
+                u32::try_from(index).ok()?,
                 terminal,
                 self.num_terminals,
                 physical_state_count,
                 root_state,
                 Arc::clone(&allocator),
+                Arc::clone(&owners),
             )?);
             pending.push((terminal, root_state, byte_support, runtime));
         }
@@ -6913,10 +6928,10 @@ impl Tokenizer {
     /// so they are resolved through their bounded exact derivative search here.
     /// Resource exhaustion is an error rather than a false dead/live answer.
     pub(crate) fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
-        for runtime in &self.virtual_residuals {
-            if let Some(future) = runtime.exact_has_future(state)? {
-                return Ok(future);
-            }
+        if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
+            return runtime
+                .exact_has_future(state)?
+                .ok_or_else(|| "residual runtime owner index lost state ownership".to_owned());
         }
         Ok(!self.is_end(state))
     }
@@ -7759,9 +7774,8 @@ impl Tokenizer {
 
     fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
         if let Some(transitions) = self
-            .virtual_residuals
-            .iter()
-            .find_map(|runtime| runtime.transitions(state))
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.transitions(state))
         {
             return TokenizerTransitionsIter {
                 inner: TokenizerTransitionsIterInner::VirtualProduct(transitions.into_iter()),
@@ -8394,10 +8408,8 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        for runtime in &self.virtual_residuals {
-            if runtime.handles_state(state) {
-                return runtime.step(state, byte);
-            }
+        if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
+            return runtime.step(state, byte);
         }
         for runtime in &self.virtual_repeat_intersections {
             if runtime.handles_state(state) {
@@ -8497,9 +8509,8 @@ impl Tokenizer {
     #[inline]
     pub fn matched_terminals_slice(&self, state: u32) -> &[TerminalID] {
         if let Some(finalizers) = self
-            .virtual_residuals
-            .iter()
-            .find_map(|runtime| runtime.finalizer_list(state))
+            .virtual_residual_runtime_for_state(state)
+            .and_then(|runtime| runtime.finalizer_list(state))
         {
             return finalizers;
         }
@@ -10128,6 +10139,65 @@ mod tests {
         assert!(
             tokenizer.try_full_determinization(128, 4_096).is_none(),
             "physical subset construction must not discard virtual residual states",
+        );
+    }
+
+    #[test]
+    fn residual_state_owner_index_dispatches_multiple_components_directly() {
+        let repeated_suffix = |byte, suffix| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::Choice(vec![
+                        bytes(&[byte]),
+                        bytes(&[byte, byte]),
+                    ])),
+                    min: 0,
+                    max: Some(1_000_000_000),
+                },
+                bytes(&[suffix]),
+            ])
+        };
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 2, None);
+        tokenizer
+            .install_virtual_residual_components(vec![
+                (repeated_suffix(b'a', b'z'), 0),
+                (repeated_suffix(b'b', b'y'), 1),
+            ])
+            .expect("two general residual components must install");
+
+        let a_state = tokenizer.step(1, b'a').expect("first residual must advance");
+        let b_state = tokenizer.step(2, b'b').expect("second residual must advance");
+        assert_ne!(a_state, b_state);
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(a_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(b_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(1),
+        );
+
+        let aa_state = tokenizer
+            .step(a_state, b'a')
+            .expect("interleaved first residual must remain owned");
+        let bb_state = tokenizer
+            .step(b_state, b'b')
+            .expect("interleaved second residual must remain owned");
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(aa_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(0),
+        );
+        assert_eq!(
+            tokenizer
+                .virtual_residual_runtime_for_state(bb_state)
+                .map(VirtualResidualRuntime::terminal),
+            Some(1),
         );
     }
 
