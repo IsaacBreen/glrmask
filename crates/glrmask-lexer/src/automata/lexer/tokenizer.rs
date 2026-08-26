@@ -6508,12 +6508,6 @@ impl Tokenizer {
                 let expression = expressions
                     .get(entry.terminal as usize)
                     .ok_or_else(|| "serialized residual terminal is out of range".to_owned())?;
-                if !super::compile::expression_supports_virtual_residual_runtime(expression) {
-                    return Err(format!(
-                        "serialized residual terminal {} is no longer supported by the residual runtime",
-                        entry.terminal,
-                    ));
-                }
                 let expected_support = super::compile::expr_u8set(expression);
                 if self.terminal_byte_support(entry.terminal) != Some(expected_support) {
                     return Err(format!(
