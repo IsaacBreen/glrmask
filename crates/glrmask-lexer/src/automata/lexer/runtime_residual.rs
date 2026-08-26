@@ -53,6 +53,52 @@ const TRANSITION_UNKNOWN: u32 = u32::MAX;
 const DEFAULT_LIVENESS_STATE_BUDGET: usize = 262_144;
 const DEFAULT_LIVENESS_TRANSITION_BUDGET: usize = 4_194_304;
 
+struct ResidualLivenessBudget {
+    state_limit: usize,
+    transition_limit: usize,
+    states_used: usize,
+    transitions_used: usize,
+}
+
+impl ResidualLivenessBudget {
+    fn new(state_limit: usize, transition_limit: usize) -> Self {
+        Self {
+            state_limit,
+            transition_limit,
+            states_used: 0,
+            transitions_used: 0,
+        }
+    }
+
+    fn consume_state(&mut self) -> Result<(), String> {
+        self.states_used = self
+            .states_used
+            .checked_add(1)
+            .ok_or_else(|| "dynamic residual liveness state count overflow".to_owned())?;
+        if self.states_used > self.state_limit {
+            return Err(format!(
+                "dynamic residual liveness exceeded state budget ({})",
+                self.state_limit
+            ));
+        }
+        Ok(())
+    }
+
+    fn consume_transition(&mut self) -> Result<(), String> {
+        self.transitions_used = self
+            .transitions_used
+            .checked_add(1)
+            .ok_or_else(|| "dynamic residual liveness transition count overflow".to_owned())?;
+        if self.transitions_used > self.transition_limit {
+            return Err(format!(
+                "dynamic residual liveness exceeded transition budget ({})",
+                self.transition_limit
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl ResidualArena {
     pub(crate) fn from_expr(expr: &Expr) -> Option<(Self, ResidualId)> {
         let mut arena = Self {
@@ -544,6 +590,15 @@ impl ResidualArena {
         state_budget: usize,
         transition_budget: usize,
     ) -> Result<bool, String> {
+        let mut budget = ResidualLivenessBudget::new(state_budget, transition_budget);
+        self.has_future_with_work_budget(id, &mut budget)
+    }
+
+    fn has_future_with_work_budget(
+        &mut self,
+        id: ResidualId,
+        budget: &mut ResidualLivenessBudget,
+    ) -> Result<bool, String> {
         if let Some(value) = self.nonempty_cache[id as usize] {
             return Ok(value);
         }
@@ -552,23 +607,59 @@ impl ResidualArena {
             return Ok(value);
         }
 
+        // Positive-word existence composes exactly through these regular
+        // operators. Resolve their children independently so a giant repeat
+        // never turns a hard *body* liveness question into a search over its
+        // repetition counter. Boolean language relations remain on the general
+        // derivative-graph fallback below.
+        let structural = match self.nodes[id as usize].clone() {
+            ResidualNode::Choice(parts) => {
+                let mut live = false;
+                for &part in parts.iter() {
+                    if self.has_future_with_work_budget(part, budget)? {
+                        live = true;
+                        break;
+                    }
+                }
+                Some(live)
+            }
+            ResidualNode::Seq(parts) => {
+                let mut any_positive = false;
+                let mut language_nonempty = true;
+                for &part in parts.iter() {
+                    if self.is_nullable(part) {
+                        if self.has_future_with_work_budget(part, budget)? {
+                            any_positive = true;
+                        }
+                    } else if self.has_future_with_work_budget(part, budget)? {
+                        any_positive = true;
+                    } else {
+                        language_nonempty = false;
+                        break;
+                    }
+                }
+                Some(language_nonempty && any_positive)
+            }
+            ResidualNode::Repeat { body, max, .. } => Some(
+                max != Some(0) && self.has_future_with_work_budget(body, budget)?,
+            ),
+            _ => None,
+        };
+        if let Some(value) = structural {
+            self.nonempty_cache[id as usize] = Some(value);
+            return Ok(value);
+        }
+
         let mut seen = FxHashSet::<ResidualId>::default();
         let mut queue = VecDeque::from([id]);
         seen.insert(id);
-        let mut transitions = 0usize;
+        budget.consume_state()?;
         while let Some(state) = queue.pop_front() {
             let first_bytes = self
                 .first_bytes(state)
                 .ok_or_else(|| "dynamic residual FIRST-set construction overflow".to_owned())?;
             for byte in first_bytes.iter() {
-                transitions = transitions
-                    .checked_add(1)
-                    .ok_or_else(|| "dynamic residual liveness transition count overflow".to_owned())?;
-                if transitions > transition_budget {
-                    return Err(format!(
-                        "dynamic residual liveness exceeded transition budget ({transition_budget})"
-                    ));
-                }
+                budget.consume_transition()?;
                 let target = self
                     .step(state, byte)
                     .ok_or_else(|| "dynamic residual state-id overflow".to_owned())?;
@@ -580,11 +671,7 @@ impl ResidualArena {
                     return Ok(true);
                 }
                 if seen.insert(target) {
-                    if seen.len() > state_budget {
-                        return Err(format!(
-                            "dynamic residual liveness exceeded state budget ({state_budget})"
-                        ));
-                    }
+                    budget.consume_state()?;
                     queue.push_back(target);
                 }
             }
@@ -946,6 +1033,30 @@ mod tests {
             .expect_err("a deliberately tiny resource ceiling must not become a false dead result");
         assert!(error.contains("budget"), "unexpected liveness error: {error}");
         assert!(arena.has_future_with_budget(root, 256, 512).unwrap());
+    }
+
+    #[test]
+    fn giant_repeat_liveness_solves_embedded_body_once() {
+        let mut body = DFA::new(3);
+        body.ensure_group_capacity(1);
+        body.add_transition(0, b'a', 1);
+        body.add_transition(1, b'b', 2);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        body.overwrite_state_metadata(2, accepting, BitSet::new(1));
+        // Deliberately leave derived future metadata stale: the residual
+        // engine must reason from the DFA graph, not from precomputed labels.
+
+        let expr = Expr::Repeat {
+            expr: Box::new(Expr::Dfa(Arc::new(body))),
+            min: 1_000_000_000,
+            max: Some(1_000_000_000),
+        };
+        let (mut arena, root) = ResidualArena::from_expr(&expr).unwrap();
+        assert!(
+            arena.has_future_with_budget(root, 8, 16).unwrap(),
+            "repeat liveness must solve the body language once rather than walk the billion-copy counter",
+        );
     }
 
     #[test]
