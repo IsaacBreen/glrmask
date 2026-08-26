@@ -1054,7 +1054,7 @@ impl Constraint {
                         // real multi-lexeme paths (including ignore -> reset ->
                         // terminal -> boundary) while admitting only harmless
                         // false-positive trigger tokens.
-                        let reset = self.tokenizer.initial_state();
+                        let reset = self.runtime_commit_initial_state();
                         if !states.contains(&reset) {
                             states.push(reset);
                             states.sort_unstable();

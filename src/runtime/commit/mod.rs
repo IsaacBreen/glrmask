@@ -1671,7 +1671,7 @@ fn cached_single_end_state_may_advance(
     let index = admission_cache_entry_index(cache, gss, future.len());
     {
         let entry = &cache[index];
-        if future.is_subset(&entry.tested) {
+        if future.is_subset_of_extended(&entry.tested) {
             return !future.is_disjoint(&entry.admitted);
         }
         if let Some((_, result)) = entry
@@ -1698,7 +1698,7 @@ fn end_state_may_advance_from_cache_entry(
     entry: &ParserAdmissionCacheEntry,
 ) -> bool {
     end_state == constraint.runtime_commit_initial_state()
-        || !entry.admitted.is_disjoint(
+        || !entry.admitted.is_disjoint_prefix(
             constraint.tokenizer.possible_future_terminals(end_state),
         )
 }
@@ -1715,7 +1715,7 @@ fn end_state_may_advance_with_batch(
         return true;
     }
     match admitted {
-        Some(admitted) => !admitted.is_disjoint(
+        Some(admitted) => !admitted.is_disjoint_prefix(
             constraint.tokenizer.possible_future_terminals(end_state),
         ),
         None => end_state_may_advance(constraint, gss, end_state),

@@ -236,8 +236,27 @@ impl BitSet {
             .all(|(lhs, rhs)| (*lhs & *rhs) == 0)
     }
 
+    /// Test disjointness for aligned prefix domains of potentially different
+    /// widths. Bits omitted by the shorter historical domain are false.
+    pub fn is_disjoint_prefix(&self, other: &Self) -> bool {
+        self.words
+            .iter()
+            .zip(&other.words)
+            .all(|(lhs, rhs)| (*lhs & *rhs) == 0)
+    }
+
     pub fn is_subset(&self, other: &Self) -> bool {
         self.assert_same_len(other);
+        self.words
+            .iter()
+            .zip(&other.words)
+            .all(|(lhs, rhs)| (*lhs & !*rhs) == 0)
+    }
+
+    /// Test whether this shorter aligned prefix-domain set is contained in an
+    /// equal-or-wider set. Omitted higher bits in `self` are false.
+    pub fn is_subset_of_extended(&self, other: &Self) -> bool {
+        debug_assert!(self.len <= other.len);
         self.words
             .iter()
             .zip(&other.words)
