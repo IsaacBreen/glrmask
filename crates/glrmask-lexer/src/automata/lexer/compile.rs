@@ -12520,58 +12520,6 @@ pub fn expression_contains_large_bounded_repeat(expr: &Expr) -> bool {
     }
 }
 
-fn large_repeat_is_safe_lazy_zero_min_suffix_component(expr: &Expr) -> bool {
-    let Expr::Seq(parts) = unwrap_shared(expr) else {
-        return false;
-    };
-    let mut flat_parts = Vec::<Expr>::new();
-    for part in parts {
-        match unwrap_shared(part) {
-            Expr::Seq(inner) => flat_parts.extend(inner.iter().cloned()),
-            _ => flat_parts.push(part.clone()),
-        }
-    }
-
-    // `LazyZeroMinRepeatSuffixComponent::from_expr` tries qualifying repeats
-    // from left to right and compiles the candidate body and suffix while
-    // probing it. Therefore we may only call it after proving that the first
-    // candidate it can probe is itself the giant repeat, and that no second
-    // giant repeat can be hidden in that candidate's body or suffix.
-    let Some(repeat_index) = flat_parts.iter().position(|part| {
-        matches!(
-            unwrap_shared(part),
-            Expr::Repeat {
-                min: 0,
-                max: Some(max),
-                ..
-            } if *max >= LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND
-        )
-    }) else {
-        return false;
-    };
-    let Expr::Repeat {
-        expr: body,
-        min: 0,
-        max: Some(max),
-    } = unwrap_shared(&flat_parts[repeat_index])
-    else {
-        unreachable!("repeat_index only selects zero-minimum bounded repeats");
-    };
-    if *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
-        || expression_contains_large_bounded_repeat(body)
-        || flat_parts
-            .iter()
-            .enumerate()
-            .any(|(index, part)| index != repeat_index && expression_contains_large_bounded_repeat(part))
-    {
-        return false;
-    }
-
-    // At this point probing `from_expr` cannot itself materialize a giant
-    // repeat: the selected root is the only giant repeat in the component.
-    LazyZeroMinRepeatSuffixComponent::from_expr(expr).is_some()
-}
-
 const LAZY_INTERSECTION_OTHER_MATERIALIZED_STATE_BUDGET: usize = 100_000;
 const LAZY_INTERSECTION_OTHER_MATERIALIZED_TRANSITION_BUDGET: usize = 1_000_000;
 
@@ -12625,10 +12573,6 @@ fn compile_lazy_intersection_materialized_other_component(
         ProductComponent::VirtualFixedSequence { .. } => None,
     }?;
     product_component_has_finite_language(&component).then_some(component)
-}
-
-fn can_materialize_lazy_intersection_other_component(expr: &Expr) -> bool {
-    compile_lazy_intersection_materialized_other_component(expr, true).is_some()
 }
 
 /// Whether the language accepted by one already-materializable product
@@ -12710,60 +12654,6 @@ fn product_component_has_finite_language(component: &ProductComponent) -> bool {
         ProductComponent::VirtualFixedSequence { .. } => true,
         ProductComponent::VirtualBoundedRepeat { .. } => false,
     }
-}
-
-fn non_giant_product_component_has_finite_language(expr: &Expr) -> bool {
-    if expression_contains_large_bounded_repeat(expr) {
-        return false;
-    }
-    let component = compile_product_component_with_options(expr, true, true, None);
-    product_component_has_finite_language(&component)
-}
-
-/// Prove that every giant repeat inside a binary-intersection terminal stays
-/// on an existing exact lazy component path. This is intentionally stronger
-/// than `expression_supports_deferred_dense_runtime`: a generic binary product
-/// may still materialize one of its component expressions before discovery.
-#[doc(hidden)]
-pub fn expression_large_repeats_are_deferred_exactly(expr: &Expr) -> bool {
-    // Keep this validation predicate structural. Building an exclusion plan
-    // can materialize nested group operations, which would make the safety
-    // check itself capable of eagerly compiling the giant repeat it is meant
-    // to guard. A direct top-level intersection with group-op-free operands
-    // maps to the exact two-coordinate product without such preprocessing.
-    let Expr::Intersect { expr: left, intersect: right } = unwrap_shared(expr) else {
-        return false;
-    };
-    if expr_contains_group_op(left) || expr_contains_group_op(right) {
-        return false;
-    }
-
-    // The existing lazy zero-min-repeat/suffix product can keep exactly one
-    // giant component symbolic while the other coordinate is an ordinary
-    // materialized DFA. A non-giant bounded root that the generic product would
-    // normally keep virtual is also allowed when the shared helper above proves
-    // its exact materialization fits the fixed state/transition budgets. Two
-    // genuinely symbolic giant coordinates still miss this special path and
-    // must remain fail-closed here.
-    let components_are_safe = match (
-        expression_contains_large_bounded_repeat(left),
-        expression_contains_large_bounded_repeat(right),
-    ) {
-        (true, false) => {
-            (large_repeat_is_safe_lazy_zero_min_suffix_component(left)
-                && can_materialize_lazy_intersection_other_component(right))
-                || (virtual_bounded_repeat_spec(left).is_some()
-                    && non_giant_product_component_has_finite_language(right))
-        }
-        (false, true) => {
-            (large_repeat_is_safe_lazy_zero_min_suffix_component(right)
-                && can_materialize_lazy_intersection_other_component(left))
-                || (virtual_bounded_repeat_spec(right).is_some()
-                    && non_giant_product_component_has_finite_language(left))
-        }
-        _ => false,
-    };
-    components_are_safe && expression_supports_deferred_dense_runtime(expr)
 }
 
 fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
@@ -12941,12 +12831,14 @@ mod tests {
             ])
         };
 
-        assert!(super::large_repeat_is_safe_lazy_zero_min_suffix_component(
+        assert!(super::LazyZeroMinRepeatSuffixComponent::from_expr(
             &expr_for((u32::MAX - 1) as usize),
-        ));
-        assert!(!super::large_repeat_is_safe_lazy_zero_min_suffix_component(
+        )
+        .is_some());
+        assert!(super::LazyZeroMinRepeatSuffixComponent::from_expr(
             &expr_for(u32::MAX as usize),
-        ));
+        )
+        .is_none());
     }
 
     #[test]
@@ -12959,11 +12851,6 @@ mod tests {
             },
             Expr::U8Class(U8Set::from_bytes(b"bc")),
         ]);
-        assert!(
-            super::large_repeat_is_safe_lazy_zero_min_suffix_component(&expr),
-            "a root zero-minimum giant repeat followed by a nonnullable suffix must not require a dummy literal prefix",
-        );
-
         let mut component = super::LazyZeroMinRepeatSuffixComponent::from_expr(&expr)
             .expect("zero-prefix lazy repeat+suffix component");
         assert_eq!(component.prefix_len(), 0);
@@ -13622,11 +13509,6 @@ mod tests {
                     intersect: Box::new(ordinary.clone()),
                 }
             };
-            assert!(
-                super::expression_large_repeats_are_deferred_exactly(&expression),
-                "finite ordinary language should admit the lazy giant lane in either operand order",
-            );
-
             let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
                 std::slice::from_ref(&expression),
             ));
@@ -14661,49 +14543,6 @@ mod tests {
     }
 
     #[test]
-    fn giant_virtual_repeat_intersection_is_safe_when_other_language_is_finite() {
-        let body = Expr::Choice(vec![
-            Expr::U8Seq(b"ab".to_vec()),
-            Expr::U8Seq(b"c".to_vec()),
-        ]);
-        let giant = Expr::Repeat {
-            expr: Box::new(body.clone()),
-            min: 3,
-            max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
-        };
-        let finite = Expr::U8Seq(b"abcabc".to_vec());
-        let expression = Expr::Intersect {
-            expr: Box::new(giant.clone()),
-            intersect: Box::new(finite.clone()),
-        };
-        assert!(super::expression_large_repeats_are_deferred_exactly(
-            &expression
-        ));
-
-        let reversed = Expr::Intersect {
-            expr: Box::new(finite),
-            intersect: Box::new(giant.clone()),
-        };
-        assert!(super::expression_large_repeats_are_deferred_exactly(
-            &reversed
-        ));
-
-        let cyclic = Expr::Repeat {
-            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
-            min: 0,
-            max: None,
-        };
-        let unsafe_expression = Expr::Intersect {
-            expr: Box::new(giant),
-            intersect: Box::new(cyclic),
-        };
-        assert!(
-            !super::expression_large_repeats_are_deferred_exactly(&unsafe_expression),
-            "a cyclic ordinary coordinate can keep the product alive through every giant repeat count",
-        );
-    }
-
-    #[test]
     fn sparse_virtual_repeat_finite_product_does_not_flatten_repeat_state_ids() {
         const LONG: usize = 65_536;
         let mut base_dfa = DFA::new(LONG + 1);
@@ -14757,15 +14596,6 @@ mod tests {
 
     #[test]
     fn lazy_giant_intersection_materializes_only_budgeted_non_giant_repeat_side() {
-        let lazy_giant = Expr::Seq(vec![
-            Expr::Repeat {
-                expr: Box::new(byte_expr(b'a')),
-                min: 0,
-                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
-            },
-            byte_expr(b'b'),
-        ]);
-
         // This root repeat is above the generic product's direct-repeat
         // threshold, so it would normally be represented as a
         // VirtualBoundedRepeat. Its exact DFA is still tiny, however, and the
@@ -14775,17 +14605,18 @@ mod tests {
             min: 0,
             max: Some(100),
         };
-        assert!(super::expression_large_repeats_are_deferred_exactly(
-            &Expr::Intersect {
-                expr: Box::new(lazy_giant.clone()),
-                intersect: Box::new(small_other),
-            }
-        ));
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &small_other,
+            true,
+        )
+        .is_some());
 
         // Stay one below the giant-repeat threshold so the right side remains
         // nominally "non-giant", but make its exact bounded-repeat DFA exceed
-        // the 100k materialization budget. Validation must continue to fail
-        // closed instead of treating every non-giant repeat as cheap.
+        // the 100k materialization budget. The specialized fast path must
+        // decline instead of turning this optimization into a large eager
+        // allocation; the general residual runtime remains the correctness
+        // fallback at the dynamic-constraint layer.
         let oversized_other = Expr::Repeat {
             expr: Box::new(Expr::U8Seq({
                 let mut bytes = vec![b'a'; 31];
@@ -14795,34 +14626,22 @@ mod tests {
             min: 0,
             max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND - 1),
         };
-        assert!(
-            !super::expression_large_repeats_are_deferred_exactly(&Expr::Intersect {
-                expr: Box::new(lazy_giant),
-                intersect: Box::new(oversized_other),
-            }),
-            "a non-giant repeat whose exact DFA exceeds the fixed budget must remain fail-closed",
-        );
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &oversized_other,
+            true,
+        )
+        .is_none());
 
         let cyclic_other = Expr::Repeat {
             expr: Box::new(byte_expr(b'a')),
             min: 0,
             max: None,
         };
-        let lazy_giant = Expr::Seq(vec![
-            Expr::Repeat {
-                expr: Box::new(byte_expr(b'a')),
-                min: 0,
-                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
-            },
-            byte_expr(b'b'),
-        ]);
-        assert!(
-            !super::expression_large_repeats_are_deferred_exactly(&Expr::Intersect {
-                expr: Box::new(lazy_giant),
-                intersect: Box::new(cyclic_other),
-            }),
-            "a cyclic ordinary coordinate can keep the giant lazy counter live through every layer",
-        );
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &cyclic_other,
+            true,
+        )
+        .is_none());
     }
 
     #[test]
