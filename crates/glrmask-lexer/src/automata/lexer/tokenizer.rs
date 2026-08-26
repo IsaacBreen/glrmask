@@ -5138,7 +5138,17 @@ impl Tokenizer {
         state_limit: usize,
         transition_limit: usize,
     ) -> Option<FullTokenizerDeterminization> {
-        if state_limit == 0 || transition_limit == 0 || !self.has_epsilon_transitions() {
+        // Virtual states live outside the materialized DFA state array. A
+        // physical subset construction cannot represent or epsilon-close
+        // those coordinates, so it must never be used as an implicit
+        // materialization fallback for any virtual runtime family.
+        if self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+            || state_limit == 0
+            || transition_limit == 0
+            || !self.has_epsilon_transitions()
+        {
             return None;
         }
 
@@ -10097,6 +10107,28 @@ mod tests {
             };
             assert_eq!(normalize(product.matches), normalize(source.matches));
         });
+    }
+
+    #[test]
+    fn full_determinization_refuses_virtual_residual_state_space() {
+        let mut tokenizer = Tokenizer::from_parts(DFA::new(1), 1, None);
+        let expression = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![bytes(b"a"), bytes(b"aa")])),
+                min: 0,
+                max: Some(1_000_000_000),
+            },
+            bytes(b"z"),
+        ]);
+        tokenizer
+            .install_virtual_residual_components(vec![(expression, 0)])
+            .expect("general residual component must install");
+        assert!(tokenizer.has_epsilon_transitions());
+        assert!(tokenizer.has_virtual_residual_runtime());
+        assert!(
+            tokenizer.try_full_determinization(128, 4_096).is_none(),
+            "physical subset construction must not discard virtual residual states",
+        );
     }
 
     use crate::automata::lexer::dfa::DFA;
