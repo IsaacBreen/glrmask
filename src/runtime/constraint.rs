@@ -4722,6 +4722,135 @@ impl Constraint {
         aliases
     }
 
+    fn build_dynamic_terminal_observation_classes(
+        &self,
+    ) -> Vec<(TerminalID, Arc<[u32]>)> {
+        if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
+            return Vec::new();
+        }
+
+        // This quotient exists to split a parser-visible terminal back out of
+        // a broad lexer residual that also carries unrelated futures. Restrict
+        // construction to exactly that structural shape using only immutable
+        // tokenizer/table data so serialized dynamic compilation can build the
+        // certificate without running the full runtime-cache finalizer.
+        // Whole-mask reuse below is enabled only when the unchanged parser
+        // frontier admits one terminal.  Requiring at least one singleton LR
+        // row is a cheap conservative prefilter.  Within one mixed broad lexer
+        // residual, build only the terminal most often singleton-admitted: the
+        // quotient is an accelerator for that parser-visible component, while
+        // paying once for every unrelated co-residual would defeat the build
+        // time saved by the dynamic architecture.
+        let mut singleton_rows = vec![0usize; self.table.num_terminals as usize];
+        for row in &self.table.advance {
+            let mut terminals = row.iter();
+            let Some(terminal) = terminals.next() else {
+                continue;
+            };
+            if terminals.next().is_none()
+                && let Some(count) = singleton_rows.get_mut(terminal)
+            {
+                *count += 1;
+            }
+        }
+        let mut best_by_futures = BTreeMap::<Vec<TerminalID>, (usize, u32)>::new();
+        for state in 0..self.tokenizer.num_states() {
+            if self.tokenizer.transitions_from(state).count() < 100 {
+                continue;
+            }
+            let loop_len = self.tokenizer.self_loop_bytes(state).len();
+            if loop_len < 64 {
+                continue;
+            }
+            let futures = self
+                .tokenizer
+                .possible_future_terminals_iter(state)
+                .collect::<Vec<_>>();
+            if !(2..=8).contains(&futures.len()) {
+                continue;
+            }
+            let entry = best_by_futures
+                .entry(futures)
+                .or_insert((loop_len, state));
+            if (loop_len, std::cmp::Reverse(state))
+                > (entry.0, std::cmp::Reverse(entry.1))
+            {
+                *entry = (loop_len, state);
+            }
+        }
+        let mut ranked = best_by_futures
+            .into_iter()
+            .map(|(futures, (loop_len, state))| (loop_len, state, futures))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|left, right| {
+            (std::cmp::Reverse(left.0), left.1, &left.2)
+                .cmp(&(std::cmp::Reverse(right.0), right.1, &right.2))
+        });
+        ranked.truncate(2);
+
+        let mut candidates = BTreeSet::<TerminalID>::new();
+        for (_, _, futures) in ranked {
+            let best = futures
+                .iter()
+                .copied()
+                .filter_map(|terminal| {
+                    let count = singleton_rows
+                        .get(terminal as usize)
+                        .copied()
+                        .unwrap_or(0);
+                    (count != 0).then_some((count, std::cmp::Reverse(terminal)))
+                })
+                .max()
+                .map(|(_, std::cmp::Reverse(terminal))| terminal);
+            if let Some(terminal) = best {
+                candidates.insert(terminal);
+            }
+        }
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some();
+        candidates
+            .into_par_iter()
+            .filter_map(|terminal| {
+                let started = std::time::Instant::now();
+                let (classes, configs, rounds) = self
+                    .tokenizer
+                    .exact_terminal_observation_partition(terminal, 100_000, 20_000_000)?;
+
+                // Retain only genuinely quotienting maps.  A class shared by
+                // at least two live raw states is enough to make O(1) runtime
+                // recurrence checks possible; otherwise the table cannot hit.
+                let mut seen = BTreeSet::<u32>::new();
+                let useful = classes
+                    .iter()
+                    .copied()
+                    .filter(|&class| class != 0)
+                    .any(|class| !seen.insert(class));
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_terminal_observation_cache_build] terminal={} singleton_rows={} configs={} rounds={} useful={} elapsed_ms={:.3}",
+                        terminal,
+                        singleton_rows.get(terminal as usize).copied().unwrap_or(0),
+                        configs,
+                        rounds,
+                        useful,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                useful.then_some((terminal, Arc::from(classes)))
+            })
+            .collect()
+    }
+
+    pub(crate) fn prepare_dynamic_terminal_observation_classes_for_artifact(&mut self) {
+        if self.dynamic_mask_vocab.has_terminal_observation_classes() {
+            return;
+        }
+        let classes = self.build_dynamic_terminal_observation_classes();
+        self.dynamic_mask_vocab
+            .set_terminal_observation_classes(classes);
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.table.rebuild_unconditional_advance_rows();
@@ -4884,9 +5013,15 @@ impl Constraint {
         } else {
             Vec::new()
         };
+        let terminal_observation_classes = if dynamic_mask_vocab.has_terminal_observation_classes() {
+            dynamic_mask_vocab.terminal_observation_classes_cloned()
+        } else {
+            self.build_dynamic_terminal_observation_classes()
+        };
         dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
         dynamic_mask_vocab.set_projection_alias_vocab(projection_alias_vocab);
         dynamic_mask_vocab.set_projection_alias_h64(projection_alias_h64);
+        dynamic_mask_vocab.set_terminal_observation_classes(terminal_observation_classes);
         let hot_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_dynamic_hot_frontiers = self
             .compute_direct_regular_dynamic_hot_frontiers(

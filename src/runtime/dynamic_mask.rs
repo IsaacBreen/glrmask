@@ -27,7 +27,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
+    Constraint, DynamicMaskLexerStateKey, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
     DynamicSelfLoopProjection,
 };
 use super::state::ConstraintState;
@@ -2593,6 +2593,14 @@ fn dynamic_mask_cache_enabled() -> bool {
 fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStateKey> {
     let mut remaining = DYNAMIC_MASK_CACHE_MAX_STACKS;
     let mut key = Vec::with_capacity(state.state.len());
+    let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+    let observation_cache_enabled =
+        std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
+            && vocab.has_terminal_observation_classes()
+            // Static/dynamic composition can defer parser terminals and repair
+            // component switches. Those observations are not represented by
+            // the ordinary singleton parser-admission proof below.
+            && state.constraint.static_dynamic_overlay.is_none();
     for (&tokenizer_state, gss) in &state.state {
         if gss.max_depth() > DYNAMIC_MASK_CACHE_MAX_DEPTH {
             return None;
@@ -2612,8 +2620,62 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
             })
             .collect::<Vec<_>>();
         paths.sort_unstable();
-        key.push((tokenizer_state, paths));
+        let exclusions_empty = paths.iter().all(|(_, exclusions)| exclusions.is_empty());
+
+        // Exact parser-relative lexer quotient. When this parser frontier admits
+        // exactly one terminal, every lexer event before the first successful
+        // parser advance is observable only through that terminal's
+        // `(matched, possible-future)` pair. Equal precomputed exact quotient
+        // classes therefore have the same next-token mask; after a finalization
+        // both executions enter the same parser child and common lexer reset.
+        let lexer_key = if observation_cache_enabled
+            && exclusions_empty
+            && state.constraint.ignore_terminal.is_none_or(|ignore| {
+                let ignore = ignore as usize;
+                !state
+                    .constraint
+                    .tokenizer
+                    .matched_terminal_bitset(tokenizer_state)
+                    .contains(ignore)
+                    && !state
+                        .constraint
+                        .tokenizer
+                        .possible_future_terminals(tokenizer_state)
+                        .contains(ignore)
+            })
+        {
+            let admitted = state
+                .constraint
+                .direct_regular_admissible_terminals(gss)
+                .unwrap_or_else(|| {
+                    let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
+                    stack_admissible_terminals(&state.constraint.table, gss, &candidates)
+                });
+            let mut terminals = admitted.iter_ones();
+            terminals
+                .next()
+                .filter(|_| terminals.next().is_none())
+                .and_then(|terminal| {
+                    let terminal = terminal as TerminalID;
+                    vocab
+                        .terminal_observation_class(terminal, tokenizer_state)
+                        .map(|class| DynamicMaskLexerStateKey::TerminalObservation {
+                            terminal,
+                            class,
+                            initial: tokenizer_state == state.constraint.tokenizer.initial_state(),
+                        })
+                })
+                .unwrap_or(DynamicMaskLexerStateKey::Exact(tokenizer_state))
+        } else {
+            DynamicMaskLexerStateKey::Exact(tokenizer_state)
+        };
+        key.push((lexer_key, paths));
     }
+    // Raw parser-state entries are sorted by tokenizer id. Observation classes
+    // deliberately identify different raw ids, so canonicalize ordering after
+    // replacing that coordinate and collapse redundant equivalent branches.
+    key.sort_unstable();
+    key.dedup();
     Some(key)
 }
 

@@ -5,6 +5,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
+#[cfg(test)]
+use rustc_hash::FxHashSet;
 use rayon::prelude::*;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
@@ -4662,6 +4664,404 @@ impl Tokenizer {
     fn virtual_residual_runtime_for_state(&self, state: u32) -> Option<&VirtualResidualRuntime> {
         let owner = self.virtual_residuals.first()?.owner_index(state)?;
         self.virtual_residuals.get(owner).map(Arc::as_ref)
+    }
+
+    /// Exact parser-relative observation equivalence of two lexer residual
+    /// configurations.  Unlike the bounded counterpart, `Some(true)` is only
+    /// returned after the complete finite graph of reachable epsilon-closed
+    /// configuration pairs has been exhausted.  It therefore proves equality
+    /// of `(matched, possible future)` for every continuation byte string, for
+    /// exactly the terminal labels selected by `terminals`.
+    ///
+    /// `None` is a conservative resource-limit decline.  It is not evidence
+    /// of inequivalence.
+    #[cfg(test)]
+    pub fn state_sets_observation_equivalent_exact(
+        &self,
+        left: &[u32],
+        right: &[u32],
+        terminals: &BitSet,
+        pair_limit: usize,
+    ) -> Option<bool> {
+        self.state_sets_observation_equivalence_exact_witness(
+            left,
+            right,
+            terminals,
+            pair_limit,
+        )
+        .map(|result| result.is_ok())
+    }
+
+    /// Diagnostic form of [`Self::state_sets_observation_equivalent_exact`].
+    /// `Err(bytes)` is a concrete distinguishing continuation prefix;
+    /// `Ok(())` proves equivalence; `None` is a resource-limit decline.
+    #[cfg(test)]
+    pub fn state_sets_observation_equivalence_exact_witness(
+        &self,
+        left: &[u32],
+        right: &[u32],
+        terminals: &BitSet,
+        pair_limit: usize,
+    ) -> Option<Result<(), Box<[u8]>>> {
+        if left.is_empty() || right.is_empty() || pair_limit == 0 {
+            return None;
+        }
+        if terminals.len() != self.num_terminals as usize {
+            return None;
+        }
+
+        let normalize = |states: &[u32]| -> Option<TokenizerStateSet> {
+            if states.iter().any(|&state| state >= self.num_states()) {
+                return None;
+            }
+            let mut closure = TokenizerStateSet::new();
+            for &state in states {
+                closure.extend(self.dfa.epsilon_closure(&[state]));
+            }
+            closure.sort_unstable();
+            closure.dedup();
+            Some(closure)
+        };
+        let observation_equal = |left: &[u32], right: &[u32]| {
+            terminals.iter().all(|terminal| {
+                let left_matched = left
+                    .iter()
+                    .any(|&state| self.matched_terminal_bitset(state).contains(terminal));
+                let right_matched = right
+                    .iter()
+                    .any(|&state| self.matched_terminal_bitset(state).contains(terminal));
+                if left_matched != right_matched {
+                    return false;
+                }
+                let left_future = left
+                    .iter()
+                    .any(|&state| self.possible_future_terminals(state).contains(terminal));
+                let right_future = right
+                    .iter()
+                    .any(|&state| self.possible_future_terminals(state).contains(terminal));
+                left_future == right_future
+            })
+        };
+        let observation_live = |states: &[u32]| {
+            terminals.iter().any(|terminal| {
+                states.iter().any(|&state| {
+                    self.matched_terminal_bitset(state).contains(terminal)
+                        || self.possible_future_terminals(state).contains(terminal)
+                })
+            })
+        };
+
+        let left = normalize(left)?;
+        let right = normalize(right)?;
+        if !observation_equal(&left, &right) {
+            return Some(Err(Box::new([])));
+        }
+
+        type ConfigPair = (Box<[u32]>, Box<[u32]>);
+        let to_pair = |left: &TokenizerStateSet, right: &TokenizerStateSet| -> ConfigPair {
+            (
+                left.iter().copied().collect::<Vec<_>>().into_boxed_slice(),
+                right.iter().copied().collect::<Vec<_>>().into_boxed_slice(),
+            )
+        };
+        let mut seen = FxHashSet::<ConfigPair>::default();
+        seen.insert(to_pair(&left, &right));
+        let mut frontier = vec![(left, right, Vec::<u8>::new())];
+        while let Some((left, right, prefix)) = frontier.pop() {
+            for byte in 0u16..=255 {
+                let left_target = self.step_all(left.as_slice(), byte as u8);
+                let right_target = self.step_all(right.as_slice(), byte as u8);
+                let left_live = !left_target.is_empty() && observation_live(&left_target);
+                let right_live = !right_target.is_empty() && observation_live(&right_target);
+                if left_live != right_live {
+                    let mut witness = prefix.clone();
+                    witness.push(byte as u8);
+                    return Some(Err(witness.into_boxed_slice()));
+                }
+                if !left_live {
+                    continue;
+                }
+                if !observation_equal(&left_target, &right_target) {
+                    let mut witness = prefix.clone();
+                    witness.push(byte as u8);
+                    return Some(Err(witness.into_boxed_slice()));
+                }
+                if left_target == right_target {
+                    continue;
+                }
+                let pair = to_pair(&left_target, &right_target);
+                if seen.insert(pair) {
+                    if seen.len() > pair_limit {
+                        return None;
+                    }
+                    let mut next_prefix = prefix.clone();
+                    next_prefix.push(byte as u8);
+                    frontier.push((left_target, right_target, next_prefix));
+                }
+            }
+        }
+        Some(Ok(()))
+    }
+
+    /// Exact quotient of raw lexer states for the complete observation of one
+    /// terminal: `(matched now, possible in the future)`.
+    ///
+    /// Each raw state is first projected to the selected terminal and closed
+    /// under epsilon transitions.  Those finite residual configurations form a
+    /// deterministic Moore machine under byte input.  We discover that machine
+    /// from every raw singleton residual, then refine by output + byte-successor
+    /// class until a true fixed point.  Equal returned nonzero class IDs are
+    /// therefore an exact arbitrary-continuation equivalence proof.  Class zero
+    /// is the terminal-dead residual.
+    ///
+    /// `None` is a conservative resource-limit decline.
+    pub fn exact_terminal_observation_partition(
+        &self,
+        terminal: TerminalID,
+        config_limit: usize,
+        transition_work_limit: usize,
+    ) -> Option<(Box<[u32]>, usize, usize)> {
+        if terminal >= self.num_terminals || config_limit == 0 || transition_work_limit == 0 {
+            return None;
+        }
+
+        // Fast exact path for the common partitioned lexer shape.  Once the
+        // reset dispatcher selects this terminal's unique component,
+        // `has_scalar_deterministic_dispatch()` proves that every byte-reachable
+        // state is scalar and has no epsilon fan-out.  We can therefore refine
+        // the terminal Moore machine directly on raw states, with no subset
+        // construction or configuration hash-consing.  Raw states outside the
+        // certified component deliberately retain class zero and can never be
+        // used as aliases by callers.
+        if let Some(root) = self.terminal_scalar_dispatch_root(terminal) {
+            let state_count = self.num_states() as usize;
+            let mut local_of_raw = vec![u32::MAX; state_count];
+            let mut raws = Vec::<u32>::new();
+            let mut transitions = Vec::<Box<[(u8, u32)]>>::new();
+            let mut observations = Vec::<u8>::new();
+            let mut pending = VecDeque::from([root]);
+            local_of_raw[root as usize] = 0;
+            raws.push(root);
+            let mut work = 0usize;
+
+            let mut index = 0usize;
+            while let Some(state) = pending.pop_front() {
+                debug_assert_eq!(raws[index], state);
+                if raws.len() > config_limit {
+                    return None;
+                }
+                let matched = self.matched_terminal_bitset(state).contains(terminal as usize);
+                let future = self
+                    .possible_future_terminals(state)
+                    .contains(terminal as usize);
+                observations.push((u8::from(matched) << 1) | u8::from(future));
+
+                let mut row = Vec::<(u8, u32)>::new();
+                for (byte, target) in self.transitions_from(state) {
+                    work = work.saturating_add(1);
+                    if work > transition_work_limit {
+                        return None;
+                    }
+                    if !self.state_live_for_terminal(target, terminal) {
+                        continue;
+                    }
+                    let target_index = target as usize;
+                    let local = if local_of_raw[target_index] == u32::MAX {
+                        let next = u32::try_from(raws.len()).ok()?;
+                        local_of_raw[target_index] = next;
+                        raws.push(target);
+                        pending.push_back(target);
+                        next
+                    } else {
+                        local_of_raw[target_index]
+                    };
+                    row.push((byte, local));
+                }
+                transitions.push(row.into_boxed_slice());
+                index += 1;
+            }
+            let mut classes = observations.iter().map(|&obs| u32::from(obs)).collect::<Vec<_>>();
+            let mut rounds = 0usize;
+            loop {
+                rounds += 1;
+                type Signature = SmallVec<[(u8, u32); 128]>;
+                let mut ids = FxHashMap::<(u8, Signature), u32>::default();
+                let mut next_id = 1u32;
+                let mut next = vec![0u32; raws.len()];
+                for state in 0..raws.len() {
+                    let mut signature = Signature::new();
+                    for &(byte, target) in transitions[state].iter() {
+                        signature.push((byte, classes[target as usize]));
+                    }
+                    let key = (observations[state], signature);
+                    next[state] = if let Some(&id) = ids.get(&key) {
+                        id
+                    } else {
+                        let id = next_id;
+                        next_id = next_id.saturating_add(1);
+                        ids.insert(key, id);
+                        id
+                    };
+                }
+
+                let mut old_to_new = FxHashMap::<u32, u32>::default();
+                let mut new_to_old = FxHashMap::<u32, u32>::default();
+                let stable = classes.iter().zip(next.iter()).all(|(&old, &new)| {
+                    let forward = old_to_new.entry(old).or_insert(new);
+                    if *forward != new {
+                        return false;
+                    }
+                    let backward = new_to_old.entry(new).or_insert(old);
+                    *backward == old
+                });
+                classes = next;
+                if stable {
+                    break;
+                }
+            }
+            let mut mapped = vec![0u32; state_count];
+            for (local, &raw) in raws.iter().enumerate() {
+                mapped[raw as usize] = classes[local];
+            }
+            // Preserve the public class-zero contract: zero means this
+            // terminal is dead.  A scalar dispatch certificate only covers
+            // the reset-reachable component, while structural synthesis may
+            // append externally-entered live residuals elsewhere in the raw
+            // DFA.  Give each such residual a fresh singleton class.  That is
+            // intentionally incomplete (two equivalent external residuals may
+            // not be merged), but remains an exact equality certificate and
+            // prevents an uncovered live state from being confused with dead.
+            let mut next_uncovered_class = classes
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            for raw in 0..self.num_states() {
+                if mapped[raw as usize] == 0 && self.state_live_for_terminal(raw, terminal) {
+                    mapped[raw as usize] = next_uncovered_class;
+                    next_uncovered_class = next_uncovered_class.saturating_add(1);
+                }
+            }
+            return Some((mapped.into_boxed_slice(), raws.len(), rounds));
+        }
+
+        type Config = Box<[u32]>;
+        let mut config_ids = FxHashMap::<Config, u32>::default();
+        let mut configs = Vec::<Config>::new();
+        let mut raw_config = vec![0u32; self.num_states() as usize];
+
+        let intern = |config: Config,
+                      config_ids: &mut FxHashMap<Config, u32>,
+                      configs: &mut Vec<Config>|
+         -> Option<u32> {
+            if config.is_empty() {
+                return Some(0);
+            }
+            if let Some(&id) = config_ids.get(config.as_ref()) {
+                return Some(id);
+            }
+            if configs.len() >= config_limit {
+                return None;
+            }
+            let id = u32::try_from(configs.len() + 1).ok()?;
+            config_ids.insert(config.clone(), id);
+            configs.push(config);
+            Some(id)
+        };
+
+        for raw in 0..self.num_states() {
+            let config = self.terminal_projected_epsilon_closure(&[raw], terminal);
+            raw_config[raw as usize] = intern(config, &mut config_ids, &mut configs)?;
+        }
+        let mut transitions = Vec::<Box<[(u8, u32)]>>::new();
+        let mut observations = Vec::<u8>::new();
+        let mut work = 0usize;
+        let mut index = 0usize;
+        while index < configs.len() {
+            let config = configs[index].clone();
+            let matched = config
+                .iter()
+                .any(|&state| self.matched_terminal_bitset(state).contains(terminal as usize));
+            let future = config.iter().any(|&state| {
+                self.possible_future_terminals(state)
+                    .contains(terminal as usize)
+            });
+            observations.push((u8::from(matched) << 1) | u8::from(future));
+
+            let mut bytes = U8Set::empty();
+            for &state in config.iter() {
+                for (byte, _) in self.transitions_from(state) {
+                    bytes.insert(byte);
+                }
+            }
+            let mut row = Vec::<(u8, u32)>::with_capacity(bytes.len());
+            for byte in bytes.iter() {
+                let target = self.terminal_projected_step(
+                    config.as_ref(),
+                    terminal,
+                    byte,
+                    &mut work,
+                    transition_work_limit,
+                )?;
+                let target = intern(target, &mut config_ids, &mut configs)?;
+                if target != 0 {
+                    row.push((byte, target));
+                }
+            }
+            transitions.push(row.into_boxed_slice());
+            index += 1;
+        }
+        let mut classes = observations.iter().map(|&obs| u32::from(obs)).collect::<Vec<_>>();
+        let mut rounds = 0usize;
+        loop {
+            rounds += 1;
+            let mut ids = FxHashMap::<(u8, Vec<(u8, u32)>), u32>::default();
+            let mut next_id = 1u32;
+            let mut next = vec![0u32; configs.len()];
+            for state in 0..configs.len() {
+                let mut signature = Vec::<(u8, u32)>::new();
+                for &(byte, target) in transitions[state].iter() {
+                    let target_class = classes[(target - 1) as usize];
+                    signature.push((byte, target_class));
+                }
+                let key = (observations[state], signature);
+                next[state] = if let Some(&id) = ids.get(&key) {
+                    id
+                } else {
+                    let id = next_id;
+                    next_id = next_id.saturating_add(1);
+                    ids.insert(key, id);
+                    id
+                };
+            }
+
+            let mut old_to_new = FxHashMap::<u32, u32>::default();
+            let mut new_to_old = FxHashMap::<u32, u32>::default();
+            let stable = classes.iter().zip(next.iter()).all(|(&old, &new)| {
+                let forward = old_to_new.entry(old).or_insert(new);
+                if *forward != new {
+                    return false;
+                }
+                let backward = new_to_old.entry(new).or_insert(old);
+                *backward == old
+            });
+            classes = next;
+            if stable {
+                break;
+            }
+        }
+        let mapped = raw_config
+            .into_iter()
+            .map(|config| {
+                if config == 0 {
+                    0
+                } else {
+                    classes[(config - 1) as usize]
+                }
+            })
+            .collect::<Vec<_>>();
+        Some((mapped.into_boxed_slice(), configs.len(), rounds))
     }
 
     /// Exact finite-horizon quotient for the Boolean observation
@@ -9381,6 +9781,84 @@ mod tests {
             None,
             "budget exhaustion must never be interpreted as equivalence",
         );
+    }
+
+    #[test]
+    fn exact_terminal_observation_partition_matches_pairwise_bisimulation() {
+        let tokenizers = vec![
+            arbitrary_epsilon_l1_test_tokenizer(),
+            tokenizer_from_exprs(vec![plus(bytes(b"a")), bytes(b"ab"), bytes(b"ba")]),
+        ];
+
+        for tokenizer in tokenizers {
+            for terminal in 0..tokenizer.num_terminals() {
+                let (classes, _, _) = tokenizer
+                    .exact_terminal_observation_partition(terminal, 10_000, 1_000_000)
+                    .expect("small test tokenizer must quotient within budget");
+                let mut observed = BitSet::new(tokenizer.num_terminals() as usize);
+                observed.set(terminal as usize);
+                for left in 0..tokenizer.num_states() {
+                    for right in 0..tokenizer.num_states() {
+                        let exact = tokenizer
+                            .state_sets_observation_equivalent_exact(
+                                &[left],
+                                &[right],
+                                &observed,
+                                10_000,
+                            )
+                            .expect("small pairwise proof must stay within budget");
+                        assert_eq!(
+                            classes[left as usize] == classes[right as usize],
+                            exact,
+                            "terminal {terminal}, raw states {left} and {right}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_exact_terminal_partition_never_aliases_uncovered_live_residuals() {
+        let tokenizer = dispatch_prefix_tokenizer(true);
+        assert!(tokenizer.has_scalar_deterministic_dispatch());
+        let terminal = 0;
+        let (classes, _, _) = tokenizer
+            .exact_terminal_observation_partition(terminal, 10_000, 1_000_000)
+            .expect("small scalar tokenizer must quotient within budget");
+        let mut observed = BitSet::new(tokenizer.num_terminals() as usize);
+        observed.set(terminal as usize);
+
+        // State 4 is deliberately reset-unreachable but terminal-live.  It
+        // must not be class zero merely because the fast scalar proof starts
+        // from the certified dispatch component.
+        assert!(tokenizer.state_live_for_terminal(4, terminal));
+        assert_ne!(classes[4], 0);
+
+        // The fast path may conservatively leave uncovered live residuals in
+        // singleton classes, but every actual nonzero alias must still be an
+        // exact arbitrary-continuation equivalence proof.
+        for left in 0..tokenizer.num_states() {
+            for right in 0..tokenizer.num_states() {
+                if classes[left as usize] == 0
+                    || classes[left as usize] != classes[right as usize]
+                {
+                    continue;
+                }
+                assert_eq!(
+                    tokenizer
+                        .state_sets_observation_equivalent_exact(
+                            &[left],
+                            &[right],
+                            &observed,
+                            10_000,
+                        )
+                        .expect("small pairwise proof must stay within budget"),
+                    true,
+                    "scalar alias for raw states {left} and {right} must be exact",
+                );
+            }
+        }
     }
 
     fn normalized_exec(

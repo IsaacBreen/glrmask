@@ -2076,8 +2076,16 @@ pub(crate) struct DirectRegularDynamicFrontierCacheEntry {
 /// deliberately removes representation-only Arc identities and accumulator
 /// node organization, so equivalent residuals reached after different token
 /// commits share one exact cached mask.
-pub(crate) type DynamicMaskStateKey =
-    Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DynamicMaskLexerStateKey {
+    Exact(u32),
+    TerminalObservation { terminal: TerminalID, class: u32, initial: bool },
+}
+
+pub(crate) type DynamicMaskStateKey = Vec<(
+    DynamicMaskLexerStateKey,
+    Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>,
+)>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicConfigSubtreeCertificate {
@@ -2402,6 +2410,7 @@ pub(crate) struct DynamicMaskVocab {
     projection_alias_vocab: Arc<[u32]>,
     projection_alias_h64: Arc<[u32]>,
     bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
+    terminal_observation_classes: Arc<[(TerminalID, Arc<[u32]>)]>,
     /// Optional mask-only finite-token quotient. Commit continues to use the
     /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
     /// built in this smaller coordinate and indexed from exact runtime states
@@ -2467,6 +2476,7 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2511,6 +2521,7 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2538,6 +2549,7 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2582,6 +2594,7 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2865,6 +2878,7 @@ impl DynamicMaskVocab {
     pub(crate) fn inherit_mask_tokenizer_quotient_from(&mut self, source: &Self) {
         self.mask_tokenizer = source.mask_tokenizer.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
+        self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
         self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
         self.virtual_repeat_intersection_projections =
             source.virtual_repeat_intersection_projections.clone();
@@ -3031,6 +3045,55 @@ impl DynamicMaskVocab {
             self.bounded_observation_sets.state_count(),
             self.bounded_observation_sets.unique_set_count(),
         )
+    }
+
+    pub(crate) fn set_terminal_observation_classes(
+        &mut self,
+        mut classes: Vec<(TerminalID, Arc<[u32]>)>,
+    ) {
+        classes.sort_unstable_by_key(|(terminal, _)| *terminal);
+        classes.dedup_by_key(|(terminal, _)| *terminal);
+        self.terminal_observation_classes = Arc::from(classes);
+    }
+
+    #[inline]
+    pub(crate) fn terminal_observation_class(
+        &self,
+        terminal: TerminalID,
+        state: u32,
+    ) -> Option<u32> {
+        let index = self
+            .terminal_observation_classes
+            .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+            .ok()?;
+        self.terminal_observation_classes[index]
+            .1
+            .get(state as usize)
+            .copied()
+            .filter(|&class| class != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_terminal_observation_classes(&self) -> bool {
+        !self.terminal_observation_classes.is_empty()
+    }
+
+    pub(crate) fn terminal_observation_classes_cloned(
+        &self,
+    ) -> Vec<(TerminalID, Arc<[u32]>)> {
+        self.terminal_observation_classes
+            .iter()
+            .map(|(terminal, classes)| (*terminal, Arc::clone(classes)))
+            .collect()
+    }
+
+    pub(crate) fn terminal_observation_classes_for_artifact(
+        &self,
+    ) -> Vec<(TerminalID, Vec<u32>)> {
+        self.terminal_observation_classes
+            .iter()
+            .map(|(terminal, classes)| (*terminal, classes.as_ref().to_vec()))
+            .collect()
     }
 
     pub(crate) fn cached_direct_regular_frontier(
@@ -3313,6 +3376,7 @@ impl Default for DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,

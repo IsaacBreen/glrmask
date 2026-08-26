@@ -445,11 +445,13 @@ fn compile_dynamic_serialized_from_source_profiled(
         let grammar = ast::lower(&alternative)?;
         lower_ms += lower_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        compiled.push(compile_dynamic_owned_unfinalized_with_table_construction(
+        let mut constraint = compile_dynamic_owned_unfinalized_with_table_construction(
             grammar,
             vocab,
             default_table_construction,
-        )?);
+        )?;
+        constraint.inner.prepare_dynamic_terminal_observation_classes_for_artifact();
+        compiled.push(constraint);
     }
     let compile_ms = compile_started
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
