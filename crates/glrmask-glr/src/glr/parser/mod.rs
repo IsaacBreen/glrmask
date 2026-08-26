@@ -92,6 +92,9 @@ pub struct ScopedProvidedAction<'a> {
     pub action: ScopedActionRef<'a>,
     /// Component whose local nonterminal coordinate must be used by reductions.
     pub reduction_component: u32,
+    /// Additional composition stack effects which coexist with the borrowed
+    /// local action. Currently used only for nullable child FINISH at start.
+    pub extra_stack_shifts: SmallVec<[ScopedStackShift; 1]>,
 }
 
 /// Semantic action/goto source for composed parser states. This path is kept
@@ -141,6 +144,9 @@ pub struct ScopedSubgrammarLink {
     pub child_component: u32,
     pub child_start: u32,
     pub return_pop: u32,
+    /// Standalone child compilation may normalize the epsilon-root reduction
+    /// out of the local action rows. In that case FINISH at child start still
+    /// has an immediate pop-one return alternative.
     pub child_start_nullable: bool,
 }
 
@@ -187,6 +193,7 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
                 Some(ScopedProvidedAction {
                     action: ScopedActionRef::Local { component, action },
                     reduction_component: component,
+                    extra_stack_shifts: SmallVec::new(),
                 })
             }
             ScopedParserSymbol::Entry { link } => {
@@ -195,54 +202,67 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
                     return None;
                 }
                 let action = table.action(local_state, link.slot_terminal)?;
-                if let Some((parent_target, replace)) = action.shift_target().map(|target| {
-                    (target, action.shift_is_replace())
-                }) {
-                    Some(ScopedProvidedAction {
+                match action {
+                    Action::Shift(parent_target, replace)
+                    | Action::Split {
+                        shift: Some((parent_target, replace)),
+                        reduces: _,
+                        accept: false,
+                    } if action.reduce_count() == 0 => Some(ScopedProvidedAction {
                         action: ScopedActionRef::Call {
                             parent_component: component,
-                            parent_target,
-                            replace,
+                            parent_target: *parent_target,
+                            replace: *replace,
                             child_component: link.child_component,
                             child_start: link.child_start,
                         },
                         reduction_component: component,
-                    })
-                } else if matches!(action, Action::Reduce(..) | Action::Split { shift: None, .. }) {
-                    Some(ScopedProvidedAction {
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    Action::Reduce(..)
+                    | Action::Split {
+                        shift: None,
+                        reduces: _,
+                        accept: false,
+                    } if action.reduce_count() != 0 => Some(ScopedProvidedAction {
                         action: ScopedActionRef::Local { component, action },
                         reduction_component: component,
-                    })
-                } else {
-                    None
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    _ => None,
                 }
             }
             ScopedParserSymbol::Finish {
                 component: symbol_component,
             } if symbol_component == component => {
-                let link = self
-                    .links
-                    .iter()
-                    .find(|link| link.child_component == component)?;
-                match table.action(local_state, EOF) {
-                    Some(Action::Accept) => Some(ScopedProvidedAction {
-                        action: ScopedActionRef::Return {
-                            pop: link.return_pop,
-                        },
+                let link = *self.links.iter().find(|link| link.child_component == component)?;
+                let nullable_start = link.child_start_nullable && local_state == link.child_start;
+                let eof_action = table.action(local_state, EOF);
+                let mut provided = match eof_action {
+                    Some(Action::Accept) => ScopedProvidedAction {
+                        action: ScopedActionRef::Return { pop: link.return_pop },
                         reduction_component: component,
-                    }),
-                    Some(action) => Some(ScopedProvidedAction {
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    Some(action) => ScopedProvidedAction {
                         action: ScopedActionRef::Local { component, action },
                         reduction_component: component,
-                    }),
-                    None if link.child_start_nullable && local_state == link.child_start => {
-                        Some(ScopedProvidedAction {
-                            action: ScopedActionRef::Return { pop: 1 },
-                            reduction_component: component,
-                        })
-                    }
-                    None => None,
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    None if nullable_start => ScopedProvidedAction {
+                        action: ScopedActionRef::Return { pop: 1 },
+                        reduction_component: component,
+                        extra_stack_shifts: SmallVec::new(),
+                    },
+                    None => return None,
+                };
+                if nullable_start && eof_action.is_some() {
+                    provided.extra_stack_shifts.push(ScopedStackShift {
+                        pop: 1,
+                        pushes: SmallVec::new(),
+                    });
                 }
+                Some(provided)
             }
             _ => None,
         }
@@ -257,9 +277,7 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
         if goto_from.component() != component {
             return None;
         }
-        let (target, replace) = self
-            .table(component)?
-            .goto_target(goto_from.local_state(), nonterminal)?;
+        let (target, replace) = self.table(component)?.goto_target(goto_from.local_state(), nonterminal)?;
         Some((ScopedParserState::new(component, target), replace))
     }
 
@@ -270,9 +288,7 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
     ) {
         let component = state.component();
         let local_state = state.local_state();
-        let Some(table) = self.table(component) else {
-            return;
-        };
+        let Some(table) = self.table(component) else { return; };
         for (index, link) in self.links.iter().enumerate() {
             if link.parent_component == component
                 && table.action(local_state, link.slot_terminal).is_some()
@@ -290,10 +306,7 @@ impl ScopedParserActionProvider for ScopedComponentActionProvider<'_> {
     }
 
     fn state_count_hint(&self) -> usize {
-        self.components
-            .iter()
-            .map(|table| table.num_states as usize)
-            .sum()
+        self.components.iter().map(|table| table.num_states as usize).sum()
     }
 }
 
@@ -368,299 +381,6 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
     }
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LegacyScopedParserSymbol {
-    Terminal { component: u32, terminal: TerminalID },
-    Link(u32),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct LegacyScopedSubgrammarLink {
-    pub parent_component: u32,
-    pub slot_terminal: TerminalID,
-    pub child_component: u32,
-    pub child_accept_state: u32,
-    pub child_return_pop: u32,
-    pub child_start_nullable: bool,
-}
-
-/// Composition parser provider over untouched component tables. Runtime parser
-/// state IDs are compact scoped IDs: each component owns one contiguous range,
-/// but no combined action/goto table is materialized.
-pub struct ScopedTableActionProvider<'a> {
-    components: Vec<&'a GLRTable>,
-    state_offsets: Vec<u32>,
-    links: Vec<LegacyScopedSubgrammarLink>,
-    total_states: u32,
-}
-
-impl<'a> ScopedTableActionProvider<'a> {
-    pub fn new(
-        components: Vec<&'a GLRTable>,
-        links: Vec<LegacyScopedSubgrammarLink>,
-    ) -> Result<Self, String> {
-        let mut state_offsets = Vec::with_capacity(components.len());
-        let mut total_states = 0u32;
-        for table in &components {
-            state_offsets.push(total_states);
-            total_states = total_states
-                .checked_add(table.num_states)
-                .ok_or_else(|| "scoped parser-state coordinate overflow".to_string())?;
-        }
-        for (index, link) in links.iter().enumerate() {
-            let parent = components
-                .get(link.parent_component as usize)
-                .ok_or_else(|| format!("link {index} references missing parent component"))?;
-            let child = components
-                .get(link.child_component as usize)
-                .ok_or_else(|| format!("link {index} references missing child component"))?;
-            if link.slot_terminal >= parent.num_terminals {
-                return Err(format!("link {index} slot terminal is outside the parent table"));
-            }
-            if link.child_accept_state >= child.num_states {
-                return Err(format!("link {index} child accept state is outside the child table"));
-            }
-        }
-        Ok(Self {
-            components,
-            state_offsets,
-            links,
-            total_states,
-        })
-    }
-
-    #[inline]
-    pub fn scoped_state(&self, component: u32, local_state: u32) -> Option<u32> {
-        let table = *self.components.get(component as usize)?;
-        if local_state >= table.num_states {
-            return None;
-        }
-        self.state_offsets
-            .get(component as usize)?
-            .checked_add(local_state)
-    }
-
-    #[inline]
-    pub fn decode_state(&self, state: u32) -> Option<(u32, u32)> {
-        if state >= self.total_states {
-            return None;
-        }
-        let component = self
-            .state_offsets
-            .partition_point(|&offset| offset <= state)
-            .checked_sub(1)?;
-        let local = state - self.state_offsets[component];
-        (local < self.components[component].num_states)
-            .then_some((component as u32, local))
-    }
-
-    #[inline]
-    fn map_state(&self, component: u32, local_state: u32) -> Option<u32> {
-        self.scoped_state(component, local_state)
-    }
-
-    fn map_local_action<'b>(&self, component: u32, action: &'b Action) -> Option<Cow<'b, Action>> {
-        let map = |state| self.map_state(component, state);
-        Some(match action {
-            Action::Reduce(..) | Action::Accept | Action::Skip => Cow::Borrowed(action),
-            Action::Split {
-                shift: None,
-                ..
-            } => Cow::Borrowed(action),
-            Action::Shift(target, replace) => {
-                Cow::Owned(Action::Shift(map(*target)?, *replace))
-            }
-            Action::StackShifts(shifts) => Cow::Owned(Action::StackShifts(
-                shifts
-                    .iter()
-                    .map(|shift| {
-                        Some(StackShift {
-                            pop: shift.pop,
-                            pushes: shift
-                                .pushes
-                                .iter()
-                                .map(|&state| map(state))
-                                .collect::<Option<Vec<_>>>()?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            Action::GuardedStackShifts(shifts) => Cow::Owned(Action::GuardedStackShifts(
-                shifts
-                    .iter()
-                    .map(|shift| {
-                        Some(GuardedStackShift {
-                            guards: shift
-                                .guards
-                                .iter()
-                                .map(|guard| {
-                                    Some(StackShiftGuard {
-                                        pop: guard.pop,
-                                        states: guard
-                                            .states
-                                            .iter()
-                                            .map(|&state| map(state))
-                                            .collect::<Option<Vec<_>>>()?,
-                                    })
-                                })
-                                .collect::<Option<Vec<_>>>()?,
-                            pop: shift.pop,
-                            pushes: shift
-                                .pushes
-                                .iter()
-                                .map(|&state| map(state))
-                                .collect::<Option<Vec<_>>>()?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            Action::Split {
-                shift: Some((target, replace)),
-                reduces,
-                accept,
-            } => Cow::Owned(Action::Split {
-                shift: Some((map(*target)?, *replace)),
-                reduces: reduces.clone(),
-                accept: *accept,
-            }),
-            Action::ReplaceShifts(targets) => Cow::Owned(Action::ReplaceShifts(
-                targets
-                    .iter()
-                    .map(|&target| map(target))
-                    .collect::<Option<Vec<_>>>()?
-                    .into(),
-            )),
-        })
-    }
-
-    fn local_action(&self, component: u32, local_state: u32, terminal: TerminalID) -> Option<ProvidedAction<'_>> {
-        let table = *self.components.get(component as usize)?;
-        let action = table.action(local_state, terminal)?;
-        Some(ProvidedAction {
-            action: self.map_local_action(component, action)?,
-            scope: component,
-            extra_stack_shifts: SmallVec::new(),
-        })
-    }
-
-    pub fn link_symbols(&self) -> Vec<LegacyScopedParserSymbol> {
-        (0..self.links.len())
-            .map(|index| LegacyScopedParserSymbol::Link(index as u32))
-            .collect()
-    }
-}
-
-impl ParserActionProvider for ScopedTableActionProvider<'_> {
-    type Symbol = LegacyScopedParserSymbol;
-
-    fn action(&self, state: u32, symbol: LegacyScopedParserSymbol) -> Option<ProvidedAction<'_>> {
-        let (component, local_state) = self.decode_state(state)?;
-        match symbol {
-            LegacyScopedParserSymbol::Terminal {
-                component: terminal_component,
-                terminal,
-            } => {
-                (component == terminal_component)
-                    .then(|| self.local_action(component, local_state, terminal))?
-            }
-            LegacyScopedParserSymbol::Link(link_index) => {
-                let link = *self.links.get(link_index as usize)?;
-                if component == link.parent_component {
-                    let table = *self.components.get(component as usize)?;
-                    let action = table.action(local_state, link.slot_terminal)?;
-                    match action {
-                        Action::Shift(target, replace)
-                        | Action::Split {
-                            shift: Some((target, replace)),
-                            reduces: _,
-                            accept: false,
-                        } if action.reduce_count() == 0 => {
-                            let parent_target = self.map_state(component, *target)?;
-                            let child_start = self.map_state(link.child_component, 0)?;
-                            Some(ProvidedAction {
-                                action: Cow::Owned(Action::StackShifts(vec![StackShift {
-                                    pop: u32::from(*replace),
-                                    pushes: vec![parent_target, child_start],
-                                }])),
-                                scope: component,
-                                extra_stack_shifts: SmallVec::new(),
-                            })
-                        }
-                        Action::Reduce(..)
-                        | Action::Split {
-                            shift: None,
-                            reduces: _,
-                            accept: false,
-                        } if action.reduce_count() != 0 => self.local_action(
-                            component,
-                            local_state,
-                            link.slot_terminal,
-                        ),
-                        _ => None,
-                    }
-                } else if component == link.child_component {
-                    let table = *self.components.get(component as usize)?;
-                    let eof_action = table.action(local_state, EOF);
-                    if local_state == link.child_accept_state
-                        && matches!(eof_action, Some(Action::Accept))
-                    {
-                        return Some(ProvidedAction {
-                            action: Cow::Owned(Action::StackShifts(vec![StackShift {
-                                pop: link.child_return_pop,
-                                pushes: Vec::new(),
-                            }])),
-                            scope: component,
-                            extra_stack_shifts: SmallVec::new(),
-                        });
-                    }
-                    let mut provided = match eof_action {
-                        Some(action) => ProvidedAction {
-                            action: self.map_local_action(component, action)?,
-                            scope: component,
-                            extra_stack_shifts: SmallVec::new(),
-                        },
-                        None if link.child_start_nullable && local_state == 0 => ProvidedAction {
-                            action: Cow::Owned(Action::StackShifts(Vec::new())),
-                            scope: component,
-                            extra_stack_shifts: SmallVec::new(),
-                        },
-                        None => return None,
-                    };
-                    if link.child_start_nullable && local_state == 0 {
-                        provided.extra_stack_shifts.push(StackShift {
-                            pop: 1,
-                            pushes: Vec::new(),
-                        });
-                    }
-                    Some(provided)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn goto_target(
-        &self,
-        scope: u32,
-        goto_from: u32,
-        nonterminal: u32,
-    ) -> Option<(u32, bool)> {
-        let (component, local_goto_from) = self.decode_state(goto_from)?;
-        if component != scope {
-            return None;
-        }
-        let table = *self.components.get(component as usize)?;
-        let (target, replace) = table.goto_target(local_goto_from, nonterminal)?;
-        Some((self.map_state(component, target)?, replace))
-    }
-
-    #[inline]
-    fn state_count_hint(&self) -> usize {
-        self.total_states as usize
-    }
-}
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
@@ -4522,6 +4242,55 @@ fn merge_scoped_into(dst: &mut ScopedParserGSS, branch: ScopedParserGSS) {
     }
 }
 
+fn apply_scoped_guarded_stack_shifts(
+    gss: ScopedParserGSS,
+    component: u32,
+    shifts: &[GuardedStackShift],
+) -> ScopedParserGSS {
+    let mut out = ScopedParserGSS::empty();
+    for shift in shifts {
+        debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
+        debug_assert!(shift.guards.iter().all(|guard| guard.pop <= shift.pop));
+        let mut base = gss.clone();
+        let mut depth = 0u32;
+        let mut dead = false;
+        for guard in &shift.guards {
+            if guard.pop < depth {
+                dead = true;
+                break;
+            }
+            base = base.popn((guard.pop - depth) as isize);
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+            let mut filtered = ScopedParserGSS::empty();
+            for &local_state in &guard.states {
+                merge_scoped_into(
+                    &mut filtered,
+                    base.isolate(Some(ScopedParserState::new(component, local_state))),
+                );
+            }
+            base = filtered;
+            if base.is_empty() {
+                dead = true;
+                break;
+            }
+            depth = guard.pop;
+        }
+        if dead || shift.pop < depth {
+            continue;
+        }
+        let branch = scoped_push_local_states(
+            base.popn((shift.pop - depth) as isize),
+            component,
+            &shift.pushes,
+        );
+        merge_scoped_into(&mut out, branch);
+    }
+    out
+}
+
 fn scoped_push_states(
     mut gss: ScopedParserGSS,
     states: &[ScopedParserState],
@@ -4572,20 +4341,24 @@ pub fn advance_scoped_stacks_with_provider<P: ScopedParserActionProvider>(
             };
             let isolated = closure.isolate(Some(state));
 
+            for shift in &provided.extra_stack_shifts {
+                let base = isolated.clone().popn(shift.pop as isize);
+                let branch = scoped_push_states(base, &shift.pushes);
+                merge_scoped_into(&mut shifted, branch);
+            }
+
             match provided.action {
                 ScopedActionRef::Local { component, action } => {
                     match action {
                         Action::GuardedStackShifts(shifts) => {
-                            // Guard values are local LR IDs. Until the optimized
-                            // scoped path is ported, evaluate guarded effects by
-                            // enumerating only their explicit stack effects when
-                            // they have no guards; guarded controls otherwise stay
-                            // on the existing composed-table oracle.
-                            for shift in shifts.iter().filter(|shift| shift.guards.is_empty()) {
-                                let base = isolated.clone().popn(shift.pop as isize);
-                                let branch = scoped_push_local_states(base, component, &shift.pushes);
-                                merge_scoped_into(&mut shifted, branch);
-                            }
+                            merge_scoped_into(
+                                &mut shifted,
+                                apply_scoped_guarded_stack_shifts(
+                                    isolated.clone(),
+                                    component,
+                                    shifts,
+                                ),
+                            );
                         }
                         _ => {
                             action.for_each_stack_shift(|pop, pushes| {
@@ -5620,7 +5393,6 @@ mod tests {
         ScopedComponentActionProvider, ScopedParserGSS, ScopedParserState, ScopedParserSymbol,
         ScopedProvidedAction, ScopedStackShift, ScopedSubgrammarLink,
         advance_scoped_stacks_with_provider, close_scoped_control_stacks_with_provider,
-        close_scoped_control_stacks_with_provider,
         ParserGSS,
         advance_concrete_stacks_reference,
         advance_stacks_with_provider,
@@ -5733,6 +5505,152 @@ mod tests {
     }
 
     #[test]
+    fn scoped_local_guarded_shift_respects_component_scope() {
+        let token = 0;
+        let parent = build_test_table(1, 0, &[&[]], &[&[]]);
+        let child = build_test_table(
+            3,
+            1,
+            &[
+                &[],
+                &[(token, Action::GuardedStackShifts(vec![GuardedStackShift {
+                    guards: vec![StackShiftGuard { pop: 1, states: vec![0] }],
+                    pop: 1,
+                    pushes: vec![2],
+                }]))],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+        let components = [&parent, &child];
+        let provider = ScopedComponentActionProvider::new(&components, &[]);
+
+        let matching = ScopedParserGSS::from_single_stack(
+            vec![ScopedParserState::new(1, 0), ScopedParserState::new(1, 1)],
+            TerminalsDisallowed::new(),
+        );
+        let shifted = advance_scoped_stacks_with_provider(
+            &provider,
+            matching,
+            ScopedParserSymbol::Terminal { component: 1, terminal: token },
+        );
+        assert_eq!(shifted.single_top_value(), Some(ScopedParserState::new(1, 2)));
+
+        let cross_scope = ScopedParserGSS::from_single_stack(
+            vec![ScopedParserState::new(0, 0), ScopedParserState::new(1, 1)],
+            TerminalsDisallowed::new(),
+        );
+        let rejected = advance_scoped_stacks_with_provider(
+            &provider,
+            cross_scope,
+            ScopedParserSymbol::Terminal { component: 1, terminal: token },
+        );
+        assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn direct_scoped_provider_preserves_reductions_under_entry_and_finish() {
+        let slot = 0;
+        let child_token = 0;
+        let nt = 0;
+        let parent = build_test_table(
+            4,
+            1,
+            &[
+                &[],
+                &[(slot, Action::Reduce(nt, 1))],
+                &[(slot, Action::Shift(3, false))],
+                &[],
+            ],
+            &[&[(nt, (2, false))], &[], &[], &[]],
+        );
+        let child = build_test_table(
+            3,
+            1,
+            &[
+                &[(child_token, Action::Shift(1, false))],
+                &[(EOF, Action::Reduce(nt, 1))],
+                &[(EOF, Action::Accept)],
+            ],
+            &[&[(nt, (2, false))], &[], &[]],
+        );
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: false,
+        }];
+        let provider = ScopedComponentActionProvider::new(&components, &links);
+        let start = ScopedParserGSS::from_single_stack(
+            vec![ScopedParserState::new(0, 0), ScopedParserState::new(0, 1)],
+            TerminalsDisallowed::new(),
+        );
+
+        let called = advance_scoped_stacks_with_provider(
+            &provider,
+            start,
+            ScopedParserSymbol::Entry { link: 0 },
+        );
+        assert_eq!(called.single_top_value(), Some(ScopedParserState::new(1, 0)));
+        let called_stacks = called.to_stacks(8).unwrap();
+        assert!(called_stacks.iter().any(|(stack, _)| stack == &vec![
+            ScopedParserState::new(0, 0),
+            ScopedParserState::new(0, 2),
+            ScopedParserState::new(0, 3),
+            ScopedParserState::new(1, 0),
+        ]));
+
+        let child_advanced = advance_scoped_stacks_with_provider(
+            &provider,
+            called,
+            ScopedParserSymbol::Terminal { component: 1, terminal: child_token },
+        );
+        let returned = advance_scoped_stacks_with_provider(
+            &provider,
+            child_advanced,
+            ScopedParserSymbol::Finish { component: 1 },
+        );
+        assert_eq!(returned.single_top_value(), Some(ScopedParserState::new(0, 3)));
+    }
+
+    #[test]
+    fn direct_scoped_provider_nullable_child_can_return_immediately() {
+        let slot = 0;
+        let parent = build_test_table(
+            2,
+            1,
+            &[&[(slot, Action::Shift(1, false))], &[]],
+            &[&[], &[]],
+        );
+        let child = build_test_table(1, 0, &[&[]], &[&[]]);
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: true,
+        }];
+        let provider = ScopedComponentActionProvider::new(&components, &links);
+        let start = ScopedParserGSS::from_single_stack(
+            vec![ScopedParserState::new(0, 0)],
+            TerminalsDisallowed::new(),
+        );
+        let closed = close_scoped_control_stacks_with_provider(&provider, &start);
+        let stacks = closed.to_stacks(16).unwrap();
+        assert!(stacks.iter().any(|(stack, _)| stack == &vec![ScopedParserState::new(0, 0), ScopedParserState::new(0, 1)]));
+        assert!(stacks.iter().any(|(stack, _)| stack == &vec![
+            ScopedParserState::new(0, 0),
+            ScopedParserState::new(0, 1),
+            ScopedParserState::new(1, 0),
+        ]));
+    }
+
+    #[test]
     fn scoped_provider_call_and_return_use_only_ordinary_gss_stack_effects() {
         struct Provider {
             child_shift: Action,
@@ -5753,6 +5671,7 @@ mod tests {
                     (0, 0, 10) => Some(ScopedProvidedAction {
                         action: ScopedActionRef::StackShifts(&self.call),
                         reduction_component: 0,
+                        extra_stack_shifts: SmallVec::new(),
                     }),
                     (1, 0, 0) => Some(ScopedProvidedAction {
                         action: ScopedActionRef::Local {
@@ -5760,10 +5679,12 @@ mod tests {
                             action: &self.child_shift,
                         },
                         reduction_component: 1,
+                        extra_stack_shifts: SmallVec::new(),
                     }),
                     (1, 1, 11) => Some(ScopedProvidedAction {
                         action: ScopedActionRef::StackShifts(&self.ret),
                         reduction_component: 1,
+                        extra_stack_shifts: SmallVec::new(),
                     }),
                     (0, 1, 1) => Some(ScopedProvidedAction {
                         action: ScopedActionRef::Local {
@@ -5771,6 +5692,7 @@ mod tests {
                             action: &self.parent_shift,
                         },
                         reduction_component: 0,
+                        extra_stack_shifts: SmallVec::new(),
                     }),
                     _ => None,
                 }
