@@ -24,7 +24,6 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
     expression_supports_deferred_dense_runtime,
-    expression_supports_virtual_residual_runtime,
     factor_regex_expr,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
@@ -652,31 +651,6 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     )
 }
 
-/// Dynamic masking can execute directly over partitioned NFA tokenizer states,
-/// so large terminal sets do not need to pay for expensive product DFA
-/// construction up front. Keep the historical tokenizer policy for smaller
-/// grammars, where the more deterministic shape is useful at mask time.
-/// Explicit lexer env overrides continue to take precedence over this default.
-fn validate_dynamic_large_repeat_shapes(grammar: &GrammarDef) -> crate::Result<()> {
-    let expressions = grammar
-        .terminals
-        .iter()
-        .map(terminal_expr)
-        .map(factor_regex_expr)
-        .collect::<Vec<_>>();
-    for (terminal, expression) in expressions.iter().enumerate() {
-        if expression_contains_large_bounded_repeat(expression)
-            && !expression_supports_virtual_residual_runtime(expression)
-        {
-            return Err(crate::Error::Compilation(format!(
-                "dynamic lexer cannot represent large bounded repeat in terminal {} with the exact residual runtime; refusing eager materialization",
-                grammar.terminal_display_name(terminal as u32),
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option<Tokenizer>> {
     const HYBRID_MIN_BOUND: usize = 4_096;
 
@@ -902,10 +876,7 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
         .map(terminal_expr)
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
-    let requires_exact_lazy_runtime = expressions
-        .iter()
-        .any(expression_contains_large_bounded_repeat);
-    if !explicit_policy || requires_exact_lazy_runtime {
+    if !explicit_policy {
         let labels = grammar
             .terminals
             .iter()
@@ -949,12 +920,6 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
                 );
             }
             return Ok(tokenizer);
-        }
-        if requires_exact_lazy_runtime {
-            return Err(crate::Error::Compilation(
-                "validated giant repeat selected neither an exact virtual tokenizer nor an exact deferred runtime partition; refusing eager materialization"
-                    .to_owned(),
-            ));
         }
     }
     if !explicit_policy && grammar.terminals.len() >= LARGE_DYNAMIC_LEXER_TERMINALS {
@@ -4956,10 +4921,6 @@ fn compile_dynamic_owned_impl(
     default_table_construction: GlrTableConstruction,
     finalize_runtime: bool,
 ) -> crate::Result<DynamicConstraint> {
-    // Validate the original terminal expressions before grammar preparation can
-    // rewrite their shape. This is a hard safety boundary: unsupported giant
-    // repeats must never reach the eager `(max + 1) * body_states` compiler.
-    validate_dynamic_large_repeat_shapes(&grammar)?;
     let start_nullable = grammar.start_is_nullable();
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
@@ -4986,11 +4947,6 @@ fn compile_dynamic_owned_impl(
         }
         prepare_grammar(grammar)
     };
-    // Preparation is allowed to rewrite terminal expressions. Re-run the
-    // giant-repeat safety proof on the exact expressions the tokenizer builder
-    // will consume so a transform cannot create a new eager-materialization
-    // path after the original precondition check.
-    validate_dynamic_large_repeat_shapes(&prepared_grammar)?;
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     let prepared_has_giant_repeat = prepared_grammar
         .terminals
