@@ -1646,6 +1646,36 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_constraint_loads_v14_payload_without_boundary_trigger() {
+        let vocab = vocab();
+        let constraint = DynamicConstraint::from_glrm_grammar(
+            "start start; nt start ::= \"a\" \"b\";",
+            &vocab,
+        )
+        .unwrap();
+        let original_mask = constraint.start().mask();
+        let legacy = DynamicConstraintPayloadV4 {
+            alternatives: vec![DynamicConstraintPayloadV4Alternative {
+                constraint: DynamicConstraint::payload_for_constraint(&constraint.inner),
+                late_grammar_slots: constraint.inner.late_grammar_slots.clone(),
+            }],
+        };
+        let payload = bincode::serialize(&legacy).unwrap();
+        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+        bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION_V14.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        let loaded = DynamicConstraint::load(&bytes).unwrap();
+        assert!(matches!(
+            loaded.inner.boundary_trigger,
+            crate::runtime::BoundaryTrigger::None
+        ));
+        assert_eq!(loaded.start().mask(), original_mask);
+    }
+
+    #[test]
     fn dynamic_constraint_loads_v11_payload_without_ignore_descriptor() {
         let vocab = vocab();
         let constraint = DynamicConstraint::from_glrm_grammar(
@@ -1732,6 +1762,32 @@ mod tests {
 
         let loaded = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert_eq!(original_mask, loaded.start().mask());
+    }
+
+    #[test]
+    fn dynamic_transfer_loads_v4_payload_without_boundary_trigger() {
+        let vocab = vocab();
+        crate::compiler::constraint_possible_matches::prepare_vocab_for_dynamic_mask(&vocab);
+        let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
+        let original_mask = original.start().mask();
+        let legacy = DynamicConstraintTransferPayloadV1 {
+            alternatives: vec![DynamicConstraint::transfer_payload_from_constraint_owned(
+                original.clone().into_constraint(),
+            )],
+        };
+        let payload = bincode::serialize(&legacy).unwrap();
+        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&DYNAMIC_TRANSFER_MAGIC);
+        bytes.extend_from_slice(&DYNAMIC_TRANSFER_VERSION_V4.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        let loaded = DynamicConstraint::load_with_vocab(&bytes, &vocab).unwrap();
+        assert!(matches!(
+            loaded.inner.boundary_trigger,
+            crate::runtime::BoundaryTrigger::None
+        ));
+        assert_eq!(loaded.start().mask(), original_mask);
     }
 
     #[test]
