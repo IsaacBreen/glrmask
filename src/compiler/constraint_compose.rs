@@ -23203,6 +23203,84 @@ table: &child.table,
     }
 
     #[test]
+    fn compact_dynamic_scoped_ignore_parser_preserves_both_entry_scopes() {
+        let vocab = byte_vocab();
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                ignore CHILD_WS;
+                t CHILD_WS ::= "\t"+;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let slot = terminal(&parent, "SUB");
+        let x = terminal(&parent, "X");
+        let parent_ws = terminal(&parent, "PARENT_WS");
+        let child_ws_local = terminal(&child, "CHILD_WS");
+        let composed = compose_constraints_owned_parent_segmented(
+            parent,
+            &[CompiledSubgrammarInput {
+                placeholder_terminal: slot,
+                additional_placeholder_terminals: &[],
+                constraint: &child,
+            }],
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .unwrap()
+        .constraint;
+        assert!(composed.uses_compact_segmented_parser_runtime());
+        let overlay = composed.static_dynamic_overlay.as_ref().unwrap();
+        let child_ws = overlay.segmented_parser_components[1].terminal_offset + child_ws_local;
+        let state = composed.initial_state_map();
+        let start = state.values().next().unwrap();
+        let after_x = composed
+            .advance_compact_segmented_parser(start, x)
+            .expect("compact parser runtime");
+        let mut scopes = after_x
+            .peek_values()
+            .into_iter()
+            .map(|state| composed.compact_segmented_parser_component(state).unwrap().0)
+            .collect::<Vec<_>>();
+        scopes.sort_unstable();
+        scopes.dedup();
+        assert_eq!(scopes, vec![0, 1], "CALL closure must retain parent and child choices");
+
+        let after_parent_ws = composed
+            .advance_compact_segmented_parser(&after_x, parent_ws)
+            .expect("compact parser runtime");
+        assert!(!after_parent_ws.is_empty(), "parent trivia must remain legal before CALL");
+        assert!(after_parent_ws.peek_values().into_iter().any(|state| {
+            composed
+                .compact_segmented_parser_component(state)
+                .is_some_and(|(component, _)| component == 1)
+        }));
+
+        let after_child_ws = composed
+            .advance_compact_segmented_parser(&after_x, child_ws)
+            .expect("compact parser runtime");
+        assert!(!after_child_ws.is_empty(), "child trivia must be legal after CALL");
+        assert!(after_child_ws.peek_values().into_iter().all(|state| {
+            composed
+                .compact_segmented_parser_component(state)
+                .is_some_and(|(component, _)| component == 1)
+        }));
+    }
+
+    #[test]
     fn distinct_parent_and_child_ignore_terminals_match_inline_scoped_semantics() {
         let vocab = Vocab::new(vec![
             (0, b"X \ta!".to_vec()),
