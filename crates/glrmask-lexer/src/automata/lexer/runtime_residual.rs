@@ -627,7 +627,10 @@ impl ResidualArena {
                 let has_nonnullable = parts.iter().any(|&part| !self.is_nullable(part));
                 if has_nonnullable {
                     let mut live = true;
-                    for &part in parts.iter().filter(|&&part| !self.is_nullable(part)) {
+                    for &part in parts.iter() {
+                        if self.is_nullable(part) {
+                            continue;
+                        }
                         if !self.has_future_with_work_budget(part, budget)? {
                             live = false;
                             break;
