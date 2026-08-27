@@ -8621,9 +8621,19 @@ impl Tokenizer {
         const MAX_WITNESSES: usize = 16_384;
 
         #[inline]
-        fn equal_under_mask(left: &BitSet, right: &BitSet, mask: &BitSet) -> bool {
+        fn equal_under_mask(
+            left: &BitSet,
+            right: &BitSet,
+            mask: &BitSet,
+            sparse_mask: &[usize],
+        ) -> bool {
             debug_assert_eq!(left.len(), right.len());
             debug_assert_eq!(left.len(), mask.len());
+            if !sparse_mask.is_empty() {
+                return sparse_mask
+                    .iter()
+                    .all(|&terminal| left.contains(terminal) == right.contains(terminal));
+            }
             left.words()
                 .iter()
                 .zip(right.words())
@@ -8641,6 +8651,12 @@ impl Tokenizer {
 
         let source_finalizers = self.matched_terminal_bitset(source);
         let source_futures = self.possible_future_terminals(source);
+        let active_count = active_terminals.count_ones();
+        let sparse_active = if active_count <= 16 {
+            active_terminals.iter().collect::<SmallVec<[usize; 16]>>()
+        } else {
+            SmallVec::new()
+        };
 
         // Bounded-repeat products are represented by one compressed segment
         // whose byte equivalence classes are stable across every state in the
@@ -8679,10 +8695,12 @@ impl Tokenizer {
                         self.matched_terminal_bitset(target),
                         source_finalizers,
                         active_terminals,
+                        &sparse_active,
                     ) || !equal_under_mask(
                         self.possible_future_terminals(target),
                         source_futures,
                         active_terminals,
+                        &sparse_active,
                     ) {
                         return false;
                     }

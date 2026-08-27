@@ -40,6 +40,7 @@ struct DynamicTraversalCache {
     terminal_admissible: FxHashMap<(usize, TerminalID), bool>,
     lexer_relevant: FxHashMap<(u32, usize), bool>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
+    parser_relative_subtree_certificates_enabled: bool,
     profile_interaction_hash: Option<u64>,
     profile_interaction_events: usize,
     profile_parser_action_counts: [usize; 10],
@@ -1987,6 +1988,17 @@ fn dynamic_bounded_subtree_min_tokens() -> usize {
     })
 }
 
+fn dynamic_bounded_component_min_tokens() -> usize {
+    static MIN_TOKENS: OnceLock<usize> = OnceLock::new();
+    *MIN_TOKENS.get_or_init(|| {
+        std::env::var("GLRMASK_EXPERIMENT_DYNAMIC_PARSER_RELATIVE_COMPONENT_MIN_TOKENS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value >= 2)
+            .unwrap_or(32)
+    })
+}
+
 fn dynamic_projection_reentry_min_tokens() -> usize {
     static MIN_TOKENS: OnceLock<usize> = OnceLock::new();
     *MIN_TOKENS.get_or_init(|| {
@@ -2248,6 +2260,45 @@ fn process_dynamic_trie_node(
     false
 }
 
+fn bounded_observation_component_witness(
+    tokenizer: &Tokenizer,
+    states: impl IntoIterator<Item = u32>,
+    active: &BitSet,
+    subtree_bytes: U8Set,
+    horizon: u8,
+) -> (Option<u32>, u8) {
+    let mut best_horizon = 0u8;
+    let mut best_state = None;
+    for source in states {
+        if tokenizer.state_has_epsilon_transitions(source) {
+            continue;
+        }
+        let matched = tokenizer.matched_terminal_bitset(source);
+        let future = tokenizer.possible_future_terminals(source);
+        // One closure component is a complete existential witness only if it
+        // starts as a live parser-visible residual with no parser-visible
+        // finalizer already pending. The bounded observation proof then keeps
+        // both properties invariant for every byte prefix up to `horizon`.
+        if !matched.is_disjoint(active) || future.is_disjoint(active) {
+            continue;
+        }
+        let proved = tokenizer.bounded_observation_safe_horizon_from_state(
+            source,
+            subtree_bytes,
+            active,
+            horizon,
+        );
+        if proved > best_horizon {
+            best_horizon = proved;
+            best_state = Some(source);
+        }
+        if proved >= horizon {
+            return (Some(source), proved);
+        }
+    }
+    (best_state, best_horizon)
+}
+
 /// Finite-horizon generalization of the literal raw-state self-loop check.
 ///
 /// Constraint finalization precomputes, for every deterministic tokenizer
@@ -2283,11 +2334,12 @@ fn bounded_observation_branch_certificate(
     if lexer_scan_cache.tokenizer().has_virtual_residual_runtime() {
         reject!("virtual_residual_runtime");
     }
-    if branch.tokenizer_config == initial_config
-    {
+    let initial_component_certificate = branch.tokenizer_config == initial_config
+        && traversal_cache.parser_relative_subtree_certificates_enabled;
+    if branch.tokenizer_config == initial_config && !initial_component_certificate {
         reject!("initial_config");
     }
-    if branch.fresh_reset {
+    if branch.fresh_reset && !initial_component_certificate {
         reject!("fresh_reset");
     }
     if !branch.pending_terminals.is_empty() {
@@ -2305,6 +2357,59 @@ fn bounded_observation_branch_certificate(
     if horizon > 64 {
         reject!("horizon_gt_64");
     }
+
+    if initial_component_certificate {
+        let mut active = admissible_terminals_cached(
+            constraint,
+            &branch.gss,
+            traversal_cache,
+        )
+        .clone();
+        if let Some(ignore) = constraint.ignore_terminal {
+            active.set(ignore as usize);
+        }
+        if active.is_empty() {
+            reject!("component_no_active_terminals");
+        }
+        let tokenizer = lexer_scan_cache.tokenizer();
+        let config_len = lexer_scan_cache.config_len(branch.tokenizer_config);
+        let (best_state, best_horizon) = bounded_observation_component_witness(
+            tokenizer,
+            (0..config_len)
+                .map(|state_index| lexer_scan_cache.config_state(branch.tokenizer_config, state_index)),
+            &active,
+            subtree_bytes,
+            horizon as u8,
+        );
+        if u32::from(best_horizon) >= horizon {
+            if detail {
+                eprintln!(
+                    "[glrmask/profile][dynamic_bounded_component] node={} tokens={} source={} config_len={} terminals={:?} horizon={} result=accept",
+                    node_id,
+                    subtree_token_count,
+                    best_state.expect("successful component proof has a source"),
+                    config_len,
+                    active.iter_ones().collect::<Vec<_>>(),
+                    horizon,
+                );
+            }
+            return true;
+        }
+        if detail {
+            eprintln!(
+                "[glrmask/profile][dynamic_bounded_component] node={} tokens={} best_source={:?} config_len={} terminals={:?} horizon={} proved={} result=reject",
+                node_id,
+                subtree_token_count,
+                best_state,
+                lexer_scan_cache.config_len(branch.tokenizer_config),
+                active.iter_ones().collect::<Vec<_>>(),
+                horizon,
+                best_horizon,
+            );
+        }
+        return false;
+    }
+
     if lexer_scan_cache.config_len(branch.tokenizer_config) != 1 {
         reject!("config_not_scalar");
     }
@@ -2330,7 +2435,37 @@ fn bounded_observation_branch_certificate(
     let Some(safe_bytes) = vocab.bounded_observation_safe_bytes(source, horizon) else {
         reject!("no_precomputed_horizon");
     };
-    let certified = subtree_bytes.is_subset(&safe_bytes);
+    let mut certified = subtree_bytes.is_subset(&safe_bytes);
+    let mut parser_relative_horizon = None;
+    if !certified && traversal_cache.parser_relative_subtree_certificates_enabled {
+        let mut active = admissible_terminals_cached(
+            constraint,
+            &branch.gss,
+            traversal_cache,
+        )
+        .clone();
+        if let Some(ignore) = constraint.ignore_terminal {
+            active.set(ignore as usize);
+        }
+        // The bounded certificate is meant to prove that no parser-visible
+        // lexical event occurs anywhere below this node. If one is already
+        // matched at the source, keep using the older exact walk rather than
+        // reasoning about zero-width/finalizer ordering here.
+        let source_matched = lexer_scan_cache.tokenizer().matched_terminal_bitset(source);
+        if source_matched.is_disjoint(&active) {
+            let proved = lexer_scan_cache
+                .tokenizer()
+                .bounded_observation_safe_horizon_from_state(
+                    source,
+                    subtree_bytes,
+                    &active,
+                    horizon as u8,
+                );
+            parser_relative_horizon = Some(proved);
+            certified = u32::from(proved) >= horizon;
+        }
+    }
+
     if detail {
         let exact_full_horizon = (!certified
             && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDED_EXACT").is_some()
@@ -2352,13 +2487,14 @@ fn bounded_observation_branch_certificate(
             .filter(|&byte| !safe_bytes.contains(byte))
             .collect::<Vec<_>>();
         eprintln!(
-            "[glrmask/profile][dynamic_bounded_detail] node={} tokens={} bytes={} horizon={} source={} precomputed_safe_bytes={} exact_full_horizon={:?} missing={:?} result={}",
+            "[glrmask/profile][dynamic_bounded_detail] node={} tokens={} bytes={} horizon={} source={} precomputed_safe_bytes={} parser_relative_horizon={:?} exact_full_horizon={:?} missing={:?} result={}",
             node_id,
             subtree_token_count,
             byte_count,
             horizon,
             source,
             safe_bytes.len(),
+            parser_relative_horizon,
             exact_full_horizon,
             missing,
             if certified { "accept" } else { "reject" }
@@ -2470,6 +2606,48 @@ fn process_interned_dynamic_trie_node(
                 stats.bounded_subtree_marks += 1;
                 mark_subtree_tokens(vocab, trie, node_id, buf);
                 return true;
+            }
+        }
+    }
+
+    // Reset epsilon-closures are especially common after an in-token lexer
+    // finalization. A single parser-relevant closure component can be an exact
+    // existential witness for the whole subtree, and that check is much cheaper
+    // than the generic structured fallback. Permit this proof below the normal
+    // large-subtree threshold without making every ordinary bounded proof more
+    // aggressive.
+    if allow_skip_certificates
+        && !require_repair_used
+        && traversal_cache.parser_relative_subtree_certificates_enabled
+    {
+        let component_min = dynamic_bounded_component_min_tokens();
+        if subtree_tokens.len() >= component_min && subtree_tokens.len() < bounded_min_tokens {
+            let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node_id));
+            let horizon = trie.subtree_max_byte_len(node_id);
+            if horizon != 0 && horizon <= 64 {
+                let branches = recognizer.branches(recognizer_state).clone();
+                let certified = branches.iter().any(|branch| {
+                    branch.tokenizer_config == initial_config
+                        && bounded_observation_branch_certificate(
+                            vocab,
+                            state.constraint,
+                            branch,
+                            initial_config,
+                            node_id,
+                            subtree_tokens.len(),
+                            subtree_bytes,
+                            horizon,
+                            lexer_scan_cache,
+                            traversal_cache,
+                        )
+                });
+                if certified {
+                    stats.subtree_marks += 1;
+                    stats.subtree_mark_tokens += subtree_tokens.len();
+                    stats.bounded_subtree_marks += 1;
+                    mark_subtree_tokens(vocab, trie, node_id, buf);
+                    return true;
+                }
             }
         }
     }
@@ -3649,11 +3827,15 @@ fn walk_interned_dynamic_trie(
         }
         if top_ranges.len() > 1 {
             let base_scan_cache = lexer_scan_cache.clone();
+            let parser_relative_subtree_certificates_enabled =
+                traversal_cache.parser_relative_subtree_certificates_enabled;
             let results = top_ranges
                 .par_iter()
                 .map(|&(walk_start, walk_end)| -> Result<(Vec<u32>, DynamicWalkStats), String> {
                     let mut local_scan_cache = base_scan_cache.clone();
                     let mut local_traversal_cache = DynamicTraversalCache::default();
+                    local_traversal_cache.parser_relative_subtree_certificates_enabled =
+                        parser_relative_subtree_certificates_enabled;
                     let mut local_raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
                     let mut local_config_self_loop_cache = FxHashMap::<u32, U8Set>::default();
                     let mut local_buf = vec![0u32; buf.len()];
@@ -3963,6 +4145,9 @@ fn fill_mask_dynamic_impl(
     let mut raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut config_self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
+    traversal_cache.parser_relative_subtree_certificates_enabled =
+        std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_PARSER_RELATIVE_SUBTREE_CERTIFICATES")
+            .is_some();
     if profile {
         traversal_cache.profile_interaction_hash = Some(0xcbf29ce484222325u64);
     }
@@ -4760,6 +4945,8 @@ fn fill_mask_dynamic_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex_partitioned_with_adaptive;
     use crate::{DynamicConstraint, Constraint as Constraint, Vocab};
     use std::collections::BTreeSet;
 
@@ -4767,6 +4954,67 @@ mod tests {
         let word = token_id as usize / 32;
         let bit = token_id % 32;
         mask.get(word).is_some_and(|word| word & (1u32 << bit) != 0)
+    }
+
+    #[test]
+    fn bounded_component_witness_selects_one_live_dispatch_component() {
+        let mut letters = U8Set::empty();
+        for byte in b'a'..=b'z' {
+            letters.insert(byte);
+        }
+        let mut digits = U8Set::empty();
+        for byte in b'0'..=b'9' {
+            digits.insert(byte);
+        }
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(letters)),
+                min: 100,
+                max: Some(100),
+            },
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(digits)),
+                min: 100,
+                max: Some(100),
+            },
+        ];
+        // Force distinct lexer partitions so the reset state is an epsilon
+        // union of two deterministic dispatch components, matching the runtime
+        // shape that this certificate is intended to exploit.
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+            .into_tokenizer(2, Some(Arc::from(expressions.into_boxed_slice())));
+        let roots = tokenizer.singleton_epsilon_closure(tokenizer.initial_state());
+        assert!(roots.len() >= 3, "test requires an epsilon-union lexer closure");
+
+        let mut active = BitSet::new(2);
+        active.set(0);
+        let mut bytes = U8Set::empty();
+        bytes.insert(b'a');
+        bytes.insert(b'b');
+        let (source, proved) = bounded_observation_component_witness(
+            &tokenizer,
+            roots.iter().copied(),
+            &active,
+            bytes,
+            32,
+        );
+        let source = source.expect("letter dispatch component should certify the alphabet");
+        assert_eq!(proved, 32);
+        assert!(tokenizer.possible_future_terminals(source).contains(0));
+        assert!(tokenizer.matched_terminal_bitset(source).is_disjoint(&active));
+
+        // Digits belong only to the parser-invisible sibling component, so no
+        // parser-visible letter component can witness even the first byte.
+        let mut digit_bytes = U8Set::empty();
+        digit_bytes.insert(b'0');
+        let (_, proved) = bounded_observation_component_witness(
+            &tokenizer,
+            roots.iter().copied(),
+            &active,
+            digit_bytes,
+            1,
+        );
+        assert_eq!(proved, 0);
     }
 
     fn direct_mask(state: &ConstraintState<'_>) -> Vec<u32> {
