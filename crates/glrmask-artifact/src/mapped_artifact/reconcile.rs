@@ -1371,7 +1371,13 @@ pub fn remap_weights_with_maps(
             .iter()
             .map(|(_, tokens)| tokens.ranges().count())
             .sum::<usize>();
-        let use_range_cache = total_source_tokens >= 8_192
+        // Building a global range cache pays a hash/interning cost before any
+        // source set is remapped. With only a few dozen distinct source token
+        // sets, direct disjoint-run remapping is cheaper even for fairly dense
+        // sets; reserve the shared range cache for workloads with enough
+        // independent sets to amortize that setup cost.
+        let use_range_cache = sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            && total_source_tokens >= 8_192
             && total_source_ranges.saturating_mul(4) < total_source_tokens;
         let remapped = if use_range_cache {
             let mut unique_ranges = FxHashSet::<(u32, u32)>::default();

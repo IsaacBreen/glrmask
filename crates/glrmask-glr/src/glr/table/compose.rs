@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use super::row::{ActionRow, GotoRow, SparseRow};
 use super::{
-    Action, AdmissionPolicy, GLRTable, GlrTableConstruction, GuardedStackShift, StackShift,
-    StackShiftGuard,
+    Action, AdmissionPolicy, GLRTable, GlrTableConstruction, GuardedShiftCellIndex,
+    GuardedStackShift, StackShift, StackShiftGuard,
 };
 use crate::glr::analysis::EOF;
 use crate::ds::bitset::BitSet;
@@ -76,6 +77,45 @@ pub struct ComposedTable {
     /// this tiny set avoids rescanning every appended action cell when deciding
     /// which cached parent parser templates may have changed.
     pub appended_parent_action_terminals: BTreeSet<TerminalID>,
+}
+
+fn remap_guarded_shift_index_row_affine(
+    row: &FxHashMap<TerminalID, GuardedShiftCellIndex>,
+    terminal_offset: TerminalID,
+    eof_control: TerminalID,
+    state_offset: u32,
+) -> Result<FxHashMap<TerminalID, GuardedShiftCellIndex>, String> {
+    if row.is_empty() {
+        return Ok(FxHashMap::default());
+    }
+    let mut mapped = FxHashMap::with_capacity_and_hasher(row.len(), Default::default());
+    for (&terminal, cell) in row {
+        let mapped_terminal = if terminal == EOF {
+            eof_control
+        } else {
+            terminal
+                .checked_add(terminal_offset)
+                .ok_or_else(|| "merged terminal ID overflow".to_string())?
+        };
+        let mut by_guard_key =
+            FxHashMap::with_capacity_and_hasher(cell.by_guard_key.len(), Default::default());
+        for (&(pop, state), shift_indices) in &cell.by_guard_key {
+            let state = state
+                .checked_add(state_offset)
+                .ok_or_else(|| "merged parser state ID overflow".to_string())?;
+            by_guard_key.insert((pop, state), shift_indices.clone());
+        }
+        mapped.insert(
+            mapped_terminal,
+            GuardedShiftCellIndex {
+                guard_pops: cell.guard_pops.clone(),
+                by_guard_key,
+                guard_counts: cell.guard_counts.clone(),
+                unguarded_indices: cell.unguarded_indices.clone(),
+            },
+        );
+    }
+    Ok(mapped)
 }
 
 fn remap_rule(rule: &Rule, terminal_offset: TerminalID, nonterminal_offset: NonterminalID) -> Rule {
@@ -285,6 +325,109 @@ fn remap_action(
         ),
         Action::Skip => Action::Skip,
     })
+}
+
+
+fn remap_advance_row_affine(
+    source: &BitSet,
+    source_num_terminals: TerminalID,
+    terminal_offset: TerminalID,
+    eof_control: TerminalID,
+    merged_num_terminals: TerminalID,
+) -> BitSet {
+    let source_terminal_count = source_num_terminals as usize;
+    debug_assert_eq!(source.len(), source_terminal_count + 1);
+    debug_assert!(terminal_offset + source_num_terminals <= merged_num_terminals);
+    debug_assert!(eof_control < merged_num_terminals);
+
+    let mut mapped = BitSet::new(merged_num_terminals as usize + 1);
+    let source_word_count = source_terminal_count.div_ceil(64);
+    let destination_word = terminal_offset as usize / 64;
+    let destination_shift = terminal_offset as usize % 64;
+    let trailing_bits = source_terminal_count % 64;
+
+    for source_word in 0..source_word_count {
+        let mut word = source.words()[source_word];
+        if trailing_bits != 0 && source_word + 1 == source_word_count {
+            word &= (1u64 << trailing_bits) - 1;
+        }
+        let target_word = destination_word + source_word;
+        mapped.words_mut()[target_word] |= word << destination_shift;
+        if destination_shift != 0 && target_word + 1 < mapped.words().len() {
+            mapped.words_mut()[target_word + 1] |= word >> (64 - destination_shift);
+        }
+    }
+
+    if source.contains(source_terminal_count) {
+        mapped.set(eof_control as usize);
+    }
+    mapped
+}
+
+fn remap_action_affine(
+    action: &Action,
+    state_offset: u32,
+    child_num_states: u32,
+    nonterminal_offset: NonterminalID,
+) -> Action {
+    // The explicit linker checks `state_offset + child_num_states` before it
+    // maps this block. Every state reference in a child action is local to that
+    // block, so repeating checked arithmetic and `Result<Vec<_>>` plumbing for
+    // every cell only adds work. Keep debug proofs at the actual references.
+    let map_state = |state: u32| {
+        debug_assert!(state < child_num_states);
+        state + state_offset
+    };
+    match action {
+        Action::Shift(target, replace) => Action::Shift(map_state(*target), *replace),
+        Action::StackShifts(shifts) => {
+            let mut mapped = shifts.clone();
+            for shift in &mut mapped {
+                for state in &mut shift.pushes {
+                    *state = map_state(*state);
+                }
+            }
+            Action::StackShifts(mapped)
+        }
+        Action::GuardedStackShifts(shifts) => {
+            let mut mapped = shifts.clone();
+            for shift in &mut mapped {
+                for guard in &mut shift.guards {
+                    for state in &mut guard.states {
+                        *state = map_state(*state);
+                    }
+                }
+                for state in &mut shift.pushes {
+                    *state = map_state(*state);
+                }
+            }
+            Action::GuardedStackShifts(mapped)
+        }
+        Action::Reduce(nonterminal, len) => {
+            Action::Reduce(nonterminal + nonterminal_offset, *len)
+        }
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => Action::Split {
+            shift: shift.map(|(target, replace)| (map_state(target), replace)),
+            reduces: reduces
+                .iter()
+                .map(|&(nonterminal, len)| (nonterminal + nonterminal_offset, len))
+                .collect(),
+            accept: *accept,
+        },
+        Action::Accept => Action::Accept,
+        Action::ReplaceShifts(targets) => Action::ReplaceShifts(
+            targets
+                .iter()
+                .map(|&target| map_state(target))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        Action::Skip => Action::Skip,
+    }
 }
 
 #[derive(Default)]
@@ -1321,6 +1464,26 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
     children: &[SubgrammarTableInput<'_>],
     child_rules: &[&[Rule]],
 ) -> Result<ComposedTable, String> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let total_started_at = profile.then(Instant::now);
+    let source_has_guarded_stack_shifts = table_has_guarded_stack_shifts(parent)
+        || children
+            .iter()
+            .any(|child| table_has_guarded_stack_shifts(child.table));
+    let can_affine_guarded_index = source_has_guarded_stack_shifts
+        && parent.guarded_shift_index.len() == parent.num_states as usize
+        && parent_scoped_ignore_terminal.map_or(true, |ignore| {
+            parent.action.iter().all(|row| row.get(&ignore).is_none())
+        })
+        && children.iter().all(|child_input| {
+            let child = child_input.table;
+            child.guarded_shift_index.len() == child.num_states as usize
+                && !(child_input.start_nullable
+                    && child.action.first().is_some_and(|row| row.get(&EOF).is_some()))
+                && child_input.ignore_terminal.map_or(true, |ignore| {
+                    child.action.iter().all(|row| row.get(&ignore).is_none())
+                })
+        });
     if children.len() != child_rules.len() {
         return Err("child table/rule override count mismatch".to_owned());
     }
@@ -1344,13 +1507,24 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
             .ok_or_else(|| "merged nonterminal ID overflow".to_string())?;
     }
 
+    let setup_started_at = profile.then(Instant::now);
     let mut action = parent.action.clone();
     let mut goto = parent.goto.clone();
+    let mut guarded_shift_index = if can_affine_guarded_index {
+        parent.guarded_shift_index.clone()
+    } else {
+        Vec::new()
+    };
     if let Some(ignore) = parent_scoped_ignore_terminal {
         for row in &mut action {
             merge_action_cell(row, ignore, identity_skip_action())?;
         }
     }
+    // `advance` is exactly action-row presence. Build the parent portion once
+    // after scoped-ignore injection, then construct appended child rows while
+    // their mapped action terminals are already hot instead of rescanning the
+    // entire composed action table after transport.
+    let mut advance = super::action_presence_rows(&action, next_terminal);
 
     let mut state_relations = Vec::with_capacity(children.len() + 1);
     state_relations.push(
@@ -1375,6 +1549,14 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
     if let Some(ignore) = parent_scoped_ignore_terminal {
         skip_terminals.insert(ignore);
     }
+    let setup_ms = setup_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let child_transport_started_at = profile.then(Instant::now);
+    let mut child_row_map_ms = 0.0f64;
+    let mut child_row_append_ms = 0.0f64;
+    let mut child_relation_ms = 0.0f64;
+    let mut child_callsite_metadata_ms = 0.0f64;
+    let mut child_rules_ms = 0.0f64;
+    let mut child_names_ms = 0.0f64;
 
     for (child_index, child_input) in children.iter().enumerate() {
         let child = child_input.table;
@@ -1452,146 +1634,244 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
 
         let mut child_relation = vec![Vec::<u32>::new(); child.num_states as usize];
 
-        // Deliberately copy the whole child once per call site.  This makes the
-        // continuation and active ignore scope explicit in the parser-state
-        // identity.  Sharing internal states is a later optimization which can
-        // be proved against this representation.
+        // Deliberately copy the whole child once per call site. This makes the
+        // continuation and active ignore scope explicit in parser-state identity.
+        // Every copy is one contiguous block, so its local->merged state map is
+        // exactly affine: `merged = state_base + local`. Avoid materializing and
+        // repeatedly indexing a full state_map for this guaranteed shape.
         for &(control, caller_state, placeholder_target, placeholder_replace) in &call_sites {
-            let mut state_map = vec![u32::MAX; child.num_states as usize];
-            for local_state in 0..child.num_states {
-                state_map[local_state as usize] = next_state;
-                child_relation[local_state as usize].push(next_state);
-                next_state += 1;
-                action.push(ActionRow::default());
-                goto.push(GotoRow::default());
-            }
+            let state_base = next_state;
+            next_state = next_state
+                .checked_add(child.num_states)
+                .ok_or_else(|| "merged parser state ID overflow".to_string())?;
 
-            let mapped_start = state_map[child_start as usize];
-            let mapped_accept = state_map[child_accept as usize];
+            let mapped_start = state_base + child_start;
             action[caller_state as usize].insert(
                 control,
                 Action::Shift(mapped_start, placeholder_replace),
             );
 
-            // A compiled child can retain exact root-nullability metadata even
-            // after its internal epsilon reduction has been normalized out of
-            // the LR action rows.  The explicit-control linker must therefore
-            // make the empty child derivation explicit too.  From the mapped
-            // child start, reducing an empty root and then taking the ordinary
-            // child-return control has net stack effect `pop start; push parent
-            // continuation`, independent of whether the child's root goto
-            // itself uses replace semantics.
-            if child_input.start_nullable {
-                merge_action_cell(
-                    &mut action[mapped_start as usize],
-                    control,
-                    Action::StackShifts(vec![StackShift {
-                        pop: 1,
-                        pushes: vec![placeholder_target],
-                    }]),
-                )?;
-            }
-
-            for local_state in 0..child.num_states {
-                let merged_state = state_map[local_state as usize] as usize;
-                for (terminal, child_action) in child.action[local_state as usize].iter() {
-                    if terminal == EOF && local_state == child_accept {
-                        if !matches!(child_action, Action::Accept) {
-                            return Err(format!(
-                                "child accept state {child_accept} has unsupported EOF action {child_action:?}",
-                            ));
-                        }
-                        merge_action_cell(
-                            &mut action[merged_state],
+            let map_row = |local_state: u32|
+             -> Result<
+                (
+                    ActionRow,
+                    GotoRow,
+                    BitSet,
+                    FxHashMap<TerminalID, GuardedShiftCellIndex>,
+                ),
+                String,
+            > {
+                let source_action = &child.action[local_state as usize];
+                let extras = usize::from(child_input.ignore_terminal.is_some())
+                    + usize::from(child_input.start_nullable && local_state == child_start);
+                let mut mapped_action =
+                    ActionRow::Sparse(SparseRow::with_expected_len(source_action.len() + extras));
+                let source_advance = child.advance.get(local_state as usize).filter(|row| {
+                    child.advance.len() == child.num_states as usize
+                        && row.len() == child.num_terminals as usize + 1
+                });
+                let mut mapped_advance = source_advance.map_or_else(
+                    || BitSet::new(next_terminal as usize + 1),
+                    |row| {
+                        remap_advance_row_affine(
+                            row,
+                            child.num_terminals,
+                            terminal_offset,
                             control,
-                            Action::StackShifts(vec![StackShift {
-                                pop: return_pop,
-                                pushes: vec![placeholder_target],
-                            }]),
-                        )?;
-                        continue;
-                    }
+                            next_terminal,
+                        )
+                    },
+                );
 
-                    let mapped_action = remap_action(
-                        child_action,
-                        &state_map,
-                        terminal_offset,
-                        nonterminal_offset,
-                        Some(mapped_start),
-                        Some(mapped_accept),
-                        child_start,
-                        child_accept,
-                    )?;
-                    let mapped_terminal = if terminal == EOF {
-                        control
+                // A compiled child can retain exact root-nullability metadata even
+                // after its internal epsilon reduction has been normalized out of
+                // the LR action rows. Make that empty derivation explicit in the
+                // mapped start row before merging any colliding child control cell.
+                if child_input.start_nullable && local_state == child_start {
+                    mapped_action.insert(
+                        control,
+                        Action::StackShifts(vec![StackShift {
+                            pop: 1,
+                            pushes: vec![placeholder_target],
+                        }]),
+                    );
+                    mapped_advance.set(control as usize);
+                }
+
+                for (terminal, child_action) in source_action.iter() {
+                    let (mapped_terminal, next_action) =
+                        if terminal == EOF && local_state == child_accept {
+                            if !matches!(child_action, Action::Accept) {
+                                return Err(format!(
+                                    "child accept state {child_accept} has unsupported EOF action {child_action:?}",
+                                ));
+                            }
+                            (
+                                control,
+                                Action::StackShifts(vec![StackShift {
+                                    pop: return_pop,
+                                    pushes: vec![placeholder_target],
+                                }]),
+                            )
+                        } else {
+                            (
+                                if terminal == EOF {
+                                    control
+                                } else {
+                                    terminal + terminal_offset
+                                },
+                                remap_action_affine(
+                                    child_action,
+                                    state_base,
+                                    child.num_states,
+                                    nonterminal_offset,
+                                ),
+                            )
+                        };
+                    // Child action-row keys are unique, and ordinary child
+                    // terminals map into the disjoint child terminal range.
+                    // EOF alone maps back to the parent control terminal, so
+                    // the only cell that can already exist here is the
+                    // nullable-start continuation installed above.
+                    if child_input.start_nullable
+                        && local_state == child_start
+                        && terminal == EOF
+                    {
+                        merge_action_cell(&mut mapped_action, mapped_terminal, next_action)?;
                     } else {
-                        terminal + terminal_offset
-                    };
-                    merge_action_cell(
-                        &mut action[merged_state],
-                        mapped_terminal,
-                        mapped_action,
-                    )?;
+                        debug_assert!(mapped_action.get(&mapped_terminal).is_none());
+                        mapped_action.insert(mapped_terminal, next_action);
+                    }
                 }
 
                 if let Some(local_ignore) = child_input.ignore_terminal {
+                    let mapped_ignore = local_ignore + terminal_offset;
                     merge_action_cell(
-                        &mut action[merged_state],
-                        local_ignore + terminal_offset,
+                        &mut mapped_action,
+                        mapped_ignore,
                         identity_skip_action(),
                     )?;
+                    mapped_advance.set(mapped_ignore as usize);
                 }
 
-                for (nonterminal, &(target, replace)) in child.goto[local_state as usize].iter() {
-                    goto[merged_state].insert(
+                let source_goto = &child.goto[local_state as usize];
+                let mut mapped_goto = GotoRow::with_expected_len(source_goto.len());
+                for (nonterminal, &(target, replace)) in source_goto.iter() {
+                    mapped_goto.insert(
                         nonterminal + nonterminal_offset,
-                        (state_map[target as usize], replace),
+                        (state_base + target, replace),
                     );
                 }
-            }
+                if source_advance.is_none() {
+                    mapped_advance = super::action_presence_row(&mapped_action, next_terminal);
+                }
+                let mapped_guarded = if can_affine_guarded_index {
+                    remap_guarded_shift_index_row_affine(
+                        &child.guarded_shift_index[local_state as usize],
+                        terminal_offset,
+                        control,
+                        state_base,
+                    )?
+                } else {
+                    FxHashMap::default()
+                };
+                Ok((mapped_action, mapped_goto, mapped_advance, mapped_guarded))
+            };
 
+            let row_map_started_at = profile.then(Instant::now);
+            let mapped_rows = if child.num_states >= 512 {
+                (0..child.num_states)
+                    .into_par_iter()
+                    .map(map_row)
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                (0..child.num_states)
+                    .map(map_row)
+                    .collect::<Result<Vec<_>, String>>()?
+            };
+            child_row_map_ms += row_map_started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+            let row_append_started_at = profile.then(Instant::now);
+            action.reserve(mapped_rows.len());
+            goto.reserve(mapped_rows.len());
+            if can_affine_guarded_index {
+                guarded_shift_index.reserve(mapped_rows.len());
+            }
+            for (local_state, (mapped_action, mapped_goto, mapped_advance, mapped_guarded)) in
+                mapped_rows.into_iter().enumerate()
+            {
+                child_relation[local_state].push(state_base + local_state as u32);
+                action.push(mapped_action);
+                goto.push(mapped_goto);
+                advance.push(mapped_advance);
+                if can_affine_guarded_index {
+                    guarded_shift_index.push(mapped_guarded);
+                }
+            }
+            child_row_append_ms += row_append_started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+            let metadata_started_at = profile.then(Instant::now);
             for &(state, terminal) in &child.forwarded_shifts {
                 forwarded_shifts.insert((
-                    state_map[state as usize],
+                    state_base + state,
                     terminal + terminal_offset,
                 ));
             }
             for frontier in &child.direct_regular_wide_frontiers {
                 direct_regular_wide_frontiers.push(
                     super::DirectRegularWideFrontierDescriptor {
-                        source_state: state_map[frontier.source_state as usize],
+                        source_state: state_base + frontier.source_state,
                         terminal: frontier.terminal + terminal_offset,
                         target_states: frontier
                             .target_states
                             .iter()
-                            .map(|&target| state_map[target as usize])
+                            .map(|&target| state_base + target)
                             .collect(),
                     },
                 );
             }
+            child_callsite_metadata_ms += metadata_started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         }
 
-        for targets in &mut child_relation {
-            targets.sort_unstable();
-            targets.dedup();
-        }
+        // `state_base` increases by one disjoint child-state block for every
+        // call site, and each local state receives exactly `state_base + local`.
+        // Targets are therefore already strictly increasing and duplicate-free.
+        let relation_started_at = profile.then(Instant::now);
         state_relations.push(child_relation);
+        child_relation_ms += relation_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+        let rules_started_at = profile.then(Instant::now);
         for rule in child_rules {
             rules.push(remap_rule(rule, terminal_offset, nonterminal_offset));
         }
         if child_input.start_nullable {
             ensure_epsilon_rule(&mut rules, child_root);
         }
-        nonterminal_display_names.extend(
-            child
-                .nonterminal_display_names
-                .iter()
-                .map(|name| format!("child{child_index}::{name}")),
-        );
+        child_rules_ms += rules_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let names_started_at = profile.then(Instant::now);
+        let child_name_prefix = format!("child{child_index}::");
+        nonterminal_display_names.extend(child.nonterminal_display_names.iter().map(|name| {
+            let mut display_name = String::with_capacity(child_name_prefix.len() + name.len());
+            display_name.push_str(&child_name_prefix);
+            display_name.push_str(name);
+            display_name
+        }));
+        child_names_ms += names_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     }
 
+    let child_transport_ms = child_transport_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let nullable_started_at = profile.then(Instant::now);
     let result_start_nullable = rules_make_start_nullable(&rules, parent_root);
+    let nullable_ms = nullable_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let mut table = GLRTable {
         action,
         goto,
@@ -1602,17 +1882,32 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
         nonterminal_display_names,
         construction: GlrTableConstruction::Lalr,
         admission_policy: AdmissionPolicy::ExactSimulation,
-        advance: Vec::<BitSet>::new(),
+        advance,
         unconditional_advance: Vec::new(),
         forwarded_shifts,
         control_terminals: control_terminals.clone(),
         skip_terminals,
-        guarded_shift_index: Vec::new(),
+        guarded_shift_index,
         direct_regular_wide_frontiers,
     };
-    table.rebuild_advance_rows_from_actions();
-    table.rebuild_guarded_shift_index();
+    let advance_started_at = profile.then(Instant::now);
+    debug_assert_eq!(table.advance.len(), table.num_states as usize);
+    let advance_ms = advance_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let guarded_started_at = profile.then(Instant::now);
+    if can_affine_guarded_index {
+        debug_assert_eq!(table.guarded_shift_index.len(), table.num_states as usize);
+    } else if source_has_guarded_stack_shifts {
+        table.rebuild_guarded_shift_index();
+    } else {
+        table.guarded_shift_index = vec![Default::default(); table.num_states as usize];
+    }
+    let guarded_ms = guarded_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let compress_started_at = profile.then(Instant::now);
     table.compress_default_action_rows();
+    let compress_ms = compress_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     table.set_embedded_start_nullable(result_start_nullable);
 
     let parent_terminal_end = parent.num_terminals;
@@ -1623,6 +1918,14 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
         .flat_map(|row| row.keys())
         .filter(|&terminal| terminal < parent_terminal_end)
         .collect::<BTreeSet<_>>();
+
+    if let Some(started) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][subgrammar_explicit_table_compose] states={} setup_ms={setup_ms:.3} child_transport_ms={child_transport_ms:.3} child_row_map_ms={child_row_map_ms:.3} child_row_append_ms={child_row_append_ms:.3} child_relation_ms={child_relation_ms:.3} child_callsite_metadata_ms={child_callsite_metadata_ms:.3} child_rules_ms={child_rules_ms:.3} child_names_ms={child_names_ms:.3} nullable_ms={nullable_ms:.3} advance_ms={advance_ms:.3} guarded_ms={guarded_ms:.3} compress_ms={compress_ms:.3} total_ms={:.3}",
+            table.num_states,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(ComposedTable {
         table,
@@ -1949,6 +2252,12 @@ mod tests {
             }
         }
         rec(alphabet, max_len, &mut Vec::new(), &mut visit);
+    }
+
+    fn assert_advance_matches_actions(table: &GLRTable) {
+        let mut rebuilt = table.clone();
+        rebuilt.rebuild_advance_rows_from_actions();
+        assert_eq!(table.advance, rebuilt.advance);
     }
 
     #[test]
@@ -2348,6 +2657,7 @@ mod tests {
         let explicit =
             compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
                 .unwrap();
+        assert_advance_matches_actions(&explicit.table);
 
         let done = terminal(&parent_analysis, "DONE");
         let child_a = explicit.terminal_offsets[1] + terminal(&child_analysis, "a");
@@ -2660,6 +2970,7 @@ mod tests {
             std::slice::from_ref(&input),
         )
         .unwrap();
+        assert_advance_matches_actions(&composed.table);
         let direct = compose_subgrammar_tables(
             &parent,
             Some(parent_ws),

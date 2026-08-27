@@ -638,6 +638,17 @@ impl ActionRow {
             return;
         }
 
+        // A default row with `p` present cells over an `N`-terminal domain has
+        // cost `1 + (N - m)`, where `m` is the multiplicity of its chosen
+        // default action. It can beat the sparse cost `p` only if
+        // `m > N + 1 - p`. Since `m <= p`, any row at or below half density
+        // is provably impossible to compress. Reject it before allocating and
+        // hashing an action-frequency map.
+        let present_count = row.len();
+        if present_count <= (num_terminals as usize + 1) / 2 {
+            return;
+        }
+
         let mut counts: FxHashMap<Action, usize> = FxHashMap::default();
         for (terminal, action) in row.iter() {
             if *terminal >= num_terminals {
@@ -646,8 +657,7 @@ impl ActionRow {
             *counts.entry(action.clone()).or_insert(0) += 1;
         }
 
-        let sparse_cost = row.len();
-        let present_count = sparse_cost;
+        let sparse_cost = present_count;
         if present_count > num_terminals as usize {
             return;
         }

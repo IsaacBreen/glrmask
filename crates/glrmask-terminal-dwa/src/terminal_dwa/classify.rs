@@ -441,6 +441,37 @@ pub fn vocab_tokens_with_adjacent_pairs(
     allowed_pairs: &[U8Set; 256],
 ) -> Vec<u32> {
     let index = vocab_adjacent_pair_index(vocab);
+    let mut total_occurrences = 0usize;
+    for (left, rights) in allowed_pairs.iter().enumerate() {
+        for right in rights.iter() {
+            total_occurrences += index.occurrences_for_pair(left as u8, right).len();
+        }
+    }
+
+    // Sparse boundary queries usually touch a tiny fraction of the vocabulary.
+    // Avoid allocating/zeroing a full-vocabulary bitmap and scanning every
+    // entry merely to recover those few token ids. Entry indices sort in the
+    // same order as `entry_token_ids`, so this preserves deterministic output.
+    if total_occurrences.saturating_mul(2) <= index.entry_token_ids.len() {
+        let mut selected_entries = Vec::with_capacity(total_occurrences);
+        for (left, rights) in allowed_pairs.iter().enumerate() {
+            for right in rights.iter() {
+                selected_entries.extend(
+                    index
+                        .occurrences_for_pair(left as u8, right)
+                        .iter()
+                        .map(|&occurrence| (occurrence >> 32) as u32),
+                );
+            }
+        }
+        selected_entries.sort_unstable();
+        selected_entries.dedup();
+        return selected_entries
+            .into_iter()
+            .map(|entry| index.entry_token_ids[entry as usize])
+            .collect();
+    }
+
     let mut selected = vec![false; index.entry_token_ids.len()];
     for (left, rights) in allowed_pairs.iter().enumerate() {
         for right in rights.iter() {
