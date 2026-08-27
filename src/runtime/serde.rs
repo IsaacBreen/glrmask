@@ -2456,6 +2456,7 @@ struct RecursiveSegmentedBoundaryShardV25 {
 struct RecursiveSegmentedRuntimeArtifactV25Ref<'a> {
     components: Vec<RecursiveSegmentedParserComponentV25Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
+    recursive_compiler_table: &'a [u8],
     recursive_tokenizer_internal_tsids: &'a [Vec<u32>],
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV25Ref<'a>>,
@@ -2465,6 +2466,7 @@ struct RecursiveSegmentedRuntimeArtifactV25Ref<'a> {
 struct RecursiveSegmentedRuntimeArtifactV25 {
     components: Vec<RecursiveSegmentedParserComponentV25>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
+    recursive_compiler_table: Vec<u8>,
     recursive_tokenizer_internal_tsids: Vec<Vec<u32>>,
     segmented_mask_authoritative: bool,
     boundary_shards: Vec<RecursiveSegmentedBoundaryShardV25>,
@@ -2735,6 +2737,10 @@ fn segmented_runtime_artifact_ref(
         .expect("validated recursive runtime must derive its parser layout before serialization")
         .expect("provider-native segmented runtime must have a recursive parser layout");
     let overlay = constraint.static_dynamic_overlay.as_ref()?;
+    let recursive_compiler_table = overlay
+        .recursive_compiler_table
+        .get()
+        .expect("recursive runtime must retain its compiler table blob");
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()
@@ -2805,6 +2811,7 @@ fn segmented_runtime_artifact_ref(
         RecursiveSegmentedRuntimeArtifactV25Ref {
             components,
             segmented_parser_links,
+            recursive_compiler_table: recursive_compiler_table.as_ref(),
             recursive_tokenizer_internal_tsids:
                 recursive_tokenizer_internal_tsids.as_slice(),
             segmented_mask_authoritative: overlay.segmented_mask_authoritative,
@@ -3585,6 +3592,7 @@ fn restore_recursive_segmented_runtime_v25(
             "recursive v25 segmented runtime must be mask-authoritative".to_owned(),
         ));
     }
+    let recursive_compiler_table = runtime.recursive_compiler_table;
     let recursive_tokenizer_internal_tsids = runtime.recursive_tokenizer_internal_tsids;
     let global_terminal_count = constraint.table.num_terminals as usize;
     let global_tokenizer_states = constraint.tokenizer.num_states();
@@ -3698,6 +3706,14 @@ fn restore_recursive_segmented_runtime_v25(
         overlay.segmented_boundary_shards.clear();
         overlay.segmented_boundary_parser = None;
         overlay.segmented_boundary_terminal_trie = None;
+        overlay
+            .recursive_compiler_table
+            .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
+            .map_err(|_| {
+                crate::GlrMaskError::Serialization(
+                    "recursive compiler table was initialized twice".to_owned(),
+                )
+            })?;
     }
     let layout = constraint
         .recursive_parser_layout_for_pending_root()

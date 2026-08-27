@@ -186,6 +186,13 @@ pub mod artifact_serde {
         }
 
         fn into_rows(self, num_terminals: u32) -> Result<Vec<BitSet>, String> {
+            // Empty advance rows are a valid omitted/derived cache. Recursive
+            // composition coordinators deliberately serialize a zero-state
+            // grammar shell, whose terminal domain remains meaningful even
+            // though it has no executable advance rows.
+            if self.row_ids.is_empty() && self.unique_rows.is_empty() {
+                return Ok(Vec::new());
+            }
             if self.bit_len < num_terminals {
                 return Err(format!(
                     "compact GLR advance width {} is smaller than {num_terminals} terminals",

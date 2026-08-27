@@ -1095,6 +1095,25 @@ mod tests {
         }
     }
 
+    fn assert_recursive_compiler_views_detached(constraint: &RuntimeConstraint) {
+        if !constraint.uses_compact_segmented_parser_runtime() {
+            return;
+        }
+        assert_eq!(
+            constraint.table.num_states, 0,
+            "recursive coordinator retained a flattened LR state machine",
+        );
+        assert!(constraint.table.action.is_empty() && constraint.table.goto.is_empty());
+        let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
+        assert!(
+            overlay.recursive_compiler_table.get().is_some(),
+            "recursive coordinator lost its lazy compiler table",
+        );
+        for component in &overlay.segmented_parser_components {
+            assert_recursive_compiler_views_detached(&component.constraint);
+        }
+    }
+
     fn poison_materialized_outer_table(constraint: &mut RuntimeConstraint) {
         constraint.recursive_parser_layout().unwrap().unwrap();
         constraint.table.action.clear();
@@ -1858,6 +1877,8 @@ mod tests {
         .unwrap();
 
         let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        assert_recursive_compiler_views_detached(&bound);
+        assert_recursive_compiler_views_detached(&loaded);
         let mut no_trigger = bound.clone();
         {
             let overlay = no_trigger.static_dynamic_overlay.as_mut().unwrap();
@@ -2661,7 +2682,7 @@ mod tests {
     }
 
     #[test]
-    fn v25_loaded_composed_child_rebinds_via_recursive_late_composition_oracle() {
+    fn loaded_recursive_composition_rebinds_from_lazy_compiler_views() {
         let vocab = Vocab::new(vec![
             (0, b"<".to_vec()),
             (1, b"a".to_vec()),
@@ -2704,6 +2725,11 @@ mod tests {
             half.tokenizer.num_states() < half_layout.total_tokenizer_states,
             "test fixture must actually contain more than one tokenizer leaf",
         );
+        assert_eq!(
+            half.table.num_states, 0,
+            "recursive coordinator must not retain a flattened LR state machine",
+        );
+        assert!(half.table.action.is_empty() && half.table.goto.is_empty());
         assert!(half_overlay
             .segmented_parser_components
             .iter()
@@ -2721,6 +2747,11 @@ mod tests {
             "loaded recursive coordinator must not reconstruct the outer union tokenizer eagerly",
         );
         assert!(loaded_half.tokenizer.num_states() < loaded_half_layout.total_tokenizer_states);
+        assert_eq!(
+            loaded_half.table.num_states, 0,
+            "loaded recursive coordinator must keep the flattened parser table lazy",
+        );
+        assert!(loaded_half.table.action.is_empty() && loaded_half.table.goto.is_empty());
         assert!(loaded_half_overlay
             .segmented_parser_components
             .iter()
@@ -2732,31 +2763,9 @@ mod tests {
         let loaded_full = loaded_half
             .bind_grammar_dynamic_boundary("right", &right)
             .unwrap();
-
-        // Recursive late binding must not require the persisted outer union
-        // tokenizer. Current artifacts still carry it, so deliberately replace
-        // it with the intact root-leaf tokenizer while retaining the recursive
-        // state/TSID relation. The compiler must reconstruct any temporary flat
-        // tokenizer view it needs from the leaf tree itself.
-        let mut tokenizer_poisoned_half = RuntimeConstraint::load(&half.save()).unwrap();
-        tokenizer_poisoned_half.recursive_parser_layout().unwrap().unwrap();
-        let root = tokenizer_poisoned_half
-            .static_dynamic_overlay
-            .as_ref()
-            .unwrap()
-            .segmented_parser_components[0]
-            .constraint
-            .clone();
-        tokenizer_poisoned_half.tokenizer = root.tokenizer.clone();
-        tokenizer_poisoned_half.tokenizer_fast_transitions =
-            root.tokenizer_fast_transitions.clone();
-        tokenizer_poisoned_half.tokenizer_has_epsilon_transitions =
-            root.tokenizer_has_epsilon_transitions;
-        let tokenizer_poisoned_half =
-            RuntimeConstraint::load(&tokenizer_poisoned_half.save()).unwrap();
-        let tokenizer_poisoned_full = tokenizer_poisoned_half
-            .bind_grammar_dynamic_boundary("right", &right)
-            .unwrap();
+        for constraint in [&fresh_full, &loaded_full] {
+            assert_recursive_compiler_views_detached(constraint);
+        }
         let fresh_start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
             vec![0],
             crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
@@ -2783,7 +2792,7 @@ mod tests {
                 "recursive parser advance differs for terminal {terminal}",
             );
         }
-        for constraint in [&fresh_full, &loaded_full, &tokenizer_poisoned_full] {
+        for constraint in [&fresh_full, &loaded_full] {
             let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
             assert!(overlay
                 .segmented_parser_components

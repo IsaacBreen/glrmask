@@ -1563,6 +1563,91 @@ impl Constraint {
         Ok(true)
     }
 
+    /// Materialize the exact flattened parser table used only by later
+    /// composition. Recursive runtime execution never consults this table: its
+    /// parser coordinate is the disjoint union of intact leaf tables plus
+    /// CALL/RETURN provider controls. We nevertheless retain the exact compiled
+    /// table in packed form because grammar rules alone do not encode all LR
+    /// conflict/precedence decisions.
+    pub(crate) fn prepare_recursive_compiler_table_for_composition(
+        &mut self,
+    ) -> Result<bool, String> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return Ok(false);
+        }
+        if self.table.num_states != 0 && !self.table.action.is_empty() {
+            return Ok(false);
+        }
+        let blob = self
+            .static_dynamic_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.recursive_compiler_table.get())
+            .cloned()
+            .ok_or_else(|| {
+                "recursive composition has no packed compiler table".to_owned()
+            })?;
+        let table = crate::compiler::glr::table::artifact_serde::from_compact_bytes(blob.as_ref())?;
+        if table.num_terminals != self.table.num_terminals {
+            return Err(format!(
+                "recursive compiler table has {} terminals, grammar shell has {}",
+                table.num_terminals, self.table.num_terminals,
+            ));
+        }
+        if table.num_rules != self.table.num_rules {
+            return Err(format!(
+                "recursive compiler table has {} rules, grammar shell has {}",
+                table.num_rules, self.table.num_rules,
+            ));
+        }
+        self.table = table;
+        self.deferred_table_rules_blob = None;
+        self.deferred_table_rules = OnceLock::new();
+        Ok(true)
+    }
+
+    /// Replace the live recursive coordinator's flattened LR machine with a
+    /// grammar shell while retaining an exact packed compiler copy for future
+    /// rebinding. The shell deliberately keeps terminal/rule/nonterminal
+    /// metadata because those are semantic grammar facts; only executable
+    /// materialized parser-state machinery is discarded.
+    pub(crate) fn detach_recursive_outer_table(&mut self) -> Result<bool, String> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return Ok(false);
+        }
+        let overlay = self
+            .static_dynamic_overlay
+            .as_ref()
+            .ok_or_else(|| "recursive runtime is missing overlay metadata".to_owned())?;
+        if overlay.recursive_compiler_table.get().is_none() {
+            if self.table.num_states == 0 || self.table.action.is_empty() {
+                return Err(
+                    "recursive grammar shell has no packed compiler table".to_owned(),
+                );
+            }
+            let packed = Arc::<[u8]>::from(
+                crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table),
+            );
+            overlay
+                .recursive_compiler_table
+                .set(packed)
+                .map_err(|_| "recursive compiler table initialized twice".to_owned())?;
+        }
+        if self.table.num_states == 0 && self.table.action.is_empty() && self.table.goto.is_empty() {
+            return Ok(false);
+        }
+        self.table.action.clear();
+        self.table.goto.clear();
+        self.table.advance.clear();
+        self.table.unconditional_advance.clear();
+        self.table.forwarded_shifts.clear();
+        self.table.control_terminals.clear();
+        self.table.skip_terminals.clear();
+        self.table.guarded_shift_index.clear();
+        self.table.direct_regular_wide_frontiers.clear();
+        self.table.num_states = 0;
+        Ok(true)
+    }
+
     /// Drop the redundant flattened union tokenizer from a live recursive
     /// coordinator after compilation has finished. Recursive execution scans
     /// the intact leaf tokenizers directly; the outer `Constraint::tokenizer`

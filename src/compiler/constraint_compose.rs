@@ -18048,6 +18048,7 @@ fn build_static_dynamic_overlay_metadata(
             segmented_parser_links: Vec::new(),
             segmented_parser_state_offsets: Vec::new(),
             recursive_parser_layout: Default::default(),
+            recursive_compiler_table: Default::default(),
             recursive_tokenizer_internal_tsids: Default::default(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
@@ -18737,6 +18738,8 @@ fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option
 fn prepared_constraint_for_segmented_composition(
     source: &Constraint,
 ) -> Result<Option<Constraint>, String> {
+    let recursive_compiler_table_missing = source.uses_compact_segmented_parser_runtime()
+        && (source.table.num_states == 0 || source.table.action.is_empty());
     let recursive_compiler_tokenizer_missing = source
         .recursive_parser_layout()?
         .is_some_and(|layout| {
@@ -18745,6 +18748,7 @@ fn prepared_constraint_for_segmented_composition(
         });
     if (source.deferred_composition_metadata_blob.is_none()
         || source.composition_link_metadata_materialized)
+        && !recursive_compiler_table_missing
         && !recursive_compiler_tokenizer_missing
     {
         return Ok(None);
@@ -18755,6 +18759,7 @@ fn prepared_constraint_for_segmented_composition(
     {
         prepared.materialize_composition_link_metadata_for_compilation()?;
     }
+    prepared.prepare_recursive_compiler_table_for_composition()?;
     prepared.prepare_recursive_compiler_tokenizer_for_composition()?;
     // Segmented A retains the component's own runtime backend. In particular,
     // a loaded static component's packed parser DWA is already a complete
@@ -18763,6 +18768,21 @@ fn prepared_constraint_for_segmented_composition(
     // likewise stays dynamic and deliberately has no parser DWA to rebuild.
     debug_assert_eq!(prepared.uses_dynamic_runtime(), source.uses_dynamic_runtime());
     Ok(Some(prepared))
+}
+
+fn detach_recursive_component_compiler_views(constraint: &mut Constraint) -> Result<(), String> {
+    if !constraint.uses_compact_segmented_parser_runtime() {
+        return Ok(());
+    }
+    let Some(overlay) = constraint.static_dynamic_overlay.as_mut() else {
+        return Ok(());
+    };
+    for component in &mut overlay.segmented_parser_components {
+        let source = Arc::make_mut(&mut component.constraint);
+        source.detach_recursive_outer_table()?;
+        source.detach_recursive_outer_tokenizer()?;
+    }
+    Ok(())
 }
 
 
@@ -19699,6 +19719,7 @@ fn compose_constraints_owned_parent_impl(
         parent.materialize_composition_metadata_for_compilation()?;
     }
     if explicit_segmented_boundary.is_some() {
+        parent.prepare_recursive_compiler_table_for_composition()?;
         parent.prepare_recursive_compiler_tokenizer_for_composition()?;
     }
     let parent_metadata_materialize_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -20952,6 +20973,7 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
+                recursive_compiler_table: Default::default(),
                 recursive_tokenizer_internal_tsids: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
@@ -21300,6 +21322,8 @@ fn compose_constraints_owned_parent_impl(
                 components_have_no_runtime_product,
             )
         });
+        detach_recursive_component_compiler_views(&mut result.constraint)?;
+        result.constraint.detach_recursive_outer_table()?;
         result.constraint.detach_recursive_outer_tokenizer()?;
         if compose_profile_enabled() {
             eprintln!(
@@ -21430,6 +21454,7 @@ fn compose_constraints_owned_parent_impl(
                     segmented_parser_links: Vec::new(),
                     segmented_parser_state_offsets: Vec::new(),
                     recursive_parser_layout: Default::default(),
+                    recursive_compiler_table: Default::default(),
                     recursive_tokenizer_internal_tsids: Default::default(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
@@ -21498,6 +21523,7 @@ fn compose_constraints_owned_parent_impl(
                 segmented_parser_links: Vec::new(),
                 segmented_parser_state_offsets: Vec::new(),
                 recursive_parser_layout: Default::default(),
+                recursive_compiler_table: Default::default(),
                 recursive_tokenizer_internal_tsids: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,

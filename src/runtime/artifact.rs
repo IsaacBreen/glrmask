@@ -4467,6 +4467,13 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// the existing `LeveledGSS<u32, ...>` action provider.
     #[serde(skip, default)]
     pub(crate) recursive_parser_layout: OnceLock<Arc<RecursiveParserLayout>>,
+    /// Exact packed flattened parser table retained only for future compiler
+    /// rebinding. Live recursive execution never reads it. The coordinator's
+    /// ordinary `table` field is reduced to a grammar shell after compilation;
+    /// late composition materializes this blob into a temporary compiler clone
+    /// and detaches it again before publishing runtime components.
+    #[serde(skip, default)]
+    pub(crate) recursive_compiler_table: OnceLock<Arc<[u8]>>,
     /// Exact endpoint lexical relation: recursive leaf tokenizer state -> this
     /// constraint's internal TSID set. Runtime-product components can make the
     /// image genuinely set-valued, so this must not be collapsed to one TSID.
