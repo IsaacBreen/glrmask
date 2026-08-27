@@ -25,7 +25,10 @@ const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL: u16 = 15;
 // v16 combines the v14 composition metadata and v15 residual-runtime metadata.
 const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16: u16 = 16;
 // v17 additionally persists exact terminal-observation quotient certificates.
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 17;
+const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17: u16 = 17;
+// v18 additionally persists the initialized dynamic-mask vocabulary trie so
+// self-contained loads do not rebuild the full vocabulary index from token bytes.
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 18;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
@@ -217,6 +220,13 @@ struct DynamicConstraintPayloadV5Alternative {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintPayloadV5 {
     alternatives: Vec<DynamicConstraintPayloadV5Alternative>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DynamicConstraintPayloadV6 {
+    alternatives: Vec<DynamicConstraintPayloadV5Alternative>,
+    /// Vocabulary-only runtime index shared by every union alternative.
+    dynamic_mask_vocab: Option<crate::runtime::DynamicMaskVocabArtifact>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1150,6 +1160,76 @@ impl DynamicConstraint {
         Ok(Self::from_alternatives(alternatives))
     }
 
+    fn from_payload_v6(payload: DynamicConstraintPayloadV6) -> crate::Result<Self> {
+        if payload.dynamic_mask_vocab.is_some() {
+            let mut alternatives = payload.alternatives.iter();
+            if let Some(first) = alternatives.next() {
+                let token_bytes = &first.base.v2.v1.token_bytes;
+                if alternatives.any(|alternative| alternative.base.v2.v1.token_bytes != *token_bytes) {
+                    return Err(crate::GlrMaskError::Serialization(
+                        "dynamic artifact shares a vocabulary index across alternatives with different token bytes"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        let shared_dynamic_vocab = payload
+            .dynamic_mask_vocab
+            .map(DynamicMaskVocab::from_artifact)
+            .transpose()
+            .map_err(crate::GlrMaskError::Serialization)?;
+        if let (Some(vocab), Some(first)) = (&shared_dynamic_vocab, payload.alternatives.first()) {
+            if !vocab.matches_token_bytes_exact(&first.base.v2.v1.token_bytes) {
+                return Err(crate::GlrMaskError::Serialization(
+                    "dynamic artifact vocabulary index does not match serialized token bytes"
+                        .to_owned(),
+                ));
+            }
+        }
+        let mut alternatives = Vec::with_capacity(payload.alternatives.len());
+        for alternative in payload.alternatives {
+            let DynamicConstraintPayloadV5Alternative {
+                mut base,
+                terminal_observation_classes,
+            } = alternative;
+            let exprs = base.v2.v1.terminal_exprs.clone();
+            base.v2
+                .v1
+                .tokenizer
+                .restore_terminal_exprs_with_virtual_runtime_metadata(
+                    exprs,
+                    &base.virtual_runtimes,
+                    false,
+                )
+                .map_err(crate::GlrMaskError::Serialization)?;
+            let dynamic_mask_vocab = shared_dynamic_vocab
+                .as_ref()
+                .map(DynamicMaskVocab::fresh_runtime_instance)
+                .unwrap_or_default();
+            let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
+                base.v2,
+                dynamic_mask_vocab,
+            );
+            inner.late_grammar_slots = base.late_grammar_slots;
+            Self::restore_terminal_observation_classes(
+                &mut inner,
+                terminal_observation_classes,
+            )?;
+            inner.rebuild_dynamic_runtime_caches();
+            alternatives.push(Self {
+                inner,
+                alternatives: Vec::new(),
+                composition_grammars: vec![None],
+            });
+        }
+        if alternatives.is_empty() {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic union artifact has no alternatives".to_owned(),
+            ));
+        }
+        Ok(Self::from_alternatives(alternatives))
+    }
+
     fn from_legacy_payload_v14_main(
         payload: LegacyDynamicConstraintPayloadV14Main,
     ) -> crate::Result<Self> {
@@ -1242,11 +1322,28 @@ impl DynamicConstraint {
                 );
             }
         }
-        let payload = DynamicConstraintPayloadV5 {
-            alternatives: std::iter::once(&self.inner)
-                .chain(self.alternatives.iter())
+        let constraints = std::iter::once(&self.inner)
+            .chain(self.alternatives.iter())
+            .collect::<Vec<_>>();
+        let share_vocab = constraints.first().is_none_or(|first| {
+            constraints
+                .iter()
+                .skip(1)
+                .all(|constraint| constraint.token_bytes == first.token_bytes)
+        });
+        let dynamic_mask_vocab = share_vocab
+            .then(|| {
+                constraints
+                    .iter()
+                    .find_map(|constraint| constraint.dynamic_mask_vocab.to_vocab_artifact())
+            })
+            .flatten();
+        let payload = DynamicConstraintPayloadV6 {
+            alternatives: constraints
+                .into_iter()
                 .map(Self::payload_v5_for_constraint)
                 .collect(),
+            dynamic_mask_vocab,
         };
         let payload = bincode::serialize(&payload)
             .expect("DynamicConstraint serialization should succeed");
@@ -1520,6 +1617,7 @@ impl DynamicConstraint {
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14_MAIN
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16
+                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17
                 | DYNAMIC_CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -1618,11 +1716,17 @@ impl DynamicConstraint {
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 Self::from_payload_v4(payload, false)
             }
-            DYNAMIC_CONSTRAINT_VERSION => {
+            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17 => {
                 let payload: DynamicConstraintPayloadV5 =
                     bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 Self::from_payload_v5(payload, false)
+            }
+            DYNAMIC_CONSTRAINT_VERSION => {
+                let payload: DynamicConstraintPayloadV6 =
+                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
+                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                Self::from_payload_v6(payload)
             }
             _ => unreachable!("version was validated above"),
         }
@@ -2003,7 +2107,7 @@ mod tests {
             let payload = bincode::serialize(&payload).unwrap();
             let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
             bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
-            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
             bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
             bytes.extend_from_slice(&payload);
             bytes
@@ -2224,6 +2328,63 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_v18_persists_vocab_and_v17_remains_loadable() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"b".to_vec()),
+        ]);
+        let constraint = DynamicConstraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= /a+/;
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let current = constraint.save();
+        assert_eq!(
+            u16::from_le_bytes([current[8], current[9]]),
+            DYNAMIC_CONSTRAINT_VERSION,
+        );
+        let payload: DynamicConstraintPayloadV6 =
+            bincode::deserialize(&current[DYNAMIC_CONSTRAINT_HEADER_LEN..]).unwrap();
+        assert!(payload.dynamic_mask_vocab.is_some());
+        let current_loaded = DynamicConstraint::load(&current).unwrap();
+        assert_eq!(current_loaded.start().mask(), constraint.start().mask());
+
+        let mut mismatched_shared_vocab = payload.clone();
+        let mut second = mismatched_shared_vocab.alternatives[0].clone();
+        second.base.v2.v1.token_bytes = Arc::new(BTreeMap::from([(0, b"z".to_vec())]));
+        mismatched_shared_vocab.alternatives.push(second);
+        let mismatched_shared_vocab = bincode::serialize(&mismatched_shared_vocab).unwrap();
+        let mut malformed =
+            Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + mismatched_shared_vocab.len());
+        malformed.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+        malformed.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+        malformed.extend_from_slice(&(mismatched_shared_vocab.len() as u64).to_le_bytes());
+        malformed.extend_from_slice(&mismatched_shared_vocab);
+        let error = DynamicConstraint::load(&malformed).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("shares a vocabulary index across alternatives with different token bytes"));
+
+        let legacy_payload = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&constraint.inner)],
+        };
+        let legacy_payload = bincode::serialize(&legacy_payload).unwrap();
+        let mut legacy = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + legacy_payload.len());
+        legacy.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+        legacy.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
+        legacy.extend_from_slice(&(legacy_payload.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&legacy_payload);
+        let legacy_loaded = DynamicConstraint::load(&legacy).unwrap();
+        assert_eq!(legacy_loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
     fn dynamic_virtual_unit_repeat_save_load_round_trip() {
         let vocab = Vocab::new(vec![
             (0, b"b".to_vec()),
@@ -2383,7 +2544,7 @@ mod tests {
             let payload = bincode::serialize(&payload).unwrap();
             let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
             bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
-            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
             bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
             bytes.extend_from_slice(&payload);
             bytes
