@@ -2,6 +2,15 @@
 
 //! Extremely fast grammar-constrained decoding for LLMs.
 //!
+//! # Pre-release compatibility policy
+//!
+//! GLRMask is still pre-release. Serialized constraint formats, internal runtime
+//! layouts, and compiler artifacts are **not** required to remain compatible
+//! with earlier development versions. Architecture, correctness, simplicity,
+//! and performance take priority over loading old artifacts. Compatibility code
+//! may be removed whenever it obstructs a cleaner design; do not preserve an old
+//! representation unless there is a separate current reason to keep it.
+//!
 //! GLRMask compiles a [`Grammar`] together with a model vocabulary into a reusable
 //! [`Constraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
 //! obtain the next-token mask, sample a token, then commit that token to advance

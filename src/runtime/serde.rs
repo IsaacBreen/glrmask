@@ -1,3 +1,14 @@
+// PRE-RELEASE COMPATIBILITY POLICY
+// ================================
+// GLRMask has not reached a compatibility-stable release. Old serialized
+// constraint versions and historical runtime layouts are NOT a design
+// requirement. Prefer the cleanest exact current representation even when that
+// means old development artifacts stop loading. Existing legacy readers below
+// are transitional code, not an API promise: delete or simplify them whenever
+// they complicate the architecture, correctness proof, performance, or wire
+// format. Do not add compatibility machinery unless compatibility is explicitly
+// made a requirement again.
+
 use crate::automata::lexer::Lexer;
 use crate::runtime::Constraint;
 use crate::runtime::artifact::{
