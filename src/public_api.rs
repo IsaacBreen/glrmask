@@ -2691,6 +2691,19 @@ mod tests {
             .bind_grammar_dynamic_boundary("left", &left)
             .unwrap();
         let half_overlay = half.static_dynamic_overlay.as_ref().unwrap();
+        let half_layout = half.recursive_parser_layout().unwrap().unwrap();
+        assert_eq!(
+            half.tokenizer.num_states(),
+            half_overlay.segmented_parser_components[0]
+                .constraint
+                .tokenizer
+                .num_states(),
+            "recursive coordinator must retain only the root-leaf tokenizer",
+        );
+        assert!(
+            half.tokenizer.num_states() < half_layout.total_tokenizer_states,
+            "test fixture must actually contain more than one tokenizer leaf",
+        );
         assert!(half_overlay
             .segmented_parser_components
             .iter()
@@ -2706,6 +2719,16 @@ mod tests {
 
         let loaded_half = RuntimeConstraint::load(&half.save()).unwrap();
         let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
+        let loaded_half_layout = loaded_half.recursive_parser_layout().unwrap().unwrap();
+        assert_eq!(
+            loaded_half.tokenizer.num_states(),
+            loaded_half_overlay.segmented_parser_components[0]
+                .constraint
+                .tokenizer
+                .num_states(),
+            "loaded recursive coordinator must not reconstruct the outer union tokenizer eagerly",
+        );
+        assert!(loaded_half.tokenizer.num_states() < loaded_half_layout.total_tokenizer_states);
         assert!(loaded_half_overlay
             .segmented_parser_components
             .iter()
@@ -2737,6 +2760,31 @@ mod tests {
         let loaded_full = loaded_half
             .bind_grammar_dynamic_boundary("right", &right)
             .unwrap();
+
+        // Recursive late binding must not require the persisted outer union
+        // tokenizer. Current artifacts still carry it, so deliberately replace
+        // it with the intact root-leaf tokenizer while retaining the recursive
+        // state/TSID relation. The compiler must reconstruct any temporary flat
+        // tokenizer view it needs from the leaf tree itself.
+        let mut tokenizer_poisoned_half = RuntimeConstraint::load(&half.save()).unwrap();
+        tokenizer_poisoned_half.recursive_parser_layout().unwrap().unwrap();
+        let root = tokenizer_poisoned_half
+            .static_dynamic_overlay
+            .as_ref()
+            .unwrap()
+            .segmented_parser_components[0]
+            .constraint
+            .clone();
+        tokenizer_poisoned_half.tokenizer = root.tokenizer.clone();
+        tokenizer_poisoned_half.tokenizer_fast_transitions =
+            root.tokenizer_fast_transitions.clone();
+        tokenizer_poisoned_half.tokenizer_has_epsilon_transitions =
+            root.tokenizer_has_epsilon_transitions;
+        let tokenizer_poisoned_half =
+            RuntimeConstraint::load(&tokenizer_poisoned_half.save()).unwrap();
+        let tokenizer_poisoned_full = tokenizer_poisoned_half
+            .bind_grammar_dynamic_boundary("right", &right)
+            .unwrap();
         let fresh_start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
             vec![0],
             crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
@@ -2763,7 +2811,7 @@ mod tests {
                 "recursive parser advance differs for terminal {terminal}",
             );
         }
-        for constraint in [&fresh_full, &loaded_full] {
+        for constraint in [&fresh_full, &loaded_full, &tokenizer_poisoned_full] {
             let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
             assert!(overlay
                 .segmented_parser_components

@@ -3624,6 +3624,7 @@ fn restore_recursive_segmented_runtime_v25(
         })
         .collect::<crate::Result<Vec<_>>>()?;
     let mut components = Vec::with_capacity(decoded_components.len());
+    let mut expected_tokenizer_state_offset = 0u32;
     for (index, (component, child)) in decoded_components.into_iter().enumerate() {
         if component.root_entry_terminals.len() != global_terminal_count {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -3640,15 +3641,23 @@ fn restore_recursive_segmented_runtime_v25(
                 "recursive v25 component {index} terminal range lies outside outer terminal domain"
             )));
         }
-        if component
-            .tokenizer_state_offset
-            .checked_add(child.tokenizer.num_states().saturating_sub(1))
-            .is_none_or(|last| last >= global_tokenizer_states)
-        {
+        if component.tokenizer_state_offset != expected_tokenizer_state_offset {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v25 component {index} tokenizer-state range lies outside outer tokenizer"
+                "recursive v25 component {index} tokenizer-state offset is {}, expected {expected_tokenizer_state_offset}",
+                component.tokenizer_state_offset,
             )));
         }
+        let child_tokenizer_span = child
+            .recursive_parser_layout()
+            .map_err(crate::GlrMaskError::Serialization)?
+            .map_or(child.tokenizer.num_states(), |layout| layout.total_tokenizer_states);
+        expected_tokenizer_state_offset = expected_tokenizer_state_offset
+            .checked_add(child_tokenizer_span)
+            .ok_or_else(|| {
+                crate::GlrMaskError::Serialization(
+                    "recursive v25 tokenizer-state coordinate overflow".to_owned(),
+                )
+            })?;
         if component
             .root_disallowed_terminal
             .is_some_and(|terminal| terminal >= child.table.num_terminals)
@@ -3673,6 +3682,12 @@ fn restore_recursive_segmented_runtime_v25(
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: Vec::new(),
         });
+    }
+    if expected_tokenizer_state_offset as usize != recursive_tokenizer_internal_tsids.len() {
+        return Err(crate::GlrMaskError::Serialization(format!(
+            "recursive v25 tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
+            recursive_tokenizer_internal_tsids.len(),
+        )));
     }
     let links = runtime
         .segmented_parser_links

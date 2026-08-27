@@ -18738,13 +18738,25 @@ fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option
 fn prepared_constraint_for_segmented_composition(
     source: &Constraint,
 ) -> Result<Option<Constraint>, String> {
-    if source.deferred_composition_metadata_blob.is_none()
-        || source.composition_link_metadata_materialized
+    let recursive_compiler_tokenizer_missing = source
+        .recursive_parser_layout()?
+        .is_some_and(|layout| {
+            source.tokenizer.num_states() != layout.total_tokenizer_states
+                || source.state_to_internal_tsid.len() != layout.total_tokenizer_states as usize
+        });
+    if (source.deferred_composition_metadata_blob.is_none()
+        || source.composition_link_metadata_materialized)
+        && !recursive_compiler_tokenizer_missing
     {
         return Ok(None);
     }
     let mut prepared = source.clone();
-    prepared.materialize_composition_link_metadata_for_compilation()?;
+    if source.deferred_composition_metadata_blob.is_some()
+        && !source.composition_link_metadata_materialized
+    {
+        prepared.materialize_composition_link_metadata_for_compilation()?;
+    }
+    prepared.prepare_recursive_compiler_tokenizer_for_composition()?;
     // Segmented A retains the component's own runtime backend. In particular,
     // a loaded static component's packed parser DWA is already a complete
     // runtime representation; unpacking it here merely to link B duplicates
@@ -19686,6 +19698,9 @@ fn compose_constraints_owned_parent_impl(
         parent.materialize_composition_link_metadata_for_compilation()?;
     } else {
         parent.materialize_composition_metadata_for_compilation()?;
+    }
+    if explicit_segmented_boundary.is_some() {
+        parent.prepare_recursive_compiler_tokenizer_for_composition()?;
     }
     let parent_metadata_materialize_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let phase_started_at = Instant::now();
@@ -21287,6 +21302,7 @@ fn compose_constraints_owned_parent_impl(
                 components_have_no_runtime_product,
             )
         });
+        result.constraint.detach_recursive_outer_tokenizer()?;
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms=0.000 boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} parser_runtime_cache_ms={parser_runtime_cache_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
