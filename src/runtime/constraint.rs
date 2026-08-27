@@ -1132,9 +1132,9 @@ impl Constraint {
     /// This is an optional accelerator for dynamic composition and is
     /// deliberately separate from ordinary constraint compilation. The trigger
     /// uses raw local tokenizer-state IDs and original model-token IDs rather
-    /// than the component's whole-token TSID/token quotient. Unsupported
-    /// already-composed/control-bearing components retain the conservative
-    /// `Tokens` trigger instead of publishing an inexact `Exact` artifact.
+    /// than the component's whole-token TSID/token quotient. Recursive
+    /// coordinators build it from private compiler-materialized table/tokenizer
+    /// views; those flattened views are never reattached to live runtime state.
     pub fn build_exact_boundary_trigger(&mut self) -> Result<(), String> {
         if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
             return Ok(());

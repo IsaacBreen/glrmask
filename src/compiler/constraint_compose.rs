@@ -20515,10 +20515,10 @@ fn compose_constraints_owned_parent_impl(
 
     let terminal_live_started_at = Instant::now();
     // Explicit segmented composition retains the parent as recursive leaf 0.
-    // That leaf now owns a live tokenizer just like every retained child, so
-    // its fast-transition facade must survive construction of the transitional
-    // outer union tokenizer. Once scoped tokenization is fully authoritative we
-    // can stop building the outer fast table instead of cloning this one.
+    // That leaf owns a live tokenizer just like every retained child, so its
+    // fast-transition facade must survive construction of the temporary flat
+    // compiler tokenizer. The coordinator drops that flat tokenizer again
+    // before publication.
     let preserve_parent_runtime = explicit_segmented_boundary.is_some();
     let mut terminal_live_states = merged_terminal_live_states_owned_parent(
         &mut parent,
@@ -21273,10 +21273,10 @@ fn compose_constraints_owned_parent_impl(
         }
 
         if result.constraint.uses_compact_segmented_parser_runtime() {
-            // Establish the single materialized -> recursive late-composition
-            // oracle before discarding the historical per-component
-            // projections. This must happen for dynamic-only compositions too:
-            // a compiled child can itself be bound beneath another parent.
+            // Derive and cache the authoritative recursive leaf layout before
+            // discarding historical per-component projections. This is needed
+            // for dynamic-only compositions too because a compiled child can
+            // itself be bound beneath another recursive wrapper.
             result
                 .constraint
                 .recursive_parser_layout_for_pending_root()?
