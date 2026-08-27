@@ -4821,7 +4821,11 @@ impl Tokenizer {
         config_limit: usize,
         transition_work_limit: usize,
     ) -> Option<(Box<[u32]>, usize, usize)> {
-        if terminal >= self.num_terminals || config_limit == 0 || transition_work_limit == 0 {
+        if self.has_any_virtual_runtime()
+            || terminal >= self.num_terminals
+            || config_limit == 0
+            || transition_work_limit == 0
+        {
             return None;
         }
 
@@ -6748,8 +6752,11 @@ impl Tokenizer {
     }
 
     /// Restore virtual sidecars from explicit outer-artifact metadata. Unlike
-    /// the legacy structural heuristic, this requires every virtualizable
-    /// giant terminal to have exactly one declared runtime owner.
+    /// the legacy structural heuristic, every virtualizable giant terminal is
+    /// a mandatory owner. A below-threshold residual owner is additionally
+    /// permitted only when the exact bounded-code liveness oracle certifies its
+    /// terminal expression; such owners are representation choices, not
+    /// mandatory semantics, so older materialized artifacts may omit them.
     #[doc(hidden)]
     pub fn restore_terminal_exprs_with_virtual_runtime_metadata(
         &mut self,
@@ -6772,28 +6779,72 @@ impl Tokenizer {
             .iter()
             .map(|entry| entry.terminal)
             .collect::<BTreeSet<_>>();
-        let expected_virtual_terminals = expressions
-            .iter()
-            .enumerate()
-            .filter_map(|(terminal, expression)| {
-                super::compile::expression_contains_large_bounded_repeat(expression)
-                    .then_some(terminal as TerminalID)
-            })
-            .collect::<BTreeSet<_>>();
-        if expected_virtual_terminals != declared_terminals {
-            return Err(format!(
-                "serialized virtual runtime terminal ownership mismatch: expected {:?}, found {:?}",
-                expected_virtual_terminals, declared_terminals,
-            ));
+        let physical_state_count = self.num_states();
+        let mut required_virtual_terminals = BTreeSet::<TerminalID>::new();
+        let mut certified_bounded_code_terminals = BTreeSet::<TerminalID>::new();
+        for (terminal, expression) in expressions.iter().enumerate() {
+            let terminal = terminal as TerminalID;
+            if super::compile::expression_contains_large_bounded_repeat(expression) {
+                required_virtual_terminals.insert(terminal);
+                continue;
+            }
+            if !super::compile::expression_supports_bounded_code_residual_runtime(expression) {
+                continue;
+            }
+            certified_bounded_code_terminals.insert(terminal);
+
+            // Current below-threshold bounded-code residual artifacts carry a
+            // deliberately impossible physical proxy. The proxy's conservative
+            // future bit is serialized, but there is no physical accepting
+            // state for the terminal. That shape proves this particular
+            // artifact depends on an explicit residual owner. Older fully
+            // materialized artifacts have a physical finalizer and therefore
+            // remain loadable without metadata. A genuinely empty materialized
+            // terminal has neither a future nor a finalizer, so it also does not
+            // spuriously become metadata-dependent.
+            let mut has_physical_finalizer = false;
+            let mut has_physical_future = false;
+            for state in 0..physical_state_count {
+                has_physical_finalizer |= self.state_finalizers(state).contains(terminal as usize);
+                has_physical_future |= self.state_futures(state).contains(terminal as usize);
+                if has_physical_finalizer && has_physical_future {
+                    break;
+                }
+            }
+            if !has_physical_finalizer && has_physical_future {
+                required_virtual_terminals.insert(terminal);
+            }
         }
         if metadata.len() != declared_terminals.len() {
             return Err("serialized virtual runtime metadata contains duplicate terminal owners".to_owned());
+        }
+        let missing_required = required_virtual_terminals
+            .difference(&declared_terminals)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !missing_required.is_empty() {
+            return Err(format!(
+                "serialized virtual runtime terminal ownership mismatch: missing required {:?}, found {:?}",
+                missing_required, declared_terminals,
+            ));
+        }
+        for entry in metadata {
+            if required_virtual_terminals.contains(&entry.terminal) {
+                continue;
+            }
+            if entry.kind != VirtualTokenizerRuntimeKind::ResidualExpr
+                || !certified_bounded_code_terminals.contains(&entry.terminal)
+            {
+                return Err(format!(
+                    "serialized virtual runtime terminal ownership mismatch: terminal {} is not a required giant component or a certified bounded-code residual",
+                    entry.terminal,
+                ));
+            }
         }
         if metadata.is_empty() {
             return Ok(());
         }
 
-        let physical_state_count = self.num_states();
         let start_state = self.start_state();
         let reset_closure = self.epsilon_closure_states(&[start_state]);
         let validate_root = |tokenizer: &Self,
@@ -7367,6 +7418,13 @@ impl Tokenizer {
     }
 
     #[doc(hidden)]
+    pub fn has_any_virtual_runtime(&self) -> bool {
+        self.virtual_unit_repeat.is_some()
+            || !self.virtual_repeat_intersections.is_empty()
+            || !self.virtual_residuals.is_empty()
+    }
+
+    #[doc(hidden)]
     pub fn has_virtual_residual_runtime(&self) -> bool {
         !self.virtual_residuals.is_empty()
     }
@@ -7379,11 +7437,20 @@ impl Tokenizer {
             .sum()
     }
 
-    /// Exact liveness at a dynamic token boundary. Ordinary and specialized
-    /// tokenizer states already carry exact future metadata. General symbolic
-    /// residuals deliberately expose a conservative infallible future bitset,
-    /// so they are resolved through their bounded exact derivative search here.
-    /// Resource exhaustion is an error rather than a false dead/live answer.
+    #[doc(hidden)]
+    pub fn virtual_residual_bounded_code_liveness_oracle_count(&self) -> usize {
+        self.virtual_residuals
+            .iter()
+            .filter(|runtime| runtime.has_bounded_code_liveness_oracle())
+            .count()
+    }
+
+    /// Exact liveness at a dynamic token boundary. Ordinary, specialized, and
+    /// certified bounded-code residual states already expose exact future
+    /// metadata. Other general symbolic residuals deliberately expose a
+    /// conservative infallible future bitset, so this boundary resolves them
+    /// through the bounded exact derivative search. Resource exhaustion is an
+    /// error rather than a false dead/live answer.
     #[doc(hidden)]
     pub fn exact_dynamic_state_has_future(&self, state: u32) -> Result<bool, String> {
         if let Some(runtime) = self.virtual_residual_runtime_for_state(state) {
@@ -9942,6 +10009,29 @@ mod tests {
     }
 
     #[test]
+    fn exact_terminal_observation_partition_declines_virtual_state_space() {
+        let mut tokenizer = tokenizer_from_exprs(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Class(U8Set::empty()),
+        ]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        tokenizer
+            .install_virtual_zero_min_unit_repeat_component(
+                U8Set::single(b'a'),
+                1_000_000_000,
+                1,
+            )
+            .unwrap();
+        assert!(tokenizer.has_any_virtual_runtime());
+        assert!(
+            tokenizer
+                .exact_terminal_observation_partition(1, 10_000, 1_000_000)
+                .is_none(),
+            "a raw-state observation quotient cannot certify lazily allocated virtual states",
+        );
+    }
+
+    #[test]
     fn lazy_binary_repeat_intersection_matches_materialized_small_oracle() {
         use crate::automata::lexer::compile::compile_terminal_expr_dfa;
         use crate::automata::lexer::runtime_repeat_product::{
@@ -10569,6 +10659,53 @@ mod tests {
                 "unique-full-state metadata disagrees at mask state {mask_state}",
             );
         }
+    }
+
+    #[test]
+    fn materialized_certified_bounded_code_terminal_does_not_require_virtual_owner_metadata() {
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                bytes(b"\""),
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: None,
+                },
+                bytes(b"\""),
+            ])),
+            intersect: Box::new(Expr::Seq(vec![
+                bytes(b"\""),
+                Expr::Repeat {
+                    expr: Box::new(bytes(b"a")),
+                    min: 0,
+                    max: Some(128),
+                },
+                bytes(b"\""),
+            ])),
+        };
+        assert!(
+            crate::automata::lexer::compile::expression_supports_bounded_code_residual_runtime(
+                &expression,
+            ),
+            "test expression must be eligible for the optional bounded-code residual representation",
+        );
+        let original = tokenizer_from_exprs(vec![expression.clone()]);
+        assert!(!original.has_any_virtual_runtime());
+        assert!(
+            (0..original.num_states())
+                .any(|state| original.state_finalizers(state).contains(0)),
+            "the compatibility case must contain the terminal physically",
+        );
+
+        let mut loaded = serialized_roundtrip(&original);
+        loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(vec![expression]),
+                &[],
+                false,
+            )
+            .expect("an older fully-materialized certifiable terminal must not require a residual sidecar");
+        assert!(!loaded.has_any_virtual_runtime());
     }
 
     #[test]

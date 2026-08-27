@@ -284,9 +284,7 @@ impl<'a> Lowerer<'a> {
         if recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some() {
             return Ok(None);
         }
-        if !self.should_split_bounded_string(schema.min_length, max_length)
-            || !self.config.preserve_pattern_max_length
-        {
+        if !self.should_split_bounded_string(schema.min_length, max_length) {
             return Ok(None);
         }
 
@@ -397,10 +395,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let preprocessed = preprocess_ascii_shorthand(pattern);
-        let preserved_max = schema.max_length.filter(|_| {
-            pattern_matches_any_string(&preprocessed) || self.config.preserve_pattern_max_length
-        });
-        analyze_complex_anchored_pattern(&preprocessed, schema.min_length, preserved_max)
+        analyze_complex_anchored_pattern(&preprocessed, schema.min_length, schema.max_length)
     }
 
     fn lower_complex_anchored_pattern_expr(
@@ -540,45 +535,62 @@ impl<'a> Lowerer<'a> {
         split_pattern: bool,
     ) -> ImportResult<GrammarExpr> {
         if schema.pattern.is_none()
+            && schema.min_length == 0
+            && schema.max_length.is_none()
             && let Some(format_body_regex) =
                 recognized_string_format_body_regex_for_lowering(schema.format.as_deref())
         {
-            // Recognized JSON Schema formats are already emitted as JSON-string
-            // body regexes. Do not build a generic JSON string terminal and then
-            // intersect it with the format terminal: for trivial timestamp
-            // schemas that intersection dominates compile time. The recognized
-            // format bodies below contain only raw JSON-safe ASCII, so the
-            // quoted terminal is already a valid JSON string spelling.
-            //
-            // As with the previous format-lowering policy, sibling min/max
-            // bounds are intentionally not preserved here. Keeping them creates
-            // the same timeout class as patterned-string length intersections.
+            // With no sibling length assertion the recognized format is already
+            // the complete JSON-string language. Keep the direct terminal fast
+            // path. When minLength/maxLength is present, fall through to the
+            // exact bounded-string envelope intersection below instead of
+            // deleting a schema assertion for build-time convenience.
             return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
                 format_body_regex,
             )));
         }
 
+        let mut length_clamped_pattern = None;
         if let (Some(pattern), Some(max_length)) =
             (schema.pattern.as_deref(), schema.max_length)
-            && self.config.preserve_pattern_max_length
         {
             let preprocessed = preprocess_ascii_shorthand(pattern);
-            let score = pattern_max_length_complexity_score(&preprocessed, max_length);
-            let hard_limit = self.config.pattern_max_length_hard_complexity_limit;
-            if score > hard_limit
-                && pattern_requires_sibling_length_envelope(
-                    &preprocessed,
-                    schema.min_length,
-                    max_length,
-                )
-            {
-                return Err(SchemaImportError::new(format!(
-                    "pattern/maxLength requires an exact tokenizer product above the compiler structural budget (estimated complexity {score}, limit {hard_limit}); the length constraint was not dropped"
-                )));
+            if let Some(relation) = pattern_length_envelope_relation(
+                &preprocessed,
+                schema.min_length,
+                max_length,
+            ) {
+                match relation {
+                    PatternLengthEnvelopeRelation::Disjoint => return Ok(never()),
+                    PatternLengthEnvelopeRelation::Redundant => {}
+                    PatternLengthEnvelopeRelation::Constraining => {
+                        if let Some(clamped) = clamp_absolute_single_fixed_width_repetition(
+                            &preprocessed,
+                            schema.min_length,
+                            max_length,
+                        ) {
+                            match clamped {
+                                FixedWidthRepeatClamp::Empty => return Ok(never()),
+                                FixedWidthRepeatClamp::Pattern(pattern) => {
+                                    length_clamped_pattern = Some(pattern);
+                                }
+                            }
+                        } else {
+                            let score = pattern_max_length_complexity_score(&preprocessed, max_length);
+                            let hard_limit = self.config.pattern_max_length_hard_complexity_limit;
+                            if score > hard_limit {
+                                return Err(SchemaImportError::new(format!(
+                                    "pattern/maxLength requires an exact tokenizer product above the compiler structural budget (estimated complexity {score}, limit {hard_limit}); the length constraint was not dropped"
+                                )));
+                            }
+                        }
+                    }
+                }
             }
         }
 
         let mut expr = if let Some(pattern) = &schema.pattern {
+            let pattern = length_clamped_pattern.as_deref().unwrap_or(pattern);
             // Preserve the exact length envelope alongside the pattern. Static
             // complexity estimates may choose a different construction strategy,
             // but they must never delete a finite schema bound.
@@ -606,16 +618,16 @@ impl<'a> Lowerer<'a> {
         };
         let mut constraints = Vec::new();
 
-        if let Some(pattern) = &schema.pattern
-            && let Some(length_bound_body) = cheap_pattern_length_bound_body_regex(
+        if let Some(pattern) = &schema.pattern {
+            let pattern = length_clamped_pattern.as_deref().unwrap_or(pattern);
+            if let Some(length_bound_body) = cheap_pattern_length_bound_body_regex(
                 pattern,
                 &self.json_string_char_regex(),
                 schema.min_length,
                 schema.max_length,
-                self.config.preserve_pattern_max_length,
-            )
-        {
-            constraints.push(quoted_string_body_regex(&length_bound_body));
+            ) {
+                constraints.push(quoted_string_body_regex(&length_bound_body));
+            }
         }
 
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
@@ -2584,7 +2596,6 @@ fn cheap_pattern_length_bound_body_regex(
     string_char_regex: &str,
     min: usize,
     max: Option<usize>,
-    preserve_pattern_max_length: bool,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -2597,21 +2608,20 @@ fn cheap_pattern_length_bound_body_regex(
 
     if let Some(max) = max {
         // A finite upper bound is part of the schema language. Preserve it
-        // regardless of the estimated product cost. The complexity score is a
-        // strategy selector elsewhere; using it as a semantic fallback made the
-        // importer silently accept strings that the schema rejects.
-        if preserve_pattern_max_length {
-            return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
+        // regardless of the estimated product cost unless a fully anchored
+        // pattern already proves every match lies inside the sibling length
+        // interval. The latter intersection is semantically redundant and can
+        // be omitted exactly.
+        if matches!(
+            pattern_length_envelope_relation(&pattern, min, max),
+            Some(PatternLengthEnvelopeRelation::Redundant)
+        ) {
+            return None;
         }
+        return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
     }
 
-    // Historical compatibility mode: keep only the cheap lower bound when the
-    // caller explicitly disables patterned max-length preservation.
-    if min > 0 {
-        return Some(bounded_json_string_body_regex(string_char_regex, min, None));
-    }
-
-    None
+    (min > 0).then(|| bounded_json_string_body_regex(string_char_regex, min, None))
 }
 
 fn fixed_decoded_pattern_length(hir: &Hir) -> Option<usize> {
@@ -2657,17 +2667,196 @@ fn pattern_max_length_complexity_score(pattern: &str, max_length: usize) -> usiz
     pattern_hir_length_complexity(&hir, max_length).score
 }
 
-fn pattern_requires_sibling_length_envelope(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternLengthEnvelopeRelation {
+    Disjoint,
+    Redundant,
+    Constraining,
+}
+
+fn pattern_length_envelope_relation(
     pattern: &str,
     min_length: usize,
     max_length: usize,
-) -> bool {
+) -> Option<PatternLengthEnvelopeRelation> {
     let Ok(hir) = Parser::new().parse(pattern) else {
-        return false;
+        // Invalid patterns are diagnosed by the normal lowering path. Until
+        // then, never use a failed analysis either to remove a sibling
+        // constraint or to replace the parse error with a budget error.
+        return None;
     };
-    let (hir, _, _) = strip_outer_anchors(hir);
-    let bounds = pattern_hir_length_complexity(&hir, max_length);
-    bounds.min_chars < min_length || bounds.max_chars.is_none_or(|max| max > max_length)
+    let (hir, anchored_start, anchored_end) = strip_outer_absolute_anchors(hir);
+    let bounds = decoded_pattern_length_bounds(&hir)?;
+
+    // Any matching decoded string must be at least as long as the regex body
+    // it contains, even for an unanchored pattern. This proves disjointness on
+    // the upper side without making an anchoring assumption.
+    if bounds.min > max_length {
+        return Some(PatternLengthEnvelopeRelation::Disjoint);
+    }
+
+    if anchored_start && anchored_end {
+        if bounds.max.is_some_and(|max| max < min_length) {
+            return Some(PatternLengthEnvelopeRelation::Disjoint);
+        }
+        if bounds.min >= min_length && bounds.max.is_some_and(|max| max <= max_length) {
+            return Some(PatternLengthEnvelopeRelation::Redundant);
+        }
+    }
+
+    Some(PatternLengthEnvelopeRelation::Constraining)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DecodedPatternLengthBounds {
+    min: usize,
+    max: Option<usize>,
+}
+
+/// Exact decoded-Unicode-scalar length bounds for one regex HIR. This is a
+/// semantic helper, deliberately separate from `pattern_hir_length_complexity`,
+/// whose literal-node accounting is only a compiler cost heuristic.
+fn decoded_pattern_length_bounds(hir: &Hir) -> Option<DecodedPatternLengthBounds> {
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => Some(DecodedPatternLengthBounds {
+            min: 0,
+            max: Some(0),
+        }),
+        HirKind::Literal(Literal(bytes)) => {
+            let chars = std::str::from_utf8(bytes).ok()?.chars().count();
+            Some(DecodedPatternLengthBounds {
+                min: chars,
+                max: Some(chars),
+            })
+        }
+        HirKind::Class(_) => Some(DecodedPatternLengthBounds {
+            min: 1,
+            max: Some(1),
+        }),
+        HirKind::Capture(capture) => decoded_pattern_length_bounds(&capture.sub),
+        HirKind::Concat(parts) => {
+            let mut min = 0usize;
+            let mut max = Some(0usize);
+            for part in parts {
+                let bounds = decoded_pattern_length_bounds(part)?;
+                min = min.checked_add(bounds.min)?;
+                max = match (max, bounds.max) {
+                    (Some(left), Some(right)) => Some(left.checked_add(right)?),
+                    _ => None,
+                };
+            }
+            Some(DecodedPatternLengthBounds { min, max })
+        }
+        HirKind::Alternation(parts) => {
+            if parts.is_empty() {
+                return Some(DecodedPatternLengthBounds {
+                    min: 0,
+                    max: Some(0),
+                });
+            }
+            let mut min = usize::MAX;
+            let mut max = Some(0usize);
+            for part in parts {
+                let bounds = decoded_pattern_length_bounds(part)?;
+                min = min.min(bounds.min);
+                max = match (max, bounds.max) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    _ => None,
+                };
+            }
+            Some(DecodedPatternLengthBounds { min, max })
+        }
+        HirKind::Repetition(repetition) => {
+            let sub = decoded_pattern_length_bounds(&repetition.sub)?;
+            let min = sub.min.checked_mul(repetition.min as usize)?;
+            let max = match (sub.max, repetition.max) {
+                (Some(sub_max), Some(repetitions)) => {
+                    Some(sub_max.checked_mul(repetitions as usize)?)
+                }
+                _ => None,
+            };
+            Some(DecodedPatternLengthBounds { min, max })
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FixedWidthRepeatClamp {
+    Empty,
+    Pattern(String),
+}
+
+/// Intersect a fully and absolutely anchored pattern containing exactly one
+/// variable repetition with a decoded JSON-string length interval, without
+/// building a regex intersection. Every other top-level piece must have fixed
+/// decoded length and the repeated subexpression must have exact width `w > 0`.
+/// The total decoded length is therefore `fixed + count * w`, so the sibling
+/// length bounds are exactly an integer interval on `count`.
+fn clamp_absolute_single_fixed_width_repetition(
+    pattern: &str,
+    min_length: usize,
+    max_length: usize,
+) -> Option<FixedWidthRepeatClamp> {
+    let hir = Parser::new().parse(pattern).ok()?;
+    let (body, anchored_start, anchored_end) = strip_outer_absolute_anchors(hir);
+    if !anchored_start || !anchored_end {
+        return None;
+    }
+
+    let mut parts = match body.kind() {
+        HirKind::Concat(parts) => parts.clone(),
+        _ => vec![body],
+    };
+    let mut fixed_length = 0usize;
+    let mut variable = None;
+    for (index, part) in parts.iter().enumerate() {
+        if let HirKind::Repetition(repetition) = part.kind()
+            && repetition.max != Some(repetition.min)
+        {
+            if variable.is_some() {
+                return None;
+            }
+            let width = fixed_decoded_pattern_length(&repetition.sub)?;
+            if width == 0 {
+                return None;
+            }
+            variable = Some((index, repetition.clone(), width));
+        } else {
+            fixed_length = fixed_length.checked_add(fixed_decoded_pattern_length(part)?)?;
+        }
+    }
+    let (index, repetition, width) = variable?;
+
+    if fixed_length > max_length {
+        return Some(FixedWidthRepeatClamp::Empty);
+    }
+    let length_min_count = min_length.saturating_sub(fixed_length).div_ceil(width);
+    let length_max_count = (max_length - fixed_length) / width;
+    let min_count = (repetition.min as usize).max(length_min_count);
+    let max_count = repetition
+        .max
+        .map(|max| max as usize)
+        .unwrap_or(length_max_count)
+        .min(length_max_count);
+    if min_count > max_count {
+        return Some(FixedWidthRepeatClamp::Empty);
+    }
+
+    let min = u32::try_from(min_count).ok()?;
+    let max = u32::try_from(max_count).ok()?;
+    parts[index] = Hir::repetition(Repetition {
+        min,
+        max: Some(max),
+        greedy: repetition.greedy,
+        sub: repetition.sub,
+    });
+    let body = if parts.len() == 1 {
+        parts.pop().unwrap()
+    } else {
+        Hir::concat(parts)
+    };
+    let rewritten = Hir::concat(vec![Hir::look(Look::Start), body, Hir::look(Look::End)]);
+    Some(FixedWidthRepeatClamp::Pattern(rewritten.to_string()))
 }
 
 /// Estimate the cost of repeating one constrained string inside a bounded
@@ -2912,6 +3101,87 @@ fn strip_outer_captures(mut hir: Hir) -> Hir {
             _ => return hir,
         }
     }
+}
+
+fn strip_outer_absolute_start_anchor(hir: Hir) -> Option<Hir> {
+    let hir = strip_outer_captures(hir);
+    match hir.kind() {
+        HirKind::Concat(parts)
+            if parts
+                .first()
+                .is_some_and(|part| matches!(part.kind(), HirKind::Look(Look::Start))) =>
+        {
+            Some(Hir::concat(parts[1..].to_vec()))
+        }
+        HirKind::Look(Look::Start) => Some(Hir::empty()),
+        _ => None,
+    }
+}
+
+fn strip_outer_absolute_end_anchor(hir: Hir) -> Option<Hir> {
+    let hir = strip_outer_captures(hir);
+    match hir.kind() {
+        HirKind::Concat(parts)
+            if parts
+                .last()
+                .is_some_and(|part| matches!(part.kind(), HirKind::Look(Look::End))) =>
+        {
+            Some(Hir::concat(parts[..parts.len() - 1].to_vec()))
+        }
+        HirKind::Look(Look::End) => Some(Hir::empty()),
+        _ => None,
+    }
+}
+
+fn strip_outer_absolute_anchors(hir: Hir) -> (Hir, bool, bool) {
+    let mut hir = strip_outer_captures(hir);
+    let mut anchored_start = false;
+    let mut anchored_end = false;
+
+    if let Some(stripped) = strip_outer_absolute_start_anchor(hir.clone()) {
+        hir = stripped;
+        anchored_start = true;
+    }
+    if let Some(stripped) = strip_outer_absolute_end_anchor(hir.clone()) {
+        hir = stripped;
+        anchored_end = true;
+    }
+
+    hir = strip_outer_captures(hir);
+    if let HirKind::Alternation(parts) = hir.kind() {
+        let mut parts = parts.clone();
+        if !anchored_start
+            && parts
+                .iter()
+                .all(|part| strip_outer_absolute_start_anchor(part.clone()).is_some())
+        {
+            parts = parts
+                .into_iter()
+                .map(|part| {
+                    strip_outer_absolute_start_anchor(part)
+                        .expect("checked common absolute start anchor")
+                })
+                .collect();
+            anchored_start = true;
+        }
+        if !anchored_end
+            && parts
+                .iter()
+                .all(|part| strip_outer_absolute_end_anchor(part.clone()).is_some())
+        {
+            parts = parts
+                .into_iter()
+                .map(|part| {
+                    strip_outer_absolute_end_anchor(part)
+                        .expect("checked common absolute end anchor")
+                })
+                .collect();
+            anchored_end = true;
+        }
+        hir = Hir::alternation(parts);
+    }
+
+    (hir, anchored_start, anchored_end)
 }
 
 fn strip_outer_start_anchor(hir: Hir) -> Option<Hir> {
@@ -4037,9 +4307,129 @@ mod tests {
     use regex::Regex;
 
     use super::{
-        preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex,
+        clamp_absolute_single_fixed_width_repetition, preprocess_ascii_shorthand,
+        quoted_string_body_regex, string_pattern_as_body_regex, FixedWidthRepeatClamp,
         JsonStringCompatMode, JsonStringContext, TEST_COMPAT_MODE,
     };
+
+    #[test]
+    fn fixed_width_repeat_clamp_matches_literal_language_intersection_exhaustively() {
+        for (body, width) in [("a", 1usize), ("(?:ab)", 2), ("(?:ab|cd)", 2)] {
+            for original_min in 0usize..=4 {
+                for original_max in ((original_min + 1)..=6)
+                    .map(Some)
+                    .chain(std::iter::once(None))
+                {
+                    // Exact-count repetitions can be canonicalized out of the
+                    // HIR and, more importantly, never need clamping: their one
+                    // decoded length is already classified as redundant or
+                    // disjoint by the preceding length-relation proof.
+                    let quantifier = match original_max {
+                        Some(max) if max == original_min => format!("{{{original_min}}}"),
+                        Some(max) => format!("{{{original_min},{max}}}"),
+                        None => format!("{{{original_min},}}"),
+                    };
+                    let pattern = format!("^{body}{quantifier}$");
+                    let original = Regex::new(&pattern).unwrap();
+
+                    for min_length in 0usize..=12 {
+                        for max_length in min_length..=12 {
+                            let clamped = clamp_absolute_single_fixed_width_repetition(
+                                &pattern,
+                                min_length,
+                                max_length,
+                            )
+                            .unwrap_or_else(|| panic!("single fixed-width variable repeat should clamp: pattern={pattern:?} min_length={min_length} max_length={max_length}"));
+                            let rewritten = match &clamped {
+                                FixedWidthRepeatClamp::Empty => None,
+                                FixedWidthRepeatClamp::Pattern(pattern) => {
+                                    Some(Regex::new(pattern).unwrap())
+                                }
+                            };
+
+                            for count in 0usize..=8 {
+                                let candidate = if width == 1 {
+                                    "a".repeat(count)
+                                } else {
+                                    "ab".repeat(count)
+                                };
+                                let expected = original.is_match(&candidate)
+                                    && (min_length..=max_length).contains(&candidate.chars().count());
+                                let actual = rewritten
+                                    .as_ref()
+                                    .is_some_and(|regex| regex.is_match(&candidate));
+                                assert_eq!(
+                                    actual, expected,
+                                    "pattern={pattern:?} min_length={min_length} max_length={max_length} count={count}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_width_repeat_clamp_with_fixed_prefix_suffix_matches_intersection() {
+        for (prefix, body, suffix, width) in [
+            ("pre", "a", "post", 1usize),
+            ("x", "(?:ab)", "yz", 2usize),
+            ("é", "(?:ab|cd)", "Z", 2usize),
+        ] {
+            for original_min in 0usize..=3 {
+                for original_max in ((original_min + 1)..=5)
+                    .map(Some)
+                    .chain(std::iter::once(None))
+                {
+                    let quantifier = match original_max {
+                        Some(max) => format!("{{{original_min},{max}}}"),
+                        None => format!("{{{original_min},}}"),
+                    };
+                    let pattern = format!("^{prefix}{body}{quantifier}{suffix}$");
+                    let original = Regex::new(&pattern).unwrap();
+
+                    for min_length in 0usize..=18 {
+                        for max_length in min_length..=18 {
+                            let clamped = clamp_absolute_single_fixed_width_repetition(
+                                &pattern,
+                                min_length,
+                                max_length,
+                            )
+                            .unwrap_or_else(|| panic!(
+                                "single fixed-width repeat with fixed context should clamp: pattern={pattern:?} min_length={min_length} max_length={max_length}"
+                            ));
+                            let rewritten = match &clamped {
+                                FixedWidthRepeatClamp::Empty => None,
+                                FixedWidthRepeatClamp::Pattern(pattern) => {
+                                    Some(Regex::new(pattern).unwrap())
+                                }
+                            };
+
+                            for count in 0usize..=7 {
+                                let repeated = if width == 1 {
+                                    "a".repeat(count)
+                                } else {
+                                    "ab".repeat(count)
+                                };
+                                let candidate = format!("{prefix}{repeated}{suffix}");
+                                let decoded_len = candidate.chars().count();
+                                let expected = original.is_match(&candidate)
+                                    && (min_length..=max_length).contains(&decoded_len);
+                                let actual = rewritten
+                                    .as_ref()
+                                    .is_some_and(|regex| regex.is_match(&candidate));
+                                assert_eq!(
+                                    actual, expected,
+                                    "pattern={pattern:?} min_length={min_length} max_length={max_length} count={count}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn preprocess_ascii_shorthand_rewrites_generic_word_shorthand() {

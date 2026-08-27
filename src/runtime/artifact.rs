@@ -3181,7 +3181,7 @@ impl DynamicMaskVocab {
 
 
 impl DynamicMaskVocab {
-    pub(crate) fn to_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+    fn to_artifact_impl(&self, include_mask_quotient: bool) -> Option<DynamicMaskVocabArtifact> {
         if !self.initialized || self.pending_source.is_some() {
             return None;
         }
@@ -3237,9 +3237,25 @@ impl DynamicMaskVocab {
             edge_bytes: self.trie.edge_bytes.clone(),
             alias_offsets,
             aliases,
-            mask_tokenizer: self.mask_tokenizer.as_deref().cloned(),
-            full_to_mask_state: self.full_to_mask_state.as_ref().to_vec(),
+            mask_tokenizer: include_mask_quotient
+                .then(|| self.mask_tokenizer.as_deref().cloned())
+                .flatten(),
+            full_to_mask_state: if include_mask_quotient {
+                self.full_to_mask_state.as_ref().to_vec()
+            } else {
+                Vec::new()
+            },
         })
+    }
+
+    pub(crate) fn to_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+        self.to_artifact_impl(true)
+    }
+
+    /// Serialize only vocabulary-derived runtime data. Constraint-specific
+    /// mask-tokenizer quotients and projections are reconstructed after load.
+    pub(crate) fn to_vocab_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+        self.to_artifact_impl(false)
     }
 
     pub(crate) fn from_artifact(artifact: DynamicMaskVocabArtifact) -> Result<Self, String> {
@@ -3255,6 +3271,62 @@ impl DynamicMaskVocab {
         }
         let node_count = artifact.nodes.len();
         let edge_count = artifact.edges.len();
+
+        // The compact runtime assumes one rooted tree. Validate ownership and
+        // reachability before any recursive metadata reconstruction so malformed
+        // artifacts cannot smuggle overlapping child ranges, cycles, or detached
+        // components into the trie.
+        let mut edge_owned = vec![false; edge_count];
+        let mut incoming = vec![0u8; node_count];
+        for (node_index, node) in artifact.nodes.iter().enumerate() {
+            let first = node.first_child as usize;
+            let len = node.child_len as usize;
+            let Some(end) = first.checked_add(len) else {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {node_index} has an invalid child range"
+                ));
+            };
+            if end > edge_count {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {node_index} has an invalid child range"
+                ));
+            }
+            for edge_index in first..end {
+                if std::mem::replace(&mut edge_owned[edge_index], true) {
+                    return Err("dynamic-mask vocabulary artifact has overlapping child ranges".to_owned());
+                }
+                let child = artifact.edges[edge_index].child as usize;
+                if child >= node_count || child == 0 {
+                    return Err(format!(
+                        "dynamic-mask vocabulary edge {edge_index} references an invalid child"
+                    ));
+                }
+                incoming[child] = incoming[child].saturating_add(1);
+                if incoming[child] != 1 {
+                    return Err("dynamic-mask vocabulary artifact is not a tree".to_owned());
+                }
+            }
+        }
+        if edge_owned.iter().any(|owned| !*owned)
+            || incoming.iter().skip(1).any(|&count| count != 1)
+        {
+            return Err("dynamic-mask vocabulary artifact is not one rooted tree".to_owned());
+        }
+        let mut reachable = vec![false; node_count];
+        let mut stack = vec![0usize];
+        while let Some(node) = stack.pop() {
+            if std::mem::replace(&mut reachable[node], true) {
+                continue;
+            }
+            let raw = &artifact.nodes[node];
+            let first = raw.first_child as usize;
+            let end = first + raw.child_len as usize;
+            stack.extend(artifact.edges[first..end].iter().map(|edge| edge.child as usize));
+        }
+        if reachable.iter().any(|seen| !*seen) {
+            return Err("dynamic-mask vocabulary artifact has unreachable trie nodes".to_owned());
+        }
+
         let mut nodes = Vec::with_capacity(node_count);
         let alias_count = artifact.alias_offsets.len().saturating_sub(1);
         for (index, node) in artifact.nodes.into_iter().enumerate() {
@@ -3285,11 +3357,6 @@ impl DynamicMaskVocab {
         }
         let mut edges = Vec::with_capacity(edge_count);
         for (index, edge) in artifact.edges.into_iter().enumerate() {
-            if edge.child as usize >= node_count {
-                return Err(format!(
-                    "dynamic-mask vocabulary edge {index} references an invalid child"
-                ));
-            }
             let start = edge.byte_start as usize;
             let len = edge.byte_len as usize;
             if start
@@ -3352,6 +3419,111 @@ impl DynamicMaskVocab {
             None => {}
         }
         Ok(result)
+    }
+}
+
+impl DynamicMaskVocab {
+    /// Verify that this vocabulary-only runtime index represents exactly the
+    /// supplied original token-id -> byte mapping. This is used when loading a
+    /// self-contained dynamic artifact: the persisted trie is an accelerator,
+    /// never an independent source of vocabulary semantics.
+    pub(crate) fn matches_token_bytes_exact(&self, token_bytes: &BTreeMap<u32, Vec<u8>>) -> bool {
+        if self.canonical_original_tokens.len() != token_bytes.len() {
+            return false;
+        }
+
+        // Canonical token ids are assigned before trie partitioning by sorting
+        // original vocabulary entries first by bytes and then by original id.
+        // Reconstruct just that ordering (not the trie), validate every alias
+        // group exactly, and retain one borrowed byte slice per canonical token
+        // for the topology walk below.
+        let mut sorted_tokens = token_bytes
+            .iter()
+            .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        let sort_tokens = |left: &(u32, &[u8]), right: &(u32, &[u8])| {
+            left.1.cmp(right.1).then_with(|| left.0.cmp(&right.0))
+        };
+        if rayon::current_num_threads() == 1 {
+            sorted_tokens.sort_unstable_by(sort_tokens);
+        } else {
+            sorted_tokens.par_sort_unstable_by(sort_tokens);
+        }
+        let mut canonical_bytes = Vec::<&[u8]>::with_capacity(self.canonical_token_count());
+        let mut start = 0usize;
+        while start < sorted_tokens.len() {
+            let bytes = sorted_tokens[start].1;
+            let mut end = start + 1;
+            while end < sorted_tokens.len() && sorted_tokens[end].1 == bytes {
+                end += 1;
+            }
+            let canonical = canonical_bytes.len() as u32;
+            let Some(originals) = self.token_ids(canonical) else {
+                return false;
+            };
+            if originals.len() != end - start
+                || !originals
+                    .iter()
+                    .copied()
+                    .eq(sorted_tokens[start..end].iter().map(|(token_id, _)| *token_id))
+            {
+                return false;
+            }
+            canonical_bytes.push(bytes);
+            start = end;
+        }
+        if canonical_bytes.len() != self.canonical_token_count() {
+            return false;
+        }
+
+        struct Frame {
+            node: u32,
+            next_child: usize,
+            prefix_len: usize,
+        }
+
+        let mut canonical_seen = vec![false; canonical_bytes.len()];
+        let mut prefix = Vec::<u8>::new();
+        let mut frames = vec![Frame {
+            node: 0,
+            next_child: 0,
+            prefix_len: 0,
+        }];
+        while !frames.is_empty() {
+            let frame_index = frames.len() - 1;
+            let node_id = frames[frame_index].node;
+            if frames[frame_index].next_child == 0 {
+                if let Some(canonical) = self.trie.node(node_id).token_id {
+                    let canonical = canonical as usize;
+                    if canonical >= canonical_seen.len()
+                        || canonical_seen[canonical]
+                        || canonical_bytes[canonical] != prefix.as_slice()
+                    {
+                        return false;
+                    }
+                    canonical_seen[canonical] = true;
+                }
+            }
+
+            let children = self.trie.children(node_id);
+            if frames[frame_index].next_child < children.len() {
+                let edge = children[frames[frame_index].next_child].clone();
+                frames[frame_index].next_child += 1;
+                let prefix_len = prefix.len();
+                prefix.extend_from_slice(self.trie.edge_bytes(&edge));
+                frames.push(Frame {
+                    node: edge.child,
+                    next_child: 0,
+                    prefix_len,
+                });
+            } else {
+                let prefix_len = frames[frame_index].prefix_len;
+                frames.pop();
+                prefix.truncate(prefix_len);
+            }
+        }
+
+        canonical_seen.into_iter().all(|seen| seen)
     }
 }
 
@@ -5519,6 +5691,69 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         assert!(
             PackedDwaDenseWeightMaskCache::from_flat(2, 1, vec![2], vec![7]).is_err()
         );
+    }
+
+    #[test]
+    fn vocab_only_artifact_rejects_missing_trie_root() {
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let mut artifact = vocab
+            .to_vocab_artifact()
+            .expect("initialized vocabulary should serialize");
+        assert!(artifact.mask_tokenizer.is_none());
+        assert!(artifact.full_to_mask_state.is_empty());
+        artifact.nodes.clear();
+        let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
+        assert!(error.contains("no trie root"));
+    }
+
+    #[test]
+    fn vocab_artifact_rejects_overlapping_child_ranges() {
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let mut artifact = vocab.to_vocab_artifact().unwrap();
+        artifact.nodes.push(DynamicMaskVocabArtifactNode {
+            token_id: u32::MAX,
+            first_child: 0,
+            child_len: 1,
+        });
+        artifact.edges.push(DynamicMaskVocabArtifactEdge {
+            byte_start: 0,
+            byte_len: 0,
+            child: 1,
+        });
+        artifact.nodes[0].first_child = 0;
+        artifact.nodes[0].child_len = 1;
+        let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
+        assert!(error.contains("overlapping child ranges"));
+    }
+
+    #[test]
+    fn vocab_runtime_exactly_checks_original_token_bytes() {
+        let mut trie = DynamicMaskTrie::new();
+        trie.nodes.push(DynamicMaskTrieNode {
+            token_id: Some(0),
+            ..DynamicMaskTrieNode::default()
+        });
+        let (byte_start, byte_len) = trie.push_edge_bytes(b"a");
+        trie.edges.push(DynamicMaskTrieEdge {
+            byte_start,
+            byte_len,
+            child: 1,
+        });
+        trie.nodes[0].first_child = 0;
+        trie.nodes[0].child_len = 1;
+        trie.finalize_subtree_metadata();
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(trie),
+            Arc::new(vec![vec![7]]),
+        );
+        assert!(vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"a".to_vec())])));
+        assert!(!vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"b".to_vec())])));
     }
 
     #[test]

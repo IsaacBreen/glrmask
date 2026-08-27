@@ -25,7 +25,10 @@ const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL: u16 = 15;
 // v16 combines the v14 composition metadata and v15 residual-runtime metadata.
 const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16: u16 = 16;
 // v17 additionally persists exact terminal-observation quotient certificates.
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 17;
+const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17: u16 = 17;
+// v18 additionally persists the initialized dynamic-mask vocabulary trie so
+// self-contained loads do not rebuild the full vocabulary index from token bytes.
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 18;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
@@ -217,6 +220,13 @@ struct DynamicConstraintPayloadV5Alternative {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintPayloadV5 {
     alternatives: Vec<DynamicConstraintPayloadV5Alternative>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DynamicConstraintPayloadV6 {
+    alternatives: Vec<DynamicConstraintPayloadV5Alternative>,
+    /// Vocabulary-only runtime index shared by every union alternative.
+    dynamic_mask_vocab: Option<crate::runtime::DynamicMaskVocabArtifact>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1150,6 +1160,76 @@ impl DynamicConstraint {
         Ok(Self::from_alternatives(alternatives))
     }
 
+    fn from_payload_v6(payload: DynamicConstraintPayloadV6) -> crate::Result<Self> {
+        if payload.dynamic_mask_vocab.is_some() {
+            let mut alternatives = payload.alternatives.iter();
+            if let Some(first) = alternatives.next() {
+                let token_bytes = &first.base.v2.v1.token_bytes;
+                if alternatives.any(|alternative| alternative.base.v2.v1.token_bytes != *token_bytes) {
+                    return Err(crate::GlrMaskError::Serialization(
+                        "dynamic artifact shares a vocabulary index across alternatives with different token bytes"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        let shared_dynamic_vocab = payload
+            .dynamic_mask_vocab
+            .map(DynamicMaskVocab::from_artifact)
+            .transpose()
+            .map_err(crate::GlrMaskError::Serialization)?;
+        if let (Some(vocab), Some(first)) = (&shared_dynamic_vocab, payload.alternatives.first()) {
+            if !vocab.matches_token_bytes_exact(&first.base.v2.v1.token_bytes) {
+                return Err(crate::GlrMaskError::Serialization(
+                    "dynamic artifact vocabulary index does not match serialized token bytes"
+                        .to_owned(),
+                ));
+            }
+        }
+        let mut alternatives = Vec::with_capacity(payload.alternatives.len());
+        for alternative in payload.alternatives {
+            let DynamicConstraintPayloadV5Alternative {
+                mut base,
+                terminal_observation_classes,
+            } = alternative;
+            let exprs = base.v2.v1.terminal_exprs.clone();
+            base.v2
+                .v1
+                .tokenizer
+                .restore_terminal_exprs_with_virtual_runtime_metadata(
+                    exprs,
+                    &base.virtual_runtimes,
+                    false,
+                )
+                .map_err(crate::GlrMaskError::Serialization)?;
+            let dynamic_mask_vocab = shared_dynamic_vocab
+                .as_ref()
+                .map(DynamicMaskVocab::fresh_runtime_instance)
+                .unwrap_or_default();
+            let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
+                base.v2,
+                dynamic_mask_vocab,
+            );
+            inner.late_grammar_slots = base.late_grammar_slots;
+            Self::restore_terminal_observation_classes(
+                &mut inner,
+                terminal_observation_classes,
+            )?;
+            inner.rebuild_dynamic_runtime_caches();
+            alternatives.push(Self {
+                inner,
+                alternatives: Vec::new(),
+                composition_grammars: vec![None],
+            });
+        }
+        if alternatives.is_empty() {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic union artifact has no alternatives".to_owned(),
+            ));
+        }
+        Ok(Self::from_alternatives(alternatives))
+    }
+
     fn from_legacy_payload_v14_main(
         payload: LegacyDynamicConstraintPayloadV14Main,
     ) -> crate::Result<Self> {
@@ -1242,11 +1322,28 @@ impl DynamicConstraint {
                 );
             }
         }
-        let payload = DynamicConstraintPayloadV5 {
-            alternatives: std::iter::once(&self.inner)
-                .chain(self.alternatives.iter())
+        let constraints = std::iter::once(&self.inner)
+            .chain(self.alternatives.iter())
+            .collect::<Vec<_>>();
+        let share_vocab = constraints.first().is_none_or(|first| {
+            constraints
+                .iter()
+                .skip(1)
+                .all(|constraint| constraint.token_bytes == first.token_bytes)
+        });
+        let dynamic_mask_vocab = share_vocab
+            .then(|| {
+                constraints
+                    .iter()
+                    .find_map(|constraint| constraint.dynamic_mask_vocab.to_vocab_artifact())
+            })
+            .flatten();
+        let payload = DynamicConstraintPayloadV6 {
+            alternatives: constraints
+                .into_iter()
                 .map(Self::payload_v5_for_constraint)
                 .collect(),
+            dynamic_mask_vocab,
         };
         let payload = bincode::serialize(&payload)
             .expect("DynamicConstraint serialization should succeed");
@@ -1520,6 +1617,7 @@ impl DynamicConstraint {
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14_MAIN
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL
                 | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16
+                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17
                 | DYNAMIC_CONSTRAINT_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -1618,11 +1716,17 @@ impl DynamicConstraint {
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 Self::from_payload_v4(payload, false)
             }
-            DYNAMIC_CONSTRAINT_VERSION => {
+            LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17 => {
                 let payload: DynamicConstraintPayloadV5 =
                     bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
                 Self::from_payload_v5(payload, false)
+            }
+            DYNAMIC_CONSTRAINT_VERSION => {
+                let payload: DynamicConstraintPayloadV6 =
+                    bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
+                        .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                Self::from_payload_v6(payload)
             }
             _ => unreachable!("version was validated above"),
         }
@@ -1828,6 +1932,378 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_bounded_pattern_uses_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"\\".to_vec()),
+            (5, b"u".to_vec()),
+            (6, b"0".to_vec()),
+            (7, b"6".to_vec()),
+            (8, b"1".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^(?:a|bb)+$",
+            "minLength": 2,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert!(
+            !dynamic
+                .inner
+                .dynamic_mask_vocab_for_runtime()
+                .has_terminal_observation_classes(),
+            "physical terminal-observation quotients must stay disabled for virtual residual runtimes",
+        );
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "the importer-generated pattern/length intersection must carry the certified prefix-code liveness oracle",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""a""#));
+        assert!(accepts(br#""aa""#));
+        assert!(
+            accepts(br#""\u0061\u0061""#),
+            "two escaped spellings of decoded 'a' must count as two JSON characters",
+        );
+        assert!(!accepts(br#""ab""#));
+
+        let mut at_limit = Vec::with_capacity(5002);
+        at_limit.push(b'"');
+        at_limit.extend(std::iter::repeat_n(b'a', 5000));
+        at_limit.push(b'"');
+        assert!(accepts(&at_limit));
+
+        let mut too_long = Vec::with_capacity(5003);
+        too_long.push(b'"');
+        too_long.extend(std::iter::repeat_n(b'a', 5001));
+        too_long.push(b'"');
+        assert!(!accepts(&too_long));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            !loaded
+                .inner
+                .dynamic_mask_vocab_for_runtime()
+                .has_terminal_observation_classes(),
+            "save/load must not attach a physical observation quotient to a virtual residual runtime",
+        );
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the certified liveness oracle from the retained terminal expression",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn dynamic_json_schema_bounded_format_uses_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b".".to_vec()),
+            (4, b"-".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "format": "hostname",
+            "minLength": 3,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "format/length intersections must carry the same certified JSON decoded-length liveness oracle as pattern/length intersections",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""aa""#));
+        assert!(accepts(br#""aaa""#));
+        assert!(accepts(br#""a.b""#));
+        assert!(!accepts(br#""a..b""#));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the bounded format liveness oracle",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn dynamic_json_schema_pattern_format_and_length_share_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b".".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^(?:a|bb)+$",
+            "format": "hostname",
+            "minLength": 2,
+            "maxLength": 128
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "nested pattern/format/length intersections below the generic giant-repeat threshold must still use the certified residual representation",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""a""#));
+        assert!(accepts(br#""aa""#));
+        assert!(accepts(br#""bb""#));
+        assert!(!accepts(br#""a.b""#));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+
+        let encode_current = |payload: DynamicConstraintPayloadV5| {
+            let payload = bincode::serialize(&payload).unwrap();
+            let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+            bytes.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+            bytes
+        };
+
+        let mut missing_owner = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&dynamic.inner)],
+        };
+        assert_eq!(missing_owner.alternatives[0].base.virtual_runtimes.len(), 1);
+        missing_owner.alternatives[0].base.virtual_runtimes.clear();
+        let error = DynamicConstraint::load(&encode_current(missing_owner)).unwrap_err();
+        assert!(
+            error.to_string().contains("terminal ownership mismatch"),
+            "dropping a below-threshold residual owner from its physical proxy artifact must fail closed: {error}",
+        );
+
+        let mut forged_owner = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&dynamic.inner)],
+        };
+        let terminal = forged_owner.alternatives[0].base.virtual_runtimes[0].terminal as usize;
+        forged_owner.alternatives[0]
+            .base
+            .v2
+            .v1
+            .terminal_exprs
+            .as_mut()
+            .expect("current dynamic artifact retains terminal expressions")[terminal] =
+            Expr::U8Seq(b"a".to_vec());
+        let error = DynamicConstraint::load(&encode_current(forged_owner)).unwrap_err();
+        assert!(
+            error.to_string().contains("certified bounded-code residual"),
+            "a below-threshold residual owner cannot be forged for an uncertified expression: {error}",
+        );
+    }
+
+    #[test]
+    fn dynamic_json_schema_cross_branch_bounded_string_constraints_share_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"bb".to_vec()),
+            (5, b".".to_vec()),
+            (6, b"-".to_vec()),
+        ]);
+        let schemas = [
+            r#"{
+                "allOf": [
+                    {"type":"string","format":"hostname","minLength":2,"maxLength":5000},
+                    {"type":"string","pattern":"^(?:a|bb)+$","minLength":3,"maxLength":5000},
+                    {"type":"string","pattern":"^(?:a|bbb)+$","maxLength":5000}
+                ]
+            }"#,
+            r#"{
+                "allOf": [
+                    {"type":"string","pattern":"^(?:a|bb)+$","minLength":2,"maxLength":6000},
+                    {"type":"string","pattern":"^(?:a|bbb)+$","minLength":3,"maxLength":5000},
+                    {"type":"string","format":"hostname","maxLength":5500}
+                ]
+            }"#,
+        ];
+
+        for schema in schemas {
+            let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+            assert!(
+                dynamic.inner.tokenizer.has_virtual_residual_runtime(),
+                "expected virtual residual runtime for cross-branch schema: {schema}",
+            );
+            assert!(
+                dynamic
+                    .inner
+                    .tokenizer
+                    .virtual_residual_bounded_code_liveness_oracle_count()
+                    > 0,
+                "cross-branch bounded string constraints must flatten to one common JSON decoded-length envelope plus finite constraint operands: {schema}",
+            );
+            assert!(
+                !dynamic
+                    .inner
+                    .dynamic_mask_vocab_for_runtime()
+                    .has_terminal_observation_classes(),
+                "virtual residual constraints must not attach a physical observation quotient",
+            );
+
+            let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+            assert!(
+                loaded
+                    .inner
+                    .tokenizer
+                    .virtual_residual_bounded_code_liveness_oracle_count()
+                    > 0,
+                "save/load must reconstruct the cross-branch bounded-code oracle: {schema}",
+            );
+            assert_eq!(loaded.start().mask(), dynamic.start().mask());
+        }
+    }
+
+    #[test]
+    fn dynamic_json_schema_allof_bounded_patterns_share_exact_code_liveness_oracle() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"c".to_vec()),
+            (5, b"\\".to_vec()),
+            (6, b"u".to_vec()),
+            (7, b"0".to_vec()),
+            (8, b"6".to_vec()),
+            (9, b"1".to_vec()),
+        ]);
+        let schema = r#"{
+            "allOf": [
+                {
+                    "type": "string",
+                    "pattern": "^(?:a|bb)+$",
+                    "minLength": 2,
+                    "maxLength": 5000
+                },
+                {
+                    "type": "string",
+                    "pattern": "^(?:a|cc)+$",
+                    "minLength": 3,
+                    "maxLength": 4000
+                }
+            ]
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "allOf branches with the same JSON length envelope language should share one exact bounded-code oracle",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts(br#""aa""#));
+        assert!(accepts(br#""aaa""#));
+        assert!(accepts(br#""\u0061\u0061\u0061""#));
+        assert!(!accepts(br#""bbb""#));
+        assert!(!accepts(br#""ccc""#));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(
+            loaded
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+            "save/load must reconstruct the coalesced allOf oracle",
+        );
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn dynamic_json_schema_bounded_unicode_pattern_keeps_raw_and_escaped_spellings_exact() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, "é".as_bytes().to_vec()),
+            (2, br"\u00e9".to_vec()),
+            (3, br"\u00E9".to_vec()),
+            (4, b"x".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^(?:é|xx)+$",
+            "minLength": 2,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count()
+                > 0,
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(!accepts("\"é\"".as_bytes()));
+        assert!(accepts("\"éé\"".as_bytes()));
+        assert!(accepts(br#""\u00e9\u00E9""#));
+        assert!(accepts("\"é\\u00e9\"".as_bytes()));
+        assert!(!accepts("\"éx\"".as_bytes()));
+    }
+
+    #[test]
     fn dynamic_constraint_save_load_round_trip() {
         let vocab = vocab();
         let constraint = DynamicConstraint::from_glrm_grammar(
@@ -1849,6 +2325,63 @@ mod tests {
         );
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
+    }
+
+    #[test]
+    fn dynamic_v18_persists_vocab_and_v17_remains_loadable() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"b".to_vec()),
+        ]);
+        let constraint = DynamicConstraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= /a+/;
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let current = constraint.save();
+        assert_eq!(
+            u16::from_le_bytes([current[8], current[9]]),
+            DYNAMIC_CONSTRAINT_VERSION,
+        );
+        let payload: DynamicConstraintPayloadV6 =
+            bincode::deserialize(&current[DYNAMIC_CONSTRAINT_HEADER_LEN..]).unwrap();
+        assert!(payload.dynamic_mask_vocab.is_some());
+        let current_loaded = DynamicConstraint::load(&current).unwrap();
+        assert_eq!(current_loaded.start().mask(), constraint.start().mask());
+
+        let mut mismatched_shared_vocab = payload.clone();
+        let mut second = mismatched_shared_vocab.alternatives[0].clone();
+        second.base.v2.v1.token_bytes = Arc::new(BTreeMap::from([(0, b"z".to_vec())]));
+        mismatched_shared_vocab.alternatives.push(second);
+        let mismatched_shared_vocab = bincode::serialize(&mismatched_shared_vocab).unwrap();
+        let mut malformed =
+            Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + mismatched_shared_vocab.len());
+        malformed.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+        malformed.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+        malformed.extend_from_slice(&(mismatched_shared_vocab.len() as u64).to_le_bytes());
+        malformed.extend_from_slice(&mismatched_shared_vocab);
+        let error = DynamicConstraint::load(&malformed).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("shares a vocabulary index across alternatives with different token bytes"));
+
+        let legacy_payload = DynamicConstraintPayloadV5 {
+            alternatives: vec![DynamicConstraint::payload_v5_for_constraint(&constraint.inner)],
+        };
+        let legacy_payload = bincode::serialize(&legacy_payload).unwrap();
+        let mut legacy = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + legacy_payload.len());
+        legacy.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
+        legacy.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
+        legacy.extend_from_slice(&(legacy_payload.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&legacy_payload);
+        let legacy_loaded = DynamicConstraint::load(&legacy).unwrap();
+        assert_eq!(legacy_loaded.start().mask(), constraint.start().mask());
     }
 
     #[test]
@@ -2011,7 +2544,7 @@ mod tests {
             let payload = bincode::serialize(&payload).unwrap();
             let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
             bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_MAGIC);
-            bytes.extend_from_slice(&DYNAMIC_CONSTRAINT_VERSION.to_le_bytes());
+            bytes.extend_from_slice(&LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17.to_le_bytes());
             bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
             bytes.extend_from_slice(&payload);
             bytes

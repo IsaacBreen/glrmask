@@ -12484,6 +12484,15 @@ pub fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
         && pure_binary_intersection(&plan.exclusions, &plan.intersections)
 }
 
+/// Whether the exact general residual runtime has the bounded-code liveness
+/// certificate needed to make this expression a safe protected dynamic
+/// component. This is an internal representation-policy predicate; it does not
+/// change the accepted language.
+#[doc(hidden)]
+pub fn expression_supports_bounded_code_residual_runtime(expr: &Expr) -> bool {
+    super::runtime_residual::expression_supports_bounded_code_liveness_oracle(expr)
+}
+
 /// Whether this expression contains any bounded repetition large enough that
 /// falling through to the ordinary repeat compiler could allocate in direct
 /// proportion to the declared bound.
