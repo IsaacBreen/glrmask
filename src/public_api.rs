@@ -1589,11 +1589,17 @@ mod tests {
         let mut inner = inner_parent
             .bind_grammar_dynamic_boundary("leaf", leaf)
             .unwrap();
+        assert_recursive_compiler_views_detached(&inner);
+        let mut compiler_view = inner.clone();
+        compiler_view
+            .prepare_recursive_compiler_table_for_composition()
+            .unwrap();
         assert!(
-            !inner.table.control_terminals.is_empty(),
-            "fixture must exercise Exact construction over live linker controls",
+            !compiler_view.table.control_terminals.is_empty(),
+            "fixture must exercise Exact construction over compiler-materialized linker controls",
         );
         inner.build_exact_boundary_trigger().unwrap();
+        assert_recursive_compiler_views_detached(&inner);
         assert!(matches!(
             inner.boundary_trigger,
             crate::runtime::BoundaryTrigger::Exact(_)

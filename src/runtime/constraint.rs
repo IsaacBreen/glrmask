@@ -1139,20 +1139,43 @@ impl Constraint {
         if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
             return Ok(());
         }
-        self.build_boundary_token_trigger()?;
-        let candidates = self
-            .boundary_trigger
-            .token_summary()
-            .map(|tokens| tokens.to_vec())
-            .unwrap_or_default();
-        let Some(dwa) =
+
+        // Recursive coordinators deliberately keep only leaf-native runtime
+        // parser/tokenizer views. Exact-trigger construction is compiler work:
+        // it is still defined over the exact flattened component coordinate,
+        // so materialize those compiler-only views in a private clone rather
+        // than reattaching them to the live constraint. The resulting trigger
+        // remains an optional accelerator; recursive outer runtimes decline its
+        // materialized parser coordinate and fall back to exact scoped commits.
+        let dwa = if self.uses_compact_segmented_parser_runtime() {
+            let mut compiler_view = self.clone();
+            compiler_view.prepare_recursive_compiler_table_for_composition()?;
+            compiler_view.prepare_recursive_compiler_tokenizer_for_composition()?;
+            compiler_view.build_boundary_token_trigger()?;
+            let candidates = compiler_view
+                .boundary_trigger
+                .token_summary()
+                .map(|tokens| tokens.to_vec())
+                .unwrap_or_default();
+            crate::compiler::constraint_compose::build_exact_component_boundary_trigger(
+                &compiler_view,
+                &candidates,
+            )?
+        } else {
+            self.build_boundary_token_trigger()?;
+            let candidates = self
+                .boundary_trigger
+                .token_summary()
+                .map(|tokens| tokens.to_vec())
+                .unwrap_or_default();
             crate::compiler::constraint_compose::build_exact_component_boundary_trigger(
                 self,
                 &candidates,
             )?
-        else {
+        };
+        let Some(dwa) = dwa else {
             return Err(
-                "exact boundary trigger construction is not yet supported for components with live linker-control terminals"
+                "exact boundary trigger construction could not characterize the component parser"
                     .to_owned(),
             );
         };
