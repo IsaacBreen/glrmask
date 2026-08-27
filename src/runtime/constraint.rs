@@ -5175,22 +5175,32 @@ impl Constraint {
     pub(crate) fn build_dynamic_mask_trie_partitioned(
         entries: &[(usize, &[u8])],
     ) -> DynamicMaskTrie {
-        let mut ordered_entries = entries.to_vec();
-        ordered_entries.sort_unstable_by(|left, right| {
+        // Character-type classification is substantially more expensive than
+        // comparing the resulting small integer. Do it once per vocabulary
+        // entry rather than O(log N) times from the sort comparator.
+        let mut classified_entries = entries
+            .iter()
+            .map(|&(token_id, bytes)| {
+                (
+                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(bytes), bytes),
+                    token_id,
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        classified_entries.sort_unstable_by(|left, right| {
             right
-                .1
+                .2
                 .is_empty()
-                .cmp(&left.1.is_empty())
-                .then_with(|| {
-                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(left.1), left.1)
-                        .cmp(&dynamic_mask_vocab_layout_class(
-                            classify_vocab_char_type(right.1),
-                            right.1,
-                        ))
-                        .then_with(|| left.1.cmp(right.1))
-                        .then_with(|| left.0.cmp(&right.0))
-                })
+                .cmp(&left.2.is_empty())
+                .then_with(|| left.0.cmp(&right.0))
+                .then_with(|| left.2.cmp(right.2))
+                .then_with(|| left.1.cmp(&right.1))
         });
+        let ordered_entries = classified_entries
+            .into_iter()
+            .map(|(_, token_id, bytes)| (token_id, bytes))
+            .collect::<Vec<_>>();
         let entries = ordered_entries.as_slice();
         let mut trie = DynamicMaskTrie::new();
         if entries.is_empty() {
