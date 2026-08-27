@@ -2708,14 +2708,6 @@ mod tests {
             .segmented_parser_components
             .iter()
             .all(|component| component.global_to_local_parser_state.is_empty()));
-        assert_eq!(
-            half_overlay
-                .recursive_states_by_materialized_state
-                .get()
-                .unwrap()
-                .len(),
-            half.table.num_states as usize,
-        );
 
         let loaded_half = RuntimeConstraint::load(&half.save()).unwrap();
         let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
@@ -2733,26 +2725,6 @@ mod tests {
             .segmented_parser_components
             .iter()
             .all(|component| component.global_to_local_parser_state.is_empty()));
-        assert_eq!(
-            loaded_half_overlay
-                .recursive_states_by_materialized_state
-                .get()
-                .unwrap()
-                .len(),
-            loaded_half.table.num_states as usize,
-        );
-        assert_eq!(
-            half_overlay
-                .recursive_states_by_materialized_state
-                .get()
-                .unwrap()
-                .as_ref(),
-            loaded_half_overlay
-                .recursive_states_by_materialized_state
-                .get()
-                .unwrap()
-                .as_ref(),
-        );
 
         let fresh_full = half
             .bind_grammar_dynamic_boundary("right", &right)

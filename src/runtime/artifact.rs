@@ -4467,13 +4467,6 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// the existing `LeveledGSS<u32, ...>` action provider.
     #[serde(skip, default)]
     pub(crate) recursive_parser_layout: OnceLock<Arc<RecursiveParserLayout>>,
-    /// Exact late-composition oracle from this constraint's materialized LR
-    /// states into its own recursive provider coordinate. This is derived once
-    /// while the legacy per-component projections are still available (or
-    /// restored directly by the v25 wire format), then reused whenever this
-    /// already-composed constraint is embedded under another wrapper.
-    #[serde(skip, default)]
-    pub(crate) recursive_states_by_materialized_state: OnceLock<Arc<Vec<Vec<u32>>>>,
     /// Exact endpoint lexical relation: recursive leaf tokenizer state -> this
     /// constraint's internal TSID set. Runtime-product components can make the
     /// image genuinely set-valued, so this must not be collapsed to one TSID.
