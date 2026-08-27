@@ -3598,15 +3598,28 @@ fn restore_recursive_segmented_runtime_v25(
     }
     let global_terminal_count = constraint.table.num_terminals as usize;
     let global_tokenizer_states = constraint.tokenizer.num_states();
-    let mut components = Vec::with_capacity(runtime.components.len());
-    for (index, component) in runtime.components.into_iter().enumerate() {
+    // Immediate component artifacts are independent. Decode them in parallel
+    // before validating their placement in the outer compiler-oracle
+    // coordinates. This is especially important for nested recursive
+    // compositions: a sequential loop turns load latency into the sum of every
+    // descendant artifact load, while Rayon lets the component tree collapse
+    // to roughly its critical path without changing the wire or runtime tree.
+    let decoded_components = runtime
+        .components
+        .into_par_iter()
+        .map(|component| {
+            let child = Constraint::load(&component.constraint_artifact)?;
+            Ok::<_, crate::GlrMaskError>((component, child))
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    let mut components = Vec::with_capacity(decoded_components.len());
+    for (index, (component, child)) in decoded_components.into_iter().enumerate() {
         if component.root_entry_terminals.len() != global_terminal_count {
             return Err(crate::GlrMaskError::Serialization(format!(
                 "recursive v25 component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
                 component.root_entry_terminals.len(),
             )));
         }
-        let child = Constraint::load(component.constraint_artifact)?;
         if component
             .terminal_offset
             .checked_add(child.table.num_terminals)
