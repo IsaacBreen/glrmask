@@ -13,12 +13,12 @@ pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]
 pub(crate) use artifact::{
     dynamic_mask_vocab_layout_class, BoundaryTerminalNwa, BoundaryTerminalNwaNode,
-    BoundaryTerminalNwaTransition, BoundaryTerminalTrieNode, CompositionGrammarSummary,
-    BoundaryTrigger, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
-    FastTokenizerTransitions, SegmentedBoundaryParser, SegmentedBoundaryTerminalTrie,
-    SegmentedBoundaryShard, SegmentedBoundaryShardBackend, SegmentedParserComponent,
-    SegmentedParserComponentTables, SegmentedParserLink, LateGrammarSlot,
-    SpecialTokenTerminal, StaticDynamicOverlayMetadata,
+    BoundaryTerminalNwaTransition, BoundaryTerminalTrieNode, BoundaryTrigger,
+    CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
+    DynamicMaskVocabArtifact, FastCommitTemplateDfas, FastTokenizerTransitions, LateGrammarSlot,
+    SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,
+    SegmentedBoundaryTerminalTrie, SegmentedParserComponent, SegmentedParserComponentTables,
+    SegmentedParserLink, SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
 pub(crate) use artifact::token_bytes_artifact_serde::PackedTokenBytes;
 #[allow(unused_imports)]

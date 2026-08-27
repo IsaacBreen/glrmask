@@ -3468,7 +3468,7 @@ impl<'a> ConstraintState<'a> {
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
-                            boundary,
+                            &boundary,
                             Some(&shard.start_parser_states),
                             Some(shard.start_component),
                             shard.accepts_empty_stack,
@@ -3477,7 +3477,7 @@ impl<'a> ConstraintState<'a> {
                     }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
                         self.or_segmented_boundary_terminal_trie_mask(
-                            boundary,
+                            &boundary,
                             Some(&shard.start_parser_states),
                             shard.accepts_empty_stack,
                             buf,
@@ -3513,7 +3513,7 @@ impl<'a> ConstraintState<'a> {
                                 if !self.or_exact_component_trigger_candidates(
                                     component,
                                     shard,
-                                    dwa,
+                                    &dwa,
                                     &mut direct_candidates,
                                 ) {
                                     direct_candidates_complete = false;

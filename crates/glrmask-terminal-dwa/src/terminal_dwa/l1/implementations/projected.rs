@@ -3288,7 +3288,14 @@ fn projected_root_membership_precheck(input: BuildInput<'_>, threshold: usize) -
 }
 
 fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
-    if input.subset_parent_order.is_some() {
+    if input.subset_parent_order.is_some()
+        || input.partition_label == "single_terminal_global"
+    {
+        // The global one-terminal path has exactly one terminal signature. Its
+        // residual projection stays compact even when the underlying tokenizer
+        // has many states, while finite projection expands the full
+        // state×vocabulary relation and can be orders of magnitude slower.
+        // Keep this already-specialized path on the exact residual kernel.
         return usize::MAX;
     }
     let (env_name, default) = if input.partition_label == "p1" {

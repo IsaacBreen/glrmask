@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::import::ast::{GrammarExpr, Quantifier};
+use crate::import::ast::{GrammarExpr, NamedRule, Quantifier};
 use serde_json::Value;
 
 use super::ast::{
@@ -800,7 +800,10 @@ impl<'a> Lowerer<'a> {
         if lowered.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
         }
-        if !lowered.iter().all(all_of_intersection_terminal_safe) {
+        if !lowered
+            .iter()
+            .all(|expr| all_of_intersection_terminal_safe(expr, &self.rules))
+        {
             // The generic grammar lowerer treats Intersect as terminal-ish. Parser-shaped
             // object/array allOf operands can contain nonterminal refs or SeparatedSequence,
             // so overapproximate them for build parity instead of emitting an invalid terminal.
@@ -1426,39 +1429,76 @@ fn llguidance_plain_open_object_subsumption_candidate(object: &ObjectSchema) -> 
         && matches!(object.additional_properties, AdditionalProperties::AllowAny)
 }
 
-fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
+fn all_of_intersection_terminal_safe(expr: &GrammarExpr, rules: &[NamedRule]) -> bool {
+    let mut visiting = BTreeSet::new();
+    all_of_intersection_terminal_safe_inner(expr, rules, &mut visiting)
+}
+
+fn all_of_intersection_terminal_safe_inner(
+    expr: &GrammarExpr,
+    rules: &[NamedRule],
+    visiting: &mut BTreeSet<String>,
+) -> bool {
     match expr {
         GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte
         | GrammarExpr::Epsilon => true,
-        GrammarExpr::Ref(name) => matches!(
-            name.as_str(),
-            JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE
-                | JSON_ADDITIONAL_KEY_COLON_SHARED_RULE
-                | JSON_BOOL_RULE
-                | JSON_INTEGER_RULE
-                | JSON_ITEM_SEPARATOR_RULE
-                | JSON_KEY_SEPARATOR_RULE
-                | JSON_KEY_STRING_RULE
-                | JSON_NULL_RULE
-                | JSON_NUMBER_RULE
-                | JSON_STRING_CHAR_RULE
-                | JSON_STRING_RULE
-        ),
+        // Special LLM tokens are parser-controlled terminals, not byte-language
+        // expressions. The common terminal resolver rejects them inside
+        // Intersect/Exclude, so they must not pass this byte-terminal gate.
+        GrammarExpr::SpecialToken(_) => false,
+        GrammarExpr::Ref(name) => {
+            if matches!(
+                name.as_str(),
+                JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE
+                    | JSON_ADDITIONAL_KEY_COLON_SHARED_RULE
+                    | JSON_BOOL_RULE
+                    | JSON_INTEGER_RULE
+                    | JSON_ITEM_SEPARATOR_RULE
+                    | JSON_KEY_SEPARATOR_RULE
+                    | JSON_KEY_STRING_RULE
+                    | JSON_NULL_RULE
+                    | JSON_NUMBER_RULE
+                    | JSON_STRING_CHAR_RULE
+                    | JSON_STRING_RULE
+            ) {
+                return true;
+            }
+            let Some(rule) = rules
+                .iter()
+                .find(|rule| rule.is_terminal && rule.name == *name)
+            else {
+                return false;
+            };
+            if !visiting.insert(name.clone()) {
+                return false;
+            }
+            let safe = all_of_intersection_terminal_safe_inner(&rule.expr, rules, visiting);
+            visiting.remove(name);
+            safe
+        }
         GrammarExpr::Grouped(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
-        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => all_of_intersection_terminal_safe(inner),
-        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => all_of_intersection_terminal_safe(expr),
-        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-            parts.iter().all(all_of_intersection_terminal_safe)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
+            all_of_intersection_terminal_safe_inner(inner, rules, visiting)
         }
-        GrammarExpr::Intersect { expr, intersect } | GrammarExpr::Exclude { expr, exclude: intersect } => {
-            all_of_intersection_terminal_safe(expr) && all_of_intersection_terminal_safe(intersect)
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => {
+            all_of_intersection_terminal_safe_inner(expr, rules, visiting)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => parts
+            .iter()
+            .all(|part| all_of_intersection_terminal_safe_inner(part, rules, visiting)),
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::Exclude {
+            expr,
+            exclude: intersect,
+        } => {
+            all_of_intersection_terminal_safe_inner(expr, rules, visiting)
+                && all_of_intersection_terminal_safe_inner(intersect, rules, visiting)
         }
         GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => false,
     }
@@ -3665,4 +3705,47 @@ pub fn all_of_schema(left: Schema, right: Schema) -> Schema {
             ..SchemaAssertions::default()
         },
     )
+}
+
+#[cfg(test)]
+mod all_of_terminal_safety_tests {
+    use super::*;
+
+    fn rule(name: &str, expr: GrammarExpr, is_terminal: bool) -> NamedRule {
+        NamedRule {
+            name: name.to_string(),
+            expr,
+            is_terminal,
+            is_internal: false,
+        }
+    }
+
+    #[test]
+    fn generated_terminal_refs_are_checked_through_their_bodies() {
+        let rules = vec![
+            rule("bytes", GrammarExpr::RawRegex("a+".to_string()), true),
+            rule("parser", GrammarExpr::RawRegex("b+".to_string()), false),
+        ];
+        assert!(all_of_intersection_terminal_safe(
+            &GrammarExpr::Ref("bytes".to_string()),
+            &rules,
+        ));
+        assert!(!all_of_intersection_terminal_safe(
+            &GrammarExpr::Ref("parser".to_string()),
+            &rules,
+        ));
+    }
+
+    #[test]
+    fn special_token_terminal_refs_are_not_byte_intersection_safe() {
+        let rules = vec![rule("special", GrammarExpr::SpecialToken(17), true)];
+        assert!(!all_of_intersection_terminal_safe(
+            &GrammarExpr::Ref("special".to_string()),
+            &rules,
+        ));
+        assert!(!all_of_intersection_terminal_safe(
+            &GrammarExpr::SpecialToken(17),
+            &rules,
+        ));
+    }
 }

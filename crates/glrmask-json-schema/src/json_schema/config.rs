@@ -1,9 +1,9 @@
 /// Import-time configuration kept intentionally small.
 ///
 /// These are the only user-visible JSON Schema importer knobs in the rewrite.
-/// Most affect grammar shape only. Patterned string bounds are preserved by
-/// default; any explicit compatibility opt-out is deliberately semantically
-/// weaker and must never be selected merely because a pattern is expensive.
+/// Most affect grammar shape only. Patterned string bounds are always
+/// semantic. `preserve_pattern_max_length` is retained for configuration/API
+/// compatibility, but disabling it must never enlarge the accepted language.
 #[derive(Debug, Clone)]
 pub struct JsonSchemaConfig {
     pub llguidance_compat: bool,
@@ -73,6 +73,9 @@ impl Default for JsonSchemaConfig {
             // but creates severe build fallout. This warning itself should
             // never be removed in the future.
             terminalize_bounded_string_max: 50,
+            // Legacy compatibility knob. Finite patterned-string maxLength is
+            // now always enforced; retain the field/env so older callers do not
+            // break when constructing importer configuration.
             preserve_pattern_max_length: true,
             // Static regex-HIR budget for choosing specialized patterned-string
             // lowering strategies. It must not decide whether maxLength is

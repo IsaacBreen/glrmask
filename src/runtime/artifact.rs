@@ -7,6 +7,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
+use crate::automata::lexer::runtime_repeat_product::VirtualBinaryRepeatIntersectionMaskProjection;
+use crate::automata::lexer::runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection;
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
@@ -889,11 +891,18 @@ impl FastTokenizerTransitions {
         match self {
             Self::Dense(rows) => rows
                 .get(state as usize)
-                .map_or(u32::MAX, |row| row[byte as usize]),
-            Self::Flat(flat) => flat
-                .get(state as usize * 256 + byte as usize)
+                .map_or_else(
+                    || tokenizer.get_transition(state, byte),
+                    |row| row[byte as usize],
+                ),
+            Self::Flat(flat) => state
+                .try_into()
+                .ok()
+                .and_then(|state: usize| state.checked_mul(256))
+                .and_then(|offset| offset.checked_add(byte as usize))
+                .and_then(|index| flat.get(index))
                 .copied()
-                .unwrap_or(u32::MAX),
+                .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
             Self::Fallback(_) => tokenizer.get_transition(state, byte),
             Self::Hybrid {
                 state_to_dense_row,
@@ -2116,8 +2125,16 @@ pub(crate) struct DirectRegularDynamicFrontierCacheEntry {
 /// deliberately removes representation-only Arc identities and accumulator
 /// node organization, so equivalent residuals reached after different token
 /// commits share one exact cached mask.
-pub(crate) type DynamicMaskStateKey =
-    Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DynamicMaskLexerStateKey {
+    Exact(u32),
+    TerminalObservation { terminal: TerminalID, class: u32, initial: bool },
+}
+
+pub(crate) type DynamicMaskStateKey = Vec<(
+    DynamicMaskLexerStateKey,
+    Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>,
+)>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicConfigSubtreeCertificate {
@@ -2442,12 +2459,15 @@ pub(crate) struct DynamicMaskVocab {
     projection_alias_vocab: Arc<[u32]>,
     projection_alias_h64: Arc<[u32]>,
     bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
+    terminal_observation_classes: Arc<[(TerminalID, Arc<[u32]>)]>,
     /// Optional mask-only finite-token quotient. Commit continues to use the
     /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
     /// built in this smaller coordinate and indexed from exact runtime states
     /// through `full_to_mask_state`.
     mask_tokenizer: Option<Arc<Tokenizer>>,
     full_to_mask_state: Arc<[u32]>,
+    virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
+    virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
 }
 
 impl DynamicMaskVocab {
@@ -2505,8 +2525,11 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            virtual_unit_repeat_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2547,8 +2570,11 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            virtual_unit_repeat_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2572,8 +2598,11 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            virtual_unit_repeat_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2614,8 +2643,11 @@ impl DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            virtual_unit_repeat_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 
@@ -2846,6 +2878,43 @@ impl DynamicMaskVocab {
             .all(|&state| state < tokenizer.num_states()));
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(full_to_mask_state);
+        self.virtual_unit_repeat_projection = None;
+        self.virtual_repeat_intersection_projections.clear();
+    }
+
+    pub(crate) fn set_virtual_unit_repeat_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        projection: VirtualZeroMinUnitRepeatMaskProjection,
+    ) {
+        debug_assert_eq!(
+            tokenizer.num_states(),
+            projection.mask_state_count(),
+        );
+        self.mask_tokenizer = Some(Arc::new(tokenizer));
+        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.virtual_unit_repeat_projection = Some(projection);
+        self.virtual_repeat_intersection_projections.clear();
+    }
+
+    pub(crate) fn set_virtual_repeat_intersection_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        projection: VirtualBinaryRepeatIntersectionMaskProjection,
+    ) {
+        self.set_virtual_repeat_intersections_mask_projection(tokenizer, vec![projection]);
+    }
+
+    pub(crate) fn set_virtual_repeat_intersections_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
+    ) {
+        debug_assert!(!projections.is_empty());
+        self.mask_tokenizer = Some(Arc::new(tokenizer));
+        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.virtual_unit_repeat_projection = None;
+        self.virtual_repeat_intersection_projections = projections;
     }
 
     /// Preserve mask-only quotient metadata when a deferred dynamic-vocabulary
@@ -2858,9 +2927,21 @@ impl DynamicMaskVocab {
     pub(crate) fn inherit_mask_tokenizer_quotient_from(&mut self, source: &Self) {
         self.mask_tokenizer = source.mask_tokenizer.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
+        self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
+        self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
+        self.virtual_repeat_intersection_projections =
+            source.virtual_repeat_intersection_projections.clone();
     }
 
     pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
+        if self.virtual_unit_repeat_projection.is_some()
+            || !self.virtual_repeat_intersection_projections.is_empty()
+        {
+            // This compact structural projection is rebuilt from the exact
+            // virtual tokenizer and bound vocabulary after load. The legacy
+            // transfer tuple can only express a dense full-state vector.
+            return None;
+        }
         self.mask_tokenizer.as_ref().map(|tokenizer| {
             ((**tokenizer).clone(), self.full_to_mask_state.as_ref().to_vec())
         })
@@ -2873,6 +2954,23 @@ impl DynamicMaskVocab {
 
     #[inline]
     pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
+        if !self.virtual_repeat_intersection_projections.is_empty() {
+            for projection in &self.virtual_repeat_intersection_projections {
+                if let Some(projected) = projection.project(full_state) {
+                    return projected;
+                }
+            }
+            panic!(
+                "exact virtual tokenizer state {full_state} has no owning finite-mask projection"
+            );
+        }
+        if let Some(projection) = self.virtual_unit_repeat_projection {
+            return projection.project(full_state).unwrap_or_else(|| {
+                panic!(
+                    "exact arithmetic tokenizer state {full_state} has no owning finite-mask projection"
+                )
+            });
+        }
         self.full_to_mask_state
             .get(full_state as usize)
             .copied()
@@ -2881,6 +2979,17 @@ impl DynamicMaskVocab {
 
     pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
         let tokenizer = self.mask_tokenizer.as_ref()?;
+        if !self.virtual_repeat_intersection_projections.is_empty() {
+            // The exact product state domain is populated lazily, so no finite
+            // global full-state multiplicity table exists. Optimizations that
+            // require such a table must simply decline.
+            return None;
+        }
+        if let Some(projection) = self.virtual_unit_repeat_projection {
+            let counts = projection.multiplicities();
+            debug_assert_eq!(counts.len(), tokenizer.num_states() as usize);
+            return Some(counts);
+        }
         let mut counts = vec![0usize; tokenizer.num_states() as usize];
         for &state in self.full_to_mask_state.iter() {
             if let Some(count) = counts.get_mut(state as usize) {
@@ -2895,6 +3004,14 @@ impl DynamicMaskVocab {
     /// represented by `u32::MAX`.
     pub(crate) fn mask_projection_unique_full_states(&self) -> Option<Vec<u32>> {
         let tokenizer = self.mask_tokenizer.as_ref()?;
+        if !self.virtual_repeat_intersection_projections.is_empty() {
+            return None;
+        }
+        if let Some(projection) = self.virtual_unit_repeat_projection {
+            let unique = projection.unique_full_states();
+            debug_assert_eq!(unique.len(), tokenizer.num_states() as usize);
+            return Some(unique);
+        }
         let mut unique = vec![u32::MAX; tokenizer.num_states() as usize];
         let mut duplicate = vec![false; tokenizer.num_states() as usize];
         for (full_state, &mask_state) in self.full_to_mask_state.iter().enumerate() {
@@ -2912,11 +3029,12 @@ impl DynamicMaskVocab {
         Some(unique)
     }
 
+    /// Lookup by a state in the active mask-tokenizer coordinate. Callers that
+    /// hold an exact committed tokenizer state must project it first.
     pub(crate) fn self_loop_projection(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_by_source.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -2924,11 +3042,11 @@ impl DynamicMaskVocab {
         self.self_loop_projections.get(index as usize)
     }
 
+    /// H64 alias lookup in the active mask-tokenizer coordinate.
     pub(crate) fn self_loop_projection_alias_h64(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_alias_h64.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -2936,11 +3054,11 @@ impl DynamicMaskVocab {
         self.self_loop_projections.get(index as usize)
     }
 
+    /// Vocabulary alias lookup in the active mask-tokenizer coordinate.
     pub(crate) fn self_loop_projection_alias_vocab(
         &self,
         source_state: u32,
     ) -> Option<&DynamicSelfLoopProjection> {
-        let source_state = self.mask_projection_state(source_state);
         let index = *self.projection_alias_vocab.get(source_state as usize)?;
         if index == u32::MAX {
             return None;
@@ -2976,6 +3094,55 @@ impl DynamicMaskVocab {
             self.bounded_observation_sets.state_count(),
             self.bounded_observation_sets.unique_set_count(),
         )
+    }
+
+    pub(crate) fn set_terminal_observation_classes(
+        &mut self,
+        mut classes: Vec<(TerminalID, Arc<[u32]>)>,
+    ) {
+        classes.sort_unstable_by_key(|(terminal, _)| *terminal);
+        classes.dedup_by_key(|(terminal, _)| *terminal);
+        self.terminal_observation_classes = Arc::from(classes);
+    }
+
+    #[inline]
+    pub(crate) fn terminal_observation_class(
+        &self,
+        terminal: TerminalID,
+        state: u32,
+    ) -> Option<u32> {
+        let index = self
+            .terminal_observation_classes
+            .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+            .ok()?;
+        self.terminal_observation_classes[index]
+            .1
+            .get(state as usize)
+            .copied()
+            .filter(|&class| class != 0)
+    }
+
+    #[inline]
+    pub(crate) fn has_terminal_observation_classes(&self) -> bool {
+        !self.terminal_observation_classes.is_empty()
+    }
+
+    pub(crate) fn terminal_observation_classes_cloned(
+        &self,
+    ) -> Vec<(TerminalID, Arc<[u32]>)> {
+        self.terminal_observation_classes
+            .iter()
+            .map(|(terminal, classes)| (*terminal, Arc::clone(classes)))
+            .collect()
+    }
+
+    pub(crate) fn terminal_observation_classes_for_artifact(
+        &self,
+    ) -> Vec<(TerminalID, Vec<u32>)> {
+        self.terminal_observation_classes
+            .iter()
+            .map(|(terminal, classes)| (*terminal, classes.as_ref().to_vec()))
+            .collect()
     }
 
     pub(crate) fn cached_direct_regular_frontier(
@@ -3063,7 +3230,7 @@ impl DynamicMaskVocab {
 
 
 impl DynamicMaskVocab {
-    pub(crate) fn to_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+    fn to_artifact_impl(&self, include_mask_quotient: bool) -> Option<DynamicMaskVocabArtifact> {
         if !self.initialized || self.pending_source.is_some() {
             return None;
         }
@@ -3119,9 +3286,25 @@ impl DynamicMaskVocab {
             edge_bytes: self.trie.edge_bytes.clone(),
             alias_offsets,
             aliases,
-            mask_tokenizer: self.mask_tokenizer.as_deref().cloned(),
-            full_to_mask_state: self.full_to_mask_state.as_ref().to_vec(),
+            mask_tokenizer: include_mask_quotient
+                .then(|| self.mask_tokenizer.as_deref().cloned())
+                .flatten(),
+            full_to_mask_state: if include_mask_quotient {
+                self.full_to_mask_state.as_ref().to_vec()
+            } else {
+                Vec::new()
+            },
         })
+    }
+
+    pub(crate) fn to_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+        self.to_artifact_impl(true)
+    }
+
+    /// Serialize only vocabulary-derived runtime data. Constraint-specific
+    /// mask-tokenizer quotients and projections are reconstructed after load.
+    pub(crate) fn to_vocab_artifact(&self) -> Option<DynamicMaskVocabArtifact> {
+        self.to_artifact_impl(false)
     }
 
     pub(crate) fn from_artifact(artifact: DynamicMaskVocabArtifact) -> Result<Self, String> {
@@ -3137,6 +3320,62 @@ impl DynamicMaskVocab {
         }
         let node_count = artifact.nodes.len();
         let edge_count = artifact.edges.len();
+
+        // The compact runtime assumes one rooted tree. Validate ownership and
+        // reachability before any recursive metadata reconstruction so malformed
+        // artifacts cannot smuggle overlapping child ranges, cycles, or detached
+        // components into the trie.
+        let mut edge_owned = vec![false; edge_count];
+        let mut incoming = vec![0u8; node_count];
+        for (node_index, node) in artifact.nodes.iter().enumerate() {
+            let first = node.first_child as usize;
+            let len = node.child_len as usize;
+            let Some(end) = first.checked_add(len) else {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {node_index} has an invalid child range"
+                ));
+            };
+            if end > edge_count {
+                return Err(format!(
+                    "dynamic-mask vocabulary node {node_index} has an invalid child range"
+                ));
+            }
+            for edge_index in first..end {
+                if std::mem::replace(&mut edge_owned[edge_index], true) {
+                    return Err("dynamic-mask vocabulary artifact has overlapping child ranges".to_owned());
+                }
+                let child = artifact.edges[edge_index].child as usize;
+                if child >= node_count || child == 0 {
+                    return Err(format!(
+                        "dynamic-mask vocabulary edge {edge_index} references an invalid child"
+                    ));
+                }
+                incoming[child] = incoming[child].saturating_add(1);
+                if incoming[child] != 1 {
+                    return Err("dynamic-mask vocabulary artifact is not a tree".to_owned());
+                }
+            }
+        }
+        if edge_owned.iter().any(|owned| !*owned)
+            || incoming.iter().skip(1).any(|&count| count != 1)
+        {
+            return Err("dynamic-mask vocabulary artifact is not one rooted tree".to_owned());
+        }
+        let mut reachable = vec![false; node_count];
+        let mut stack = vec![0usize];
+        while let Some(node) = stack.pop() {
+            if std::mem::replace(&mut reachable[node], true) {
+                continue;
+            }
+            let raw = &artifact.nodes[node];
+            let first = raw.first_child as usize;
+            let end = first + raw.child_len as usize;
+            stack.extend(artifact.edges[first..end].iter().map(|edge| edge.child as usize));
+        }
+        if reachable.iter().any(|seen| !*seen) {
+            return Err("dynamic-mask vocabulary artifact has unreachable trie nodes".to_owned());
+        }
+
         let mut nodes = Vec::with_capacity(node_count);
         let alias_count = artifact.alias_offsets.len().saturating_sub(1);
         for (index, node) in artifact.nodes.into_iter().enumerate() {
@@ -3167,11 +3406,6 @@ impl DynamicMaskVocab {
         }
         let mut edges = Vec::with_capacity(edge_count);
         for (index, edge) in artifact.edges.into_iter().enumerate() {
-            if edge.child as usize >= node_count {
-                return Err(format!(
-                    "dynamic-mask vocabulary edge {index} references an invalid child"
-                ));
-            }
             let start = edge.byte_start as usize;
             let len = edge.byte_len as usize;
             if start
@@ -3237,6 +3471,111 @@ impl DynamicMaskVocab {
     }
 }
 
+impl DynamicMaskVocab {
+    /// Verify that this vocabulary-only runtime index represents exactly the
+    /// supplied original token-id -> byte mapping. This is used when loading a
+    /// self-contained dynamic artifact: the persisted trie is an accelerator,
+    /// never an independent source of vocabulary semantics.
+    pub(crate) fn matches_token_bytes_exact(&self, token_bytes: &BTreeMap<u32, Vec<u8>>) -> bool {
+        if self.canonical_original_tokens.len() != token_bytes.len() {
+            return false;
+        }
+
+        // Canonical token ids are assigned before trie partitioning by sorting
+        // original vocabulary entries first by bytes and then by original id.
+        // Reconstruct just that ordering (not the trie), validate every alias
+        // group exactly, and retain one borrowed byte slice per canonical token
+        // for the topology walk below.
+        let mut sorted_tokens = token_bytes
+            .iter()
+            .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        let sort_tokens = |left: &(u32, &[u8]), right: &(u32, &[u8])| {
+            left.1.cmp(right.1).then_with(|| left.0.cmp(&right.0))
+        };
+        if rayon::current_num_threads() == 1 {
+            sorted_tokens.sort_unstable_by(sort_tokens);
+        } else {
+            sorted_tokens.par_sort_unstable_by(sort_tokens);
+        }
+        let mut canonical_bytes = Vec::<&[u8]>::with_capacity(self.canonical_token_count());
+        let mut start = 0usize;
+        while start < sorted_tokens.len() {
+            let bytes = sorted_tokens[start].1;
+            let mut end = start + 1;
+            while end < sorted_tokens.len() && sorted_tokens[end].1 == bytes {
+                end += 1;
+            }
+            let canonical = canonical_bytes.len() as u32;
+            let Some(originals) = self.token_ids(canonical) else {
+                return false;
+            };
+            if originals.len() != end - start
+                || !originals
+                    .iter()
+                    .copied()
+                    .eq(sorted_tokens[start..end].iter().map(|(token_id, _)| *token_id))
+            {
+                return false;
+            }
+            canonical_bytes.push(bytes);
+            start = end;
+        }
+        if canonical_bytes.len() != self.canonical_token_count() {
+            return false;
+        }
+
+        struct Frame {
+            node: u32,
+            next_child: usize,
+            prefix_len: usize,
+        }
+
+        let mut canonical_seen = vec![false; canonical_bytes.len()];
+        let mut prefix = Vec::<u8>::new();
+        let mut frames = vec![Frame {
+            node: 0,
+            next_child: 0,
+            prefix_len: 0,
+        }];
+        while !frames.is_empty() {
+            let frame_index = frames.len() - 1;
+            let node_id = frames[frame_index].node;
+            if frames[frame_index].next_child == 0 {
+                if let Some(canonical) = self.trie.node(node_id).token_id {
+                    let canonical = canonical as usize;
+                    if canonical >= canonical_seen.len()
+                        || canonical_seen[canonical]
+                        || canonical_bytes[canonical] != prefix.as_slice()
+                    {
+                        return false;
+                    }
+                    canonical_seen[canonical] = true;
+                }
+            }
+
+            let children = self.trie.children(node_id);
+            if frames[frame_index].next_child < children.len() {
+                let edge = children[frames[frame_index].next_child].clone();
+                frames[frame_index].next_child += 1;
+                let prefix_len = prefix.len();
+                prefix.extend_from_slice(self.trie.edge_bytes(&edge));
+                frames.push(Frame {
+                    node: edge.child,
+                    next_child: 0,
+                    prefix_len,
+                });
+            } else {
+                let prefix_len = frames[frame_index].prefix_len;
+                frames.pop();
+                prefix.truncate(prefix_len);
+            }
+        }
+
+        canonical_seen.into_iter().all(|seen| seen)
+    }
+}
+
 impl Default for DynamicMaskVocab {
     fn default() -> Self {
         Self {
@@ -3258,8 +3597,11 @@ impl Default for DynamicMaskVocab {
             projection_alias_vocab: Arc::from(Vec::<u32>::new()),
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
+            terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            virtual_unit_repeat_projection: None,
+            virtual_repeat_intersection_projections: Vec::new(),
         }
     }
 }
@@ -5571,6 +5913,69 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         assert!(
             PackedDwaDenseWeightMaskCache::from_flat(2, 1, vec![2], vec![7]).is_err()
         );
+    }
+
+    #[test]
+    fn vocab_only_artifact_rejects_missing_trie_root() {
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let mut artifact = vocab
+            .to_vocab_artifact()
+            .expect("initialized vocabulary should serialize");
+        assert!(artifact.mask_tokenizer.is_none());
+        assert!(artifact.full_to_mask_state.is_empty());
+        artifact.nodes.clear();
+        let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
+        assert!(error.contains("no trie root"));
+    }
+
+    #[test]
+    fn vocab_artifact_rejects_overlapping_child_ranges() {
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let mut artifact = vocab.to_vocab_artifact().unwrap();
+        artifact.nodes.push(DynamicMaskVocabArtifactNode {
+            token_id: u32::MAX,
+            first_child: 0,
+            child_len: 1,
+        });
+        artifact.edges.push(DynamicMaskVocabArtifactEdge {
+            byte_start: 0,
+            byte_len: 0,
+            child: 1,
+        });
+        artifact.nodes[0].first_child = 0;
+        artifact.nodes[0].child_len = 1;
+        let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
+        assert!(error.contains("overlapping child ranges"));
+    }
+
+    #[test]
+    fn vocab_runtime_exactly_checks_original_token_bytes() {
+        let mut trie = DynamicMaskTrie::new();
+        trie.nodes.push(DynamicMaskTrieNode {
+            token_id: Some(0),
+            ..DynamicMaskTrieNode::default()
+        });
+        let (byte_start, byte_len) = trie.push_edge_bytes(b"a");
+        trie.edges.push(DynamicMaskTrieEdge {
+            byte_start,
+            byte_len,
+            child: 1,
+        });
+        trie.nodes[0].first_child = 0;
+        trie.nodes[0].child_len = 1;
+        trie.finalize_subtree_metadata();
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(trie),
+            Arc::new(vec![vec![7]]),
+        );
+        assert!(vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"a".to_vec())])));
+        assert!(!vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"b".to_vec())])));
     }
 
     #[test]

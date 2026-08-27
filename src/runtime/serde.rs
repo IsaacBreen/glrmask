@@ -46,7 +46,7 @@ const PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION: u16 = 21;
 const PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION: u16 = 22;
 const PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION: u16 = 23;
 const PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION: u16 = 24;
-const CONSTRAINT_VERSION: u16 = 26;
+const CONSTRAINT_VERSION: u16 = 27;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -72,8 +72,8 @@ const V23_SECTION_MAGIC: [u8; 4] = *b"S23\0";
 const V23_SECTION_HEADER_LEN: usize = V23_SECTION_MAGIC.len() + 11 * 8;
 const V24_SECTION_MAGIC: [u8; 4] = *b"S24\0";
 const V24_SECTION_HEADER_LEN: usize = V24_SECTION_MAGIC.len() + 11 * 8;
-const V26_SECTION_MAGIC: [u8; 4] = *b"S26\0";
-const V26_SECTION_HEADER_LEN: usize = V26_SECTION_MAGIC.len() + 11 * 8;
+const V27_SECTION_MAGIC: [u8; 4] = *b"S27\0";
+const V27_SECTION_HEADER_LEN: usize = V27_SECTION_MAGIC.len() + 11 * 8;
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
     PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
@@ -2389,7 +2389,7 @@ struct SegmentedRuntimeArtifactV24 {
 }
 
 #[derive(Serialize)]
-struct RecursiveSegmentedParserComponentV26Ref<'a> {
+struct RecursiveSegmentedParserComponentV27Ref<'a> {
     constraint_artifact: Vec<u8>,
     tokenizer_state_offset: u32,
     terminal_offset: u32,
@@ -2399,7 +2399,7 @@ struct RecursiveSegmentedParserComponentV26Ref<'a> {
 }
 
 #[derive(Deserialize)]
-struct RecursiveSegmentedParserComponentV26 {
+struct RecursiveSegmentedParserComponentV27 {
     constraint_artifact: Vec<u8>,
     tokenizer_state_offset: u32,
     terminal_offset: u32,
@@ -2409,7 +2409,7 @@ struct RecursiveSegmentedParserComponentV26 {
 }
 
 #[derive(Serialize)]
-struct RecursiveSegmentedBoundaryParserV26Ref<'a> {
+struct RecursiveSegmentedBoundaryParserV27Ref<'a> {
     parser_dwa: &'a crate::automata::weighted_u32::dwa::DWA,
     uses_composed_tsid_coordinate: bool,
     tokenizer_state_to_tsid: &'a [u32],
@@ -2417,7 +2417,7 @@ struct RecursiveSegmentedBoundaryParserV26Ref<'a> {
 }
 
 #[derive(Deserialize)]
-struct RecursiveSegmentedBoundaryParserV26 {
+struct RecursiveSegmentedBoundaryParserV27 {
     parser_dwa: crate::automata::weighted_u32::dwa::DWA,
     uses_composed_tsid_coordinate: bool,
     tokenizer_state_to_tsid: Vec<u32>,
@@ -2425,70 +2425,71 @@ struct RecursiveSegmentedBoundaryParserV26 {
 }
 
 #[derive(Serialize)]
-enum RecursiveSegmentedBoundaryShardBackendV26Ref<'a> {
-    StaticParser(RecursiveSegmentedBoundaryParserV26Ref<'a>),
+enum RecursiveSegmentedBoundaryShardBackendV27Ref<'a> {
+    StaticParser(RecursiveSegmentedBoundaryParserV27Ref<'a>),
     DynamicDirect,
 }
 
 #[derive(Deserialize)]
-enum RecursiveSegmentedBoundaryShardBackendV26 {
-    StaticParser(RecursiveSegmentedBoundaryParserV26),
+enum RecursiveSegmentedBoundaryShardBackendV27 {
+    StaticParser(RecursiveSegmentedBoundaryParserV27),
     DynamicDirect,
 }
 
 #[derive(Serialize)]
-struct RecursiveSegmentedBoundaryShardV26Ref<'a> {
+struct RecursiveSegmentedBoundaryShardV27Ref<'a> {
     start_component: u32,
     accepts_empty_stack: bool,
     candidate_tokens: Option<&'a [u32]>,
-    backend: RecursiveSegmentedBoundaryShardBackendV26Ref<'a>,
+    backend: RecursiveSegmentedBoundaryShardBackendV27Ref<'a>,
 }
 
 #[derive(Deserialize)]
-struct RecursiveSegmentedBoundaryShardV26 {
+struct RecursiveSegmentedBoundaryShardV27 {
     start_component: u32,
     accepts_empty_stack: bool,
     candidate_tokens: Option<Vec<u32>>,
-    backend: RecursiveSegmentedBoundaryShardBackendV26,
+    backend: RecursiveSegmentedBoundaryShardBackendV27,
 }
 
 #[derive(Serialize)]
-struct RecursiveSegmentedRuntimeArtifactV26Ref<'a> {
-    components: Vec<RecursiveSegmentedParserComponentV26Ref<'a>>,
+struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
+    components: Vec<RecursiveSegmentedParserComponentV27Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
     recursive_compiler_table: &'a [u8],
     recursive_tokenizer_internal_tsids: &'a [Vec<u32>],
     segmented_mask_authoritative: bool,
-    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV26Ref<'a>>,
+    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
 
 #[derive(Deserialize)]
-struct RecursiveSegmentedRuntimeArtifactV26 {
-    components: Vec<RecursiveSegmentedParserComponentV26>,
+struct RecursiveSegmentedRuntimeArtifactV27 {
+    components: Vec<RecursiveSegmentedParserComponentV27>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
     recursive_compiler_table: Vec<u8>,
     recursive_tokenizer_internal_tsids: Vec<Vec<u32>>,
     segmented_mask_authoritative: bool,
-    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV26>,
+    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27>,
 }
 
 #[derive(Serialize)]
-enum SegmentedRuntimeArtifactV26Ref<'a> {
-    Recursive(RecursiveSegmentedRuntimeArtifactV26Ref<'a>),
+enum SegmentedRuntimeArtifactV27Ref<'a> {
+    Recursive(RecursiveSegmentedRuntimeArtifactV27Ref<'a>),
     LegacyV24(SegmentedRuntimeArtifactV24Ref<'a>),
 }
 
 #[derive(Deserialize)]
-enum SegmentedRuntimeArtifactV26 {
-    Recursive(RecursiveSegmentedRuntimeArtifactV26),
+enum SegmentedRuntimeArtifactV27 {
+    Recursive(RecursiveSegmentedRuntimeArtifactV27),
     LegacyV24(SegmentedRuntimeArtifactV24),
 }
 
 #[derive(Serialize)]
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
-    segmented_runtime: Option<SegmentedRuntimeArtifactV26Ref<'a>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV27Ref<'a>>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
     packed_dwa_dense_mask_ids: &'a [u32],
     packed_dwa_dense_mask_rows: &'a [u64],
 }
@@ -2496,8 +2497,9 @@ struct ConstraintArtifactCurrentRuntimeRef<'a> {
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
     terminal_live_states: Vec<Vec<u32>>,
-    segmented_runtime: Option<SegmentedRuntimeArtifactV26>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
     packed_dwa_dense_mask_ids: Vec<u32>,
     packed_dwa_dense_mask_rows: Vec<u64>,
 }
@@ -2551,8 +2553,9 @@ struct DecodedConstraintRuntime {
     segmented_runtime_v22: Option<SegmentedRuntimeArtifactV22>,
     segmented_runtime_v23: Option<SegmentedRuntimeArtifactV23>,
     segmented_runtime_v24: Option<SegmentedRuntimeArtifactV24>,
-    segmented_runtime_v26: Option<SegmentedRuntimeArtifactV26>,
+    segmented_runtime_v27: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
     packed_dwa_dense_masks: Option<(Vec<u32>, Vec<u64>)>,
 }
 
@@ -2727,10 +2730,10 @@ fn segmented_runtime_artifact_v24_ref(
 
 fn segmented_runtime_artifact_ref(
     constraint: &Constraint,
-) -> Option<SegmentedRuntimeArtifactV26Ref<'_>> {
+) -> Option<SegmentedRuntimeArtifactV27Ref<'_>> {
     if !constraint.uses_compact_segmented_parser_runtime() {
         return segmented_runtime_artifact_v24_ref(constraint)
-            .map(SegmentedRuntimeArtifactV26Ref::LegacyV24);
+            .map(SegmentedRuntimeArtifactV27Ref::LegacyV24);
     }
     constraint
         .recursive_parser_layout()
@@ -2748,7 +2751,7 @@ fn segmented_runtime_artifact_ref(
     let components = overlay
         .segmented_parser_components
         .iter()
-        .map(|component| RecursiveSegmentedParserComponentV26Ref {
+        .map(|component| RecursiveSegmentedParserComponentV27Ref {
             constraint_artifact: component.constraint.save(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
@@ -2781,8 +2784,8 @@ fn segmented_runtime_artifact_ref(
                     let parser_dwa = boundary.recursive_parser_dwa.as_ref().expect(
                         "recursive static boundary must carry its recursive parser-coordinate DWA",
                     );
-                    RecursiveSegmentedBoundaryShardBackendV26Ref::StaticParser(
-                        RecursiveSegmentedBoundaryParserV26Ref {
+                    RecursiveSegmentedBoundaryShardBackendV27Ref::StaticParser(
+                        RecursiveSegmentedBoundaryParserV27Ref {
                             parser_dwa,
                             uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
                             tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
@@ -2791,7 +2794,7 @@ fn segmented_runtime_artifact_ref(
                     )
                 }
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
-                    RecursiveSegmentedBoundaryShardBackendV26Ref::DynamicDirect
+                    RecursiveSegmentedBoundaryShardBackendV27Ref::DynamicDirect
                 }
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
                     unreachable!(
@@ -2799,7 +2802,7 @@ fn segmented_runtime_artifact_ref(
                     )
                 }
             };
-            RecursiveSegmentedBoundaryShardV26Ref {
+            RecursiveSegmentedBoundaryShardV27Ref {
                 start_component: shard.start_component,
                 accepts_empty_stack: shard.accepts_empty_stack,
                 candidate_tokens: shard.candidate_tokens.as_deref(),
@@ -2807,8 +2810,8 @@ fn segmented_runtime_artifact_ref(
             }
         })
         .collect();
-    Some(SegmentedRuntimeArtifactV26Ref::Recursive(
-        RecursiveSegmentedRuntimeArtifactV26Ref {
+    Some(SegmentedRuntimeArtifactV27Ref::Recursive(
+        RecursiveSegmentedRuntimeArtifactV27Ref {
             components,
             segmented_parser_links,
             recursive_compiler_table: recursive_compiler_table.as_ref(),
@@ -3173,9 +3176,9 @@ fn restore_boundary_parser_v23(
     })
 }
 
-fn restore_recursive_boundary_parser_v26(
+fn restore_recursive_boundary_parser_v27(
     constraint: &Constraint,
-    boundary: RecursiveSegmentedBoundaryParserV26,
+    boundary: RecursiveSegmentedBoundaryParserV27,
     recursive_parser_state_count: u32,
 ) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryParser> {
     let global_tokenizer_states = constraint.tokenizer.num_states();
@@ -3564,7 +3567,7 @@ fn restore_segmented_runtime_v24(
         // Prevent a global/static legacy B from accidentally satisfying the
         // recursive-runtime shape test merely because v24 also serialized
         // linker metadata. As a loaded legacy constraint this node remains an
-        // opaque materialized parser if it is later embedded in v26.
+        // opaque materialized parser if it is later embedded in v27.
         overlay.segmented_parser_links.clear();
         overlay.segmented_parser_state_offsets.clear();
         return Ok(());
@@ -3583,13 +3586,13 @@ fn restore_segmented_runtime_v24(
     Ok(())
 }
 
-fn restore_recursive_segmented_runtime_v26(
+fn restore_recursive_segmented_runtime_v27(
     constraint: &mut Constraint,
-    runtime: RecursiveSegmentedRuntimeArtifactV26,
+    runtime: RecursiveSegmentedRuntimeArtifactV27,
 ) -> crate::Result<()> {
     if !runtime.segmented_mask_authoritative {
         return Err(crate::GlrMaskError::Serialization(
-            "recursive v26 segmented runtime must be mask-authoritative".to_owned(),
+            "recursive v27 segmented runtime must be mask-authoritative".to_owned(),
         ));
     }
     let recursive_compiler_table = runtime.recursive_compiler_table;
@@ -3615,7 +3618,7 @@ fn restore_recursive_segmented_runtime_v26(
     for (index, (component, child)) in decoded_components.into_iter().enumerate() {
         if component.root_entry_terminals.len() != global_terminal_count {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
+                "recursive v27 component {index} root-entry terminal set has length {} for {global_terminal_count} outer terminals",
                 component.root_entry_terminals.len(),
             )));
         }
@@ -3625,12 +3628,12 @@ fn restore_recursive_segmented_runtime_v26(
             .is_none_or(|end| end as usize > global_terminal_count)
         {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 component {index} terminal range lies outside outer terminal domain"
+                "recursive v27 component {index} terminal range lies outside outer terminal domain"
             )));
         }
         if component.tokenizer_state_offset != expected_tokenizer_state_offset {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 component {index} tokenizer-state offset is {}, expected {expected_tokenizer_state_offset}",
+                "recursive v27 component {index} tokenizer-state offset is {}, expected {expected_tokenizer_state_offset}",
                 component.tokenizer_state_offset,
             )));
         }
@@ -3642,7 +3645,7 @@ fn restore_recursive_segmented_runtime_v26(
             .checked_add(child_tokenizer_span)
             .ok_or_else(|| {
                 crate::GlrMaskError::Serialization(
-                    "recursive v26 tokenizer-state coordinate overflow".to_owned(),
+                    "recursive v27 tokenizer-state coordinate overflow".to_owned(),
                 )
             })?;
         if component
@@ -3650,14 +3653,14 @@ fn restore_recursive_segmented_runtime_v26(
             .is_some_and(|terminal| terminal >= child.table.num_terminals)
         {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 component {index} root-disallowed terminal lies outside the component"
+                "recursive v27 component {index} root-disallowed terminal lies outside the component"
             )));
         }
         if component.global_terminal_aliases.iter().any(|&(global, local)| {
             global >= constraint.table.num_terminals || local >= child.table.num_terminals
         }) {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 component {index} contains an invalid terminal alias"
+                "recursive v27 component {index} contains an invalid terminal alias"
             )));
         }
         components.push(crate::runtime::SegmentedParserComponent {
@@ -3672,7 +3675,7 @@ fn restore_recursive_segmented_runtime_v26(
     }
     if expected_tokenizer_state_offset as usize != recursive_tokenizer_internal_tsids.len() {
         return Err(crate::GlrMaskError::Serialization(format!(
-            "recursive v26 tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
+            "recursive v27 tokenizer-state relation has {} rows for {expected_tokenizer_state_offset} recursive states",
             recursive_tokenizer_internal_tsids.len(),
         )));
     }
@@ -3690,7 +3693,7 @@ fn restore_recursive_segmented_runtime_v26(
         .collect::<Vec<_>>();
     if components.is_empty() || links.is_empty() {
         return Err(crate::GlrMaskError::Serialization(
-            "recursive v26 segmented runtime requires components and linker controls".to_owned(),
+            "recursive v27 segmented runtime requires components and linker controls".to_owned(),
         ));
     }
     {
@@ -3720,7 +3723,7 @@ fn restore_recursive_segmented_runtime_v26(
         .map_err(crate::GlrMaskError::Serialization)?
         .ok_or_else(|| {
             crate::GlrMaskError::Serialization(
-                "recursive v26 runtime failed to derive its parser layout".to_owned(),
+                "recursive v27 runtime failed to derive its parser layout".to_owned(),
             )
         })?;
     constraint
@@ -3729,7 +3732,7 @@ fn restore_recursive_segmented_runtime_v26(
     let component_count = constraint
         .static_dynamic_overlay
         .as_ref()
-        .expect("recursive v26 overlay exists")
+        .expect("recursive v27 overlay exists")
         .segmented_parser_components
         .len();
     let mut seen = vec![false; component_count];
@@ -3738,34 +3741,34 @@ fn restore_recursive_segmented_runtime_v26(
         let component_index = shard.start_component as usize;
         if component_index >= component_count {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 boundary shard {index} references unknown component {}",
+                "recursive v27 boundary shard {index} references unknown component {}",
                 shard.start_component,
             )));
         }
         if seen[component_index] {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 runtime contains multiple boundary shards for component {}",
+                "recursive v27 runtime contains multiple boundary shards for component {}",
                 shard.start_component,
             )));
         }
         seen[component_index] = true;
         if shard.accepts_empty_stack && shard.start_component != 0 {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive v26 boundary shard {index} gives empty-stack ownership to non-root component {}",
+                "recursive v27 boundary shard {index} gives empty-stack ownership to non-root component {}",
                 shard.start_component,
             )));
         }
         let backend = match shard.backend {
-            RecursiveSegmentedBoundaryShardBackendV26::StaticParser(boundary) => {
+            RecursiveSegmentedBoundaryShardBackendV27::StaticParser(boundary) => {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(Arc::new(
-                    restore_recursive_boundary_parser_v26(
+                    restore_recursive_boundary_parser_v27(
                         constraint,
                         boundary,
                         layout.total_states,
                     )?,
                 ))
             }
-            RecursiveSegmentedBoundaryShardBackendV26::DynamicDirect => {
+            RecursiveSegmentedBoundaryShardBackendV27::DynamicDirect => {
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
             }
         };
@@ -3785,7 +3788,7 @@ fn restore_recursive_segmented_runtime_v26(
     let overlay = constraint
         .static_dynamic_overlay
         .as_mut()
-        .expect("recursive v26 overlay exists");
+        .expect("recursive v27 overlay exists");
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
@@ -3796,22 +3799,22 @@ fn restore_recursive_segmented_runtime_v26(
     overlay.segmented_boundary_shards = restored_shards;
     if !constraint.uses_compact_segmented_parser_runtime() {
         return Err(crate::GlrMaskError::Serialization(
-            "recursive v26 segmented runtime did not restore a provider-native parser"
+            "recursive v27 segmented runtime did not restore a provider-native parser"
                 .to_owned(),
         ));
     }
     Ok(())
 }
 
-fn restore_segmented_runtime_v26(
+fn restore_segmented_runtime_v27(
     constraint: &mut Constraint,
-    runtime: SegmentedRuntimeArtifactV26,
+    runtime: SegmentedRuntimeArtifactV27,
 ) -> crate::Result<()> {
     match runtime {
-        SegmentedRuntimeArtifactV26::Recursive(runtime) => {
-            restore_recursive_segmented_runtime_v26(constraint, runtime)
+        SegmentedRuntimeArtifactV27::Recursive(runtime) => {
+            restore_recursive_segmented_runtime_v27(constraint, runtime)
         }
-        SegmentedRuntimeArtifactV26::LegacyV24(runtime) => {
+        SegmentedRuntimeArtifactV27::LegacyV24(runtime) => {
             restore_segmented_runtime_v24(constraint, runtime)
         }
     }
@@ -4304,7 +4307,7 @@ fn v24_sections(
     ))
 }
 
-fn v26_sections(
+fn v27_sections(
     payload: &[u8],
 ) -> Result<
     (
@@ -4322,20 +4325,20 @@ fn v26_sections(
     ),
     String,
 > {
-    if payload.len() < V26_SECTION_HEADER_LEN || !payload.starts_with(&V26_SECTION_MAGIC) {
-        return Err("invalid v26 constraint section header".to_owned());
+    if payload.len() < V27_SECTION_HEADER_LEN || !payload.starts_with(&V27_SECTION_MAGIC) {
+        return Err("invalid v27 constraint section header".to_owned());
     }
-    let mut pos = V26_SECTION_MAGIC.len();
+    let mut pos = V27_SECTION_MAGIC.len();
     let mut take_len = || {
         let end = pos + 8;
         let value = u64::from_le_bytes(
             payload[pos..end]
                 .try_into()
-                .expect("v26 section length has fixed width"),
+                .expect("v27 section length has fixed width"),
         );
         pos = end;
         usize::try_from(value)
-            .map_err(|_| "v26 section length does not fit this platform".to_owned())
+            .map_err(|_| "v27 section length does not fit this platform".to_owned())
     };
     let lengths = [
         take_len()?,
@@ -4350,14 +4353,14 @@ fn v26_sections(
         take_len()?,
         take_len()?,
     ];
-    let total = lengths.iter().try_fold(V26_SECTION_HEADER_LEN, |sum, &len| {
+    let total = lengths.iter().try_fold(V27_SECTION_HEADER_LEN, |sum, &len| {
         sum.checked_add(len)
-            .ok_or_else(|| "v26 constraint section lengths overflow".to_owned())
+            .ok_or_else(|| "v27 constraint section lengths overflow".to_owned())
     })?;
     if total != payload.len() {
-        return Err("invalid v26 constraint section lengths".to_owned());
+        return Err("invalid v27 constraint section lengths".to_owned());
     }
-    let mut pos = V26_SECTION_HEADER_LEN;
+    let mut pos = V27_SECTION_HEADER_LEN;
     let mut next = |len: usize| {
         let section = &payload[pos..pos + len];
         pos += len;
@@ -5258,8 +5261,12 @@ impl Constraint {
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
                                 dynamic_mask_vocab: self
                                     .uses_dynamic_runtime()
-                                    .then(|| self.dynamic_mask_vocab.to_artifact())
+                                    .then(|| self.dynamic_mask_vocab.to_vocab_artifact())
                                     .flatten(),
+                                virtual_runtimes: self
+                                    .uses_dynamic_runtime()
+                                    .then(|| self.tokenizer.virtual_runtime_metadata())
+                                    .unwrap_or_default(),
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
                                 packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
                             })
@@ -5349,7 +5356,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V26_SECTION_HEADER_LEN
+            + V27_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5376,7 +5383,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V26_SECTION_HEADER_LEN
+            + V27_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5396,7 +5403,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V26_SECTION_HEADER_LEN
+        let payload_len = V27_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5428,7 +5435,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V26_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V27_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -5437,8 +5444,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V26_SECTION_MAGIC.len()].copy_from_slice(&V26_SECTION_MAGIC);
-            pos += V26_SECTION_MAGIC.len();
+            header[pos..pos + V27_SECTION_MAGIC.len()].copy_from_slice(&V27_SECTION_MAGIC);
+            pos += V27_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -5637,7 +5644,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V26_SECTION_MAGIC);
+        bytes.extend_from_slice(&V27_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -5894,7 +5901,7 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
-                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v26_sections(serialized)
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v27_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
                         weight,
@@ -6176,8 +6183,9 @@ impl Constraint {
                                                 segmented_runtime_v22: None,
                                                 segmented_runtime_v23: None,
                                                 segmented_runtime_v24: None,
-                                                segmented_runtime_v26: runtime.segmented_runtime,
+                                                segmented_runtime_v27: runtime.segmented_runtime,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                virtual_runtimes: runtime.virtual_runtimes,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6211,8 +6219,9 @@ impl Constraint {
                                                 segmented_runtime_v22: None,
                                                 segmented_runtime_v23: None,
                                                 segmented_runtime_v24: runtime.segmented_runtime,
-                                                segmented_runtime_v26: None,
+                                                segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                virtual_runtimes: Vec::new(),
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6246,8 +6255,9 @@ impl Constraint {
                                                 segmented_runtime_v22: None,
                                                 segmented_runtime_v23: runtime.segmented_runtime,
                                                 segmented_runtime_v24: None,
-                                                segmented_runtime_v26: None,
+                                                segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                virtual_runtimes: Vec::new(),
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6281,8 +6291,9 @@ impl Constraint {
                                                 segmented_runtime_v22: runtime.segmented_runtime,
                                                 segmented_runtime_v23: None,
                                                 segmented_runtime_v24: None,
-                                                segmented_runtime_v26: None,
+                                                segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                virtual_runtimes: Vec::new(),
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6316,8 +6327,9 @@ impl Constraint {
                                                 segmented_runtime_v22: None,
                                                 segmented_runtime_v23: None,
                                                 segmented_runtime_v24: None,
-                                                segmented_runtime_v26: None,
+                                                segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: None,
+                                                virtual_runtimes: Vec::new(),
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6331,8 +6343,9 @@ impl Constraint {
                                             segmented_runtime_v22: None,
                                             segmented_runtime_v23: None,
                                             segmented_runtime_v24: None,
-                                            segmented_runtime_v26: None,
+                                            segmented_runtime_v27: None,
                                             dynamic_mask_vocab: None,
+                                            virtual_runtimes: Vec::new(),
                                             packed_dwa_dense_masks: None,
                                         })
                                     } else {
@@ -6345,8 +6358,9 @@ impl Constraint {
                                             segmented_runtime_v22: None,
                                             segmented_runtime_v23: None,
                                             segmented_runtime_v24: None,
-                                            segmented_runtime_v26: None,
+                                            segmented_runtime_v27: None,
                                             dynamic_mask_vocab: None,
+                                            virtual_runtimes: Vec::new(),
                                             packed_dwa_dense_masks: None,
                                         })
                                     }
@@ -6853,7 +6867,9 @@ impl Constraint {
                 install_token_mask_cache(&mut constraint, cache)
                     .map_err(crate::GlrMaskError::Serialization)?;
             }
+            let mut virtual_runtimes = Vec::new();
             if let Some(runtime) = runtime {
+                virtual_runtimes = runtime.virtual_runtimes;
                 constraint.terminal_live_states = runtime.terminal_live_states;
                 if let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
@@ -6888,15 +6904,31 @@ impl Constraint {
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v24 {
                     restore_segmented_runtime_v24(&mut constraint, segmented_runtime)?;
                 }
-                if let Some(segmented_runtime) = runtime.segmented_runtime_v26 {
-                    restore_segmented_runtime_v26(&mut constraint, segmented_runtime)?;
+                if let Some(segmented_runtime) = runtime.segmented_runtime_v27 {
+                    restore_segmented_runtime_v27(&mut constraint, segmented_runtime)?;
                 }
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
-                .map_err(crate::GlrMaskError::Serialization)?;
+            if virtual_runtimes.is_empty() {
+                constraint
+                    .tokenizer
+                    .restore_terminal_exprs(artifact.terminal_exprs)
+                    .map_err(crate::GlrMaskError::Serialization)?;
+            } else {
+                let terminal_exprs = artifact.terminal_exprs.or_else(|| {
+                    constraint
+                        .retained_terminal_exprs()
+                        .map(|exprs| exprs.to_vec())
+                });
+                constraint
+                    .tokenizer
+                    .restore_terminal_exprs_with_virtual_runtime_metadata(
+                        terminal_exprs,
+                        &virtual_runtimes,
+                        false,
+                    )
+                    .map_err(crate::GlrMaskError::Serialization)?;
+            }
             let restore_exprs_ms = restore_exprs_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             if profile {
@@ -7090,7 +7122,7 @@ mod tests {
             internal_masks,
             token_mask_cache,
             composition_metadata,
-        ) = v26_sections(payload).unwrap();
+        ) = v27_sections(payload).unwrap();
         let sections: [&[u8]; 11] = [
             weight,
             dwa,
@@ -7123,7 +7155,7 @@ mod tests {
         let current = tiny_constraint();
         let saved = current.save();
         let payload = &saved[CONSTRAINT_HEADER_LEN..];
-        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v26_sections(payload).unwrap();
+        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v27_sections(payload).unwrap();
         let current_runtime =
             bincode::deserialize::<ConstraintArtifactCurrentRuntime>(current_runtime).unwrap();
         let mut root_entry_terminals =
@@ -7183,7 +7215,7 @@ mod tests {
         let current = tiny_constraint();
         let saved = current.save();
         let payload = &saved[CONSTRAINT_HEADER_LEN..];
-        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v26_sections(payload).unwrap();
+        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v27_sections(payload).unwrap();
         let current_runtime =
             bincode::deserialize::<ConstraintArtifactCurrentRuntime>(current_runtime).unwrap();
         let mut root_entry_terminals =
@@ -7236,7 +7268,7 @@ mod tests {
         let current = tiny_constraint();
         let saved = current.save();
         let payload = &saved[CONSTRAINT_HEADER_LEN..];
-        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v26_sections(payload).unwrap();
+        let (_, _, _, _, current_runtime, _, _, _, _, _, _) = v27_sections(payload).unwrap();
         let current_runtime =
             bincode::deserialize::<ConstraintArtifactCurrentRuntime>(current_runtime).unwrap();
 

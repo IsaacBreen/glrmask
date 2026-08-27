@@ -6466,6 +6466,144 @@ impl Constraint {
         aliases
     }
 
+    fn build_dynamic_terminal_observation_classes(
+        &self,
+    ) -> Vec<(TerminalID, Arc<[u32]>)> {
+        if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
+            return Vec::new();
+        }
+        if self.tokenizer.has_any_virtual_runtime() {
+            // Virtual runtimes leave the finite physical DFA domain after
+            // their physical proxy/root. An observation quotient over only raw DFA
+            // states cannot certify those lazily-created virtual states,
+            // and attempting to traverse them as raw-state indices would make
+            // the finite quotient construction invalid. Dynamic masking keeps
+            // virtual residual state identity exact instead.
+            return Vec::new();
+        }
+
+        // This quotient exists to split a parser-visible terminal back out of
+        // a broad lexer residual that also carries unrelated futures. Restrict
+        // construction to exactly that structural shape using only immutable
+        // tokenizer/table data so serialized dynamic compilation can build the
+        // certificate without running the full runtime-cache finalizer.
+        // Whole-mask reuse below is enabled only when the unchanged parser
+        // frontier admits one terminal.  Requiring at least one singleton LR
+        // row is a cheap conservative prefilter.  Within one mixed broad lexer
+        // residual, build only the terminal most often singleton-admitted: the
+        // quotient is an accelerator for that parser-visible component, while
+        // paying once for every unrelated co-residual would defeat the build
+        // time saved by the dynamic architecture.
+        let mut singleton_rows = vec![0usize; self.table.num_terminals as usize];
+        for row in &self.table.advance {
+            let mut terminals = row.iter();
+            let Some(terminal) = terminals.next() else {
+                continue;
+            };
+            if terminals.next().is_none()
+                && let Some(count) = singleton_rows.get_mut(terminal)
+            {
+                *count += 1;
+            }
+        }
+        let mut best_by_futures = BTreeMap::<Vec<TerminalID>, (usize, u32)>::new();
+        for state in 0..self.tokenizer.num_states() {
+            if self.tokenizer.transitions_from(state).count() < 100 {
+                continue;
+            }
+            let loop_len = self.tokenizer.self_loop_bytes(state).len();
+            if loop_len < 64 {
+                continue;
+            }
+            let futures = self
+                .tokenizer
+                .possible_future_terminals_iter(state)
+                .collect::<Vec<_>>();
+            if !(2..=8).contains(&futures.len()) {
+                continue;
+            }
+            let entry = best_by_futures
+                .entry(futures)
+                .or_insert((loop_len, state));
+            if (loop_len, std::cmp::Reverse(state))
+                > (entry.0, std::cmp::Reverse(entry.1))
+            {
+                *entry = (loop_len, state);
+            }
+        }
+        let mut ranked = best_by_futures
+            .into_iter()
+            .map(|(futures, (loop_len, state))| (loop_len, state, futures))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|left, right| {
+            (std::cmp::Reverse(left.0), left.1, &left.2)
+                .cmp(&(std::cmp::Reverse(right.0), right.1, &right.2))
+        });
+        ranked.truncate(2);
+
+        let mut candidates = BTreeSet::<TerminalID>::new();
+        for (_, _, futures) in ranked {
+            let best = futures
+                .iter()
+                .copied()
+                .filter_map(|terminal| {
+                    let count = singleton_rows
+                        .get(terminal as usize)
+                        .copied()
+                        .unwrap_or(0);
+                    (count != 0).then_some((count, std::cmp::Reverse(terminal)))
+                })
+                .max()
+                .map(|(_, std::cmp::Reverse(terminal))| terminal);
+            if let Some(terminal) = best {
+                candidates.insert(terminal);
+            }
+        }
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some();
+        candidates
+            .into_par_iter()
+            .filter_map(|terminal| {
+                let started = std::time::Instant::now();
+                let (classes, configs, rounds) = self
+                    .tokenizer
+                    .exact_terminal_observation_partition(terminal, 100_000, 20_000_000)?;
+
+                // Retain only genuinely quotienting maps.  A class shared by
+                // at least two live raw states is enough to make O(1) runtime
+                // recurrence checks possible; otherwise the table cannot hit.
+                let mut seen = BTreeSet::<u32>::new();
+                let useful = classes
+                    .iter()
+                    .copied()
+                    .filter(|&class| class != 0)
+                    .any(|class| !seen.insert(class));
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_terminal_observation_cache_build] terminal={} singleton_rows={} configs={} rounds={} useful={} elapsed_ms={:.3}",
+                        terminal,
+                        singleton_rows.get(terminal as usize).copied().unwrap_or(0),
+                        configs,
+                        rounds,
+                        useful,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                useful.then_some((terminal, Arc::from(classes)))
+            })
+            .collect()
+    }
+
+    pub(crate) fn prepare_dynamic_terminal_observation_classes_for_artifact(&mut self) {
+        if self.dynamic_mask_vocab.has_terminal_observation_classes() {
+            return;
+        }
+        let classes = self.build_dynamic_terminal_observation_classes();
+        self.dynamic_mask_vocab
+            .set_terminal_observation_classes(classes);
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.table.rebuild_unconditional_advance_rows();
@@ -6537,10 +6675,61 @@ impl Constraint {
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
+        if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
+            let max_token_len = self
+                .token_bytes
+                .values()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0);
+            if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_binary_repeat_intersections_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_repeat_intersection exact_states=lazy components={} mask_states={} horizon={}",
+                        projection.len(),
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab.set_virtual_repeat_intersections_mask_projection(
+                    mask_tokenizer,
+                    projection,
+                );
+            } else if let Some((mask_tokenizer, projection)) = self
+                .tokenizer
+                .virtual_unit_repeat_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_unit_repeat full_states=arithmetic mask_states={} horizon={}",
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                    );
+                }
+                dynamic_mask_vocab
+                    .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
+            }
+        }
+        let has_virtual_residual_runtime = self.tokenizer.has_virtual_residual_runtime();
         let bounded_sets_started_at = profile.then(std::time::Instant::now);
-        let (bounded16, bounded64) = self
-            .tokenizer
-            .precompute_bounded_observation_safe_byte_sets();
+        let observation_tokenizer = dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        let (bounded16, bounded64) = if has_virtual_residual_runtime {
+            // General residual states are created lazily outside the physical
+            // DFA domain, and dynamic traversal deliberately does not consume
+            // physical observation certificates for this runtime family.
+            // Avoid computing tables that cannot be used.
+            (
+                Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
+            )
+        } else {
+            observation_tokenizer.precompute_bounded_observation_safe_byte_sets()
+        };
         let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
         let bounded_state_count = bounded_sets.state_count();
         let bounded_unique_set_count = bounded_sets.unique_set_count();
@@ -6548,16 +6737,17 @@ impl Constraint {
         let bounded_sets_ms = bounded_sets_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_started_at = profile.then(std::time::Instant::now);
-        let build_self_loop_projections = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty()
-                    || (value != "0"
-                        && !value.eq_ignore_ascii_case("false")
-                        && !value.eq_ignore_ascii_case("no")
-                        && !value.eq_ignore_ascii_case("off"))
-            })
-            .unwrap_or(true);
+        let build_self_loop_projections = !has_virtual_residual_runtime
+            && std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
+                .map(|value| {
+                    let value = value.trim();
+                    value.is_empty()
+                        || (value != "0"
+                            && !value.eq_ignore_ascii_case("false")
+                            && !value.eq_ignore_ascii_case("no")
+                            && !value.eq_ignore_ascii_case("off"))
+                })
+                .unwrap_or(true);
         let (self_loop_projections, projection_alias_vocab) = if build_self_loop_projections {
             self.build_dynamic_self_loop_projections(
                 &dynamic_mask_vocab,
@@ -6569,15 +6759,22 @@ impl Constraint {
         let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_count = self_loop_projections.len();
-        let projection_alias_h64 = if std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
+        let projection_alias_h64 = if !has_virtual_residual_runtime
+            && std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
         {
             self.build_dynamic_projection_alias_h64(&dynamic_mask_vocab, &self_loop_projections)
         } else {
             Vec::new()
         };
+        let terminal_observation_classes = if dynamic_mask_vocab.has_terminal_observation_classes() {
+            dynamic_mask_vocab.terminal_observation_classes_cloned()
+        } else {
+            self.build_dynamic_terminal_observation_classes()
+        };
         dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
         dynamic_mask_vocab.set_projection_alias_vocab(projection_alias_vocab);
         dynamic_mask_vocab.set_projection_alias_h64(projection_alias_h64);
+        dynamic_mask_vocab.set_terminal_observation_classes(terminal_observation_classes);
         let hot_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_dynamic_hot_frontiers = self
             .compute_direct_regular_dynamic_hot_frontiers(
@@ -6722,22 +6919,32 @@ impl Constraint {
     pub(crate) fn build_dynamic_mask_trie_partitioned(
         entries: &[(usize, &[u8])],
     ) -> DynamicMaskTrie {
-        let mut ordered_entries = entries.to_vec();
-        ordered_entries.sort_unstable_by(|left, right| {
+        // Character-type classification is substantially more expensive than
+        // comparing the resulting small integer. Do it once per vocabulary
+        // entry rather than O(log N) times from the sort comparator.
+        let mut classified_entries = entries
+            .iter()
+            .map(|&(token_id, bytes)| {
+                (
+                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(bytes), bytes),
+                    token_id,
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        classified_entries.sort_unstable_by(|left, right| {
             right
-                .1
+                .2
                 .is_empty()
-                .cmp(&left.1.is_empty())
-                .then_with(|| {
-                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(left.1), left.1)
-                        .cmp(&dynamic_mask_vocab_layout_class(
-                            classify_vocab_char_type(right.1),
-                            right.1,
-                        ))
-                        .then_with(|| left.1.cmp(right.1))
-                        .then_with(|| left.0.cmp(&right.0))
-                })
+                .cmp(&left.2.is_empty())
+                .then_with(|| left.0.cmp(&right.0))
+                .then_with(|| left.2.cmp(right.2))
+                .then_with(|| left.1.cmp(&right.1))
         });
+        let ordered_entries = classified_entries
+            .into_iter()
+            .map(|(_, token_id, bytes)| (token_id, bytes))
+            .collect::<Vec<_>>();
         let entries = ordered_entries.as_slice();
         let mut trie = DynamicMaskTrie::new();
         if entries.is_empty() {

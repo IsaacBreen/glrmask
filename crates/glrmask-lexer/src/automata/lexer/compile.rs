@@ -12,6 +12,10 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
 
 use super::ast::Expr;
+use super::runtime_repeat_product::{
+    VirtualBinaryRepeatIntersectionDescriptor, VirtualBoundedRepeatSpec,
+};
+use super::runtime_unit_repeat::virtual_unit_repeat_state_ids_fit;
 use super::tokenizer::{
     CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
 };
@@ -515,6 +519,420 @@ fn factor_choice_literals(options: &[Expr]) -> Option<Expr> {
     ]))
 }
 
+/// Return the exact byte language of an expression which consumes precisely
+/// one byte.  Keeping this proof deliberately syntactic makes the aligned
+/// repeat-intersection rewrite fail closed for variable-width bodies.
+fn exact_unit_byte_language(expr: &Expr) -> Option<U8Set> {
+    match unwrap_shared(expr) {
+        Expr::U8Seq(bytes) if bytes.len() == 1 => Some(U8Set::single(bytes[0])),
+        Expr::U8Class(bytes) => Some(*bytes),
+        Expr::Choice(options) => {
+            let mut bytes = U8Set::empty();
+            for option in options {
+                bytes |= exact_unit_byte_language(option)?;
+            }
+            Some(bytes)
+        }
+        Expr::Intersect { expr, intersect } => Some(
+            exact_unit_byte_language(expr)?.intersection(&exact_unit_byte_language(intersect)?),
+        ),
+        _ => None,
+    }
+}
+
+#[doc(hidden)]
+pub fn virtual_zero_min_unit_repeat_fits_state_ids(
+    max: usize,
+    physical_state_count: u32,
+) -> bool {
+    virtual_unit_repeat_state_ids_fit(max, physical_state_count)
+}
+
+/// Recognize the exact arithmetic runtime lane after factoring. The body proof
+/// is syntactic and therefore fails closed for any variable-width repetition.
+#[doc(hidden)]
+pub fn virtual_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize, usize)> {
+    let Expr::Repeat {
+        expr: body,
+        min,
+        max: Some(max),
+    } = unwrap_shared(expr)
+    else {
+        return None;
+    };
+    // The standalone arithmetic runtime has one physical reset state and
+    // reserves the high raw-state bit. Keep descriptor eligibility identical
+    // to that state-ID contract. Larger exact repeats can still use the
+    // binary repeat-product lane, where the repetition count is not encoded as
+    // a contiguous virtual-state interval.
+    if !virtual_zero_min_unit_repeat_fits_state_ids(*max, 1) {
+        return None;
+    }
+    let bytes = exact_unit_byte_language(body)?;
+    (!bytes.is_empty() && *max > 0 && min <= max).then_some((bytes, *min, *max))
+}
+
+#[doc(hidden)]
+pub fn virtual_zero_min_unit_repeat_descriptor(expr: &Expr) -> Option<(U8Set, usize)> {
+    let (body, min, max) = virtual_unit_repeat_descriptor(expr)?;
+    (min == 0).then_some((body, max))
+}
+
+/// Build the O(1)-storage physical tokenizer for the supported standalone
+/// repeat. Positive-length residuals are supplied by `Tokenizer`'s arithmetic
+/// virtual-state sidecar.
+pub fn build_virtual_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
+    let [expression] = expressions else {
+        return None;
+    };
+    let (body, min, max) = virtual_unit_repeat_descriptor(expression)?;
+    let mut tokenizer = Tokenizer::from_parts(
+        DFA::new(1),
+        1,
+        Some(Arc::from(expressions.to_vec().into_boxed_slice())),
+    );
+    tokenizer.install_virtual_unit_repeat(body, min, max)?;
+    Some(tokenizer)
+}
+
+
+pub fn build_virtual_zero_min_unit_repeat_tokenizer(expressions: &[Expr]) -> Option<Tokenizer> {
+    let [expression] = expressions else {
+        return None;
+    };
+    virtual_zero_min_unit_repeat_descriptor(expression)?;
+    build_virtual_unit_repeat_tokenizer(expressions)
+}
+
+const VIRTUAL_BINARY_REPEAT_MIN_BOUND: usize = 4_096;
+
+fn virtual_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> {
+    let Expr::Repeat {
+        expr: body,
+        min,
+        max: Some(max),
+    } = unwrap_shared(expr)
+    else {
+        return None;
+    };
+    if *max < VIRTUAL_BINARY_REPEAT_MIN_BOUND || min > max {
+        return None;
+    }
+    // The body is compiled below in order to prove the deterministic,
+    // non-nullable, prefix-free residual model. Do not perform that semantic
+    // probe if the body itself contains another giant bounded repeat: doing so
+    // would eagerly materialize exactly the state space this virtual lane is
+    // intended to avoid.
+    if expression_contains_large_bounded_repeat(body) {
+        return None;
+    }
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(body, None)?;
+    Some(VirtualBoundedRepeatSpec {
+        base_dfa,
+        min: u32::try_from(*min).ok()?,
+        max: u32::try_from(*max).ok()?,
+    })
+}
+
+fn virtual_zero_min_bounded_repeat_spec(expr: &Expr) -> Option<VirtualBoundedRepeatSpec> {
+    let spec = virtual_bounded_repeat_spec(expr)?;
+    (spec.min == 0).then_some(spec)
+}
+
+/// Exactly factor an intersection of two bounded repetitions over the same
+/// certified prefix-free body. Prefix-free body languages are codes, so every
+/// word in `L*` has a unique factor count; a common word therefore has one
+/// count which must lie in both intervals.
+///
+/// Keep this rewrite focused on the giant nonzero-minimum case which otherwise
+/// needs the special synchronized virtual runtime. Small ordinary products and
+/// established zero-minimum paths remain unchanged.
+fn factor_same_body_nonzero_repeat_intersection(left: &Expr, right: &Expr) -> Option<Expr> {
+    let Expr::Repeat {
+        expr: left_body,
+        min: left_min,
+        max: Some(left_max),
+    } = unwrap_shared(left)
+    else {
+        return None;
+    };
+    let Expr::Repeat {
+        expr: right_body,
+        min: right_min,
+        max: Some(right_max),
+    } = unwrap_shared(right)
+    else {
+        return None;
+    };
+    if (*left_min == 0 && *right_min == 0)
+        || (*left_max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+            && *right_max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+        || unwrap_shared(left_body) != unwrap_shared(right_body)
+        || expression_contains_large_bounded_repeat(left_body)
+    {
+        return None;
+    }
+
+    // Establish unique factor counts before reasoning about interval overlap.
+    // Without this proof, a non-code body such as {"a", "aa"} can represent
+    // the same byte string with different repetition counts on the two sides.
+    cached_direct_bounded_repeat_base_dfa_unconditionally(left_body, None)?;
+
+    let min = (*left_min).max(*right_min);
+    let max = (*left_max).min(*right_max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    Some(Expr::Repeat {
+        expr: Box::new((**left_body).clone()),
+        min,
+        max: Some(max),
+    })
+}
+
+struct DelimitedLiteralRepeatShape<'a> {
+    prefix: Vec<u8>,
+    body: &'a Expr,
+    min: usize,
+    max: usize,
+    suffix: Vec<u8>,
+}
+
+const DELIMITED_REPEAT_SUFFIX_MERGED_STATE_BUDGET: usize = 100_000;
+const DELIMITED_REPEAT_SUFFIX_MERGED_TRANSITION_BUDGET: usize = 1_000_000;
+
+fn delimited_literal_repeat_shape(expr: &Expr) -> Option<DelimitedLiteralRepeatShape<'_>> {
+    fn literal_bytes(parts: &[Expr]) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        for part in parts {
+            match unwrap_shared(part) {
+                Expr::U8Seq(chunk) => bytes.extend_from_slice(chunk),
+                Expr::Epsilon => {}
+                _ => return None,
+            }
+        }
+        Some(bytes)
+    }
+
+    let Expr::Seq(parts) = unwrap_shared(expr) else {
+        return None;
+    };
+    let mut repeat_index = None;
+    for (index, part) in parts.iter().enumerate() {
+        if matches!(unwrap_shared(part), Expr::Repeat { max: Some(_), .. }) {
+            if repeat_index.replace(index).is_some() {
+                return None;
+            }
+        }
+    }
+    let repeat_index = repeat_index?;
+    let Expr::Repeat {
+        expr: body,
+        min,
+        max: Some(max),
+    } = unwrap_shared(&parts[repeat_index])
+    else {
+        return None;
+    };
+    let prefix = literal_bytes(&parts[..repeat_index])?;
+    let suffix = literal_bytes(&parts[repeat_index + 1..])?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(DelimitedLiteralRepeatShape {
+        prefix,
+        body,
+        min: *min,
+        max: *max,
+        suffix,
+    })
+}
+
+/// Exactly factor two bounded repeats with a shared literal
+/// prefix/body and an unambiguous literal suffix boundary. A certified
+/// prefix-free body is an instantaneous code. If the first suffix byte cannot
+/// begin any productive body word, both parses must leave the repeated body at
+/// the same code-word boundary and therefore at the same repetition count.
+/// The remaining exact literal suffixes can then be compared directly.
+///
+/// Keep this focused on giant repeat+suffix shapes. The rewrite deliberately
+/// refuses suffixes whose first byte can begin another body word: e.g.
+/// `a*ab ∩ a*b` overlaps through a one-copy count shift and must remain a real
+/// intersection.
+fn factor_same_body_delimited_literal_repeat_suffix_intersection(
+    left: &Expr,
+    right: &Expr,
+) -> Option<Expr> {
+    let left = delimited_literal_repeat_shape(left)?;
+    let right = delimited_literal_repeat_shape(right)?;
+    if (left.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND
+        && right.max < VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+        || left.prefix != right.prefix
+        || unwrap_shared(left.body) != unwrap_shared(right.body)
+        || expression_contains_large_bounded_repeat(left.body)
+    {
+        return None;
+    }
+
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(left.body, None)?;
+    let productive = productive_dfa_states(&base_dfa);
+    let suffix_can_start_body = |suffix: &[u8]| {
+        base_dfa
+            .step(0, suffix[0])
+            .is_some_and(|target| productive[target as usize])
+    };
+    if suffix_can_start_body(&left.suffix) || suffix_can_start_body(&right.suffix) {
+        return None;
+    }
+
+    let min = left.min.max(right.min);
+    let max = left.max.min(right.max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    if left.suffix != right.suffix {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+
+    // The theorem is exact for arbitrary minima, but a giant positive-minimum
+    // repeat followed by a suffix does not yet have its own symbolic runtime
+    // lane. Keep that still-giant result as the original intersection instead
+    // of turning a safely rejected shape into a later eager compile. If the
+    // merged upper bound is ordinary, explicitly bound the layered DFA that
+    // the rewrite can cause rather than treating the giant threshold itself as
+    // a memory budget.
+    if max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND {
+        if min != 0 {
+            return None;
+        }
+    } else if max != 0 {
+        let layers = max.checked_add(1)?;
+        let states = layers
+            .checked_mul(base_dfa.num_states())?
+            .checked_add(left.prefix.len())?
+            .checked_add(left.suffix.len())?;
+        let transitions = max
+            .checked_mul(dfa_transition_count(&base_dfa))?
+            .checked_add(layers)?
+            .checked_add(left.prefix.len())?
+            .checked_add(left.suffix.len())?;
+        if states > DELIMITED_REPEAT_SUFFIX_MERGED_STATE_BUDGET
+            || transitions > DELIMITED_REPEAT_SUFFIX_MERGED_TRANSITION_BUDGET
+        {
+            return None;
+        }
+    }
+
+    let mut parts = Vec::with_capacity(3);
+    if !left.prefix.is_empty() {
+        parts.push(Expr::U8Seq(left.prefix));
+    }
+    if max != 0 {
+        parts.push(Expr::Repeat {
+            expr: Box::new((*left.body).clone()),
+            min,
+            max: Some(max),
+        });
+    }
+    parts.push(Expr::U8Seq(left.suffix));
+    Some(seq_from_parts(parts))
+}
+
+/// Recognize an exact pure intersection whose two large bounded-repeat
+/// coordinates can remain symbolic at runtime. Each body must be deterministic,
+/// non-nullable and prefix-free; that makes `(completed copies, body state)` a
+/// complete residual coordinate for each side.
+#[doc(hidden)]
+pub fn virtual_binary_bounded_repeat_intersection_descriptor(
+    expr: &Expr,
+) -> Option<VirtualBinaryRepeatIntersectionDescriptor> {
+    let Expr::Intersect { expr, intersect } = unwrap_shared(expr) else {
+        return None;
+    };
+    let left = virtual_zero_min_bounded_repeat_spec(expr)?;
+    let right = virtual_zero_min_bounded_repeat_spec(intersect)?;
+    let byte_support = expr_u8set(expr).intersection(&expr_u8set(intersect));
+    (!byte_support.is_empty()).then_some(VirtualBinaryRepeatIntersectionDescriptor {
+        left,
+        right,
+        byte_support,
+    })
+}
+
+/// Recognize one large bounded repetition whose body admits the
+/// exact symbolic repeat coordinate used by the lazy product runtime.
+///
+/// The runtime already implements the exact language intersection of two
+/// bounded-repeat coordinates.  Supplying the same coordinate on both sides
+/// therefore represents the original language exactly by `L = L ∩ L`, while
+/// avoiding `(max + 1) * body_states` materialization.
+#[doc(hidden)]
+pub fn virtual_large_bounded_repeat_descriptor(
+    expr: &Expr,
+) -> Option<VirtualBinaryRepeatIntersectionDescriptor> {
+    let spec = virtual_bounded_repeat_spec(expr)?;
+    let byte_support = expr_u8set(expr);
+    (!byte_support.is_empty()).then_some(VirtualBinaryRepeatIntersectionDescriptor {
+        left: spec.clone(),
+        right: spec,
+        byte_support,
+    })
+}
+
+/// Return the declared upper bound of a top-level bounded repetition large
+/// enough to require symbolic treatment. This deliberately ignores whether
+/// the body is currently supported by the exact symbolic backend: callers use
+/// it to fail closed instead of falling through to the eager repeat compiler.
+#[doc(hidden)]
+pub fn large_top_level_bounded_repeat_bound(expr: &Expr) -> Option<usize> {
+    let Expr::Repeat { max: Some(max), .. } = unwrap_shared(expr) else {
+        return None;
+    };
+    (*max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND).then_some(*max)
+}
+
+/// Exactly normalize two aligned unit-byte repeats. Iteration boundaries
+/// coincide after every consumed byte, so the byte language and repetition
+/// count intervals can be intersected independently.
+fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<Expr> {
+    let Expr::Repeat {
+        expr: left_body,
+        min: left_min,
+        max: Some(left_max),
+    } = unwrap_shared(left)
+    else {
+        return None;
+    };
+    let Expr::Repeat {
+        expr: right_body,
+        min: right_min,
+        max: Some(right_max),
+    } = unwrap_shared(right)
+    else {
+        return None;
+    };
+
+    let body = exact_unit_byte_language(left_body)?
+        .intersection(&exact_unit_byte_language(right_body)?);
+    let min = (*left_min).max(*right_min);
+    let max = (*left_max).min(*right_max);
+    if min > max {
+        return Some(Expr::U8Class(U8Set::empty()));
+    }
+    if body.is_empty() {
+        return Some(if min == 0 {
+            Expr::Epsilon
+        } else {
+            Expr::U8Class(U8Set::empty())
+        });
+    }
+    Some(Expr::Repeat {
+        expr: Box::new(Expr::U8Class(body)),
+        min,
+        max: Some(max),
+    })
+}
+
 pub fn factor_regex_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Seq(parts) => {
@@ -559,10 +977,17 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             expr: Box::new(factor_regex_expr(*expr)),
             exclude: Box::new(factor_regex_expr(*exclude)),
         },
-        Expr::Intersect { expr, intersect } => Expr::Intersect {
-            expr: Box::new(factor_regex_expr(*expr)),
-            intersect: Box::new(factor_regex_expr(*intersect)),
-        },
+        Expr::Intersect { expr, intersect } => {
+            let expr = factor_regex_expr(*expr);
+            let intersect = factor_regex_expr(*intersect);
+            factor_same_body_delimited_literal_repeat_suffix_intersection(&expr, &intersect)
+                .or_else(|| factor_aligned_unit_repeat_intersection(&expr, &intersect))
+                .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
+                .unwrap_or_else(|| Expr::Intersect {
+                    expr: Box::new(expr),
+                    intersect: Box::new(intersect),
+                })
+        }
         Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
@@ -979,6 +1404,7 @@ fn materialize_repeated_subexpression_dfas_with_limits(
             (count >= min_occurrences
                 && expr_structural_size(&expr) >= min_size
                 && !expr_contains_group_op(&expr)
+                && !expression_contains_large_bounded_repeat(&expr)
                 && !matches!(expr, Expr::Dfa(_)))
             .then_some(expr)
         })
@@ -1410,7 +1836,7 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
     }
 }
 
-fn expr_u8set(expr: &Expr) -> U8Set {
+pub(crate) fn expr_u8set(expr: &Expr) -> U8Set {
     match expr {
         Expr::U8Seq(bytes) => U8Set::from_bytes(bytes),
         Expr::U8Class(set) => *set,
@@ -2527,10 +2953,16 @@ fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> 
 }
 
 fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
+    if min > max {
+        return None;
+    }
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
-    let total_states = (max + 1).checked_mul(base_state_count)?;
+    let layers = max.checked_add(1)?;
+    let total_states = layers.checked_mul(base_state_count)?;
+    u32::try_from(total_states).ok()?;
+    let productive = productive_dfa_states(base_dfa);
     let mut dfa = DFA::new(total_states);
     dfa.ensure_group_capacity(1);
 
@@ -2542,7 +2974,7 @@ fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) ->
             if state_id == 0 && copies_done >= min {
                 finalizers.set(0);
             }
-            if copies_done < max {
+            if copies_done < max && productive[state_id] {
                 future.set(0);
             }
             dfa.overwrite_state_metadata(mapped_state, finalizers, future);
@@ -2615,14 +3047,21 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
-    let repeat_state_count = (max + 1).checked_mul(base_state_count)?;
+    let layers = max.checked_add(1)?;
+    let repeat_state_count = layers.checked_mul(base_state_count)?;
     let suffix_len = suffix_bytes.len();
-    let total_states = repeat_state_count + suffix_len;
+    let total_states = repeat_state_count.checked_add(suffix_len)?;
+    u32::try_from(total_states).ok()?;
+    let productive = productive_dfa_states(&base_dfa);
 
-    // Safety check: first suffix byte must NOT appear in start-state transitions
-    // of the base DFA, otherwise the DFA would be nondeterministic at accepting
-    // positions (ambiguity between continuing the repeat and starting the suffix).
-    if base_states[0].transitions.get(suffix_bytes[0]).is_some() {
+    // The suffix boundary is ambiguous only when its first byte can begin a
+    // body word. A syntactic start transition into an unproductive residual is
+    // irrelevant to the body language and may be discarded below.
+    if base_states[0]
+        .transitions
+        .get(suffix_bytes[0])
+        .is_some_and(|&target| productive[target as usize])
+    {
         return None;
     }
 
@@ -2638,7 +3077,7 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
             let mut future = crate::ds::bitset::BitSet::new(1);
 
             let is_accepting_pos = state_id == 0 && copies_done >= min;
-            if copies_done < max || is_accepting_pos {
+            if (copies_done < max && productive[state_id]) || is_accepting_pos {
                 future.set(0);
             }
             dfa.overwrite_state_metadata(mapped_state, finalizers, future);
@@ -2659,6 +3098,9 @@ fn build_bounded_repeat_with_suffix_dfa_with_cache(
             let extra = if is_accepting_pos { 1 } else { 0 };
             let mut transitions = Vec::with_capacity(state.transitions.len() + extra);
             for (byte, &target) in state.transitions.iter() {
+                if !productive[target as usize] {
+                    continue;
+                }
                 let mapped_target = if !base_dfa.finalizers(target).is_empty() {
                     ((copies_done + 1) * base_state_count) as u32
                 } else {
@@ -2839,6 +3281,8 @@ struct LazyZeroMinRepeatSuffixComponent {
     class_targets: Vec<u32>,
 }
 
+const LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND: usize = 1_024;
+
 impl LazyZeroMinRepeatSuffixComponent {
     fn from_expr(expr: &Expr) -> Option<Self> {
         let unwrapped = unwrap_shared(expr);
@@ -2866,10 +3310,20 @@ impl LazyZeroMinRepeatSuffixComponent {
             // whose eager constituent DFA would dominate compilation. Smaller
             // repeats are already cheap to materialize and preserve better
             // downstream state locality through the ordinary product path.
-            if *max < 1_024 {
+            if *max < LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND {
                 continue;
             }
-            let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+            // `u32::MAX` is the unreachable sentinel in body_min_counts, so it
+            // cannot also be a real completed-copy count. Reject it (and any
+            // larger usize bound) before compiling either body or suffix.
+            if *max >= u32::MAX as usize {
+                return None;
+            }
+            let prefix = if repeat_index == 0 {
+                Vec::new()
+            } else {
+                collect_suffix_bytes(&flat_parts[..repeat_index])?
+            };
             let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
             let body_dfa = compile_expr_to_dfa(body);
             let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
@@ -3814,6 +4268,9 @@ impl Regex {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -7686,7 +8143,11 @@ fn zero_min_repeat_suffix_component_trace(
         if *max == 0 {
             continue;
         }
-        let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+        let prefix = if repeat_index == 0 {
+            Vec::new()
+        } else {
+            collect_suffix_bytes(&flat_parts[..repeat_index])?
+        };
         let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
         let body_dfa = compile_expr_to_dfa(body);
         let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
@@ -8502,7 +8963,11 @@ fn augment_product_dfa_from_seed_tuples(
                             class_active[class] = true;
                             used_classes.push(class);
                         }
-                        if component_dead_states[component] != Some(target) {
+                        let (accepting, future) =
+                            product_component_state_flags(&trace.components[component], target);
+                        if component_dead_states[component] != Some(target)
+                            && (accepting || future)
+                        {
                             class_buffers[class].push((component_id, target));
                         }
                     }
@@ -8557,6 +9022,20 @@ fn augment_product_dfa_from_seed_tuples(
         let mut byte_transitions = Vec::new();
         for &class in &used_classes {
             let next_tuple = class_buffers[class].clone();
+            // In a pure binary intersection, a byte transition is viable only
+            // when both component coordinates survive.  A materialized target
+            // with neither acceptance nor future is language-dead even if it
+            // is not the canonical full-byte sink, so dropping that coordinate
+            // must kill the whole product transition rather than leave the
+            // giant partner running alone through arbitrarily many layers.
+            if trace.components.len() == 2
+                && pure_binary_intersection(exclusions, intersections)
+                && next_tuple.len() != 2
+            {
+                class_buffers[class].clear();
+                class_active[class] = false;
+                continue;
+            }
             let (target, inserted) = add_product_tuple_state(
                 dfa,
                 trace,
@@ -10137,6 +10616,18 @@ fn build_product_dfa(
     {
         return result;
     }
+    if direct_single_visible_group
+        && pure_binary_intersection(exclusions, intersections)
+        && let Some(result) = try_build_sparse_virtual_repeat_finite_intersection_product(
+            &components,
+            &class_members,
+            &component_class_transitions,
+            capture_trace,
+            profile_timing,
+        )
+    {
+        return result;
+    }
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(if direct_single_visible_group {
         1
@@ -10548,6 +11039,247 @@ fn build_product_class_transitions(
             }
         })
         .collect()
+}
+
+fn finite_product_component_class_row(
+    component: &ProductComponent,
+    class_transitions: &ProductComponentClassTransitions,
+    state: u32,
+    out: &mut Vec<(u8, u32)>,
+) -> Option<()> {
+    out.clear();
+    match (component, class_transitions) {
+        (
+            ProductComponent::Materialized(_)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { .. },
+            ProductComponentClassTransitions::Materialized(rows),
+        ) => out.extend_from_slice(rows.get(state as usize)?),
+        (
+            ProductComponent::VirtualFixedSequence { .. },
+            ProductComponentClassTransitions::VirtualFixedSequence(rows),
+        ) => out.extend_from_slice(rows.get(state as usize)?),
+        _ => return None,
+    }
+    Some(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SparseVirtualRepeatResidual {
+    completed: u32,
+    base_state: u32,
+}
+
+fn sparse_virtual_repeat_class_row(
+    component: &ProductComponent,
+    class_transitions: &ProductComponentClassTransitions,
+    state: SparseVirtualRepeatResidual,
+    out: &mut Vec<(u8, SparseVirtualRepeatResidual)>,
+) -> Option<()> {
+    let ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. } = component else {
+        return None;
+    };
+    let ProductComponentClassTransitions::VirtualBoundedRepeat(base_rows) = class_transitions else {
+        return None;
+    };
+    out.clear();
+    if state.completed >= *max {
+        return Some(());
+    }
+    if base_dfa.finalizers(state.base_state).contains(0) {
+        return Some(());
+    }
+    let dead = explicit_dead_sink_state(base_dfa);
+    for &(class, target_base) in base_rows.get(state.base_state as usize)? {
+        if dead == Some(target_base) {
+            continue;
+        }
+        let target = if base_dfa.finalizers(target_base).contains(0) {
+            SparseVirtualRepeatResidual {
+                completed: state.completed.checked_add(1)?,
+                base_state: 0,
+            }
+        } else {
+            SparseVirtualRepeatResidual {
+                completed: state.completed,
+                base_state: target_base,
+            }
+        };
+        out.push((class, target));
+    }
+    Some(())
+}
+
+fn sparse_virtual_repeat_is_accepting(
+    component: &ProductComponent,
+    state: SparseVirtualRepeatResidual,
+) -> Option<bool> {
+    let ProductComponent::VirtualBoundedRepeat { min, .. } = component else {
+        return None;
+    };
+    Some(state.base_state == 0 && state.completed >= *min)
+}
+
+/// Exact sparse product for a pure binary intersection containing one virtual
+/// bounded-repeat coordinate and one finite-language coordinate.  The generic
+/// product builder intentionally keeps partial tuples so it can represent
+/// unions/exclusions as well as intersections; for a giant repeat that can
+/// leave a repeat-only tuple alive after the other coordinate dies and expand
+/// once per declared repetition.  Here intersection semantics let us require
+/// both coordinates to transition on every byte and discard targets that can
+/// no longer accept, so the finite coordinate's live DAG bounds discovery
+/// independently of the repeat maximum.
+fn try_build_sparse_virtual_repeat_finite_intersection_product(
+    components: &[ProductComponent],
+    class_members: &[Vec<u8>],
+    component_class_transitions: &[ProductComponentClassTransitions],
+    capture_trace: bool,
+    profile_timing: bool,
+) -> Option<(DFA, bool, Option<ProductBuildTrace>)> {
+    if components.len() != 2 || component_class_transitions.len() != 2 {
+        return None;
+    }
+    let repeat_index = match (&components[0], &components[1]) {
+        (ProductComponent::VirtualBoundedRepeat { .. }, ProductComponent::VirtualBoundedRepeat { .. }) => {
+            return None;
+        }
+        (ProductComponent::VirtualBoundedRepeat { .. }, _) => 0usize,
+        (_, ProductComponent::VirtualBoundedRepeat { .. }) => 1usize,
+        _ => return None,
+    };
+    let finite_index = 1 - repeat_index;
+    if !product_component_has_finite_language(&components[finite_index]) {
+        return None;
+    }
+
+    let started_at = profile_timing.then(Instant::now);
+    let start_repeat = SparseVirtualRepeatResidual {
+        completed: 0,
+        base_state: 0,
+    };
+    let start = (start_repeat, 0u32);
+    let mut pair_to_state = FxHashMap::<(SparseVirtualRepeatResidual, u32), u32>::default();
+    pair_to_state.insert(start, 0);
+    let mut pairs = vec![start];
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
+    let start_accepting = sparse_virtual_repeat_is_accepting(
+        &components[repeat_index],
+        start_repeat,
+    )
+    .expect("identified virtual repeat component must expose repeat acceptance")
+        && product_component_state_flags(&components[finite_index], 0).0;
+    let mut accepting = vec![start_accepting];
+    let mut repeat_row = Vec::<(u8, SparseVirtualRepeatResidual)>::new();
+    let mut finite_row = Vec::<(u8, u32)>::new();
+
+    let mut cursor = 0usize;
+    while cursor < pairs.len() {
+        let (repeat_state, finite_state) = pairs[cursor];
+        sparse_virtual_repeat_class_row(
+            &components[repeat_index],
+            &component_class_transitions[repeat_index],
+            repeat_state,
+            &mut repeat_row,
+        )
+        .expect("identified virtual repeat component must expose an exact class row");
+        finite_product_component_class_row(
+            &components[finite_index],
+            &component_class_transitions[finite_index],
+            finite_state,
+            &mut finite_row,
+        )
+        .expect("finite intersection component must expose an exact class row");
+
+        let mut repeat_position = 0usize;
+        let mut finite_position = 0usize;
+        let mut row = Vec::<(u8, u32)>::new();
+        while repeat_position < repeat_row.len() && finite_position < finite_row.len() {
+            let (repeat_class, repeat_target) = repeat_row[repeat_position];
+            let (finite_class, finite_target) = finite_row[finite_position];
+            if repeat_class < finite_class {
+                repeat_position += 1;
+                continue;
+            }
+            if finite_class < repeat_class {
+                finite_position += 1;
+                continue;
+            }
+            repeat_position += 1;
+            finite_position += 1;
+
+            let finite_flags =
+                product_component_state_flags(&components[finite_index], finite_target);
+            if !finite_flags.0 && !finite_flags.1 {
+                continue;
+            }
+            let repeat_accepting = sparse_virtual_repeat_is_accepting(
+                &components[repeat_index],
+                repeat_target,
+            )
+            .expect("identified virtual repeat component must expose repeat acceptance");
+            let pair = (repeat_target, finite_target);
+            let target = if let Some(&target) = pair_to_state.get(&pair) {
+                target
+            } else {
+                let target = u32::try_from(pairs.len())
+                    .expect("sparse exact product exceeded the DFA u32 state-id domain");
+                pair_to_state.insert(pair, target);
+                pairs.push(pair);
+                pending_class_transitions.push(Vec::new());
+                accepting.push(repeat_accepting && finite_flags.0);
+                target
+            };
+            row.push((repeat_class, target));
+        }
+        pending_class_transitions[cursor] = row;
+        cursor += 1;
+    }
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    while dfa.num_states() < pairs.len() {
+        dfa.add_state();
+    }
+    for (state, &is_accepting) in accepting.iter().enumerate() {
+        let mut finalizers = BitSet::new(1);
+        if is_accepting {
+            finalizers.set(0);
+        }
+        dfa.overwrite_state_metadata(state as u32, finalizers, BitSet::new(1));
+    }
+    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
+
+    let expanded = pending_class_transitions
+        .into_iter()
+        .map(|row| {
+            let mut transitions = Vec::new();
+            for (class, target) in row {
+                transitions.extend(
+                    class_members[class as usize]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, target)),
+                );
+            }
+            if transitions.len() > 1 {
+                transitions.sort_unstable_by_key(|entry| entry.0);
+            }
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded) {
+        state.transitions = transitions;
+    }
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] sparse_virtual_repeat_finite_intersection repeat_component={} states={} classes={} total_ms={:.3}",
+            repeat_index,
+            dfa.num_states(),
+            class_members.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let _ = capture_trace;
+    Some((dfa, true, None))
 }
 
 fn pure_binary_intersection(
@@ -11305,6 +12037,26 @@ fn compact_zero_min_repeat_is_accepting(
 /// shape. The helper is deliberately fail-closed: any transition requiring a
 /// genuine residual set returns `None`, and the general lazy product remains
 /// authoritative.
+fn select_lazy_zero_min_repeat_suffix_component(
+    expressions: &[Expr],
+) -> Option<(usize, LazyZeroMinRepeatSuffixComponent)> {
+    let giant_indices = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expr)| {
+            expression_contains_large_bounded_repeat(expr).then_some(index)
+        })
+        .collect::<SmallVec<[usize; 2]>>();
+    match giant_indices.as_slice() {
+        [index] => LazyZeroMinRepeatSuffixComponent::from_expr(&expressions[*index])
+            .map(|lazy| (*index, lazy)),
+        [] => expressions.iter().enumerate().find_map(|(index, expr)| {
+            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
+        }),
+        _ => None,
+    }
+}
+
 fn try_compile_compact_zero_min_repeat_intersection_runtime(
     plan: &ExclusionCompilePlan,
     profile_timing: bool,
@@ -11317,16 +12069,13 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     }
 
     let started_at = profile_timing.then(Instant::now);
-    let (lazy_index, lazy) = plan
-        .compiled_exprs
-        .iter()
-        .enumerate()
-        .find_map(|(index, expr)| {
-            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
-        })?;
+    let (lazy_index, lazy) =
+        select_lazy_zero_min_repeat_suffix_component(&plan.compiled_exprs)?;
     let other_index = 1 - lazy_index;
-    let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], false, true, None);
+    let other_component = compile_lazy_intersection_materialized_other_component(
+        &plan.compiled_exprs[other_index],
+        false,
+    )?;
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
     let (class_map, class_members) =
@@ -11340,7 +12089,12 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     let mut pairs = vec![start];
     let mut accepting = vec![compact_zero_min_repeat_is_accepting(&lazy, start_lazy)
         && other_dfa.finalizers(0).contains(0)];
-    let mut row_offsets = Vec::<u32>::with_capacity(lazy.max.saturating_add(3));
+    // The whole point of this runtime form is that storage is proportional to
+    // reachable product residuals, not to the syntactic repetition bound.
+    // Reserving `max` here made a billion-bound repeat try to reserve billions
+    // of offsets even when only a handful of residuals survive the intersecting
+    // automaton.
+    let mut row_offsets = Vec::<u32>::new();
     row_offsets.push(0);
     let mut row_classes = Vec::<u8>::new();
     let mut row_targets = Vec::<u32>::new();
@@ -11350,7 +12104,9 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
     while cursor < pairs.len() {
         let (lazy_state, other_state) = pairs[cursor];
         for &(class, other_target) in &other_transitions[other_state as usize] {
-            if other_dead == Some(other_target) {
+            if other_dead == Some(other_target)
+                || !single_group_dfa_state_is_live(other_dfa, other_target)
+            {
                 continue;
             }
             let representative = *class_members[class as usize].first()?;
@@ -11453,16 +12209,13 @@ fn try_compile_lazy_zero_min_repeat_intersection(
     }
 
     let started_at = profile_timing.then(Instant::now);
-    let (lazy_index, mut lazy) = plan
-        .compiled_exprs
-        .iter()
-        .enumerate()
-        .find_map(|(index, expr)| {
-            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
-        })?;
+    let (lazy_index, mut lazy) =
+        select_lazy_zero_min_repeat_suffix_component(&plan.compiled_exprs)?;
     let other_index = 1 - lazy_index;
-    let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true, None);
+    let other_component = compile_lazy_intersection_materialized_other_component(
+        &plan.compiled_exprs[other_index],
+        true,
+    )?;
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
 
@@ -11482,9 +12235,8 @@ fn try_compile_lazy_zero_min_repeat_intersection(
     }
 
     let mut pairs = vec![(0u32, 0u32)];
-    let other_state_count = other_dfa.num_states();
-    let mut state_by_lazy_other = vec![u32::MAX; lazy.num_states() * other_state_count];
-    state_by_lazy_other[0] = 0;
+    let mut state_by_lazy_other = FxHashMap::<(u32, u32), u32>::default();
+    state_by_lazy_other.insert((0, 0), 0);
     let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
     let discovery_started_at = profile_timing.then(Instant::now);
     let mut cursor = 0usize;
@@ -11497,7 +12249,9 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         };
         let mut row = Vec::with_capacity(other_transitions[other_state as usize].len());
         for &(class, other_target) in &other_transitions[other_state as usize] {
-            if other_dead == Some(other_target) {
+            if other_dead == Some(other_target)
+                || !single_group_dfa_state_is_live(other_dfa, other_target)
+            {
                 continue;
             }
             let representative = *class_members[class as usize].first()?;
@@ -11509,19 +12263,12 @@ fn try_compile_lazy_zero_min_repeat_intersection(
             } else {
                 (other_target, lazy_target)
             };
-            let required_cells = lazy.num_states().checked_mul(other_state_count)?;
-            if state_by_lazy_other.len() < required_cells {
-                state_by_lazy_other.resize(required_cells, u32::MAX);
-            }
-            let lookup_index = (lazy_target as usize)
-                .checked_mul(other_state_count)?
-                .checked_add(other_target as usize)?;
-            let existing = state_by_lazy_other[lookup_index];
-            let target = if existing != u32::MAX {
+            let lookup_key = (lazy_target, other_target);
+            let target = if let Some(&existing) = state_by_lazy_other.get(&lookup_key) {
                 existing
             } else {
                 let target = u32::try_from(pairs.len()).ok()?;
-                state_by_lazy_other[lookup_index] = target;
+                state_by_lazy_other.insert(lookup_key, target);
                 pairs.push(target_pair);
                 pending_class_transitions.push(Vec::new());
                 let added = dfa.add_state();
@@ -11585,31 +12332,27 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         .materialized_dfa()
         .map(DFA::num_states)?;
     let other_states = other_dfa.num_states();
-    let (components, left_states, right_states) = if lazy_index == 0 {
-        (vec![lazy_component, other_component], lazy_states, other_states)
+    let components = if lazy_index == 0 {
+        vec![lazy_component, other_component]
     } else {
-        (vec![other_component, lazy_component], other_states, lazy_states)
+        vec![other_component, lazy_component]
     };
     let component_ms = component_started_at
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let lookup_started_at = profile_timing.then(Instant::now);
-    let pair_cells = left_states.checked_mul(right_states)?;
-    let mut dense_lookup = vec![u32::MAX; pair_cells];
+    let mut sparse_lookup = FxHashMap::<ProductStateTuple, u32>::default();
+    sparse_lookup.reserve(pairs.len());
     for (state, &(left, right)) in pairs.iter().enumerate() {
-        let index = (left as usize)
-            .checked_mul(right_states)?
-            .checked_add(right as usize)?;
-        dense_lookup[index] = state as u32;
+        let mut tuple = ProductStateTuple::new();
+        tuple.push((0, left));
+        tuple.push((1, right));
+        sparse_lookup.insert(tuple, state as u32);
     }
     let trace = ProductBuildTrace {
         components,
         state_tuples: ProductStateTuples::DenseBinary(pairs),
-        state_lookup: ProductStateLookup::DenseBinary {
-            right_states,
-            state_by_pair: dense_lookup,
-            overflow: FxHashMap::default(),
-        },
+        state_lookup: ProductStateLookup::Hash(sparse_lookup),
         direct_single_visible_group: true,
     };
     let lookup_ms = lookup_started_at
@@ -11660,8 +12403,15 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let lazy_zero_min_repeat_product =
-        std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
+    // For giant nested repeats this is a correctness/safety lane, not merely a
+    // performance optimization. A debug override must not route an expression
+    // that validation accepted back into eager repeat materialization.
+    let requires_lazy_giant = plan
+        .compiled_exprs
+        .iter()
+        .any(expression_contains_large_bounded_repeat);
+    let lazy_zero_min_repeat_product = requires_lazy_giant
+        || std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
     if retain_transition_rows_during_discovery
         && lazy_zero_min_repeat_product
         && let Some(runtime) =
@@ -11732,6 +12482,177 @@ pub fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
     plan.visible_groups == 1
         && plan.compiled_exprs.len() == 2
         && pure_binary_intersection(&plan.exclusions, &plan.intersections)
+}
+
+/// Whether the exact general residual runtime has the bounded-code liveness
+/// certificate needed to make this expression a safe protected dynamic
+/// component. This is an internal representation-policy predicate; it does not
+/// change the accepted language.
+#[doc(hidden)]
+pub fn expression_supports_bounded_code_residual_runtime(expr: &Expr) -> bool {
+    super::runtime_residual::expression_supports_bounded_code_liveness_oracle(expr)
+}
+
+/// Whether this expression contains any bounded repetition large enough that
+/// falling through to the ordinary repeat compiler could allocate in direct
+/// proportion to the declared bound.
+#[doc(hidden)]
+pub fn expression_contains_large_bounded_repeat(expr: &Expr) -> bool {
+    match unwrap_shared(expr) {
+        Expr::Repeat { expr, max, .. } => {
+            max.is_some_and(|max| max >= VIRTUAL_BINARY_REPEAT_MIN_BOUND)
+                || expression_contains_large_bounded_repeat(expr)
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            parts.iter().any(expression_contains_large_bounded_repeat)
+        }
+        Expr::Intersect { expr, intersect } => {
+            expression_contains_large_bounded_repeat(expr)
+                || expression_contains_large_bounded_repeat(intersect)
+        }
+        Expr::Exclude { expr, exclude } => {
+            expression_contains_large_bounded_repeat(expr)
+                || expression_contains_large_bounded_repeat(exclude)
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+        Expr::Shared(_) => unreachable!("unwrap_shared removes Shared"),
+    }
+}
+
+const LAZY_INTERSECTION_OTHER_MATERIALIZED_STATE_BUDGET: usize = 100_000;
+const LAZY_INTERSECTION_OTHER_MATERIALIZED_TRANSITION_BUDGET: usize = 1_000_000;
+
+/// Compile the ordinary side of the lazy zero-min-repeat/suffix intersection
+/// lane without ever expanding a giant bounded repeat. The generic product
+/// compiler represents deterministic bounded roots with `VirtualBoundedRepeat`
+/// once their bound reaches the direct-repeat threshold, even when the exact
+/// materialized DFA would still be tiny. That representation choice should not
+/// force the lazy intersection lane to reject an otherwise cheap component.
+///
+/// Keep the ordinary coordinate independent of the giant repeat bound. Its
+/// accepted language must be finite, so its live DFA is acyclic and bounds the
+/// length of every synchronized product walk. For a non-giant virtual repeat,
+/// the new layered expansion is additionally limited by its exact
+/// `(max + 1) * base_states` footprint and a conservative
+/// `max * base_transitions` bound. Validation calls this same helper, so an
+/// expression cannot be admitted under a weaker proof than compilation uses.
+fn compile_lazy_intersection_materialized_other_component(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> Option<ProductComponent> {
+    if expression_contains_large_bounded_repeat(expr) {
+        return None;
+    }
+    let component =
+        compile_product_component_with_options(expr, preserve_coordinates, true, None);
+    let component = match component {
+        component @ (ProductComponent::Materialized(_)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { .. }) => Some(component),
+        ProductComponent::VirtualBoundedRepeat {
+            base_dfa,
+            min,
+            max,
+        } => {
+            let total_states = (max as usize + 1).checked_mul(base_dfa.num_states())?;
+            let total_transitions = (max as usize).checked_mul(dfa_transition_count(&base_dfa))?;
+            if total_states > LAZY_INTERSECTION_OTHER_MATERIALIZED_STATE_BUDGET
+                || total_transitions > LAZY_INTERSECTION_OTHER_MATERIALIZED_TRANSITION_BUDGET
+            {
+                return None;
+            }
+            let mut dfa = build_bounded_repeat_dfa_from_base(
+                base_dfa.as_ref(),
+                min as usize,
+                max as usize,
+            )?;
+            dfa.ensure_group_capacity(1);
+            dfa.set_group_u8set(0, expr_u8set(expr));
+            Some(ProductComponent::Materialized(Arc::new(dfa)))
+        }
+        ProductComponent::VirtualFixedSequence { .. } => None,
+    }?;
+    product_component_has_finite_language(&component).then_some(component)
+}
+
+/// Whether the language accepted by one already-materializable product
+/// component is finite.  We only care about states that are both reachable
+/// from the component root and can still participate in an accepting word;
+/// that live subgraph accepts an infinite language iff it contains a cycle.
+///
+/// This is a resource-safety proof for pairing an exact virtual bounded-repeat
+/// coordinate with an ordinary product coordinate.  If the ordinary language
+/// is finite, its live DAG bounds every product walk independently of the
+/// repeat's declared (possibly billion-scale) upper bound.
+fn single_group_dfa_state_is_live(dfa: &DFA, state: u32) -> bool {
+    dfa.finalizers(state).contains(0) || dfa.possible_future_group_ids(state).contains(0)
+}
+
+fn single_group_dfa_has_finite_language(dfa: &DFA) -> bool {
+    if dfa.num_states() == 0 {
+        return true;
+    }
+
+    let is_live = |state: u32| single_group_dfa_state_is_live(dfa, state);
+    if !is_live(0) {
+        return true;
+    }
+
+    let mut reachable = vec![false; dfa.num_states()];
+    let mut stack = vec![0u32];
+    reachable[0] = true;
+    while let Some(state) = stack.pop() {
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if is_live(target) && !reachable[target as usize] {
+                reachable[target as usize] = true;
+                stack.push(target);
+            }
+        }
+    }
+
+    let mut indegree = vec![0u32; dfa.num_states()];
+    let mut live_count = 0usize;
+    for state in 0..dfa.num_states() as u32 {
+        if !reachable[state as usize] {
+            continue;
+        }
+        live_count += 1;
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if reachable[target as usize] {
+                indegree[target as usize] = indegree[target as usize].saturating_add(1);
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for state in 0..dfa.num_states() as u32 {
+        if reachable[state as usize] && indegree[state as usize] == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut removed = 0usize;
+    while let Some(state) = queue.pop_front() {
+        removed += 1;
+        for (_, &target) in dfa.states()[state as usize].transitions.iter() {
+            if !reachable[target as usize] {
+                continue;
+            }
+            indegree[target as usize] -= 1;
+            if indegree[target as usize] == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    removed == live_count
+}
+
+fn product_component_has_finite_language(component: &ProductComponent) -> bool {
+    match component {
+        ProductComponent::Materialized(dfa)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+            single_group_dfa_has_finite_language(dfa)
+        }
+        ProductComponent::VirtualFixedSequence { .. } => true,
+        ProductComponent::VirtualBoundedRepeat { .. } => false,
+    }
 }
 
 fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
@@ -11865,7 +12786,8 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Lexer, DFA};
+    use super::super::dfa::DFA;
+    use super::super::Lexer;
     use super::{
         build_regex,
         build_regex_local_small_product,
@@ -11878,6 +12800,7 @@ mod tests {
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
+    use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
     use crate::Vocab;
     use rand::rngs::StdRng;
@@ -11893,6 +12816,55 @@ mod tests {
         Expr::Choice(bytes.iter().copied().map(byte_expr).collect())
     }
 
+    #[test]
+    fn lazy_zero_min_repeat_suffix_accepts_last_non_sentinel_bound() {
+        let expr_for = |max| {
+            Expr::Seq(vec![
+                byte_expr(b'['),
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(max),
+                },
+                byte_expr(b'z'),
+            ])
+        };
+
+        assert!(super::LazyZeroMinRepeatSuffixComponent::from_expr(
+            &expr_for((u32::MAX - 1) as usize),
+        )
+        .is_some());
+        assert!(super::LazyZeroMinRepeatSuffixComponent::from_expr(
+            &expr_for(u32::MAX as usize),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn lazy_zero_min_repeat_suffix_accepts_empty_literal_prefix() {
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            Expr::U8Class(U8Set::from_bytes(b"bc")),
+        ]);
+        let mut component = super::LazyZeroMinRepeatSuffixComponent::from_expr(&expr)
+            .expect("zero-prefix lazy repeat+suffix component");
+        assert_eq!(component.prefix_len(), 0);
+        let start = component.start_state();
+        assert!(!component.is_accepting(start));
+        assert!(component.has_future(start));
+        let suffix_target = component
+            .step_uncached(start, b'b')
+            .expect("zero copies may enter the suffix immediately");
+        assert!(component.is_accepting(suffix_target));
+        let trace = super::zero_min_repeat_suffix_component_trace(&expr)
+            .expect("zero-prefix structural trace must rebuild from the expression");
+        assert_eq!(trace.prefix_len, 0);
+    }
+
     fn terminal_matches(expr: Expr, input: &[u8]) -> bool {
         let regex = build_regex(std::slice::from_ref(&expr));
         let tokenizer = Tokenizer {
@@ -11904,6 +12876,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -12424,6 +13399,10 @@ mod tests {
         let (lazy, trace) = super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
             .expect("eligible repeat intersection must compile lazily");
         assert_eq!(trace.state_tuples.len(), lazy.num_states());
+        assert!(matches!(
+            &trace.state_lookup,
+            super::ProductStateLookup::Hash(_)
+        ));
 
         for input in enumerate_inputs(b"[]abx", 9) {
             assert_eq!(
@@ -12431,6 +13410,173 @@ mod tests {
                 dfa_state_observation(&eager, 0, &input),
                 "lazy product differed for input {input:?}",
             );
+        }
+    }
+
+    #[test]
+    fn lazy_repeat_selector_prefers_the_unique_giant_operand() {
+        let component = |max| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(max),
+                },
+                byte_expr(b'b'),
+            ])
+        };
+
+        let non_giant = component(super::LAZY_ZERO_MIN_REPEAT_SUFFIX_MIN_BOUND);
+        let giant = component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND);
+        let (index, _) = super::select_lazy_zero_min_repeat_suffix_component(&[
+            non_giant.clone(),
+            giant.clone(),
+        ])
+        .expect("the unique giant lazy component must be selected");
+        assert_eq!(index, 1);
+
+        let (index, _) = super::select_lazy_zero_min_repeat_suffix_component(&[
+            giant.clone(),
+            non_giant,
+        ])
+        .expect("operand reversal must still select the unique giant component");
+        assert_eq!(index, 0);
+
+        assert!(
+            super::select_lazy_zero_min_repeat_suffix_component(&[
+                giant,
+                component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1),
+            ])
+            .is_none(),
+            "the one-lazy-component lane must not claim two giant coordinates",
+        );
+    }
+
+    fn finite_dfa_with_partial_nonlive_x_cycle() -> DFA {
+        // Language is exactly {"b"}. The x-edge enters a partial dead cycle
+        // rather than the canonical 256-byte sink, so product construction
+        // must use finalizer/future liveness rather than sink identity alone.
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, U8Set::from_bytes(b"bx"));
+        dfa.set_transitions_from_sorted_entries(0, vec![(b'b', 1), (b'x', 2)]);
+        dfa.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+
+        let mut start_future = crate::ds::bitset::BitSet::new(1);
+        start_future.set(0);
+        dfa.overwrite_state_metadata(
+            0,
+            crate::ds::bitset::BitSet::new(1),
+            start_future,
+        );
+        let mut accepting = crate::ds::bitset::BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(
+            1,
+            accepting,
+            crate::ds::bitset::BitSet::new(1),
+        );
+        dfa.overwrite_state_metadata(
+            2,
+            crate::ds::bitset::BitSet::new(1),
+            crate::ds::bitset::BitSet::new(1),
+        );
+        dfa
+    }
+
+    #[test]
+    fn lazy_giant_intersection_prunes_partial_nonlive_other_cycles() {
+        let giant = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'x')),
+                min: 0,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            },
+            byte_expr(b'b'),
+        ]);
+        let ordinary = Expr::Dfa(Arc::new(finite_dfa_with_partial_nonlive_x_cycle()));
+
+        for reversed in [false, true] {
+            let expression = if reversed {
+                Expr::Intersect {
+                    expr: Box::new(ordinary.clone()),
+                    intersect: Box::new(giant.clone()),
+                }
+            } else {
+                Expr::Intersect {
+                    expr: Box::new(giant.clone()),
+                    intersect: Box::new(ordinary.clone()),
+                }
+            };
+            let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+                std::slice::from_ref(&expression),
+            ));
+            let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+            let (mut lazy, mut trace) =
+                super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
+                    .expect("partial dead cycle must not reject the exact lazy product");
+            assert_eq!(lazy.num_states(), 2, "only start and accepted 'b' survive");
+            assert!(lazy.step(0, b'x').is_none());
+            assert!(matches!(
+                &trace.state_lookup,
+                super::ProductStateLookup::Hash(_)
+            ));
+
+            for input in [b"".as_slice(), b"b", b"x", b"xx", b"xb"] {
+                let semantic_observation = |dfa: &DFA| {
+                    let (_, accepting, future) = dfa_state_observation(dfa, 0, input);
+                    (accepting, future)
+                };
+                assert_eq!(
+                    semantic_observation(&lazy),
+                    semantic_observation(&eager),
+                    "lazy product differed for reversed={reversed} input={input:?}",
+                );
+            }
+
+            // Retained structural traces can be augmented from seed tuples.
+            // Seed an impossible residual containing the ordinary dead-cycle
+            // state and verify augmentation cannot turn it into a giant-only
+            // x-walk after the ordinary coordinate is pruned.
+            let ordinary_index = if reversed { 0usize } else { 1usize };
+            let mut seed = super::ProductStateTuple::new();
+            seed.push((0, if ordinary_index == 0 { 2 } else { 0 }));
+            seed.push((1, if ordinary_index == 1 { 2 } else { 0 }));
+            let seed_state = lazy.num_states() as u32;
+            super::augment_product_dfa_from_seed_tuples(
+                &mut lazy,
+                &mut trace,
+                &[seed],
+                &plan.exclusions,
+                &plan.intersections,
+            );
+            assert!(lazy.num_states() > seed_state as usize);
+            assert!(lazy.step(seed_state, b'x').is_none());
+
+            let compact = super::try_compile_compact_zero_min_repeat_intersection_runtime(
+                &plan,
+                false,
+            )
+            .expect("compact lazy lane should also prune the partial dead cycle");
+            let (compact_dfa, compact_segment) = compact.finish_runtime();
+            let compact = Tokenizer::from_parts_with_compressed_transitions(
+                compact_dfa,
+                1,
+                None,
+                compact_segment.into_iter().collect(),
+            );
+            let eager = Tokenizer::from_parts(eager, 1, None);
+            for input in [b"".as_slice(), b"b", b"x", b"xx", b"xb"] {
+                let semantic_observation = |tokenizer: &Tokenizer| {
+                    let (matches, futures, _) = tokenizer_observation(tokenizer, input);
+                    (matches, futures)
+                };
+                assert_eq!(
+                    semantic_observation(&compact),
+                    semantic_observation(&eager),
+                    "compact product differed for reversed={reversed} input={input:?}",
+                );
+            }
         }
     }
 
@@ -12484,6 +13630,42 @@ mod tests {
                 "compact runtime product differed for input {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn compact_zero_min_repeat_runtime_does_not_allocate_from_billion_bound() {
+        let repeat_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(1_000_000_000),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        // The intersecting coordinate bounds the reachable residual product to
+        // a tiny set. Construction must therefore scale with those reachable
+        // residuals, not with the syntactic billion-count upper bound.
+        let filter_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(7),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(repeat_component),
+            intersect: Box::new(filter_component),
+        };
+        let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+        let compact = super::try_compile_compact_zero_min_repeat_intersection_runtime(
+            &plan,
+            false,
+        )
+        .expect("eligible billion-bound repeat intersection must stay compact");
+        assert!(compact.num_states() < 128);
     }
 
     #[test]
@@ -13215,6 +14397,667 @@ mod tests {
     }
 
     #[test]
+    fn factors_aligned_zero_min_unit_repeat_intersection_exactly() {
+        let word = U8Set::from_bytes(
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_",
+        );
+        let letters =
+            U8Set::from_bytes(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(word)),
+                min: 0,
+                max: Some(1_000_000_000),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(letters)),
+                min: 0,
+                max: Some(700_000_000),
+            }),
+        };
+
+        assert_eq!(
+            factor_regex_expr(expression),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(letters)),
+                min: 0,
+                max: Some(700_000_000),
+            },
+        );
+    }
+
+    #[test]
+    fn aligned_unit_repeat_intersection_factoring_preserves_small_language() {
+        let left = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 0,
+            max: Some(3),
+        };
+        let right = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+            min: 0,
+            max: Some(2),
+        };
+        let original = Expr::Intersect {
+            expr: Box::new(left),
+            intersect: Box::new(right),
+        };
+        let factored = factor_regex_expr(original.clone());
+
+        for input in enumerate_inputs(b"abc", 4) {
+            assert_eq!(
+                terminal_matches(original.clone(), &input),
+                terminal_matches(factored.clone(), &input),
+                "factoring changed acceptance for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn factors_aligned_nonzero_unit_repeat_intersection_exactly() {
+        let left = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 2,
+            max: Some(5),
+        };
+        let right = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+            min: 3,
+            max: Some(4),
+        };
+        let original = Expr::Intersect {
+            expr: Box::new(left),
+            intersect: Box::new(right),
+        };
+        let factored = factor_regex_expr(original.clone());
+        assert_eq!(
+            factored,
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::single(b'b'))),
+                min: 3,
+                max: Some(4),
+            },
+        );
+        for input in enumerate_inputs(b"abc", 6) {
+            assert_eq!(
+                terminal_matches(original.clone(), &input),
+                terminal_matches(factored.clone(), &input),
+                "nonzero aligned-unit factoring changed acceptance for {input:?}",
+            );
+        }
+
+        let disjoint = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: Some(2),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 3,
+                max: Some(4),
+            }),
+        };
+        assert_eq!(factor_regex_expr(disjoint), Expr::U8Class(U8Set::empty()));
+    }
+
+    #[test]
+    fn aligned_unit_empty_byte_intersection_normalizes_fully() {
+        let expression_for = |min| Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+        };
+        assert_eq!(factor_regex_expr(expression_for(0)), Expr::Epsilon);
+        assert_eq!(
+            factor_regex_expr(expression_for(1)),
+            Expr::U8Class(U8Set::empty()),
+        );
+    }
+
+    #[test]
+    fn aligned_repeat_intersection_rewrite_fails_closed_for_variable_width_body() {
+        let variable_width = Expr::Choice(vec![byte_expr(b'a'), Expr::U8Seq(b"aa".to_vec())]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(variable_width),
+                min: 0,
+                max: Some(100),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(100),
+            }),
+        };
+
+        assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+    }
+
+    #[test]
+    fn sparse_virtual_repeat_finite_product_does_not_flatten_repeat_state_ids() {
+        const LONG: usize = 65_536;
+        let mut base_dfa = DFA::new(LONG + 1);
+        base_dfa.ensure_group_capacity(1);
+        base_dfa.set_transitions_from_sorted_entries(0, vec![(b'a', LONG as u32)]);
+        let mut finalizers = crate::ds::bitset::BitSet::new(1);
+        finalizers.set(0);
+        base_dfa.overwrite_state_metadata(
+            LONG as u32,
+            finalizers,
+            crate::ds::bitset::BitSet::new(1),
+        );
+        let components = vec![
+            super::ProductComponent::VirtualBoundedRepeat {
+                base_dfa: Arc::new(base_dfa),
+                min: 1,
+                max: 1_000_000_000,
+            },
+            super::ProductComponent::VirtualFixedSequence {
+                byte_sets: Arc::from(
+                    vec![U8Set::single(b'a'); LONG].into_boxed_slice(),
+                ),
+                suffix_live: Arc::from(vec![true; LONG + 1].into_boxed_slice()),
+            },
+        ];
+        let (class_map, class_members) = super::compute_product_equivalence_classes(&components);
+        let class_transitions = super::build_product_class_transitions(&components, &class_map);
+        let (dfa, direct, trace) =
+            super::try_build_sparse_virtual_repeat_finite_intersection_product(
+                &components,
+                &class_members,
+                &class_transitions,
+                false,
+                false,
+            )
+            .expect("virtual repeat with finite coordinate should use sparse exact product");
+
+        // The synthetic base DFA has 65,537 states while the finite side
+        // drives 65,536 completed copies. The old flattened coordinate would
+        // need 65,536 * 65,537 = 4,295,032,832, beyond u32::MAX. The structural
+        // coordinate keeps only the actually reachable O(LONG) pair states.
+        assert!(direct);
+        assert!(trace.is_none());
+        assert_eq!(dfa.num_states(), LONG + 1);
+        let mut state = 0u32;
+        for _ in 0..LONG {
+            state = dfa.step(state, b'a').expect("accepted finite-prefix step");
+        }
+        assert!(dfa.finalizers(state).contains(0));
+    }
+
+    #[test]
+    fn lazy_giant_intersection_materializes_only_budgeted_non_giant_repeat_side() {
+        // This root repeat is above the generic product's direct-repeat
+        // threshold, so it would normally be represented as a
+        // VirtualBoundedRepeat. Its exact DFA is still tiny, however, and the
+        // lazy intersection lane may materialize it under the shared budget.
+        let small_other = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+            min: 0,
+            max: Some(100),
+        };
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &small_other,
+            true,
+        )
+        .is_some());
+
+        // Stay one below the giant-repeat threshold so the right side remains
+        // nominally "non-giant", but make its exact bounded-repeat DFA exceed
+        // the 100k materialization budget. The specialized fast path must
+        // decline instead of turning this optimization into a large eager
+        // allocation; the general residual runtime remains the correctness
+        // fallback at the dynamic-constraint layer.
+        let oversized_other = Expr::Repeat {
+            expr: Box::new(Expr::U8Seq({
+                let mut bytes = vec![b'a'; 31];
+                bytes.push(b'b');
+                bytes
+            })),
+            min: 0,
+            max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND - 1),
+        };
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &oversized_other,
+            true,
+        )
+        .is_none());
+
+        let cyclic_other = Expr::Repeat {
+            expr: Box::new(byte_expr(b'a')),
+            min: 0,
+            max: None,
+        };
+        assert!(super::compile_lazy_intersection_materialized_other_component(
+            &cyclic_other,
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bounded_repeat_from_base_rejects_layer_and_state_id_overflow() {
+        let base = super::compile_expr_to_dfa(&byte_expr(b'a'));
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 2, 1).is_none(),
+            "an invalid repeat interval must fail closed",
+        );
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 0, usize::MAX).is_none(),
+            "max + 1 must fail closed instead of overflowing",
+        );
+        assert!(
+            super::build_bounded_repeat_dfa_from_base(&base, 0, u32::MAX as usize).is_none(),
+            "layered state IDs must fit in u32",
+        );
+    }
+
+    #[test]
+    fn bounded_repeat_from_base_marks_only_productive_residuals_future_live() {
+        let mut base = DFA::new(3);
+        base.ensure_group_capacity(1);
+        base.set_transitions_from_sorted_entries(0, vec![(b'a', 1), (b'x', 2)]);
+        base.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        base.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+
+        let repeated = super::build_bounded_repeat_dfa_from_base(&base, 0, 2)
+            .expect("small repeat must materialize");
+        let dead = repeated.step(0, b'x').expect("dead residual remains represented");
+        assert!(
+            !repeated.possible_future_group_ids(dead).contains(0),
+            "a reachable base residual with no path to a finalizer must not advertise a repeat future",
+        );
+        let live = repeated.step(0, b'a').expect("accepted copy transition");
+        assert!(repeated.finalizers(live).contains(0));
+        assert!(repeated.possible_future_group_ids(live).contains(0));
+    }
+
+    #[test]
+    fn bounded_repeat_suffix_ignores_unproductive_delimiter_transition() {
+        let body = byte_expr(b'a');
+        let mut supplied_base = DFA::new(3);
+        supplied_base.ensure_group_capacity(1);
+        supplied_base.set_transitions_from_sorted_entries(0, vec![(b'a', 1), (b'x', 2)]);
+        supplied_base.set_transitions_from_sorted_entries(2, vec![(b'x', 2)]);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        supplied_base.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+
+        let mut cache = super::RepeatBaseDfaCache::default();
+        cache.insert(body.clone(), Arc::new(supplied_base));
+        let parts = vec![
+            Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 0,
+                max: Some(2),
+            },
+            byte_expr(b'x'),
+        ];
+        let (with_dead_edge, _) = super::build_bounded_repeat_with_suffix_dfa_with_cache(
+            &parts,
+            Some(&cache),
+        )
+        .expect("an unproductive body edge on the suffix byte is not a boundary ambiguity");
+
+        let clean_parts = vec![
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 0,
+                max: Some(2),
+            },
+            byte_expr(b'x'),
+        ];
+        let clean = super::build_bounded_repeat_with_suffix_dfa(&clean_parts)
+            .expect("clean prefix-free repeat+suffix must use the direct builder")
+            .0;
+        for input in enumerate_inputs(b"ax", 4) {
+            assert_eq!(
+                dfa_accepts(&with_dead_edge, &input),
+                dfa_accepts(&clean, &input),
+                "dropping an unproductive body transition changed the repeat+suffix language for {input:?}",
+            );
+        }
+        let suffix_target = with_dead_edge
+            .step(0, b'x')
+            .expect("the delimiter must enter the suffix, not the dead body residual");
+        assert!(with_dead_edge.finalizers(suffix_target).contains(0));
+
+        let overflowing = vec![
+            Expr::Repeat {
+                expr: Box::new(byte_expr(b'a')),
+                min: 0,
+                max: Some(usize::MAX),
+            },
+            byte_expr(b'x'),
+        ];
+        assert!(
+            super::build_bounded_repeat_with_suffix_dfa(&overflowing).is_none(),
+            "repeat+suffix layer arithmetic must fail closed on max + 1 overflow",
+        );
+    }
+
+    #[test]
+    fn factors_same_body_giant_repeats_with_unique_literal_suffix_boundary() {
+        let body = factor_regex_expr(Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]));
+        let component = |max, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::U8Seq(b"[".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body.clone()),
+                    min: 0,
+                    max: Some(max),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        let shared_suffix = Expr::Intersect {
+            expr: Box::new(component(
+                super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 7,
+                b"]abca",
+            )),
+            intersect: Box::new(component(
+                super::VIRTUAL_BINARY_REPEAT_MIN_BOUND,
+                b"]abca",
+            )),
+        };
+        assert_eq!(
+            factor_regex_expr(shared_suffix),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"[".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body.clone()),
+                    min: 0,
+                    max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+                },
+                Expr::U8Seq(b"]abca".to_vec()),
+            ]),
+        );
+
+        let disjoint_suffixes = Expr::Intersect {
+            expr: Box::new(component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND, b"]")),
+            intersect: Box::new(component(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 3, b"}")),
+        };
+        assert_eq!(
+            factor_regex_expr(disjoint_suffixes),
+            Expr::U8Class(U8Set::empty()),
+        );
+
+        // A small materialized analogue is a cheap semantic oracle for the
+        // variable-width prefix-free body: no byte string can satisfy the two
+        // different uniquely-delimited suffixes.
+        let small_left = component(3, b"]");
+        let small_right = component(4, b"}");
+        let small_left = compile_product_component_dfa(&small_left);
+        let small_right = compile_product_component_dfa(&small_right);
+        for input in enumerate_inputs(b"[abc]}", 6) {
+            assert!(
+                !(dfa_accepts(&small_left, &input) && dfa_accepts(&small_right, &input)),
+                "unexpected common word for uniquely delimited suffixes: {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn delimited_repeat_suffix_factoring_handles_only_safe_nonzero_min_results() {
+        let giant = super::VIRTUAL_BINARY_REPEAT_MIN_BOUND;
+        let component = |min, max, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min,
+                    max: Some(max),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        let disjoint_counts = Expr::Intersect {
+            expr: Box::new(component(5, giant, b"b")),
+            intersect: Box::new(component(1, 3, b"b")),
+        };
+        assert_eq!(
+            factor_regex_expr(disjoint_counts),
+            Expr::U8Class(U8Set::empty()),
+            "unique body/suffix boundaries make disjoint count intervals exactly empty",
+        );
+
+        let different_suffixes = Expr::Intersect {
+            expr: Box::new(component(2, giant, b"b")),
+            intersect: Box::new(component(3, giant + 1, b"c")),
+        };
+        assert_eq!(
+            factor_regex_expr(different_suffixes),
+            Expr::U8Class(U8Set::empty()),
+            "different uniquely-delimited literals are disjoint even with positive minima",
+        );
+
+        let bounded_merge = Expr::Intersect {
+            expr: Box::new(component(2, giant, b"b")),
+            intersect: Box::new(component(3, 7, b"b")),
+        };
+        assert_eq!(
+            factor_regex_expr(bounded_merge),
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 3,
+                    max: Some(7),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ]),
+            "a positive-minimum merged interval is safe when its upper bound is ordinary",
+        );
+
+        let unsupported_giant_result = Expr::Intersect {
+            expr: Box::new(component(2, giant + 1, b"b")),
+            intersect: Box::new(component(3, giant, b"b")),
+        };
+        assert!(
+            matches!(
+                factor_regex_expr(unsupported_giant_result),
+                Expr::Intersect { .. }
+            ),
+            "do not rewrite to a positive-minimum giant repeat+suffix before that shape has an exact runtime lane",
+        );
+
+        let long_body = Expr::U8Seq(vec![b'a'; 32]);
+        let large_ordinary = |min, max| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(long_body.clone()),
+                    min,
+                    max: Some(max),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ])
+        };
+        let over_budget_ordinary_result = Expr::Intersect {
+            expr: Box::new(large_ordinary(0, giant)),
+            intersect: Box::new(large_ordinary(0, giant - 1)),
+        };
+        assert!(
+            matches!(
+                factor_regex_expr(over_budget_ordinary_result),
+                Expr::Intersect { .. }
+            ),
+            "a sub-threshold merged repeat must still remain unfactored when its exact layered DFA exceeds the explicit budget",
+        );
+    }
+
+    #[test]
+    fn delimited_repeat_suffix_factoring_rejects_count_shift_and_non_code_bodies() {
+        let giant = super::VIRTUAL_BINARY_REPEAT_MIN_BOUND;
+        let repeat = |body, suffix: &[u8]| {
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(body),
+                    min: 0,
+                    max: Some(giant),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+
+        // The left suffix begins with 'a', which can start another body word.
+        // Indeed a*ab and a*b overlap by shifting one repetition across the
+        // suffix boundary, so the algebraic rewrite must not fire.
+        let shifted = Expr::Intersect {
+            expr: Box::new(repeat(byte_expr(b'a'), b"ab")),
+            intersect: Box::new(repeat(byte_expr(b'a'), b"b")),
+        };
+        assert!(matches!(factor_regex_expr(shifted), Expr::Intersect { .. }));
+
+        // Structural body equality is not enough: {a, aa} is not prefix-free,
+        // so a byte string can carry different factor counts before the same
+        // delimiter. Keep the original intersection when the code proof fails.
+        let ambiguous = Expr::Choice(vec![byte_expr(b'a'), Expr::U8Seq(b"aa".to_vec())]);
+        let non_code = Expr::Intersect {
+            expr: Box::new(repeat(ambiguous.clone(), b"b")),
+            intersect: Box::new(repeat(ambiguous, b"b")),
+        };
+        assert!(matches!(factor_regex_expr(non_code), Expr::Intersect { .. }));
+
+        // Even identical arbitrary prefix languages cannot in general be
+        // cancelled from an intersection. This rewrite only accepts one fixed
+        // literal prefix byte string.
+        let nonliteral_prefix = Expr::Choice(vec![Expr::Epsilon, byte_expr(b'p')]);
+        let prefixed = |suffix: &[u8]| {
+            Expr::Seq(vec![
+                nonliteral_prefix.clone(),
+                Expr::Repeat {
+                    expr: Box::new(byte_expr(b'a')),
+                    min: 0,
+                    max: Some(giant),
+                },
+                Expr::U8Seq(suffix.to_vec()),
+            ])
+        };
+        let nonliteral = Expr::Intersect {
+            expr: Box::new(prefixed(b"b")),
+            intersect: Box::new(prefixed(b"c")),
+        };
+        assert!(matches!(factor_regex_expr(nonliteral), Expr::Intersect { .. }));
+    }
+
+    #[test]
+    fn factors_same_prefix_free_body_nonzero_repeat_intersection_exactly() {
+        let body = factor_regex_expr(Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]));
+        let original = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 2,
+                max: Some(3),
+            }),
+        };
+        let factored = factor_regex_expr(original.clone());
+        assert_eq!(
+            factored,
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 2,
+                max: Some(3),
+            },
+        );
+
+        // Keep the giant side only barely above the virtualization threshold
+        // so the unfactored expression is still a cheap materialized oracle.
+        let original_dfa = build_regex(std::slice::from_ref(&original)).dfa;
+        let factored_dfa = build_regex(std::slice::from_ref(&factored)).dfa;
+        for input in enumerate_inputs(b"abc", 6) {
+            assert_eq!(
+                dfa_accepts(&original_dfa, &input),
+                dfa_accepts(&factored_dfa, &input),
+                "same-body factoring changed acceptance for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn same_prefix_free_body_disjoint_repeat_intervals_factor_to_empty() {
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 4,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: 1,
+                max: Some(3),
+            }),
+        };
+        assert_eq!(factor_regex_expr(expression), Expr::U8Class(U8Set::empty()));
+    }
+
+    #[test]
+    fn same_body_nonzero_repeat_factoring_requires_prefix_free_body() {
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"aa".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: 2,
+                max: Some(3),
+            }),
+        };
+        assert!(matches!(factor_regex_expr(expression), Expr::Intersect { .. }));
+
+        // Disjoint factor-count intervals are not enough without unique
+        // decipherability: a^(4097) has both a 4097-copy decomposition and a
+        // 4096-copy decomposition when the body language is {"a", "aa"}.
+        let body = Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"aa".to_vec()),
+        ]);
+        let disjoint = Expr::Intersect {
+            expr: Box::new(Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND),
+            }),
+            intersect: Box::new(Expr::Repeat {
+                expr: Box::new(body),
+                min: super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1,
+                max: Some(super::VIRTUAL_BINARY_REPEAT_MIN_BOUND + 1),
+            }),
+        };
+        assert!(matches!(factor_regex_expr(disjoint), Expr::Intersect { .. }));
+    }
+
+    #[test]
     fn nested_exclude_in_exclusion_branch_compiles() {
         let nested_residual = Expr::Exclude {
             expr: Box::new(byte_choice(b"ab")),
@@ -13271,6 +15114,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13319,6 +15165,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13367,6 +15216,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13437,6 +15289,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13582,6 +15437,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13649,6 +15507,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
@@ -13805,6 +15666,9 @@ mod tests {
             packed_runtime_metadata: None,
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
+            virtual_unit_repeat: None,
+            virtual_repeat_intersections: Vec::new(),
+            virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),

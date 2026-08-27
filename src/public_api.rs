@@ -1435,6 +1435,52 @@ mod tests {
     }
 
     #[test]
+    fn composed_dynamic_constraint_transfer_roundtrip_preserves_recursive_runtime() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+            (3, b"xyz".to_vec()),
+        ]);
+        let reference = RuntimeConstraint::compile(
+            Grammar::ebnf(r#"start ::= "x" "y""#),
+            &vocab,
+        )
+        .unwrap();
+        let parent = DynamicConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
+            .unwrap();
+
+        for dynamic_boundary in [false, true] {
+            let bound = if dynamic_boundary {
+                parent
+                    .bind_grammar_dynamic_boundary("child", &child)
+                    .unwrap()
+            } else {
+                parent.bind_grammar("child", &child).unwrap()
+            };
+            assert_eq!(bound.start().mask(), reference.start().mask());
+
+            let transfer = bound.clone().into_saved();
+            let loaded = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+            assert_eq!(
+                loaded.start().mask(),
+                bound.start().mask(),
+                "composed dynamic transfer changed initial mask (dynamic_boundary={dynamic_boundary})",
+            );
+            let mut state = loaded.start();
+            state.commit_token(2).unwrap();
+            assert!(state.is_accepting());
+        }
+    }
+
+    #[test]
     fn dynamic_boundary_token_triggers_survive_component_roundtrip() {
         let vocab = Vocab::new(vec![
             (0, b"x".to_vec()),

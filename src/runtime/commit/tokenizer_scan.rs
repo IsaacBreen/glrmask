@@ -41,10 +41,19 @@ pub(crate) fn execute_tokenizer_reusable(
 
     let owned_start_closure;
     let start_closure: &[u32] = if let Some(closures) = cached_closures {
-        let Some(closure) = closures.get(start_state as usize) else {
-            return false;
-        };
-        closure
+        if let Some(closure) = closures.get(start_state as usize) {
+            closure
+        } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
+            owned_start_closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
+            &owned_start_closure
+        } else {
+            // Arithmetic virtual lexer states deliberately sit outside the
+            // physical tokenizer state count and therefore outside this cache.
+            // They are scalar and epsilon-free, so their exact closure is the
+            // singleton itself.
+            owned_start_closure = Box::new([start_state]);
+            &owned_start_closure
+        }
     } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
         owned_start_closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
         &owned_start_closure
@@ -103,15 +112,26 @@ pub(crate) fn execute_tokenizer_reusable(
                 continue;
             }
             if let Some(closures) = cached_closures {
-                let Some(target_closure) = closures.get(target as usize) else {
+                if let Some(target_closure) = closures.get(target as usize) {
+                    if scratch.next_states.len() + target_closure.len()
+                        > scratch.next_states.capacity()
+                    {
+                        return false;
+                    }
+                    scratch.next_states.extend_from_slice(target_closure);
+                } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
+                    let target_closure = constraint.tokenizer.singleton_epsilon_closure(target);
+                    if scratch.next_states.len() + target_closure.len()
+                        > scratch.next_states.capacity()
+                    {
+                        return false;
+                    }
+                    scratch.next_states.extend_from_slice(&target_closure);
+                } else if scratch.next_states.len() == scratch.next_states.capacity() {
                     return false;
-                };
-                if scratch.next_states.len() + target_closure.len()
-                    > scratch.next_states.capacity()
-                {
-                    return false;
+                } else {
+                    scratch.next_states.push(target);
                 }
-                scratch.next_states.extend_from_slice(target_closure);
             } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
                 let target_closure = constraint.tokenizer.singleton_epsilon_closure(target);
                 if scratch.next_states.len() + target_closure.len()
@@ -241,13 +261,22 @@ pub(crate) fn execute_tokenizer_reusable_from_states(
     scratch.matches.clear();
     for &start_state in start_states {
         if let Some(closures) = cached_closures {
-            let Some(closure) = closures.get(start_state as usize) else {
+            if let Some(closure) = closures.get(start_state as usize) {
+                if scratch.states.len() + closure.len() > scratch.states.capacity() {
+                    return false;
+                }
+                scratch.states.extend_from_slice(closure);
+            } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
+                let closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
+                if scratch.states.len() + closure.len() > scratch.states.capacity() {
+                    return false;
+                }
+                scratch.states.extend_from_slice(&closure);
+            } else if scratch.states.len() == scratch.states.capacity() {
                 return false;
-            };
-            if scratch.states.len() + closure.len() > scratch.states.capacity() {
-                return false;
+            } else {
+                scratch.states.push(start_state);
             }
-            scratch.states.extend_from_slice(closure);
         } else if constraint.tokenizer.state_has_epsilon_transitions(start_state) {
             let closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
             if scratch.states.len() + closure.len() > scratch.states.capacity() {
@@ -275,13 +304,22 @@ pub(crate) fn execute_tokenizer_reusable_from_states(
                 continue;
             }
             if let Some(closures) = cached_closures {
-                let Some(closure) = closures.get(target as usize) else {
+                if let Some(closure) = closures.get(target as usize) {
+                    if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {
+                        return false;
+                    }
+                    scratch.next_states.extend_from_slice(closure);
+                } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
+                    let closure = constraint.tokenizer.singleton_epsilon_closure(target);
+                    if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {
+                        return false;
+                    }
+                    scratch.next_states.extend_from_slice(&closure);
+                } else if scratch.next_states.len() == scratch.next_states.capacity() {
                     return false;
-                };
-                if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {
-                    return false;
+                } else {
+                    scratch.next_states.push(target);
                 }
-                scratch.next_states.extend_from_slice(closure);
             } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
                 let closure = constraint.tokenizer.singleton_epsilon_closure(target);
                 if scratch.next_states.len() + closure.len() > scratch.next_states.capacity() {

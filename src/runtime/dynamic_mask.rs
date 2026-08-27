@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
-    TokenizerExecResult, TokenizerMatch, TokenizerStateSet,
+    Tokenizer, TokenizerExecResult, TokenizerMatch, TokenizerStateSet,
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
@@ -27,7 +27,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
+    Constraint, DynamicMaskLexerStateKey, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
     DynamicSelfLoopProjection,
 };
 use super::state::ConstraintState;
@@ -443,8 +443,11 @@ impl DynamicRecognizerStateCache {
         let mut subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
         let mut repair_token_boundary_allowed = false;
         let mut repair_subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
-        let collect_subtree_loops = self.branches[state_index].len() == 1
-            || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX;
+        let collect_subtree_loops = !lexer_scan_cache
+            .tokenizer()
+            .has_virtual_residual_runtime()
+            && (self.branches[state_index].len() == 1
+                || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX);
         for branch in &self.branches[state_index] {
             if !branch.initial_prune_guard.allows_token_boundary() {
                 continue;
@@ -538,8 +541,8 @@ impl DynamicRecognizerStateCache {
             if let Some(next_config) = fast_target {
                 let has_match = (0..lexer_scan_cache.config_len(next_config)).any(|index| {
                     let raw_state = lexer_scan_cache.config_state(next_config, index);
-                    constraint
-                        .tokenizer
+                    lexer_scan_cache
+                        .tokenizer()
                         .matched_terminals_iter(raw_state)
                         .next()
                         .is_some()
@@ -567,19 +570,22 @@ impl DynamicRecognizerStateCache {
             };
             let Some(advanced_prune_guard) = branch
                 .initial_prune_guard
-                .advance(constraint, std::slice::from_ref(&byte))
+                .advance(lexer_scan_cache.tokenizer(), std::slice::from_ref(&byte))
             else {
                 continue;
             };
 
             for config_index in 0..lexer_scan_cache.config_len(next_config) {
                 let matched_state = lexer_scan_cache.config_state(next_config, config_index);
-                for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
+                for terminal in lexer_scan_cache
+                    .tokenizer()
+                    .matched_terminals_iter(matched_state)
+                {
                     let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
                         advanced_prune_guard.clone()
                     } else {
                         advanced_prune_guard.remember_terminal_match(
-                            constraint,
+                            lexer_scan_cache.tokenizer(),
                             matched_state,
                             terminal,
                         )
@@ -913,6 +919,8 @@ const DYNAMIC_NFA_RAW_CONFIG_TAG: u32 = 1 << 31;
 #[derive(Clone)]
 struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
+    tokenizer: &'a Tokenizer,
+    use_constraint_fast_transitions: bool,
     deterministic: bool,
     deadline: Option<Instant>,
     max_collection_items: Option<usize>,
@@ -947,9 +955,37 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 
     fn new(constraint: &'a Constraint, deadline: Option<Instant>) -> Self {
+        Self::new_with_tokenizer(constraint, &constraint.tokenizer, deadline, true)
+    }
+
+    fn new_for_mask(
+        constraint: &'a Constraint,
+        vocab: &'a DynamicMaskVocab,
+        deadline: Option<Instant>,
+    ) -> Self {
+        let tokenizer = vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&constraint.tokenizer);
+        let use_constraint_fast_transitions = std::ptr::eq(tokenizer, &constraint.tokenizer);
+        Self::new_with_tokenizer(
+            constraint,
+            tokenizer,
+            deadline,
+            use_constraint_fast_transitions,
+        )
+    }
+
+    fn new_with_tokenizer(
+        constraint: &'a Constraint,
+        tokenizer: &'a Tokenizer,
+        deadline: Option<Instant>,
+        use_constraint_fast_transitions: bool,
+    ) -> Self {
         Self {
             constraint,
-            deterministic: !constraint.tokenizer_has_epsilon_transitions,
+            tokenizer,
+            use_constraint_fast_transitions,
+            deterministic: !tokenizer.has_epsilon_transitions(),
             deadline,
             max_collection_items: deadline.map(|_| 5_000_000),
             config_ids: FxHashMap::default(),
@@ -957,6 +993,24 @@ impl<'a> DynamicNfaScanCache<'a> {
             transitions: Vec::new(),
             residual_configs: Vec::new(),
             raw_start_config: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn tokenizer(&self) -> &Tokenizer {
+        self.tokenizer
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> u32 {
+        if self.use_constraint_fast_transitions {
+            self.constraint.tokenizer_fast_transitions.transition(
+                &self.constraint.tokenizer,
+                state,
+                byte,
+            )
+        } else {
+            self.tokenizer.get_transition(state, byte)
         }
     }
 
@@ -979,7 +1033,7 @@ impl<'a> DynamicNfaScanCache<'a> {
         states.sort_unstable();
         states.dedup();
         if let [state] = states.as_slice()
-            && !self.constraint.tokenizer.state_has_epsilon_transitions(*state)
+            && !self.tokenizer.state_has_epsilon_transitions(*state)
         {
             return Ok(Self::raw_config(*state));
         }
@@ -987,8 +1041,14 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Ok(id);
         }
         self.check_growth(self.configs.len(), 1)?;
-        let id = self.configs.len() as u32;
-        debug_assert!(id < DYNAMIC_NFA_RAW_CONFIG_TAG);
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err(
+                "dynamic lexer configuration-id namespace exhausted below raw-state tag"
+                    .to_owned(),
+            );
+        }
+        let id = u32::try_from(self.configs.len())
+            .map_err(|_| "dynamic lexer configuration-id overflow".to_owned())?;
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
         self.transitions.push(None);
@@ -1001,17 +1061,13 @@ impl<'a> DynamicNfaScanCache<'a> {
             self.raw_start_config.entry(state).or_insert(state);
             return Ok(state);
         }
-        if !self.constraint.tokenizer.state_has_epsilon_transitions(state) {
+        if !self.tokenizer.state_has_epsilon_transitions(state) {
             return Ok(Self::raw_config(state));
         }
         if let Some(&cached) = self.raw_start_config.get(&state) {
             return Ok(cached);
         }
-        let closure = self
-            .constraint
-            .tokenizer
-            .singleton_epsilon_closure(state)
-            .into_vec();
+        let closure = self.tokenizer.singleton_epsilon_closure(state).into_vec();
         let config = self.intern_config(closure)?;
         self.raw_start_config.insert(state, config);
         Ok(config)
@@ -1024,14 +1080,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         ignore_terminal: Option<TerminalID>,
     ) -> Result<Option<u32>, String> {
         let relevant = |tokenizer_state: u32| {
-            let matched = self
-                .constraint
-                .tokenizer
-                .matched_terminal_bitset(tokenizer_state);
-            let future = self
-                .constraint
-                .tokenizer
-                .possible_future_terminals(tokenizer_state);
+            let matched = self.tokenizer.matched_terminal_bitset(tokenizer_state);
+            let future = self.tokenizer.possible_future_terminals(tokenizer_state);
             !admitted.is_disjoint(matched)
                 || !admitted.is_disjoint(future)
                 || ignore_terminal.is_some_and(|terminal| {
@@ -1042,11 +1092,10 @@ impl<'a> DynamicNfaScanCache<'a> {
         if self.deterministic {
             return Ok(relevant(state).then_some(state));
         }
-        if !self.constraint.tokenizer.state_has_epsilon_transitions(state) {
+        if !self.tokenizer.state_has_epsilon_transitions(state) {
             return Ok(relevant(state).then_some(Self::raw_config(state)));
         }
         let states = self
-            .constraint
             .tokenizer
             .singleton_epsilon_closure(state)
             .iter()
@@ -1061,19 +1110,11 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
         if self.deterministic {
-            let target = self.constraint.tokenizer_fast_transitions.transition(
-                &self.constraint.tokenizer,
-                config,
-                byte,
-            );
+            let target = self.transition(config, byte);
             return Ok((target != u32::MAX).then_some(target));
         }
         if let Some(state) = Self::raw_config_state(config) {
-            let target = self.constraint.tokenizer_fast_transitions.transition(
-                &self.constraint.tokenizer,
-                state,
-                byte,
-            );
+            let target = self.transition(state, byte);
             return if target == u32::MAX {
                 Ok(None)
             } else {
@@ -1093,11 +1134,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             let config_len = self.configs[config_index].len();
             for state_index in 0..config_len {
                 let state = self.configs[config_index][state_index];
-                let target = self.constraint.tokenizer_fast_transitions.transition(
-                    &self.constraint.tokenizer,
-                    state,
-                    byte,
-                );
+                let target = self.transition(state, byte);
                 if target != u32::MAX {
                     let target_config = self.config_for_raw_start(target)?;
                     if let Some(target_state) = Self::raw_config_state(target_config) {
@@ -1125,10 +1162,16 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     fn residual_config(&mut self, config: u32) -> Result<Option<u32>, String> {
         if self.deterministic {
-            return Ok((!self.constraint.tokenizer.is_end(config)).then_some(config));
+            return Ok(self
+                .tokenizer
+                .exact_dynamic_state_has_future(config)?
+                .then_some(config));
         }
         if let Some(state) = Self::raw_config_state(config) {
-            return Ok((!self.constraint.tokenizer.is_end(state)).then_some(config));
+            return Ok(self
+                .tokenizer
+                .exact_dynamic_state_has_future(state)?
+                .then_some(config));
         }
         let config_index = config as usize;
         let cached = self.residual_configs[config_index];
@@ -1136,11 +1179,12 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
         }
 
-        let residual_states = self.configs[config_index]
-            .iter()
-            .copied()
-            .filter(|&state| !self.constraint.tokenizer.is_end(state))
-            .collect::<Vec<_>>();
+        let mut residual_states = Vec::new();
+        for &state in self.configs[config_index].iter() {
+            if self.tokenizer.exact_dynamic_state_has_future(state)? {
+                residual_states.push(state);
+            }
+        }
         let residual = if residual_states.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
         } else if residual_states.len() == self.configs[config_index].len() {
@@ -1170,7 +1214,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             let width = index + 1;
             for state_index in 0..self.config_len(config) {
                 let state = self.config_state(config, state_index);
-                for id in self.constraint.tokenizer.matched_terminals_iter(state) {
+                for id in self.tokenizer.matched_terminals_iter(state) {
                     self.check_growth(matches.len(), 1)?;
                     matches.push(TokenizerMatch {
                         id,
@@ -1233,7 +1277,7 @@ impl<'a> DynamicNfaScanCache<'a> {
         let mut bytes = U8Set::empty();
         for state_index in 0..self.config_len(config) {
             let state = self.config_state(config, state_index);
-            for (byte, _) in self.constraint.tokenizer.transitions_from(state) {
+            for (byte, _) in self.tokenizer.transitions_from(state) {
                 bytes.insert(byte);
             }
         }
@@ -1364,13 +1408,12 @@ impl InitialPruneGuard {
     /// condition: a later match of that same terminal invalidates the
     /// provisional boundary that created this parser path.
     fn new(
-        _constraint: &Constraint,
-        _tokenizer_state: u32,
-        _stacks: &ParserStacks,
+        vocab: &DynamicMaskVocab,
         terminals_disallowed: &TerminalsDisallowed,
     ) -> Self {
         let mut memories = Vec::new();
         for (&lexer_state, terminals) in terminals_disallowed.iter() {
+            let lexer_state = vocab.mask_projection_state(lexer_state);
             for &terminal in terminals.iter() {
                 memories.push((lexer_state, terminal));
             }
@@ -1397,8 +1440,8 @@ impl InitialPruneGuard {
         true
     }
 
-    fn allows_token_bytes(&self, constraint: &Constraint, bytes: &[u8]) -> bool {
-        self.advance(constraint, bytes).is_some()
+    fn allows_token_bytes(&self, tokenizer: &Tokenizer, bytes: &[u8]) -> bool {
+        self.advance(tokenizer, bytes).is_some()
     }
 
     fn blocked_output_mask(
@@ -1429,12 +1472,11 @@ impl InitialPruneGuard {
 
     fn remember_terminal_match(
         &self,
-        constraint: &Constraint,
+        tokenizer: &Tokenizer,
         lexer_state: u32,
         terminal: TerminalID,
     ) -> Self {
-        if !constraint
-            .tokenizer
+        if !tokenizer
             .possible_future_terminals(lexer_state)
             .contains(terminal as usize)
         {
@@ -1458,7 +1500,7 @@ impl InitialPruneGuard {
     /// deliberately do not affect this guard: commit evaluates its initial
     /// pruning predicate once, over the whole candidate token, before advancing
     /// the parser.
-    fn advance(&self, constraint: &Constraint, segment: &[u8]) -> Option<Self> {
+    fn advance(&self, tokenizer: &Tokenizer, segment: &[u8]) -> Option<Self> {
         let Self::Pending { memories } = self else {
             return Some(Self::Passed);
         };
@@ -1472,16 +1514,14 @@ impl InitialPruneGuard {
                 index += 1;
             }
             let blocked = &memories[start..index];
-            let execution = constraint
-                .tokenizer
-                .execute_from_state_all_widths(segment, tokenizer_state);
+            let execution = tokenizer.execute_from_state_all_widths(segment, tokenizer_state);
             for matched in &execution.matches {
                 if blocked.iter().any(|&(_, terminal)| terminal == matched.id) {
                     return None;
                 }
             }
             for end_state in execution.end_state {
-                let future = constraint.tokenizer.possible_future_terminals(end_state);
+                let future = tokenizer.possible_future_terminals(end_state);
                 for &(_, terminal) in blocked {
                     if future.contains(terminal as usize) {
                         next_memories.push((end_state, terminal));
@@ -1666,13 +1706,12 @@ fn parser_terminal_admissible_cached(
 
 fn token_boundary_allowed_cached(
     constraint: &Constraint,
+    tokenizer: &Tokenizer,
     tokenizer_state: u32,
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    let accessible = constraint
-        .tokenizer
-        .tokens_accessible_from_state(tokenizer_state);
+    let accessible = tokenizer.tokens_accessible_from_state(tokenizer_state);
     let ignore_relevant = constraint
         .ignore_terminal
         .is_some_and(|terminal| accessible.contains(terminal as usize));
@@ -1703,12 +1742,19 @@ fn config_token_boundary_allowed_cached(
 ) -> bool {
     (0..scan_cache.config_len(tokenizer_config)).any(|state_index| {
         let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
-            token_boundary_allowed_cached(constraint, tokenizer_state, stacks, cache)
+        token_boundary_allowed_cached(
+            constraint,
+            scan_cache.tokenizer(),
+            tokenizer_state,
+            stacks,
+            cache,
+        )
     })
 }
 
 fn lexer_state_relevant_cached(
     constraint: &Constraint,
+    tokenizer: &Tokenizer,
     tokenizer_state: u32,
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
@@ -1720,10 +1766,8 @@ fn lexer_state_relevant_cached(
         return result;
     }
 
-    let accessible = constraint
-        .tokenizer
-        .tokens_accessible_from_state(tokenizer_state);
-    let matched = constraint.tokenizer.matched_terminal_bitset(tokenizer_state);
+    let accessible = tokenizer.tokens_accessible_from_state(tokenizer_state);
+    let matched = tokenizer.matched_terminal_bitset(tokenizer_state);
     let ignore_relevant = constraint.ignore_terminal.is_some_and(|terminal| {
         accessible.contains(terminal as usize) || matched.contains(terminal as usize)
     });
@@ -1759,7 +1803,13 @@ fn lexer_config_relevant_cached(
 ) -> bool {
     (0..scan_cache.config_len(tokenizer_config)).any(|state_index| {
         let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
-            lexer_state_relevant_cached(constraint, tokenizer_state, stacks, cache)
+        lexer_state_relevant_cached(
+            constraint,
+            scan_cache.tokenizer(),
+            tokenizer_state,
+            stacks,
+            cache,
+        )
     })
 }
 
@@ -2047,13 +2097,13 @@ impl DynamicDeadlinePoll {
 
 #[inline]
 fn cached_self_loop_bytes(
-    constraint: &Constraint,
+    tokenizer: &Tokenizer,
     tokenizer_state: u32,
     cache: &mut FxHashMap<u32, U8Set>,
 ) -> U8Set {
     *cache
         .entry(tokenizer_state)
-        .or_insert_with(|| constraint.tokenizer.self_loop_bytes(tokenizer_state))
+        .or_insert_with(|| tokenizer.self_loop_bytes(tokenizer_state))
 }
 
 fn cached_config_self_loop_bytes(
@@ -2069,7 +2119,7 @@ fn cached_config_self_loop_bytes(
     let mut bytes = U8Set::all();
     for state_index in 0..scan_cache.config_len(tokenizer_config) {
         let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
-        bytes &= cached_self_loop_bytes(constraint, tokenizer_state, raw_cache);
+        bytes &= cached_self_loop_bytes(scan_cache.tokenizer(), tokenizer_state, raw_cache);
     }
     config_cache.insert(tokenizer_config, bytes);
     bytes
@@ -2097,6 +2147,9 @@ fn raw_self_loop_subtree(
     config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
     traversal_cache: &mut DynamicTraversalCache,
 ) -> RawSelfLoopSubtree {
+    if scan_cache.tokenizer().has_virtual_residual_runtime() {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
     if !initial_prune_guard.is_passed() {
         return RawSelfLoopSubtree::CannotSkip;
     }
@@ -2233,6 +2286,9 @@ fn bounded_observation_branch_certificate(
             return false;
         }};
     }
+    if lexer_scan_cache.tokenizer().has_virtual_residual_runtime() {
+        reject!("virtual_residual_runtime");
+    }
     if branch.tokenizer_config == initial_config
     {
         reject!("initial_config");
@@ -2270,7 +2326,10 @@ fn bounded_observation_branch_certificate(
     }
 
     let source = lexer_scan_cache.config_state(branch.tokenizer_config, 0);
-    if constraint.tokenizer.state_has_epsilon_transitions(source) {
+    if lexer_scan_cache
+        .tokenizer()
+        .state_has_epsilon_transitions(source)
+    {
         reject!("source_epsilon");
     }
 
@@ -2283,9 +2342,10 @@ fn bounded_observation_branch_certificate(
             && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDED_EXACT").is_some()
             && subtree_token_count >= 10_000)
             .then(|| {
-                let all_terminals = BitSet::all(constraint.tokenizer.num_terminals() as usize);
-                constraint
-                    .tokenizer
+                let all_terminals =
+                    BitSet::all(lexer_scan_cache.tokenizer().num_terminals() as usize);
+                lexer_scan_cache
+                    .tokenizer()
                     .bounded_observation_safe_horizon_from_state(
                         source,
                         subtree_bytes,
@@ -2332,6 +2392,9 @@ fn process_interned_dynamic_trie_node(
 ) -> bool {
     let branch_count = recognizer.branches(recognizer_state).len();
     let subtree_tokens = trie.subtree_tokens(node_id);
+    let allow_skip_certificates = !lexer_scan_cache
+        .tokenizer()
+        .has_virtual_residual_runtime();
 
     // A precomputed trie-aware projection can be reused after the walk has
     // entered its source state, provided projection construction reached this
@@ -2340,7 +2403,10 @@ fn process_interned_dynamic_trie_node(
     // `source_reentry_safe_subtrees` is deliberately stricter than the root
     // projection's ordinary `safe_subtrees`: it makes the suffix-language
     // reuse independent of how the runtime reached this node.
-    if !require_repair_used && subtree_tokens.len() >= dynamic_projection_reentry_min_tokens() {
+    if allow_skip_certificates
+        && !require_repair_used
+        && subtree_tokens.len() >= dynamic_projection_reentry_min_tokens()
+    {
         for branch in recognizer.branches(recognizer_state) {
         if !branch.fresh_reset
             && branch.pending_terminals.is_empty()
@@ -2385,7 +2451,7 @@ fn process_interned_dynamic_trie_node(
     // commonly has many literal loops *and* a counter-advancing family of
     // observation-equivalent transitions, and the latter is what lets us skip
     // the whole partition.
-    if !require_repair_used {
+    if allow_skip_certificates && !require_repair_used {
         if let Some(bounded_branches) = bounded_branches.as_ref() {
             let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node_id));
             let horizon = trie.subtree_max_byte_len(node_id);
@@ -2533,6 +2599,15 @@ fn dynamic_mask_cache_enabled() -> bool {
 fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStateKey> {
     let mut remaining = DYNAMIC_MASK_CACHE_MAX_STACKS;
     let mut key = Vec::with_capacity(state.state.len());
+    let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+    let observation_cache_enabled =
+        std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
+            && vocab.has_terminal_observation_classes()
+            && !state.constraint.tokenizer.has_any_virtual_runtime()
+            // Static/dynamic composition can defer parser terminals and repair
+            // component switches. Those observations are not represented by
+            // the ordinary singleton parser-admission proof below.
+            && state.constraint.static_dynamic_overlay.is_none();
     for (&tokenizer_state, gss) in &state.state {
         if gss.max_depth() > DYNAMIC_MASK_CACHE_MAX_DEPTH {
             return None;
@@ -2552,8 +2627,62 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
             })
             .collect::<Vec<_>>();
         paths.sort_unstable();
-        key.push((tokenizer_state, paths));
+        let exclusions_empty = paths.iter().all(|(_, exclusions)| exclusions.is_empty());
+
+        // Exact parser-relative lexer quotient. When this parser frontier admits
+        // exactly one terminal, every lexer event before the first successful
+        // parser advance is observable only through that terminal's
+        // `(matched, possible-future)` pair. Equal precomputed exact quotient
+        // classes therefore have the same next-token mask; after a finalization
+        // both executions enter the same parser child and common lexer reset.
+        let lexer_key = if observation_cache_enabled
+            && exclusions_empty
+            && state.constraint.ignore_terminal.is_none_or(|ignore| {
+                let ignore = ignore as usize;
+                !state
+                    .constraint
+                    .tokenizer
+                    .matched_terminal_bitset(tokenizer_state)
+                    .contains(ignore)
+                    && !state
+                        .constraint
+                        .tokenizer
+                        .possible_future_terminals(tokenizer_state)
+                        .contains(ignore)
+            })
+        {
+            let admitted = state
+                .constraint
+                .direct_regular_admissible_terminals(gss)
+                .unwrap_or_else(|| {
+                    let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
+                    stack_admissible_terminals(&state.constraint.table, gss, &candidates)
+                });
+            let mut terminals = admitted.iter_ones();
+            terminals
+                .next()
+                .filter(|_| terminals.next().is_none())
+                .and_then(|terminal| {
+                    let terminal = terminal as TerminalID;
+                    vocab
+                        .terminal_observation_class(terminal, tokenizer_state)
+                        .map(|class| DynamicMaskLexerStateKey::TerminalObservation {
+                            terminal,
+                            class,
+                            initial: tokenizer_state == state.constraint.tokenizer.initial_state(),
+                        })
+                })
+                .unwrap_or(DynamicMaskLexerStateKey::Exact(tokenizer_state))
+        } else {
+            DynamicMaskLexerStateKey::Exact(tokenizer_state)
+        };
+        key.push((lexer_key, paths));
     }
+    // Raw parser-state entries are sorted by tokenizer id. Observation classes
+    // deliberately identify different raw ids, so canonicalize ordering after
+    // replacing that coordinate and collapse redundant equivalent branches.
+    key.sort_unstable();
+    key.dedup();
     Some(key)
 }
 
@@ -2658,7 +2787,7 @@ fn try_advance_scalar_branch_over_segment(
         };
         for state_index in 0..lexer_scan_cache.config_len(next_config) {
             let state = lexer_scan_cache.config_state(next_config, state_index);
-            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
+            for terminal in lexer_scan_cache.tokenizer().matched_terminals_iter(state) {
                 if parser_terminal_admissible_cached(
                     constraint,
                     terminal,
@@ -2737,7 +2866,7 @@ fn advance_dynamic_branches_over_segment(
             };
             let Some(advanced_prune_guard) = branch
                 .initial_prune_guard
-                .advance(constraint, std::slice::from_ref(&byte))
+                .advance(lexer_scan_cache.tokenizer(), std::slice::from_ref(&byte))
             else {
                 continue;
             };
@@ -2745,12 +2874,15 @@ fn advance_dynamic_branches_over_segment(
             let config_len = lexer_scan_cache.config_len(next_config);
             for state_index in 0..config_len {
                 let matched_state = lexer_scan_cache.config_state(next_config, state_index);
-                for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
+                for terminal in lexer_scan_cache
+                    .tokenizer()
+                    .matched_terminals_iter(matched_state)
+                {
                     let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
                         advanced_prune_guard.clone()
                     } else {
                         advanced_prune_guard.remember_terminal_match(
-                            constraint,
+                            lexer_scan_cache.tokenizer(),
                             matched_state,
                             terminal,
                         )
@@ -3347,7 +3479,6 @@ fn walk_interned_dynamic_trie_range(
 
 #[inline]
 fn dynamic_config_matches_projection(
-    vocab: &DynamicMaskVocab,
     lexer_scan_cache: &DynamicNfaScanCache<'_>,
     tokenizer_config: u32,
     expected: &[u32],
@@ -3357,9 +3488,11 @@ fn dynamic_config_matches_projection(
     }
     let mut projected = SmallVec::<[u32; 16]>::new();
     for index in 0..lexer_scan_cache.config_len(tokenizer_config) {
-        projected.push(vocab.mask_projection_state(
-            lexer_scan_cache.config_state(tokenizer_config, index),
-        ));
+        // `DynamicNfaScanCache::new_for_mask` already executes over the mask
+        // tokenizer when one exists. Its configuration states are therefore
+        // already in the finite projection coordinate and must not be
+        // projected a second time.
+        projected.push(lexer_scan_cache.config_state(tokenizer_config, index));
     }
     projected.sort_unstable();
     projected.dedup();
@@ -3395,7 +3528,6 @@ fn dynamic_config_projection_certifies_subtree(
                 continue;
             }
             if !dynamic_config_matches_projection(
-                    vocab,
                     lexer_scan_cache,
                     branch.tokenizer_config,
                     certificate.projected_config.as_ref(),
@@ -3447,7 +3579,11 @@ fn walk_interned_dynamic_trie(
 ) -> Result<(), String> {
     let mut recognizer = DynamicRecognizerStateCache::new();
     let root_state = recognizer.intern(root_branches.clone());
-    let pre_match_projection = if let [branch] = root_branches.as_slice()
+    let allow_skip_certificates = !lexer_scan_cache
+        .tokenizer()
+        .has_virtual_residual_runtime();
+    let pre_match_projection = if allow_skip_certificates
+        && let [branch] = root_branches.as_slice()
         && !branch.fresh_reset
         && branch.pending_terminals.is_empty()
         && branch.initial_prune_guard.is_passed()
@@ -3482,13 +3618,14 @@ fn walk_interned_dynamic_trie(
         stats.recognizer_transition_misses = recognizer.transition_misses;
         return Ok(());
     }
-    if projections.iter().any(|(projection, admissible_future_mask)| {
+    if allow_skip_certificates
+        && (projections.iter().any(|(projection, admissible_future_mask)| {
         projection.subtree_common_future_mask(0) & *admissible_future_mask != 0
     }) || alias_projections_vocab
         .iter()
         .any(|(projection, admissible_future_mask)| {
             projection.subtree_common_future_mask(0) & *admissible_future_mask != 0
-        })
+        }))
     {
         stats.subtree_marks += 1;
         stats.subtree_mark_tokens += trie.subtree_tokens(0).len();
@@ -3634,7 +3771,8 @@ fn walk_interned_dynamic_trie(
                 continue;
             }
         }
-        if projections
+        if allow_skip_certificates
+            && projections
             .iter()
             .any(|(projection, _)| projection.subtree_is_safe(edge.child))
         {
@@ -3648,7 +3786,8 @@ fn walk_interned_dynamic_trie(
         // trie. They are therefore valid for every token length, but only for
         // the common-future certificate (not source-specific safe/re-entry
         // fields from the canonical projection).
-        if alias_projections_vocab
+        if allow_skip_certificates
+            && alias_projections_vocab
             .iter()
             .any(|(projection, admissible_future_mask)| {
                 projection.subtree_common_future_mask(edge.child)
@@ -3850,7 +3989,8 @@ fn fill_mask_dynamic_impl(
     if !additive_static_baseline {
         buf.fill(0);
     }
-    let initial_tsid = state.constraint.tokenizer.initial_state();
+    let exact_initial_tsid = state.constraint.tokenizer.initial_state();
+    let initial_tsid = vocab.mask_projection_state(exact_initial_tsid);
     let mut root_branches = DynamicBranches::new();
     let mut sole_root_source_state = None::<u32>;
     let mut raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
@@ -3859,16 +3999,17 @@ fn fill_mask_dynamic_impl(
     if profile {
         traversal_cache.profile_interaction_hash = Some(0xcbf29ce484222325u64);
     }
-    let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
+    let mut lexer_scan_cache = DynamicNfaScanCache::new_for_mask(state.constraint, vocab, deadline);
     let initial_config = lexer_scan_cache.config_for_raw_start(initial_tsid)?;
     let trie = vocab.trie.as_ref();
     let mut stats = DynamicWalkStats::default();
     if profile {
         eprintln!(
-            "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
+            "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} exact_tokenizer_states={} projected={}",
+            lexer_scan_cache.tokenizer().num_states(),
+            lexer_scan_cache.tokenizer().has_epsilon_transitions(),
             state.constraint.tokenizer.num_states(),
-            state.constraint.tokenizer_has_epsilon_transitions,
-            state.constraint.tokenizer_fast_transitions.len(),
+            !std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer),
         );
         if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_RELEVANT_TERMINALS") {
             let terminals = value
@@ -3896,12 +4037,7 @@ fn fill_mask_dynamic_impl(
         deadline_poll.check()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             deadline_poll.check()?;
-            let initial_prune_guard = InitialPruneGuard::new(
-                state.constraint,
-                tokenizer_state,
-                &stacks,
-                &terminals_disallowed,
-            );
+            let initial_prune_guard = InitialPruneGuard::new(vocab, &terminals_disallowed);
             if profile {
                 // Keep diagnostic parser-signature queries out of the live
                 // traversal cache.  They must not prime or otherwise alter
@@ -4023,22 +4159,26 @@ fn fill_mask_dynamic_impl(
                         stack,
                     );
                 }
+                let projected_tokenizer_state = vocab.mask_projection_state(tokenizer_state);
                 let loop_bytes = cached_self_loop_bytes(
-                    state.constraint,
-                    tokenizer_state,
+                    lexer_scan_cache.tokenizer(),
+                    projected_tokenizer_state,
                     &mut raw_self_loop_cache,
                 );
                 eprintln!(
                     "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} transitions={} matched={} futures={} loop_bytes={} boundary_allowed={}",
                     state.generation,
                     tokenizer_state,
-                    tokenizer_state == initial_tsid,
+                    tokenizer_state == exact_initial_tsid,
                     stacks.path_count_at_most(1_000_000),
                     terminals_disallowed
                         .iter()
                         .map(|(_, terminals)| terminals.len())
                         .sum::<usize>(),
-                    state.constraint.tokenizer.transitions_from(tokenizer_state).count(),
+                    lexer_scan_cache
+                        .tokenizer()
+                        .transitions_from(projected_tokenizer_state)
+                        .count(),
                     state
                         .constraint
                         .tokenizer
@@ -4052,13 +4192,16 @@ fn fill_mask_dynamic_impl(
                     loop_bytes.len(),
                     token_boundary_allowed_cached(
                         state.constraint,
-                        tokenizer_state,
+                        lexer_scan_cache.tokenizer(),
+                        projected_tokenizer_state,
                         &stacks,
                         &mut traversal_cache,
                     ),
                 );
             }
-            let tokenizer_config = lexer_scan_cache.config_for_raw_start(tokenizer_state)?;
+            let projected_tokenizer_state = vocab.mask_projection_state(tokenizer_state);
+            let tokenizer_config =
+                lexer_scan_cache.config_for_raw_start(projected_tokenizer_state)?;
             if !push_unique_dynamic_branch(
                 &mut root_branches,
                 DynamicBranch {
@@ -4077,9 +4220,12 @@ fn fill_mask_dynamic_impl(
             ) {
                 stats.duplicate_branches += 1;
             }
+            // Projection accelerators below are indexed in the tokenizer used
+            // by `lexer_scan_cache`, i.e. the finite mask coordinate when one
+            // exists. Keep this remembered source in that same coordinate.
             sole_root_source_state = match sole_root_source_state {
-                None => Some(tokenizer_state),
-                Some(existing) if existing == tokenizer_state => Some(existing),
+                None => Some(projected_tokenizer_state),
+                Some(existing) if existing == projected_tokenizer_state => Some(existing),
                 Some(_) => Some(u32::MAX),
             };
         }
@@ -5228,6 +5374,137 @@ nt start ::= A C | B D;
         state.commit_token(1).unwrap();
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
+    }
+
+    #[test]
+    fn dynamic_virtual_unit_repeat_uses_static_mask_projection_end_to_end() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaa".to_vec()),
+            (3, b"aaaa".to_vec()),
+            (4, b"aaaaa".to_vec()),
+            (5, b"aaaaaa".to_vec()),
+            (6, b"b".to_vec()),
+        ]);
+
+        let billion_grammar = r#"
+start start;
+t A ::= /a{0,1000000000}/;
+nt start ::= A;
+"#;
+        let billion = DynamicConstraint::from_glrm_grammar(billion_grammar, &vocab).unwrap();
+        assert_eq!(
+            billion.inner.tokenizer.num_states(),
+            1,
+            "the exact billion-bound lexer must remain an arithmetic runtime state",
+        );
+        let mask_tokenizer = billion
+            .inner
+            .dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .expect("virtual exact lexer must install a static mask lexer");
+        assert_eq!(
+            mask_tokenizer.num_states(),
+            vocab.max_token_byte_len() as u32 + 3,
+            "mask lexer size must depend on vocabulary horizon, not the repeat bound",
+        );
+        let billion_mask = billion.inner.start().mask();
+        for token in 0..=5 {
+            assert!(token_allowed(&billion_mask, token), "a-only token {token} was rejected");
+        }
+        assert!(!token_allowed(&billion_mask, 6));
+
+        // For a small bound, compare the virtual dynamic implementation with
+        // the ordinary materialized static implementation through the exact
+        // upper-bound transition. This checks both re-projection after commit
+        // and rejection of a vocabulary token which crosses the bound.
+        let boundary_grammar = r#"
+start start;
+t A ::= /a{0,5}/;
+nt start ::= A;
+"#;
+        let dynamic = DynamicConstraint::from_glrm_grammar(boundary_grammar, &vocab).unwrap();
+        let ordinary = Constraint::from_glrm_grammar(boundary_grammar, &vocab).unwrap();
+        let mut dynamic_state = dynamic.inner.start();
+        let mut ordinary_state = ordinary.start();
+
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        assert!(!token_allowed(&dynamic_state.mask(), 5));
+        dynamic_state.commit_token(2).unwrap(); // consume three a's
+        ordinary_state.commit_token(2).unwrap();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        assert!(token_allowed(&dynamic_state.mask(), 0));
+        assert!(token_allowed(&dynamic_state.mask(), 1));
+        assert!(!token_allowed(&dynamic_state.mask(), 2));
+
+        dynamic_state.commit_token(1).unwrap(); // reach the exact upper bound
+        ordinary_state.commit_token(1).unwrap();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        assert!(dynamic_state.is_accepting());
+        assert!(!token_allowed(&dynamic_state.mask(), 0));
+        assert!(dynamic_state.clone().commit_token(0).is_err());
+    }
+
+    #[test]
+    fn dynamic_hybrid_virtual_repeat_coexists_with_static_terminals() {
+        let vocab = Vocab::new(vec![
+            (0, b"b".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"aaa".to_vec()),
+            (4, b"baaa".to_vec()),
+            (5, b"baaaaa".to_vec()),
+            (6, b"baaaaaa".to_vec()),
+            (7, b"x".to_vec()),
+        ]);
+        let billion_grammar = r#"
+start start;
+t A ::= /a{0,1000000000}/;
+t B ::= 'b';
+nt start ::= B A;
+"#;
+        let hybrid = DynamicConstraint::from_glrm_grammar(billion_grammar, &vocab).unwrap();
+        assert!(
+            hybrid
+                .inner
+                .tokenizer
+                .virtual_zero_min_unit_repeat_mask_tokenizer(vocab.max_token_byte_len())
+                .is_some(),
+            "the pathological terminal should be the arithmetic component",
+        );
+        assert!(
+            hybrid.inner.tokenizer.num_states() < 64,
+            "physical hybrid lexer unexpectedly scales with the billion bound",
+        );
+        let start_mask = hybrid.start().mask();
+        assert!(token_allowed(&start_mask, 4));
+        assert!(token_allowed(&start_mask, 5));
+        assert!(token_allowed(&start_mask, 6));
+        assert!(!token_allowed(&start_mask, 7));
+
+        let small_grammar = r#"
+start start;
+t A ::= /a{0,5}/;
+t B ::= 'b';
+nt start ::= B A;
+"#;
+        // The hybrid threshold intentionally leaves this small grammar on the
+        // ordinary path; it is therefore an independent materialized oracle.
+        let dynamic_small = DynamicConstraint::from_glrm_grammar(small_grammar, &vocab).unwrap();
+        let ordinary_small = Constraint::from_glrm_grammar(small_grammar, &vocab).unwrap();
+        let mut dynamic_state = dynamic_small.start();
+        let mut ordinary_state = ordinary_small.start();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        assert!(token_allowed(&dynamic_state.mask(), 5));
+        assert!(!token_allowed(&dynamic_state.mask(), 6));
+
+        dynamic_state.commit_token(0).unwrap();
+        ordinary_state.commit_token(0).unwrap();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
+        dynamic_state.commit_token(3).unwrap();
+        ordinary_state.commit_token(3).unwrap();
+        assert_eq!(dynamic_state.mask(), ordinary_state.mask());
     }
 
     #[test]
