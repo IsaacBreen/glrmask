@@ -164,6 +164,59 @@ pub(crate) fn execute_tokenizer_reusable(
     true
 }
 
+/// Execute one recursive leaf tokenizer into the reusable bounded scratch,
+/// then rebase its local continuation states and terminal matches into the
+/// live scoped runtime coordinate.
+///
+/// This is deliberately separate from `execute_tokenizer_reusable`: most
+/// callers of that helper are monolithic flat/linear accelerators whose parser
+/// logic is not yet provider-aware. The recursive single-lane lexer-only fast
+/// path can use this helper safely because it never changes the parser GSS; any
+/// ignored or parser-actionable match makes that path decline transactionally.
+pub(crate) fn execute_recursive_tokenizer_reusable(
+    constraint: &Constraint,
+    bytes: &[u8],
+    scoped_start_state: u32,
+    scratch: &mut ReusableTokenizerExecScratch,
+) -> bool {
+    let Some((leaf_index, local_start_state)) =
+        constraint.recursive_tokenizer_leaf_state(scoped_start_state)
+    else {
+        return false;
+    };
+    let Some(leaf) = constraint.recursive_leaf_constraint(leaf_index) else {
+        return false;
+    };
+    debug_assert!(
+        !leaf.uses_compact_segmented_parser_runtime(),
+        "recursive tokenizer layout leaves must be intact runtime constraints",
+    );
+    if !execute_tokenizer_reusable(leaf, bytes, local_start_state, scratch) {
+        return false;
+    }
+    for state in &mut scratch.states {
+        let Some(scoped) = constraint.recursive_tokenizer_scoped_state(leaf_index, *state) else {
+            return false;
+        };
+        *state = scoped;
+    }
+    for matched in &mut scratch.matches {
+        let Some(scoped_end_state) =
+            constraint.recursive_tokenizer_scoped_state(leaf_index, matched.end_state)
+        else {
+            return false;
+        };
+        let Some(runtime_terminal) =
+            constraint.recursive_terminal_scoped_id(leaf_index, matched.id)
+        else {
+            return false;
+        };
+        matched.end_state = scoped_end_state;
+        matched.id = runtime_terminal;
+    }
+    true
+}
+
 
 /// Execute from the exact union of several tokenizer start states using the
 /// same bounded scratch. Callers use this only when all starts carry one

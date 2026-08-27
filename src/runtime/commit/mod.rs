@@ -45,7 +45,8 @@ use self::profile::{
 use self::template_advance::advance_stacks_template_dfa_owned;
 pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
-    execute_tokenizer_from_state_small, execute_tokenizer_reusable, execute_tokenizer_reusable_from_states, InitialCommitScan,
+    execute_recursive_tokenizer_reusable, execute_tokenizer_from_state_small,
+    execute_tokenizer_reusable, execute_tokenizer_reusable_from_states, InitialCommitScan,
 };
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
@@ -7073,6 +7074,90 @@ fn commit_bytes_impl(
     result
 }
 
+/// Exact single-lane lexer-only commit.
+///
+/// The parser GSS is left byte-for-byte unchanged. The shortcut applies only
+/// when bounded tokenizer execution succeeds, there are no delayed exclusions,
+/// and every terminal completed anywhere in `bytes` is both non-ignore and
+/// parser-inadmissible. Therefore no parser action (including recursive
+/// CALL/RETURN closure) can be skipped. Only viable tokenizer continuation
+/// keys are substituted for the original key; every failure to prove those
+/// conditions declines without mutating `state`.
+fn try_commit_single_state_lexer_only(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    ignore_terminal: Option<u32>,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    flat_frontier: &mut FlatFrontierScratch,
+    stack_scratch: &mut Vec<u32>,
+) -> bool {
+    let [(start_tokenizer_state, gss)] = state.entries.as_slice() else {
+        return false;
+    };
+    let start_tokenizer_state = *start_tokenizer_state;
+    let gss = gss.clone();
+    if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+        return false;
+    }
+    let recursive_runtime = constraint.uses_compact_segmented_parser_runtime();
+    let tokenizer_executed = if recursive_runtime {
+        execute_recursive_tokenizer_reusable(
+            constraint,
+            bytes,
+            start_tokenizer_state,
+            tokenizer_scratch,
+        )
+    } else {
+        execute_tokenizer_reusable(constraint, bytes, start_tokenizer_state, tokenizer_scratch)
+    };
+    if !tokenizer_executed {
+        return false;
+    }
+
+    // Direct-regular wide-frontier summaries are monolithic-coordinate
+    // accelerators. Recursive admission is already exact through the provider,
+    // so deliberately do not consult those summaries here.
+    let wide_frontier = (!recursive_runtime)
+        .then(|| constraint.direct_regular_wide_frontier_for_gss(&gss))
+        .flatten();
+    if tokenizer_scratch.matches.iter().any(|matched| {
+        runtime_is_ignored_terminal(constraint, ignore_terminal, matched.id)
+            || wide_frontier.map_or_else(
+                || parser_may_advance_on(constraint, &gss, matched.id),
+                |summary| summary.actionable_terminals.contains(matched.id as usize),
+            )
+    }) {
+        return false;
+    }
+
+    tokenizer_scratch.states.retain(|end_state| {
+        wide_frontier.map_or_else(
+            || end_state_may_advance(constraint, &gss, *end_state),
+            |summary| wide_frontier_end_state_may_advance(constraint, summary, *end_state),
+        )
+    });
+
+    // The parser frontier is unchanged. Re-key its existing Arc directly
+    // instead of decomposing, rebuilding, and fusing the represented stack
+    // language.
+    if state.replace_single_keys(&tokenizer_scratch.states) {
+        return true;
+    }
+    if let Some(acc) = gss.single_path_acc()
+        && gss.copy_single_path_stack_into(stack_scratch)
+        && flat_frontier.replace_state_with_uniform_stack_keys(
+            state,
+            &tokenizer_scratch.states,
+            stack_scratch,
+            &acc,
+        )
+    {
+        return true;
+    }
+    false
+}
+
 fn commit_bytes_impl_inner(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -7264,68 +7349,24 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    // A large fraction of model tokens only advance the lexer. Execute the
-    // tokenizer exactly into bounded, preallocated scratch. If every match is
-    // non-ignored and non-actionable for the current parser stack, the GSS is
-    // unchanged and only the single viable tokenizer continuation remains.
-    if state.len() == 1 {
-        let (&start_tokenizer_state, gss) = state.iter().next().unwrap();
-        let gss = gss.clone();
-        if execute_tokenizer_reusable(
-            constraint,
-            bytes,
-            start_tokenizer_state,
-            &mut bufs.reusable_tokenizer_exec,
-        ) {
-            let parser_accumulators_empty =
-                gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
-            let wide_frontier = constraint.direct_regular_wide_frontier_for_gss(&gss);
-            let no_actionable_matches = parser_accumulators_empty
-                && bufs.reusable_tokenizer_exec.matches.iter().all(|matched| {
-                    !is_ignored_terminal(ignore_terminal, matched.id)
-                        && wide_frontier.map_or_else(
-                            || !parser_may_advance_on(constraint, &gss, matched.id),
-                            |summary| {
-                                !summary
-                                    .actionable_terminals
-                                    .contains(matched.id as usize)
-                            },
-                        )
-                });
-            if no_actionable_matches {
-                bufs.reusable_tokenizer_exec.states.retain(|end_state| {
-                    wide_frontier.map_or_else(
-                        || end_state_may_advance(constraint, &gss, *end_state),
-                        |summary| {
-                            wide_frontier_end_state_may_advance(
-                                constraint,
-                                summary,
-                                *end_state,
-                            )
-                        },
-                    )
-                });
-
-                // The parser frontier is unchanged. Re-key its existing Arc
-                // directly instead of decomposing, rebuilding, and fusing the
-                // represented stack language.
-                if state.replace_single_keys(&bufs.reusable_tokenizer_exec.states) {
-                    return Ok(());
-                }
-
-                if let Some(acc) = gss.single_path_acc()
-                    && gss.copy_single_path_stack_into(&mut bufs.linear_stack_original)
-                    && bufs.flat_frontier.replace_state_with_uniform_stack_keys(
-                        state,
-                        &bufs.reusable_tokenizer_exec.states,
-                        &bufs.linear_stack_original,
-                        &acc,
-                    )
-                {
-                    return Ok(());
-                }
-            }
+    // A large fraction of model tokens only advance the lexer. This proof is
+    // valid in both monolithic and recursive leaf-scoped coordinates.
+    if try_commit_single_state_lexer_only(
+        constraint,
+        state,
+        bytes,
+        ignore_terminal,
+        &mut bufs.reusable_tokenizer_exec,
+        &mut bufs.flat_frontier,
+        &mut bufs.linear_stack_original,
+    ) {
+        if debug_path && constraint.uses_compact_segmented_parser_runtime() {
+            eprintln!(
+                "[glrmask/debug][commit_path] recursive_lexer_only states={}",
+                state.len(),
+            );
         }
+        return Ok(());
     }
 
     // Common deterministic case: consume one complete model token and mutate
