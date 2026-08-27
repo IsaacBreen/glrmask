@@ -3586,17 +3586,21 @@ impl<'a> ConstraintState<'a> {
         candidates: Option<&[u32]>,
     ) {
         let mut buffers = CommitBuffers::default();
-        let mut probe = |token_id: u32, buf: &mut [u32]| {
+        let mut byte_candidates = Vec::<(u32, &[u8])>::new();
+        let mut pointwise_candidates = Vec::<u32>::new();
+        let mut collect = |token_id: u32| {
             if original_mask_contains(buf, token_id) {
                 return;
             }
-            if crate::runtime::commit::token_admissible_from_state_exact(
-                self.constraint,
-                &self.state,
-                &mut buffers,
-                token_id,
-            ) {
-                set_original_mask_bit(buf, token_id);
+            if self.constraint.has_special_token_id(token_id) {
+                pointwise_candidates.push(token_id);
+            } else if let Some(bytes) = self.constraint.token_bytes_for_id(token_id) {
+                byte_candidates.push((token_id, bytes));
+            } else {
+                // Malformed/stale trigger metadata cannot create a false
+                // positive. The exact pointwise probe will simply reject an
+                // unknown token id.
+                pointwise_candidates.push(token_id);
             }
         };
 
@@ -3606,36 +3610,58 @@ impl<'a> ConstraintState<'a> {
                 let mut remaining = candidate_word & !already;
                 while remaining != 0 {
                     let bit = remaining.trailing_zeros();
-                    probe((word_index as u32) * 32 + bit, buf);
+                    collect((word_index as u32) * 32 + bit);
                     remaining &= remaining - 1;
                 }
             }
-            return;
+        } else {
+            // TriggerDetail::None is intentionally rare. Avoid probing sparse
+            // ID holes (especially with high-valued model special tokens)
+            // while still covering every token the public runtime can consume.
+            for (token_id, _) in self.constraint.token_bytes_iter() {
+                collect(token_id);
+            }
+            for special in &self.constraint.special_token_terminals {
+                if !self
+                    .constraint
+                    .is_late_grammar_placeholder_terminal(special.terminal_id)
+                {
+                    collect(special.token_id);
+                }
+            }
         }
 
-        // TriggerDetail::None is intentionally rare. Avoid probing sparse ID
-        // holes (especially with high-valued model special tokens) while still
-        // covering every token the public runtime can actually consume.
-        let mut token_ids = self
-            .constraint
-            .token_bytes_iter()
-            .map(|(token_id, _)| token_id)
-            .collect::<Vec<_>>();
-        token_ids.extend(
-            self.constraint
-                .special_token_terminals
-                .iter()
-                .filter(|special| {
-                    !self
-                        .constraint
-                        .is_late_grammar_placeholder_terminal(special.terminal_id)
-                })
-                .map(|special| special.token_id),
+        // Byte-backed candidates share the same exact commit state along their
+        // common prefixes. Evaluate that radix tree once instead of replaying
+        // the complete model-token spelling independently for every candidate.
+        let mut admitted = Vec::with_capacity(byte_candidates.len());
+        crate::runtime::commit::admissible_byte_token_candidates_from_state_exact(
+            self.constraint,
+            &self.state,
+            &mut buffers,
+            &mut byte_candidates,
+            &mut admitted,
         );
-        token_ids.sort_unstable();
-        token_ids.dedup();
-        for token_id in token_ids {
-            probe(token_id, buf);
+        for token_id in admitted {
+            set_original_mask_bit(buf, token_id);
+        }
+
+        // Special-token semantics can add a parser path independent of the
+        // token's byte spelling, so those ids deliberately stay pointwise.
+        pointwise_candidates.sort_unstable();
+        pointwise_candidates.dedup();
+        for token_id in pointwise_candidates {
+            if original_mask_contains(buf, token_id) {
+                continue;
+            }
+            if crate::runtime::commit::token_admissible_from_state_exact(
+                self.constraint,
+                &self.state,
+                &mut buffers,
+                token_id,
+            ) {
+                set_original_mask_bit(buf, token_id);
+            }
         }
     }
 

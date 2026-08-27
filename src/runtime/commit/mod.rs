@@ -1383,6 +1383,109 @@ pub(crate) fn token_admissible_from_state_exact(
     commit_token_impl(constraint, &mut probe, buffers, token_id).is_ok()
 }
 
+/// Exact batched admission for ordinary byte-backed model tokens.
+///
+/// Candidates are sorted by byte string and evaluated as a radix tree.  Each
+/// shared byte prefix is committed once through the ordinary authoritative
+/// commit engine, then the resulting `ParserStateMap` is cheaply cloned for
+/// its child branches.  A dead prefix rejects the complete subtree below it.
+///
+/// This helper deliberately handles byte semantics only.  Callers must keep
+/// tokens with special-token semantics on `token_admissible_from_state_exact`,
+/// because those tokens additionally fork parser paths that are not represented
+/// by their byte spelling.
+pub(crate) fn admissible_byte_token_candidates_from_state_exact<'a>(
+    constraint: &Constraint,
+    source: &ParserStateMap,
+    buffers: &mut CommitBuffers,
+    candidates: &mut Vec<(u32, &'a [u8])>,
+    admitted: &mut Vec<u32>,
+) {
+    if candidates.is_empty() || source.is_empty() {
+        return;
+    }
+    candidates.sort_unstable_by(|(left_id, left), (right_id, right)| {
+        left.cmp(right).then_with(|| left_id.cmp(right_id))
+    });
+
+    fn advance_segment(
+        constraint: &Constraint,
+        source: &ParserStateMap,
+        buffers: &mut CommitBuffers,
+        bytes: &[u8],
+    ) -> Option<ParserStateMap> {
+        if bytes.is_empty() {
+            return Some(source.clone());
+        }
+        buffers.reset_all();
+        let mut next = source.clone();
+        commit_bytes_impl(constraint, &mut next, bytes, buffers).ok()?;
+        (!next.is_empty()).then_some(next)
+    }
+
+    fn walk<'a>(
+        constraint: &Constraint,
+        source: &ParserStateMap,
+        buffers: &mut CommitBuffers,
+        entries: &[(u32, &'a [u8])],
+        consumed: usize,
+        admitted: &mut Vec<u32>,
+    ) {
+        let Some((_, first)) = entries.first() else {
+            return;
+        };
+        let last = entries.last().expect("nonempty radix candidate group").1;
+        let mut common_end = consumed;
+        let common_limit = first.len().min(last.len());
+        while common_end < common_limit && first[common_end] == last[common_end] {
+            common_end += 1;
+        }
+
+        let Some(frontier) = advance_segment(
+            constraint,
+            source,
+            buffers,
+            &first[consumed..common_end],
+        ) else {
+            return;
+        };
+
+        // Every candidate ending at this prefix has exactly the byte language
+        // already consumed into `frontier`.  Ordinary token commit rejects iff
+        // that frontier is empty; token-end normalization is non-destructive in
+        // the recursive runtime, and special-token alternatives are excluded by
+        // the caller.
+        let mut index = 0usize;
+        while index < entries.len() && entries[index].1.len() == common_end {
+            admitted.push(entries[index].0);
+            index += 1;
+        }
+
+        while index < entries.len() {
+            debug_assert!(entries[index].1.len() > common_end);
+            let branch_byte = entries[index].1[common_end];
+            let mut end = index + 1;
+            while end < entries.len()
+                && entries[end].1.len() > common_end
+                && entries[end].1[common_end] == branch_byte
+            {
+                end += 1;
+            }
+            walk(
+                constraint,
+                &frontier,
+                buffers,
+                &entries[index..end],
+                common_end,
+                admitted,
+            );
+            index = end;
+        }
+    }
+
+    walk(constraint, source, buffers, candidates, 0, admitted);
+}
+
 #[cold]
 pub(crate) fn prime_initial_commits(
     constraint: &Constraint,
@@ -8107,6 +8210,85 @@ mod tests {
 
     type CanonicalCommitState =
         Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
+
+    #[test]
+    fn recursive_radix_candidate_admission_matches_pointwise_exact_commit() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"X[".to_vec()),
+            (2, b"X[a".to_vec()),
+            (3, b"X[a]".to_vec()),
+            (4, b"X[a]!".to_vec()),
+            (5, b"X[a]!".to_vec()),
+            (6, b"[".to_vec()),
+            (7, b"[a".to_vec()),
+            (8, b"[a]".to_vec()),
+            (9, b"[a]!".to_vec()),
+            (10, b"a".to_vec()),
+            (11, b"a]".to_vec()),
+            (12, b"a]!".to_vec()),
+            (13, b"]".to_vec()),
+            (14, b"]!".to_vec()),
+            (15, b"!".to_vec()),
+        ]);
+        let child = Constraint::compile(
+            Grammar::glrm("glrm 1; start child; nt child = \"[\" \"a\" \"]\";"),
+            &vocab,
+        )
+        .unwrap();
+        let parent = Constraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = parent
+            .bind_grammar_dynamic_boundary("child", child)
+            .unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+
+        for path in [
+            &[][..],
+            &[0][..],
+            &[0, 6][..],
+            &[0, 6, 10][..],
+            &[0, 6, 10, 13][..],
+        ] {
+            let mut state = bound.start();
+            for &token in path {
+                state.commit_token(token).unwrap();
+            }
+
+            let mut batch_candidates = bound.token_bytes_iter().collect::<Vec<_>>();
+            let mut batch_buffers = CommitBuffers::default();
+            let mut batched = Vec::new();
+            admissible_byte_token_candidates_from_state_exact(
+                &bound,
+                &state.state,
+                &mut batch_buffers,
+                &mut batch_candidates,
+                &mut batched,
+            );
+            batched.sort_unstable();
+
+            let mut pointwise_buffers = CommitBuffers::default();
+            let mut pointwise = bound
+                .token_bytes_iter()
+                .filter_map(|(token_id, _)| {
+                    token_admissible_from_state_exact(
+                        &bound,
+                        &state.state,
+                        &mut pointwise_buffers,
+                        token_id,
+                    )
+                    .then_some(token_id)
+                })
+                .collect::<Vec<_>>();
+            pointwise.sort_unstable();
+            assert_eq!(batched, pointwise, "candidate mismatch after path {path:?}");
+        }
+    }
 
     #[test]
     fn recursive_scoped_tokenizer_exec_uses_only_the_active_leaf() {
