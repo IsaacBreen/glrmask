@@ -8,6 +8,7 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use rayon::prelude::*;
+use regex_syntax::utf8::Utf8Sequences;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -8472,22 +8473,41 @@ impl Tokenizer {
     /// the previous-round safe alphabet of every destination reachable by a
     /// currently retained byte.  The result is therefore sound for arbitrary
     /// mixed byte sequences drawn from the returned set.
-    pub fn precompute_bounded_observation_safe_byte_sets(
+    pub fn precompute_bounded_observation_safe_byte_sets_multi(
         &self,
-    ) -> (Box<[U8Set]>, Box<[U8Set]>) {
+    ) -> (
+        Box<[U8Set]>,
+        Box<[U8Set]>,
+        Box<[U8Set]>,
+        Box<[U8Set]>,
+        Box<[U8Set]>,
+        Box<[U8Set]>,
+    ) {
         const DEAD: u32 = u32::MAX;
         let state_count = self.num_states() as usize;
         if state_count == 0 {
-            return (Box::new([]), Box::new([]));
+            return (
+                Box::new([]),
+                Box::new([]),
+                Box::new([]),
+                Box::new([]),
+                Box::new([]),
+                Box::new([]),
+            );
         }
 
         // Literal self-loops are safe for every horizon and remain the fallback
         // when a finite advancing family shrinks away before H.
-        let mut horizon16 = (0..state_count)
+        let literal_loops = (0..state_count)
             .into_par_iter()
             .map(|state| self.self_loop_bytes(state as u32))
             .collect::<Vec<_>>();
-        let mut horizon64 = horizon16.clone();
+        let mut horizon2 = literal_loops.clone();
+        let mut horizon4 = literal_loops.clone();
+        let mut horizon8 = literal_loops.clone();
+        let mut horizon16 = literal_loops.clone();
+        let mut horizon32 = literal_loops.clone();
+        let mut horizon64 = literal_loops;
 
         // Pick one canonical one-byte continuation family at every raw state:
         // the largest set of bytes that all go to the same target while keeping
@@ -8613,8 +8633,9 @@ impl Tokenizer {
         // For a chain S --B0--> T --B1--> U ..., any byte alphabet contained
         // in every Bi follows the same raw-state chain and preserves the same
         // full lexer observation at every prefix. Pointer doubling computes the
-        // intersection along 2^k edges, so rounds 4 and 6 give exact conservative
-        // 16- and 64-byte alphabets for this canonical chain.
+        // intersection along 2^k edges. Keep every useful power-of-two horizon
+        // rather than throwing the intermediate results away: runtime trie
+        // nodes commonly need H2/H4/H8/H32 even when H16 or H64 is too strong.
         let mut path_sets = selected_sets;
         let mut jump = selected_targets;
         let mut doubled_sets = vec![U8Set::empty(); state_count];
@@ -8639,17 +8660,17 @@ impl Tokenizer {
             std::mem::swap(&mut path_sets, &mut doubled_sets);
             std::mem::swap(&mut jump, &mut doubled_jump);
 
-            if round == 4 {
-                horizon16
-                    .par_iter_mut()
-                    .zip(path_sets.par_iter())
-                    .for_each(|(current, candidate)| {
-                        if candidate.len() > current.len() {
-                            *current = *candidate;
-                        }
-                    });
-            } else if round == 6 {
-                horizon64
+            let destination = match round {
+                1 => Some(&mut horizon2),
+                2 => Some(&mut horizon4),
+                3 => Some(&mut horizon8),
+                4 => Some(&mut horizon16),
+                5 => Some(&mut horizon32),
+                6 => Some(&mut horizon64),
+                _ => None,
+            };
+            if let Some(destination) = destination {
+                destination
                     .par_iter_mut()
                     .zip(path_sets.par_iter())
                     .for_each(|(current, candidate)| {
@@ -8660,7 +8681,748 @@ impl Tokenizer {
             }
         }
 
-        (horizon16.into_boxed_slice(), horizon64.into_boxed_slice())
+        (
+            horizon2.into_boxed_slice(),
+            horizon4.into_boxed_slice(),
+            horizon8.into_boxed_slice(),
+            horizon16.into_boxed_slice(),
+            horizon32.into_boxed_slice(),
+            horizon64.into_boxed_slice(),
+        )
+    }
+
+    pub fn precompute_bounded_observation_safe_byte_sets(
+        &self,
+    ) -> (Box<[U8Set]>, Box<[U8Set]>) {
+        let (_, _, _, horizon16, _, horizon64) =
+            self.precompute_bounded_observation_safe_byte_sets_multi();
+        (horizon16, horizon64)
+    }
+
+    /// Experimental state-only bounded observation certificate.
+    ///
+    /// For each raw state, first collect the *entire* one-byte alphabet whose
+    /// transitions preserve that state's complete `(matched, possible-future)`
+    /// observation.  Then compute the exact maximum horizon (capped at 64) for
+    /// arbitrary mixed strings over that alphabet.  Unlike
+    /// `precompute_bounded_observation_safe_byte_sets_multi`, this does not
+    /// require every retained byte to share one raw transition target.
+    ///
+    /// The result is still purely tokenizer-state indexed: one `U8Set` and one
+    /// horizon byte per state, with no parser, terminal, or vocabulary-trie
+    /// coordinate.
+    pub fn precompute_wide_bounded_observation_safe_byte_sets(
+        &self,
+    ) -> (Box<[U8Set]>, Box<[u8]>) {
+        let state_count = self.num_states() as usize;
+        if state_count == 0 {
+            return (Box::new([]), Box::new([]));
+        }
+        let all_terminals = BitSet::all(self.num_terminals() as usize);
+        let rows = (0..state_count)
+            .into_par_iter()
+            .map(|state| {
+                let source = state as u32;
+                if self.state_has_epsilon_transitions(source) {
+                    return (U8Set::empty(), 0u8);
+                }
+                let source_matched = self.matched_terminal_bitset(source);
+                let source_futures = self.possible_future_terminals(source);
+                let mut bytes = U8Set::empty();
+                for (byte, target) in self.transitions_from(source) {
+                    if target == u32::MAX
+                        || self.state_has_epsilon_transitions(target)
+                        || self.matched_terminal_bitset(target) != source_matched
+                        || self.possible_future_terminals(target) != source_futures
+                    {
+                        continue;
+                    }
+                    bytes.insert(byte);
+                }
+                if bytes.is_empty() {
+                    return (bytes, 0);
+                }
+                let horizon = self.bounded_observation_safe_horizon_from_state(
+                    source,
+                    bytes,
+                    &all_terminals,
+                    64,
+                );
+                (bytes, horizon)
+            })
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::with_capacity(state_count);
+        let mut horizons = Vec::with_capacity(state_count);
+        for (set, horizon) in rows {
+            bytes.push(set);
+            horizons.push(horizon);
+        }
+        (bytes.into_boxed_slice(), horizons.into_boxed_slice())
+    }
+
+    /// State-only bounded no-finalization certificate that permits future
+    /// terminals to disappear while retaining the terminals that survive every
+    /// prefix of the selected byte family.
+    ///
+    /// At each state, choose the largest byte group sharing one deterministic
+    /// non-finalizing target. Pointer doubling then intersects those byte
+    /// groups along the target chain and, independently, intersects the
+    /// possible-future terminal masks seen along that chain. The H16/H32/H64
+    /// row therefore means: every mixed string over `bytes` up to H bytes
+    /// follows the same no-finalization state chain, and every terminal in
+    /// `common_futures` remains a possible future at every token boundary.
+    ///
+    /// This compact form is intentionally limited to <=64 terminals so the
+    /// runtime parser-admission test is one `u64` intersection.
+    pub fn precompute_bounded_shrinking_future_sets(
+        &self,
+    ) -> Option<(
+        Box<[U8Set]>, Box<[u64]>,
+        Box<[U8Set]>, Box<[u64]>,
+        Box<[U8Set]>, Box<[u64]>,
+    )> {
+        const DEAD: u32 = u32::MAX;
+        let terminal_count = self.num_terminals() as usize;
+        if terminal_count == 0 || terminal_count > 64 {
+            return None;
+        }
+        let state_count = self.num_states() as usize;
+        if state_count == 0 {
+            return Some((
+                Box::new([]), Box::new([]), Box::new([]),
+                Box::new([]), Box::new([]), Box::new([]),
+            ));
+        }
+
+        let future_mask = |state: u32| -> u64 {
+            self.possible_future_terminals(state)
+                .iter_ones()
+                .fold(0u64, |mask, terminal| mask | (1u64 << terminal))
+        };
+
+        let mut selected_sets = vec![U8Set::empty(); state_count];
+        let mut selected_targets = vec![DEAD; state_count];
+        let mut common_futures = vec![0u64; state_count];
+        for state in 0..state_count {
+            let source = state as u32;
+            if self.state_has_epsilon_transitions(source)
+                || !self.matched_terminal_bitset(source).is_empty()
+            {
+                continue;
+            }
+            let mut groups = SmallVec::<[(u32, U8Set); 8]>::new();
+            for (byte, target) in self.transitions_from(source) {
+                if target == DEAD
+                    || self.state_has_epsilon_transitions(target)
+                    || !self.matched_terminal_bitset(target).is_empty()
+                {
+                    continue;
+                }
+                if let Some((_, bytes)) = groups.iter_mut().find(|(seen, _)| *seen == target) {
+                    bytes.insert(byte);
+                } else {
+                    let mut bytes = U8Set::empty();
+                    bytes.insert(byte);
+                    groups.push((target, bytes));
+                }
+            }
+            let mut best = U8Set::empty();
+            let mut best_target = DEAD;
+            let mut best_common = 0u64;
+            let source_futures = future_mask(source);
+            for (target, candidate) in groups {
+                let common = source_futures & future_mask(target);
+                if common == 0 {
+                    continue;
+                }
+                if candidate.len() > best.len()
+                    || (candidate.len() == best.len()
+                        && common.count_ones() > best_common.count_ones())
+                    || (candidate.len() == best.len()
+                        && common.count_ones() == best_common.count_ones()
+                        && target < best_target)
+                {
+                    best = candidate;
+                    best_target = target;
+                    best_common = common;
+                }
+            }
+            selected_sets[state] = best;
+            selected_targets[state] = best_target;
+            common_futures[state] = best_common;
+        }
+
+        let mut path_sets = selected_sets;
+        let mut jump = selected_targets;
+        let mut path_common = common_futures;
+        let mut doubled_sets = vec![U8Set::empty(); state_count];
+        let mut doubled_jump = vec![DEAD; state_count];
+        let mut doubled_common = vec![0u64; state_count];
+        let mut horizon16 = vec![U8Set::empty(); state_count];
+        let mut horizon16_common = vec![0u64; state_count];
+        let mut horizon32 = vec![U8Set::empty(); state_count];
+        let mut horizon32_common = vec![0u64; state_count];
+        let mut horizon64 = vec![U8Set::empty(); state_count];
+        let mut horizon64_common = vec![0u64; state_count];
+
+        for round in 1..=6 {
+            doubled_sets
+                .par_iter_mut()
+                .zip(doubled_jump.par_iter_mut())
+                .zip(doubled_common.par_iter_mut())
+                .enumerate()
+                .for_each(|(state, ((set_slot, jump_slot), common_slot))| {
+                    let middle = jump[state];
+                    if middle == DEAD {
+                        *set_slot = U8Set::empty();
+                        *jump_slot = DEAD;
+                        *common_slot = 0;
+                        return;
+                    }
+                    let middle = middle as usize;
+                    let set = path_sets[state].intersection(&path_sets[middle]);
+                    let common = path_common[state] & path_common[middle];
+                    if set.is_empty() || common == 0 {
+                        *set_slot = U8Set::empty();
+                        *jump_slot = DEAD;
+                        *common_slot = 0;
+                    } else {
+                        *set_slot = set;
+                        *jump_slot = jump[middle];
+                        *common_slot = common;
+                    }
+                });
+            std::mem::swap(&mut path_sets, &mut doubled_sets);
+            std::mem::swap(&mut jump, &mut doubled_jump);
+            std::mem::swap(&mut path_common, &mut doubled_common);
+
+            let destination = match round {
+                4 => Some((&mut horizon16, &mut horizon16_common)),
+                5 => Some((&mut horizon32, &mut horizon32_common)),
+                6 => Some((&mut horizon64, &mut horizon64_common)),
+                _ => None,
+            };
+            if let Some((sets, commons)) = destination {
+                sets.copy_from_slice(&path_sets);
+                commons.copy_from_slice(&path_common);
+            }
+        }
+
+        Some((
+            horizon16.into_boxed_slice(),
+            horizon16_common.into_boxed_slice(),
+            horizon32.into_boxed_slice(),
+            horizon32_common.into_boxed_slice(),
+            horizon64.into_boxed_slice(),
+            horizon64_common.into_boxed_slice(),
+        ))
+    }
+
+    /// Exact state-only macro transition for arbitrary valid non-ASCII UTF-8
+    /// scalar values, pointer-doubled over 16/32/64 characters.
+    ///
+    /// A state receives a macro edge only when **every** Unicode scalar in
+    /// U+0080..=U+10FFFF follows defined, non-epsilon, non-finalizing byte
+    /// transitions and all of those byte paths converge on one raw tokenizer
+    /// state. This is a grammar-independent property of the tokenizer state.
+    /// The common-future masks may shrink along repeated scalar transitions,
+    /// exactly like `precompute_bounded_shrinking_future_sets`.
+    fn non_ascii_utf8_macro_targets(&self) -> Vec<u32> {
+        const DEAD: u32 = u32::MAX;
+        const MAX_FRONTIER: usize = 512;
+        let state_count = self.num_states() as usize;
+        (0..state_count)
+            .into_par_iter()
+            .map(|source_index| {
+                let source = source_index as u32;
+                if self.state_has_epsilon_transitions(source)
+                    || !self.matched_terminal_bitset(source).is_empty()
+                {
+                    return DEAD;
+                }
+                let mut common_end = None::<u32>;
+                for sequence in Utf8Sequences::new('\u{80}', char::MAX) {
+                    let mut frontier = vec![source];
+                    for range in sequence.as_slice() {
+                        let mut next = Vec::<u32>::new();
+                        for &state in &frontier {
+                            for byte in range.start..=range.end {
+                                let target = self.get_transition(state, byte);
+                                if target == DEAD
+                                    || self.state_has_epsilon_transitions(target)
+                                    || !self.matched_terminal_bitset(target).is_empty()
+                                {
+                                    return DEAD;
+                                }
+                                next.push(target);
+                            }
+                        }
+                        next.sort_unstable();
+                        next.dedup();
+                        if next.is_empty() || next.len() > MAX_FRONTIER {
+                            return DEAD;
+                        }
+                        frontier = next;
+                    }
+                    for end in frontier {
+                        match common_end {
+                            None => common_end = Some(end),
+                            Some(existing) if existing == end => {}
+                            Some(_) => return DEAD,
+                        }
+                    }
+                }
+                common_end.unwrap_or(DEAD)
+            })
+            .collect::<Vec<_>>()
+    }
+
+
+    fn shrinking_future_sets_from_macro_targets(
+        &self,
+        macro_targets: Vec<u32>,
+    ) -> Option<(Box<[u64]>, Box<[u64]>, Box<[u64]>)> {
+        const DEAD: u32 = u32::MAX;
+        let terminal_count = self.num_terminals() as usize;
+        if terminal_count == 0 || terminal_count > 64 {
+            return None;
+        }
+        let state_count = self.num_states() as usize;
+        debug_assert_eq!(macro_targets.len(), state_count);
+        let future_mask = |state: u32| -> u64 {
+            self.possible_future_terminals(state)
+                .iter_ones()
+                .fold(0u64, |mask, terminal| mask | (1u64 << terminal))
+        };
+
+        let mut jump = macro_targets;
+        let mut common = vec![0u64; state_count];
+        for state in 0..state_count {
+            let target = jump[state];
+            if target != DEAD {
+                common[state] = future_mask(state as u32) & future_mask(target);
+                if common[state] == 0 {
+                    jump[state] = DEAD;
+                }
+            }
+        }
+        let mut doubled_jump = vec![DEAD; state_count];
+        let mut doubled_common = vec![0u64; state_count];
+        let mut h16 = vec![0u64; state_count];
+        let mut h32 = vec![0u64; state_count];
+        let mut h64 = vec![0u64; state_count];
+        for round in 1..=6 {
+            doubled_jump
+                .par_iter_mut()
+                .zip(doubled_common.par_iter_mut())
+                .enumerate()
+                .for_each(|(state, (jump_slot, common_slot))| {
+                    let middle = jump[state];
+                    if middle == DEAD {
+                        *jump_slot = DEAD;
+                        *common_slot = 0;
+                        return;
+                    }
+                    let middle = middle as usize;
+                    let next = jump[middle];
+                    let retained = common[state] & common[middle];
+                    if next == DEAD || retained == 0 {
+                        *jump_slot = DEAD;
+                        *common_slot = 0;
+                    } else {
+                        *jump_slot = next;
+                        *common_slot = retained;
+                    }
+                });
+            std::mem::swap(&mut jump, &mut doubled_jump);
+            std::mem::swap(&mut common, &mut doubled_common);
+            match round {
+                4 => h16.copy_from_slice(&common),
+                5 => h32.copy_from_slice(&common),
+                6 => h64.copy_from_slice(&common),
+                _ => {}
+            }
+        }
+        Some((
+            h16.into_boxed_slice(),
+            h32.into_boxed_slice(),
+            h64.into_boxed_slice(),
+        ))
+    }
+
+    pub fn precompute_non_ascii_utf8_shrinking_future_sets(
+        &self,
+    ) -> Option<(Box<[u64]>, Box<[u64]>, Box<[u64]>)> {
+        self.shrinking_future_sets_from_macro_targets(self.non_ascii_utf8_macro_targets())
+    }
+
+    fn unicode_word_macro_targets(&self) -> Vec<u32> {
+        const DEAD: u32 = u32::MAX;
+        let mut macro_targets = self.non_ascii_utf8_macro_targets();
+        macro_targets
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(source_index, target_slot)| {
+                let target = *target_slot;
+                if target == DEAD {
+                    return;
+                }
+                let source = source_index as u32;
+                for byte in b'A'..=b'Z' {
+                    if self.get_transition(source, byte) != target {
+                        *target_slot = DEAD;
+                        return;
+                    }
+                }
+                for byte in b'a'..=b'z' {
+                    if self.get_transition(source, byte) != target {
+                        *target_slot = DEAD;
+                        return;
+                    }
+                }
+                for byte in b'0'..=b'9' {
+                    if self.get_transition(source, byte) != target {
+                        *target_slot = DEAD;
+                        return;
+                    }
+                }
+                if self.get_transition(source, b'_') != target {
+                    *target_slot = DEAD;
+                }
+            });
+        macro_targets
+    }
+
+    fn exact_shrinking_future_rows_from_macro_targets(
+        &self,
+        macro_targets: &[u32],
+    ) -> Option<Box<[u64]>> {
+        const DEAD: u32 = u32::MAX;
+        const MAX_HORIZON: usize = 64;
+        let terminal_count = self.num_terminals() as usize;
+        if terminal_count == 0 || terminal_count > 64 {
+            return None;
+        }
+        let state_count = self.num_states() as usize;
+        if macro_targets.len() != state_count {
+            return None;
+        }
+        let future_masks = (0..state_count)
+            .map(|state| {
+                self.possible_future_terminals(state as u32)
+                    .iter_ones()
+                    .fold(0u64, |mask, terminal| mask | (1u64 << terminal))
+            })
+            .collect::<Vec<_>>();
+        // Horizon-major layout: row[(h-1)*state_count + source].
+        let mut rows = vec![0u64; MAX_HORIZON * state_count];
+        for source in 0..state_count {
+            let mut state = source;
+            let mut retained = future_masks[source];
+            for horizon in 1..=MAX_HORIZON {
+                let target = macro_targets[state];
+                if target == DEAD {
+                    break;
+                }
+                let target = target as usize;
+                retained &= future_masks[target];
+                if retained == 0 {
+                    break;
+                }
+                rows[(horizon - 1) * state_count + source] = retained;
+                state = target;
+            }
+        }
+        Some(rows.into_boxed_slice())
+    }
+
+    /// Common future-terminal mask retained at every valid byte prefix of an
+    /// arbitrary non-ASCII UTF-8 scalar. Unlike `non_ascii_utf8_macro_targets`,
+    /// intermediate prefix states do not need to converge: a vocabulary token
+    /// may legally end halfway through a UTF-8 scalar and the next token can
+    /// complete it. Complete scalar paths still have to converge through the
+    /// supplied macro table so the certificate can be repeated character by
+    /// character.
+    fn non_ascii_utf8_partial_prefix_common(
+        &self,
+        macro_targets: &[u32],
+    ) -> Option<Vec<u64>> {
+        const DEAD: u32 = u32::MAX;
+        const MAX_FRONTIER: usize = 512;
+        let terminal_count = self.num_terminals() as usize;
+        if terminal_count == 0 || terminal_count > 64 {
+            return None;
+        }
+        let state_count = self.num_states() as usize;
+        if macro_targets.len() != state_count {
+            return None;
+        }
+        let future_masks = (0..state_count)
+            .map(|state| {
+                self.possible_future_terminals(state as u32)
+                    .iter_ones()
+                    .fold(0u64, |mask, terminal| mask | (1u64 << terminal))
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            (0..state_count)
+                .into_par_iter()
+                .map(|source_index| {
+                    if macro_targets[source_index] == DEAD {
+                        return 0u64;
+                    }
+                    let source = source_index as u32;
+                    let mut retained = future_masks[source_index];
+                    if retained == 0 {
+                        return 0;
+                    }
+                    for sequence in Utf8Sequences::new('\u{80}', char::MAX) {
+                        let mut frontier = vec![source];
+                        for range in sequence.as_slice() {
+                            let mut next = Vec::<u32>::new();
+                            for &state in &frontier {
+                                for byte in range.start..=range.end {
+                                    let target = self.get_transition(state, byte);
+                                    if target == DEAD
+                                        || self.state_has_epsilon_transitions(target)
+                                        || !self.matched_terminal_bitset(target).is_empty()
+                                    {
+                                        return 0;
+                                    }
+                                    retained &= future_masks[target as usize];
+                                    if retained == 0 {
+                                        return 0;
+                                    }
+                                    next.push(target);
+                                }
+                            }
+                            next.sort_unstable();
+                            next.dedup();
+                            if next.is_empty() || next.len() > MAX_FRONTIER {
+                                return 0;
+                            }
+                            frontier = next;
+                        }
+                    }
+                    retained
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Exact H1..H64 common-future rows for a sequence of deterministic macro
+    /// characters where the *final* character may end at any valid partial
+    /// non-ASCII UTF-8 prefix. This is the vocabulary-token boundary semantics
+    /// needed by BPE fragment tokens such as `C2` or `E2 80`.
+    fn exact_shrinking_future_rows_with_partial_utf8_tail(
+        &self,
+        macro_targets: &[u32],
+        partial_common: &[u64],
+    ) -> Option<Box<[u64]>> {
+        const DEAD: u32 = u32::MAX;
+        const MAX_HORIZON: usize = 64;
+        let state_count = self.num_states() as usize;
+        if macro_targets.len() != state_count || partial_common.len() != state_count {
+            return None;
+        }
+        let mut rows = vec![0u64; MAX_HORIZON * state_count];
+        for source in 0..state_count {
+            let mut state = source;
+            let mut retained = u64::MAX;
+            for horizon in 1..=MAX_HORIZON {
+                let target = macro_targets[state];
+                let partial = partial_common[state];
+                if target == DEAD || partial == 0 {
+                    break;
+                }
+                retained &= partial;
+                if retained == 0 {
+                    break;
+                }
+                rows[(horizon - 1) * state_count + source] = retained;
+                state = target as usize;
+            }
+        }
+        Some(rows.into_boxed_slice())
+    }
+
+    pub fn precompute_non_ascii_utf8_exact_shrinking_future_rows(
+        &self,
+    ) -> Option<Box<[u64]>> {
+        let targets = self.non_ascii_utf8_macro_targets();
+        self.exact_shrinking_future_rows_from_macro_targets(&targets)
+    }
+
+    pub fn precompute_unicode_word_exact_shrinking_future_rows(
+        &self,
+    ) -> Option<Box<[u64]>> {
+        let targets = self.unicode_word_macro_targets();
+        self.exact_shrinking_future_rows_from_macro_targets(&targets)
+    }
+
+    /// Exact state-only rows for Unicode-word token prefixes, including a
+    /// legal partial final non-ASCII scalar. Complete characters use the same
+    /// deterministic word macro as `precompute_unicode_word_exact...`; only
+    /// the final scalar is allowed to stop after its lead/continuation prefix.
+    pub fn precompute_unicode_word_prefix_exact_shrinking_future_rows(
+        &self,
+    ) -> Option<Box<[u64]>> {
+        let targets = self.unicode_word_macro_targets();
+        let partial = self.non_ascii_utf8_partial_prefix_common(&targets)?;
+        self.exact_shrinking_future_rows_with_partial_utf8_tail(&targets, &partial)
+    }
+
+    /// State-only macro transition for a Unicode word character: either one
+    /// ASCII `[A-Za-z0-9_]` byte or any valid non-ASCII Unicode scalar. A row
+    /// exists only when every alternative converges on the same non-finalizing
+    /// tokenizer state. This matches the vocabulary-only P2 mixed-word layout
+    /// while remaining independent of parser state and vocabulary nodes.
+    pub fn precompute_unicode_word_shrinking_future_sets(
+        &self,
+    ) -> Option<(Box<[u64]>, Box<[u64]>, Box<[u64]>)> {
+        self.shrinking_future_sets_from_macro_targets(self.unicode_word_macro_targets())
+    }
+
+    /// Experimental parser-relative variant of
+    /// [`Self::precompute_bounded_observation_safe_byte_sets`].  Observation
+    /// equality is required only for `active_terminals`, which lets dynamic
+    /// masking ignore lexer terminals that the current parser stack cannot
+    /// consume.  The returned alphabets are still grammar-independent with
+    /// respect to the vocabulary: there is one H16/H32/H64 byte set per raw
+    /// tokenizer state and no vocabulary-trie dimension.
+    ///
+    /// This intentionally uses the generic transition iterator rather than the
+    /// specialized compressed-segment scratch path above.  The intended caller
+    /// is the small mask-only tokenizer quotient (normally a few thousand
+    /// states), where keeping this experimental implementation simple is more
+    /// useful than optimizing million-state full-tokenizer construction.
+    pub fn precompute_bounded_observation_safe_byte_sets_for_terminals(
+        &self,
+        active_terminals: &BitSet,
+    ) -> (Box<[U8Set]>, Box<[U8Set]>, Box<[U8Set]>) {
+        const DEAD: u32 = u32::MAX;
+
+        #[inline]
+        fn equal_under_mask(left: &BitSet, right: &BitSet, mask: &BitSet) -> bool {
+            debug_assert_eq!(left.len(), right.len());
+            debug_assert_eq!(left.len(), mask.len());
+            left.words()
+                .iter()
+                .zip(right.words())
+                .zip(mask.words())
+                .all(|((&left, &right), &mask)| ((left ^ right) & mask) == 0)
+        }
+
+        let state_count = self.num_states() as usize;
+        if state_count == 0 {
+            return (Box::new([]), Box::new([]), Box::new([]));
+        }
+        debug_assert_eq!(active_terminals.len(), self.num_terminals() as usize);
+
+        // Literal raw-state loops are safe for every observation mask and every
+        // horizon, so retain them even if the advancing canonical family dies.
+        let mut horizon16 = (0..state_count)
+            .into_par_iter()
+            .map(|state| self.self_loop_bytes(state as u32))
+            .collect::<Vec<_>>();
+        let mut horizon32 = horizon16.clone();
+        let mut horizon64 = horizon16.clone();
+
+        let mut selected_sets = vec![U8Set::empty(); state_count];
+        let mut selected_targets = vec![DEAD; state_count];
+        for state in 0..state_count {
+            let source = state as u32;
+            if self.state_has_epsilon_transitions(source) {
+                continue;
+            }
+            let source_finalizers = self.matched_terminal_bitset(source);
+            let source_futures = self.possible_future_terminals(source);
+            let mut groups = SmallVec::<[(u32, U8Set); 8]>::new();
+            for (byte, target) in self.transitions_from(source) {
+                if let Some((_, bytes)) = groups.iter_mut().find(|(seen, _)| *seen == target) {
+                    bytes.insert(byte);
+                } else {
+                    let mut bytes = U8Set::empty();
+                    bytes.insert(byte);
+                    groups.push((target, bytes));
+                }
+            }
+
+            let mut best = U8Set::empty();
+            let mut best_target = DEAD;
+            for (target, candidate) in groups {
+                if self.state_has_epsilon_transitions(target)
+                    || !equal_under_mask(
+                        source_finalizers,
+                        self.matched_terminal_bitset(target),
+                        active_terminals,
+                    )
+                    || !equal_under_mask(
+                        source_futures,
+                        self.possible_future_terminals(target),
+                        active_terminals,
+                    )
+                {
+                    continue;
+                }
+                if candidate.len() > best.len()
+                    || (candidate.len() == best.len() && target < best_target)
+                {
+                    best = candidate;
+                    best_target = target;
+                }
+            }
+            selected_sets[state] = best;
+            selected_targets[state] = best_target;
+        }
+
+        let mut path_sets = selected_sets;
+        let mut jump = selected_targets;
+        let mut doubled_sets = vec![U8Set::empty(); state_count];
+        let mut doubled_jump = vec![DEAD; state_count];
+        for round in 1..=6 {
+            doubled_sets
+                .par_iter_mut()
+                .zip(doubled_jump.par_iter_mut())
+                .enumerate()
+                .for_each(|(state, (set_slot, jump_slot))| {
+                    let middle = jump[state];
+                    if middle == DEAD {
+                        *set_slot = U8Set::empty();
+                        *jump_slot = DEAD;
+                        return;
+                    }
+                    let middle = middle as usize;
+                    *set_slot = path_sets[state].intersection(&path_sets[middle]);
+                    *jump_slot = jump[middle];
+                });
+            std::mem::swap(&mut path_sets, &mut doubled_sets);
+            std::mem::swap(&mut jump, &mut doubled_jump);
+
+            let destination = match round {
+                4 => Some(&mut horizon16),
+                5 => Some(&mut horizon32),
+                6 => Some(&mut horizon64),
+                _ => None,
+            };
+            if let Some(destination) = destination {
+                destination
+                    .par_iter_mut()
+                    .zip(path_sets.par_iter())
+                    .for_each(|(current, candidate)| {
+                        if candidate.len() > current.len() {
+                            *current = *candidate;
+                        }
+                    });
+            }
+        }
+
+        (
+            horizon16.into_boxed_slice(),
+            horizon32.into_boxed_slice(),
+            horizon64.into_boxed_slice(),
+        )
     }
 
     /// The same exact finite-horizon proof as

@@ -3155,6 +3155,36 @@ fn prepared_runtime_dynamic_vocab(
                 .then_with(|| left.2.cmp(right.2))
                 .then_with(|| left.1.cmp(&right.1))
         });
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_VOCAB_LAYOUT").is_some() {
+            let mut index = 0usize;
+            while index < entries.len() {
+                let class = entries[index].0;
+                let start = index;
+                index += 1;
+                while index < entries.len() && entries[index].0 == class {
+                    index += 1;
+                }
+                let group = &entries[start..index];
+                let min_len = group.iter().map(|entry| entry.2.len()).min().unwrap_or(0);
+                let max_len = group.iter().map(|entry| entry.2.len()).max().unwrap_or(0);
+                let examples = group
+                    .iter()
+                    .take(5)
+                    .map(|entry| String::from_utf8_lossy(entry.2).escape_debug().to_string())
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/profile][dynamic_vocab_layout] class={} base={} first_kind={} flags=0x{:02x} tokens={} min_len={} max_len={} examples={:?}",
+                    class,
+                    class >> 19,
+                    (class >> 16) & 0x7,
+                    class & 0xff,
+                    group.len(),
+                    min_len,
+                    max_len,
+                    examples,
+                );
+            }
+        }
         let runtime_trie = Arc::new(DynamicMaskTrie::from_partitioned_token_refs(&entries));
         Arc::new(DynamicMaskVocab::from_materialized_ordered(
             runtime_trie,

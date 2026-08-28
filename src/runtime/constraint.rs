@@ -33,9 +33,12 @@ use super::artifact::{
     DenseWeightMaskCache,
     DenseWords,
     DynamicBoundedObservationSets,
+    DynamicTerminalBoundedObservationSets,
     DynamicConfigSubtreeCertificate,
     DynamicFirstMatchPostRow,
     DynamicFirstMatchSecondRow,
+    DynamicH64TerminalSubtreeTable,
+    DynamicRootEffectProjection,
     DynamicSelfLoopProjection,
     DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
@@ -2175,7 +2178,11 @@ impl Constraint {
         &self,
         vocab: &DynamicMaskVocab,
         full_fast_transitions: &FastTokenizerTransitions,
-    ) -> (Vec<DynamicSelfLoopProjection>, Vec<u32>) {
+    ) -> (
+        Vec<DynamicSelfLoopProjection>,
+        Vec<u32>,
+        Vec<DynamicRootEffectProjection>,
+    ) {
         fn build_one(
             constraint: &Constraint,
             tokenizer: &Tokenizer,
@@ -2381,6 +2388,280 @@ impl Constraint {
                 source_future_terminals,
                 &mut common_future_masks,
             );
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTION_ROOT_CLASSES").is_some() {
+                for (slot, edge) in trie.children(0).iter().enumerate() {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_projection_root_class] source_state={} slot={} child={} tokens={} bytes={} max_len={} safe={} common={:016x}",
+                        source_state,
+                        slot,
+                        edge.child,
+                        trie.subtree_tokens(edge.child).len(),
+                        U8Set::from_words(trie.subtree_bytes(edge.child)).len(),
+                        trie.subtree_max_byte_len(edge.child),
+                        safe_subtrees[edge.child as usize],
+                        common_future_masks[edge.child as usize],
+                    );
+                }
+            }
+            if let Ok(requested_terminal) = std::env::var(
+                "GLRMASK_PROFILE_DYNAMIC_COMPACT_TERMINAL_BUILD",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<TerminalID>().ok())
+            .ok_or(())
+                && source_future_terminals.contains(&requested_terminal)
+            {
+                fn build_terminal_h64_roots(
+                    tokenizer: &Tokenizer,
+                    fast_transitions: &FastTokenizerTransitions,
+                    trie: &DynamicMaskTrie,
+                    source_state: u32,
+                    terminal: TerminalID,
+                ) -> Vec<u32> {
+                    fn visit(
+                        tokenizer: &Tokenizer,
+                        fast_transitions: &FastTokenizerTransitions,
+                        trie: &DynamicMaskTrie,
+                        node: u32,
+                        state: u32,
+                        terminal: TerminalID,
+                        roots: &mut Vec<u32>,
+                    ) -> bool {
+                        let checkpoint = roots.len();
+                        let mut all_safe = trie.node(node).token_id.is_none()
+                            || tokenizer
+                                .possible_future_terminals(state)
+                                .contains(terminal as usize);
+                        for edge in trie.children(node) {
+                            let mut target = state;
+                            let mut alive = !tokenizer.state_has_epsilon_transitions(target);
+                            if alive {
+                                for &byte in trie.edge_bytes(edge) {
+                                    target = fast_transitions.transition(tokenizer, target, byte);
+                                    if target == u32::MAX
+                                        || tokenizer.state_has_epsilon_transitions(target)
+                                    {
+                                        alive = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            let child_safe = alive
+                                && visit(
+                                    tokenizer,
+                                    fast_transitions,
+                                    trie,
+                                    edge.child,
+                                    target,
+                                    terminal,
+                                    roots,
+                                );
+                            all_safe &= child_safe;
+                        }
+                        if all_safe && trie.subtree_max_total_byte_len(node) <= 64 {
+                            roots.truncate(checkpoint);
+                            roots.push(node);
+                        }
+                        all_safe
+                    }
+
+                    let mut roots = Vec::<u32>::new();
+                    let _ = visit(
+                        tokenizer,
+                        fast_transitions,
+                        trie,
+                        0,
+                        source_state,
+                        terminal,
+                        &mut roots,
+                    );
+                    roots.sort_unstable();
+                    roots.dedup();
+                    roots
+                }
+                let started = std::time::Instant::now();
+                let roots = build_terminal_h64_roots(
+                    tokenizer,
+                    fast_transitions,
+                    trie,
+                    source_state,
+                    requested_terminal,
+                );
+                let covered = roots
+                    .iter()
+                    .map(|&node| trie.subtree_tokens(node).len())
+                    .sum::<usize>();
+                eprintln!(
+                    "[glrmask/profile][dynamic_compact_terminal_build] source_state={} terminal={} roots={} covered_tokens={} elapsed_ms={:.3}",
+                    source_state,
+                    requested_terminal,
+                    roots.len(),
+                    covered,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_COMPACT_PROJECTION").is_some()
+                && source_future_terminals.len() <= 64
+            {
+                let mut maximal_counts = vec![0usize; source_future_terminals.len()];
+                let mut covered_tokens = vec![0usize; source_future_terminals.len()];
+                let mut h64_maximal_counts = vec![0usize; source_future_terminals.len()];
+                let mut h64_covered_tokens = vec![0usize; source_future_terminals.len()];
+                fn collect_maximal_common_future_roots(
+                    trie: &DynamicMaskTrie,
+                    common_future_masks: &[u64],
+                    node: u32,
+                    parent_mask: u64,
+                    maximal_counts: &mut [usize],
+                    covered_tokens: &mut [usize],
+                ) {
+                    let mask = common_future_masks[node as usize];
+                    let newly_safe = mask & !parent_mask;
+                    for bit in 0..maximal_counts.len() {
+                        if newly_safe & (1u64 << bit) != 0 {
+                            maximal_counts[bit] += 1;
+                            covered_tokens[bit] += trie.subtree_tokens(node).len();
+                        }
+                    }
+                    for edge in trie.children(node) {
+                        collect_maximal_common_future_roots(
+                            trie,
+                            common_future_masks,
+                            edge.child,
+                            mask,
+                            maximal_counts,
+                            covered_tokens,
+                        );
+                    }
+                }
+                collect_maximal_common_future_roots(
+                    trie,
+                    &common_future_masks,
+                    0,
+                    0,
+                    &mut maximal_counts,
+                    &mut covered_tokens,
+                );
+                // Count independently per terminal to preserve maximality when
+                // one terminal becomes safe at a parent while another only
+                // becomes safe lower in the trie.
+                for bit in 0..source_future_terminals.len() {
+                    fn collect_one_h64(
+                        trie: &DynamicMaskTrie,
+                        common_future_masks: &[u64],
+                        node: u32,
+                        bit: usize,
+                        count: &mut usize,
+                        covered: &mut usize,
+                    ) {
+                        let mask = common_future_masks[node as usize];
+                        if trie.subtree_max_total_byte_len(node) <= 64
+                            && mask & (1u64 << bit) != 0
+                        {
+                            *count += 1;
+                            *covered += trie.subtree_tokens(node).len();
+                            return;
+                        }
+                        for edge in trie.children(node) {
+                            collect_one_h64(
+                                trie,
+                                common_future_masks,
+                                edge.child,
+                                bit,
+                                count,
+                                covered,
+                            );
+                        }
+                    }
+                    collect_one_h64(
+                        trie,
+                        &common_future_masks,
+                        0,
+                        bit,
+                        &mut h64_maximal_counts[bit],
+                        &mut h64_covered_tokens[bit],
+                    );
+                }
+                let rows = source_future_terminals
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, terminal)| {
+                        (
+                            terminal,
+                            maximal_counts[index],
+                            covered_tokens[index],
+                            h64_maximal_counts[index],
+                            h64_covered_tokens[index],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/profile][dynamic_compact_projection] source_state={} entries={} rows={:?}",
+                    source_state,
+                    maximal_counts.iter().sum::<usize>(),
+                    rows,
+                );
+            }
+            let compact_h64_common_future_roots = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_COMPACT_H64_PROJECTION",
+            )
+            .is_some()
+                && source_future_terminals.len() <= 64
+            {
+                let mut roots = vec![Vec::<u32>::new(); source_future_terminals.len()];
+                fn collect_compact_h64_roots(
+                    trie: &DynamicMaskTrie,
+                    common_future_masks: &[u64],
+                    node: u32,
+                    handled_mask: u64,
+                    roots: &mut [Vec<u32>],
+                ) {
+                    let safe_mask = if trie.subtree_max_total_byte_len(node) <= 64 {
+                        common_future_masks[node as usize]
+                    } else {
+                        0
+                    };
+                    let newly_safe = safe_mask & !handled_mask;
+                    let mut bits = newly_safe;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        if let Some(list) = roots.get_mut(bit) {
+                            list.push(node);
+                        }
+                    }
+                    let child_handled = handled_mask | safe_mask;
+                    for edge in trie.children(node) {
+                        collect_compact_h64_roots(
+                            trie,
+                            common_future_masks,
+                            edge.child,
+                            child_handled,
+                            roots,
+                        );
+                    }
+                }
+                collect_compact_h64_roots(
+                    trie,
+                    &common_future_masks,
+                    0,
+                    0,
+                    &mut roots,
+                );
+                for roots in &mut roots {
+                    roots.sort_unstable();
+                    roots.dedup();
+                }
+                Arc::from(
+                    roots
+                        .into_iter()
+                        .map(|roots| Arc::<[u32]>::from(roots))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                Arc::from(Vec::<Arc<[u32]>>::new())
+            };
             fn visit_candidate_frontier(
                 tokenizer: &Tokenizer,
                 fast_transitions: &FastTokenizerTransitions,
@@ -3207,6 +3488,7 @@ impl Constraint {
                 safe_subtrees: Arc::from(safe_subtrees),
                 source_reentry_safe_subtrees: Arc::from(source_reentry_safe_subtrees),
                 common_future_masks: Arc::from(common_future_masks),
+                compact_h64_common_future_roots,
                 pre_match_dead_words: Arc::from(pre_match_dead_words),
                 pre_match_frontier_words: Arc::from(pre_match_frontier_words),
                 first_match_fusion_source_state: u32::MAX,
@@ -4145,6 +4427,7 @@ impl Constraint {
         // the source state and every possible first terminal finalization.
         // It is therefore applicable to the multi-future lexer states that now
         // dominate the median after the single-future paths were accelerated.
+        let mut root_effect_projections = Vec::<DynamicRootEffectProjection>::new();
         let mut root_effect_states = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_STATES")
             .ok()
             .map(|value| {
@@ -4154,6 +4437,147 @@ impl Constraint {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_ROOT_EFFECT_DOMAIN").is_some()
+            && let Some(unique_full_states) = vocab.mask_projection_unique_full_states()
+        {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            let mut unique_unmatched = 0usize;
+            let mut singleton = 0usize;
+            let mut mixed_2_8 = 0usize;
+            let mut mixed_2_8_gt3_transitions = 0usize;
+            let mut mixed_2_8_ge64_transitions = 0usize;
+            let mut mixed_2_8_ge128_transitions = 0usize;
+            let mut mixed_9_64 = 0usize;
+            let mut mixed_gt64 = 0usize;
+            let mut broad_9_64 = Vec::<(u32, u32, usize, usize)>::new();
+            for projection_state in 0..projection_tokenizer.num_states() {
+                let Some(&full_source_state) = unique_full_states.get(projection_state as usize)
+                else {
+                    continue;
+                };
+                if full_source_state == u32::MAX
+                    || multiplicities
+                        .as_ref()
+                        .and_then(|counts| counts.get(projection_state as usize))
+                        .copied()
+                        .unwrap_or(1)
+                        != 1
+                    || self
+                        .tokenizer
+                        .matched_terminals_iter(full_source_state)
+                        .next()
+                        .is_some()
+                {
+                    continue;
+                }
+                unique_unmatched += 1;
+                let futures = self
+                    .tokenizer
+                    .possible_future_terminals_iter(full_source_state)
+                    .count();
+                match futures {
+                    0 => {}
+                    1 => singleton += 1,
+                    2..=8 => {
+                        mixed_2_8 += 1;
+                        let transitions = self.tokenizer.transitions_from(full_source_state).count();
+                        mixed_2_8_gt3_transitions += usize::from(transitions > 3);
+                        mixed_2_8_ge64_transitions += usize::from(transitions >= 64);
+                        mixed_2_8_ge128_transitions += usize::from(transitions >= 128);
+                    }
+                    9..=64 => {
+                        mixed_9_64 += 1;
+                        broad_9_64.push((
+                            projection_state,
+                            full_source_state,
+                            futures,
+                            self.tokenizer.transitions_from(full_source_state).count(),
+                        ));
+                    }
+                    _ => mixed_gt64 += 1,
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][dynamic_root_effect_domain] mask_states={} unique_unmatched={} singleton={} mixed_2_8={} mixed_2_8_gt3={} mixed_2_8_ge64={} mixed_2_8_ge128={} mixed_9_64={} mixed_gt64={} broad_9_64={:?}",
+                projection_tokenizer.num_states(),
+                unique_unmatched,
+                singleton,
+                mixed_2_8,
+                mixed_2_8_gt3_transitions,
+                mixed_2_8_ge64_transitions,
+                mixed_2_8_ge128_transitions,
+                mixed_9_64,
+                mixed_gt64,
+                broad_9_64,
+            );
+        }
+        if std::env::var_os("GLRMASK_DYNAMIC_ROOT_EFFECT_ALL_BROAD_MIXED").is_some()
+            && let Some(unique_full_states) = vocab.mask_projection_unique_full_states()
+        {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            for projection_state in 0..projection_tokenizer.num_states() {
+                let Some(&full_source_state) = unique_full_states.get(projection_state as usize)
+                else {
+                    continue;
+                };
+                if full_source_state == u32::MAX
+                    || multiplicities
+                        .as_ref()
+                        .and_then(|counts| counts.get(projection_state as usize))
+                        .copied()
+                        .unwrap_or(1)
+                        != 1
+                    || self
+                        .tokenizer
+                        .matched_terminals_iter(full_source_state)
+                        .next()
+                        .is_some()
+                {
+                    continue;
+                }
+                let future_count = self
+                    .tokenizer
+                    .possible_future_terminals_iter(full_source_state)
+                    .count();
+                if (9..=64).contains(&future_count) {
+                    root_effect_states.push(full_source_state);
+                }
+            }
+        }
+        if std::env::var_os("GLRMASK_DYNAMIC_ROOT_EFFECT_ALL_WIDE_MIXED").is_some()
+            && let Some(unique_full_states) = vocab.mask_projection_unique_full_states()
+        {
+            let multiplicities = vocab.mask_projection_state_multiplicities();
+            for projection_state in 0..projection_tokenizer.num_states() {
+                let Some(&full_source_state) = unique_full_states.get(projection_state as usize)
+                else {
+                    continue;
+                };
+                if full_source_state == u32::MAX
+                    || multiplicities
+                        .as_ref()
+                        .and_then(|counts| counts.get(projection_state as usize))
+                        .copied()
+                        .unwrap_or(1)
+                        != 1
+                    || self
+                        .tokenizer
+                        .matched_terminals_iter(full_source_state)
+                        .next()
+                        .is_some()
+                {
+                    continue;
+                }
+                let future_count = self
+                    .tokenizer
+                    .possible_future_terminals_iter(full_source_state)
+                    .count();
+                let transitions = self.tokenizer.transitions_from(full_source_state).count();
+                if (2..=64).contains(&future_count) && transitions >= 128 {
+                    root_effect_states.push(full_source_state);
+                }
+            }
+        }
         if let Some(auto_limit) = std::env::var("GLRMASK_DYNAMIC_ROOT_EFFECT_AUTO_NARROW_LIMIT")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
@@ -4279,9 +4703,11 @@ impl Constraint {
                 .map(|special| special.token_id)
                 .collect::<BTreeSet<_>>();
 
-            for full_source_state in root_effect_states {
+            root_effect_projections = root_effect_states
+                .into_par_iter()
+                .filter_map(|full_source_state| {
                 if full_source_state >= self.tokenizer.num_states() {
-                    continue;
+                    return None;
                 }
                 let projection_state = vocab.mask_projection_state(full_source_state);
                 if multiplicities
@@ -4291,39 +4717,16 @@ impl Constraint {
                     .unwrap_or(1)
                     != 1
                 {
-                    continue;
+                    return None;
                 }
-
-                if !built
-                    .iter()
-                    .any(|(projection, _)| projection.source_state == projection_state)
-                {
-                    let futures = projection_tokenizer
-                        .possible_future_terminals_iter(projection_state)
-                        .collect::<Vec<_>>();
-                    if futures.is_empty() {
-                        continue;
-                    }
-                    built.push((
-                        build_one(
-                            self,
-                            projection_tokenizer,
-                            vocab,
-                            fast_transitions,
-                            projection_state,
-                            &futures,
-                        ),
-                        false,
-                    ));
-                }
-                let Some((projection, _)) = built
-                    .iter_mut()
-                    .find(|(projection, _)| projection.source_state == projection_state)
-                else {
-                    continue;
-                };
 
                 let started = std::time::Instant::now();
+                let source_future_count = projection_tokenizer
+                    .possible_future_terminals_iter(projection_state)
+                    .count();
+                if source_future_count == 0 {
+                    return None;
+                }
                 let mut residual_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
                 let mut exact_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
                 let mut children_by_terminal =
@@ -4537,11 +4940,13 @@ impl Constraint {
                     }
                 }
 
-                projection.root_effect_source_state = full_source_state;
-                projection.root_effect_post_rows = Arc::from(root_post_rows);
-                projection.root_effect_rows = Arc::from(root_rows);
-                projection.root_effect_unknown_tokens = Arc::from(unknown_tokens);
-                projection.root_effect_unknown_subtrees = Arc::from(unknown_subtrees);
+                let root_effect_projection = DynamicRootEffectProjection {
+                    source_state: projection_state,
+                    post_rows: Arc::from(root_post_rows),
+                    rows: Arc::from(root_rows),
+                    unknown_tokens: Arc::from(unknown_tokens),
+                    unknown_subtrees: Arc::from(unknown_subtrees),
+                };
 
                 if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                     || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -4550,14 +4955,42 @@ impl Constraint {
                         "[glrmask/profile][dynamic_root_effect] full_source={} projection_source={} futures={} classified_tokens={} post_rows={} root_rows={} fallback_unknown={} elapsed_ms={:.3}",
                         full_source_state,
                         projection_state,
-                        projection.future_terminals.len(),
+                        source_future_count,
                         classified_tokens,
-                        projection.root_effect_post_rows.len(),
-                        projection.root_effect_rows.len(),
-                        projection.root_effect_unknown_tokens.len(),
+                        root_effect_projection.post_rows.len(),
+                        root_effect_projection.rows.len(),
+                        root_effect_projection.unknown_tokens.len(),
                         started.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
+                Some(root_effect_projection)
+            })
+            .collect();
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_ROOT_EFFECT_PROGRAMS").is_some() {
+                use std::hash::{Hash, Hasher};
+                let mut fingerprints = FxHashSet::<u64>::default();
+                let mut total_post_rows = 0usize;
+                let mut total_rows = 0usize;
+                let mut total_unknown = 0usize;
+                for projection in &root_effect_projections {
+                    let mut hasher = rustc_hash::FxHasher::default();
+                    projection.post_rows.hash(&mut hasher);
+                    projection.rows.hash(&mut hasher);
+                    projection.unknown_tokens.hash(&mut hasher);
+                    projection.unknown_subtrees.hash(&mut hasher);
+                    fingerprints.insert(hasher.finish());
+                    total_post_rows += projection.post_rows.len();
+                    total_rows += projection.rows.len();
+                    total_unknown += projection.unknown_tokens.len();
+                }
+                eprintln!(
+                    "[glrmask/profile][dynamic_root_effect_programs] sources={} unique_fingerprints={} post_rows={} rows={} unknown_tokens={}",
+                    root_effect_projections.len(),
+                    fingerprints.len(),
+                    total_post_rows,
+                    total_rows,
+                    total_unknown,
+                );
             }
         }
 
@@ -4634,7 +5067,211 @@ impl Constraint {
                 vocab_aliases.iter().filter(|&&index| index != u32::MAX).count(),
             );
         }
-        (projections, vocab_aliases)
+        (projections, vocab_aliases, root_effect_projections)
+    }
+
+    fn build_dynamic_h64_terminal_subtree_tables(
+        &self,
+        vocab: &DynamicMaskVocab,
+    ) -> Vec<Option<DynamicH64TerminalSubtreeTable>> {
+        fn build_terminal_h64_roots(
+            tokenizer: &Tokenizer,
+            fast_transitions: &FastTokenizerTransitions,
+            trie: &DynamicMaskTrie,
+            source_state: u32,
+            terminal: TerminalID,
+        ) -> Vec<u32> {
+            fn visit(
+                tokenizer: &Tokenizer,
+                fast_transitions: &FastTokenizerTransitions,
+                trie: &DynamicMaskTrie,
+                node: u32,
+                state: u32,
+                terminal: TerminalID,
+                roots: &mut Vec<u32>,
+            ) -> bool {
+                let checkpoint = roots.len();
+                let mut all_safe = trie.node(node).token_id.is_none()
+                    || tokenizer
+                        .possible_future_terminals(state)
+                        .contains(terminal as usize);
+                for edge in trie.children(node) {
+                    let mut target = state;
+                    let mut alive = !tokenizer.state_has_epsilon_transitions(target);
+                    if alive {
+                        for &byte in trie.edge_bytes(edge) {
+                            target = fast_transitions.transition(tokenizer, target, byte);
+                            if target == u32::MAX
+                                || tokenizer.state_has_epsilon_transitions(target)
+                            {
+                                alive = false;
+                                break;
+                            }
+                        }
+                    }
+                    all_safe &= alive
+                        && visit(
+                            tokenizer,
+                            fast_transitions,
+                            trie,
+                            edge.child,
+                            target,
+                            terminal,
+                            roots,
+                        );
+                }
+                if all_safe && trie.subtree_max_total_byte_len(node) <= 64 {
+                    roots.truncate(checkpoint);
+                    roots.push(node);
+                }
+                all_safe
+            }
+
+            let mut roots = Vec::<u32>::new();
+            let _ = visit(
+                tokenizer,
+                fast_transitions,
+                trie,
+                0,
+                source_state,
+                terminal,
+                &mut roots,
+            );
+            roots.sort_unstable();
+            roots.dedup();
+            roots
+        }
+
+        let tokenizer = vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        if tokenizer.num_states() > 16_384 {
+            return Vec::new();
+        }
+        let started = std::time::Instant::now();
+        let terminal_count = self.table.num_terminals;
+        let partitioned = (0..terminal_count)
+            .into_par_iter()
+            .map(|terminal| {
+                let classes = tokenizer.bounded_terminal_future_partition(terminal, 64);
+                let mut representatives = FxHashMap::<u32, u32>::default();
+                for (state, &class) in classes.iter().enumerate() {
+                    if class != 0 {
+                        representatives.entry(class).or_insert(state as u32);
+                    }
+                }
+                let candidates = representatives
+                    .into_iter()
+                    .filter_map(|(class, state)| {
+                        let live_bytes = tokenizer
+                            .transitions_from(state)
+                            .filter(|&(_, target)| {
+                                !tokenizer.state_has_epsilon_transitions(target)
+                                    && tokenizer
+                                        .possible_future_terminals(target)
+                                        .contains(terminal as usize)
+                            })
+                            .count();
+                        (live_bytes >= 128).then_some((class, state))
+                    })
+                    .collect::<Vec<_>>();
+                (terminal, classes, candidates)
+            })
+            .collect::<Vec<_>>();
+
+        let fast = Self::compute_tokenizer_fast_transitions_for(tokenizer);
+        let trie = vocab.trie.as_ref();
+        let candidates = partitioned
+            .iter()
+            .flat_map(|(terminal, _, candidates)| {
+                candidates
+                    .iter()
+                    .map(move |&(class, state)| (*terminal, class, state))
+            })
+            .collect::<Vec<_>>();
+        let min_coverage = std::env::var("GLRMASK_EXPERIMENT_DYNAMIC_H64_MIN_COVERAGE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(64_000);
+        let built = candidates
+            .par_iter()
+            .filter_map(|&(terminal, class, state)| {
+                let roots = build_terminal_h64_roots(
+                    tokenizer,
+                    &fast,
+                    trie,
+                    state,
+                    terminal,
+                );
+                let covered = roots
+                    .iter()
+                    .map(|&node| trie.subtree_tokens(node).len())
+                    .sum::<usize>();
+                (covered >= min_coverage).then_some((
+                    terminal,
+                    class,
+                    Arc::<[u32]>::from(roots),
+                    covered,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let mut roots_by_key = FxHashMap::<(TerminalID, u32), Arc<[u32]>>::default();
+        let mut total_root_ids = 0usize;
+        let mut total_covered = 0usize;
+        for (terminal, class, roots, covered) in built {
+            total_root_ids += roots.len();
+            total_covered += covered;
+            roots_by_key.insert((terminal, class), roots);
+        }
+
+        let mut tables = vec![None; terminal_count as usize];
+        for (terminal, classes, _) in partitioned {
+            let mut classes_with_roots = roots_by_key
+                .iter()
+                .filter_map(|(&(candidate_terminal, class), roots)| {
+                    (candidate_terminal == terminal).then_some((class, Arc::clone(roots)))
+                })
+                .collect::<Vec<_>>();
+            if classes_with_roots.is_empty() {
+                continue;
+            }
+            classes_with_roots.sort_unstable_by_key(|(class, _)| *class);
+            debug_assert!(classes_with_roots.len() < u16::MAX as usize);
+            let mut class_to_certificate = FxHashMap::<u32, u16>::default();
+            let mut certificates = Vec::<Arc<[u32]>>::with_capacity(classes_with_roots.len());
+            for (index, (class, roots)) in classes_with_roots.into_iter().enumerate() {
+                class_to_certificate.insert(class, index as u16 + 1);
+                certificates.push(roots);
+            }
+            let state_to_certificate = classes
+                .iter()
+                .map(|class| class_to_certificate.get(class).copied().unwrap_or(0))
+                .collect::<Vec<_>>();
+            tables[terminal as usize] = Some(DynamicH64TerminalSubtreeTable::new(
+                state_to_certificate,
+                certificates,
+            ));
+        }
+
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_H64_TERMINAL_SUBTREES").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][dynamic_h64_terminal_subtrees] tokenizer_states={} candidate_classes={} retained_classes={} min_coverage={} root_ids={} root_bytes={} covered_sum={} elapsed_ms={:.3}",
+                tokenizer.num_states(),
+                candidates.len(),
+                roots_by_key.len(),
+                min_coverage,
+                total_root_ids,
+                total_root_ids * std::mem::size_of::<u32>(),
+                total_covered,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        tables
     }
 
     fn build_dynamic_projection_alias_h64(
@@ -4969,12 +5606,211 @@ impl Constraint {
                     .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
             }
         }
+        if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_H64_TERMINAL_SUBTREES").is_some() {
+            let tables = self.build_dynamic_h64_terminal_subtree_tables(&dynamic_mask_vocab);
+            if !tables.is_empty() {
+                dynamic_mask_vocab.set_h64_terminal_subtree_tables(tables);
+            }
+        }
         let has_virtual_residual_runtime = self.tokenizer.has_virtual_residual_runtime();
         let bounded_sets_started_at = profile.then(std::time::Instant::now);
-        let observation_tokenizer = dynamic_mask_vocab
+        // Keep an owned observation tokenizer while finalization mutates the
+        // vocabulary-side caches below. The projected tokenizer is typically
+        // small, and this diagnostic/experimental path must not hold an
+        // immutable borrow of `dynamic_mask_vocab` across those mutations.
+        let observation_tokenizer_owned = dynamic_mask_vocab
             .mask_projection_tokenizer()
-            .unwrap_or(&self.tokenizer);
-        let (bounded16, bounded64) = if has_virtual_residual_runtime {
+            .cloned()
+            .unwrap_or_else(|| self.tokenizer.clone());
+        let observation_tokenizer = &observation_tokenizer_owned;
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_H64_ALL").is_some() {
+            let started_all = std::time::Instant::now();
+            let mut total_nonzero_classes = 0usize;
+            let mut total_live_states = 0usize;
+            let mut broad_class_totals = [0usize; 5];
+            let mut broad128_candidates = Vec::<(TerminalID, u32, u32)>::new();
+            let mut rows = Vec::<(TerminalID, usize, usize, f64)>::new();
+            for terminal in 0..self.table.num_terminals {
+                let started = std::time::Instant::now();
+                let classes = observation_tokenizer
+                    .bounded_terminal_future_partition(terminal, 64);
+                let mut seen = FxHashSet::<u32>::default();
+                let mut representatives = FxHashMap::<u32, u32>::default();
+                let mut live_states = 0usize;
+                for (state, &class) in classes.iter().enumerate() {
+                    if class != 0 {
+                        seen.insert(class);
+                        representatives.entry(class).or_insert(state as u32);
+                        live_states += 1;
+                    }
+                }
+                let class_count = seen.len();
+                let thresholds = [32usize, 64, 96, 128, 144];
+                for (&class, &state) in &representatives {
+                    let live_bytes = observation_tokenizer
+                        .transitions_from(state)
+                        .filter(|&(_, target)| {
+                            !observation_tokenizer.state_has_epsilon_transitions(target)
+                                && observation_tokenizer
+                                    .possible_future_terminals(target)
+                                    .contains(terminal as usize)
+                        })
+                        .count();
+                    for (index, &threshold) in thresholds.iter().enumerate() {
+                        if live_bytes >= threshold {
+                            broad_class_totals[index] += 1;
+                        }
+                    }
+                    if live_bytes >= 128 {
+                        broad128_candidates.push((terminal, class, state));
+                    }
+                }
+                total_nonzero_classes += class_count;
+                total_live_states += live_states;
+                rows.push((
+                    terminal,
+                    class_count,
+                    live_states,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                ));
+            }
+            rows.sort_unstable_by(|left, right| {
+                (std::cmp::Reverse(left.1), std::cmp::Reverse(left.2), left.0)
+                    .cmp(&(std::cmp::Reverse(right.1), std::cmp::Reverse(right.2), right.0))
+            });
+            eprintln!(
+                "[glrmask/profile][dynamic_h64_all] tokenizer_states={} terminals={} total_nonzero_classes={} total_live_states={} broad_classes_ge_32_64_96_128_144={:?} elapsed_ms={:.3} top={:?}",
+                observation_tokenizer.num_states(),
+                self.table.num_terminals,
+                total_nonzero_classes,
+                total_live_states,
+                broad_class_totals,
+                started_all.elapsed().as_secs_f64() * 1000.0,
+                rows.iter().take(24).collect::<Vec<_>>(),
+            );
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_H64_BUILD_BROAD").is_some() {
+                fn build_terminal_h64_roots_for_profile(
+                    tokenizer: &Tokenizer,
+                    fast_transitions: &FastTokenizerTransitions,
+                    trie: &DynamicMaskTrie,
+                    source_state: u32,
+                    terminal: TerminalID,
+                ) -> (usize, usize) {
+                    fn visit(
+                        tokenizer: &Tokenizer,
+                        fast_transitions: &FastTokenizerTransitions,
+                        trie: &DynamicMaskTrie,
+                        node: u32,
+                        state: u32,
+                        terminal: TerminalID,
+                        roots: &mut Vec<u32>,
+                    ) -> bool {
+                        let checkpoint = roots.len();
+                        let mut all_safe = trie.node(node).token_id.is_none()
+                            || tokenizer
+                                .possible_future_terminals(state)
+                                .contains(terminal as usize);
+                        for edge in trie.children(node) {
+                            let mut target = state;
+                            let mut alive = !tokenizer.state_has_epsilon_transitions(target);
+                            if alive {
+                                for &byte in trie.edge_bytes(edge) {
+                                    target = fast_transitions.transition(tokenizer, target, byte);
+                                    if target == u32::MAX
+                                        || tokenizer.state_has_epsilon_transitions(target)
+                                    {
+                                        alive = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            all_safe &= alive
+                                && visit(
+                                    tokenizer,
+                                    fast_transitions,
+                                    trie,
+                                    edge.child,
+                                    target,
+                                    terminal,
+                                    roots,
+                                );
+                        }
+                        if all_safe && trie.subtree_max_total_byte_len(node) <= 64 {
+                            roots.truncate(checkpoint);
+                            roots.push(node);
+                        }
+                        all_safe
+                    }
+
+                    let mut roots = Vec::<u32>::new();
+                    let _ = visit(
+                        tokenizer,
+                        fast_transitions,
+                        trie,
+                        0,
+                        source_state,
+                        terminal,
+                        &mut roots,
+                    );
+                    roots.sort_unstable();
+                    roots.dedup();
+                    let covered = roots
+                        .iter()
+                        .map(|&node| trie.subtree_tokens(node).len())
+                        .sum::<usize>();
+                    (roots.len(), covered)
+                }
+
+                let build_started = std::time::Instant::now();
+                let fast = Self::compute_tokenizer_fast_transitions_for(observation_tokenizer);
+                let trie = dynamic_mask_vocab.trie.as_ref();
+                let results = broad128_candidates
+                    .par_iter()
+                    .map(|&(terminal, class, state)| {
+                        let started = std::time::Instant::now();
+                        let (roots, covered) = build_terminal_h64_roots_for_profile(
+                            observation_tokenizer,
+                            &fast,
+                            trie,
+                            state,
+                            terminal,
+                        );
+                        (
+                            terminal,
+                            class,
+                            state,
+                            roots,
+                            covered,
+                            started.elapsed().as_secs_f64() * 1000.0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let retained = results
+                    .iter()
+                    .filter(|row| row.4 >= 64_000)
+                    .count();
+                let retained_roots = results
+                    .iter()
+                    .filter(|row| row.4 >= 64_000)
+                    .map(|row| row.3)
+                    .sum::<usize>();
+                let total_roots = results.iter().map(|row| row.3).sum::<usize>();
+                let mut slowest = results.clone();
+                slowest.sort_by(|left, right| right.5.total_cmp(&left.5));
+                eprintln!(
+                    "[glrmask/profile][dynamic_h64_build_broad] candidates={} retained_ge_64k={} roots_total={} retained_roots={} retained_root_bytes={} wall_ms={:.3} slowest={:?}",
+                    results.len(),
+                    retained,
+                    total_roots,
+                    retained_roots,
+                    retained_roots * std::mem::size_of::<u32>(),
+                    build_started.elapsed().as_secs_f64() * 1000.0,
+                    slowest.iter().take(12).collect::<Vec<_>>(),
+                );
+            }
+        }
+        let (bounded2, bounded4, bounded8, bounded16, bounded32, bounded64) =
+            if has_virtual_residual_runtime {
             // General residual states are created lazily outside the physical
             // DFA domain, and dynamic traversal deliberately does not consume
             // physical observation certificates for this runtime family.
@@ -4982,14 +5818,222 @@ impl Constraint {
             (
                 Vec::<U8Set>::new().into_boxed_slice(),
                 Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
+                Vec::<U8Set>::new().into_boxed_slice(),
             )
         } else {
-            observation_tokenizer.precompute_bounded_observation_safe_byte_sets()
+            observation_tokenizer.precompute_bounded_observation_safe_byte_sets_multi()
         };
-        let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
+        let mut bounded_sets = DynamicBoundedObservationSets::from_raw(
+            bounded2,
+            bounded4,
+            bounded8,
+            bounded16,
+            bounded32,
+            bounded64,
+        );
+        if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_WIDE_BOUNDED_SETS").is_some()
+            && !has_virtual_residual_runtime
+            && observation_tokenizer.num_states() <= 16_384
+        {
+            let started = std::time::Instant::now();
+            let (wide, horizons) = observation_tokenizer
+                .precompute_wide_bounded_observation_safe_byte_sets();
+            if profile {
+                let nonzero = horizons.iter().filter(|&&horizon| horizon != 0).count();
+                let h16 = horizons.iter().filter(|&&horizon| horizon >= 16).count();
+                let h64 = horizons.iter().filter(|&&horizon| horizon >= 64).count();
+                eprintln!(
+                    "[glrmask/profile][dynamic_wide_bounded_build] states={} nonzero={} h16={} h64={} elapsed_ms={:.3}",
+                    observation_tokenizer.num_states(),
+                    nonzero,
+                    h16,
+                    h64,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            bounded_sets.set_wide_raw(wide, horizons);
+        }
+        if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_SHRINKING_FUTURE_SETS").is_some()
+            && !has_virtual_residual_runtime
+            && observation_tokenizer.num_states() <= 16_384
+        {
+            let started = std::time::Instant::now();
+            if let Some((h16, h16_common, h32, h32_common, h64, h64_common)) =
+                observation_tokenizer.precompute_bounded_shrinking_future_sets()
+            {
+                if profile {
+                    let nonzero16 = h16_common.iter().filter(|&&mask| mask != 0).count();
+                    let nonzero32 = h32_common.iter().filter(|&&mask| mask != 0).count();
+                    let nonzero64 = h64_common.iter().filter(|&&mask| mask != 0).count();
+                    eprintln!(
+                        "[glrmask/profile][dynamic_shrinking_future_build] states={} h16={} h32={} h64={} elapsed_ms={:.3}",
+                        observation_tokenizer.num_states(),
+                        nonzero16,
+                        nonzero32,
+                        nonzero64,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                bounded_sets.set_shrinking_raw(
+                    h16, h16_common, h32, h32_common, h64, h64_common,
+                );
+            }
+        }
+        if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_UTF8_MACRO").is_some()
+            && !has_virtual_residual_runtime
+            && observation_tokenizer.num_states() <= 16_384
+        {
+            let started = std::time::Instant::now();
+            if let Some((h16, h32, h64)) =
+                observation_tokenizer.precompute_non_ascii_utf8_shrinking_future_sets()
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_utf8_macro_build] states={} h16={} h32={} h64={} elapsed_ms={:.3}",
+                        observation_tokenizer.num_states(),
+                        h16.iter().filter(|&&mask| mask != 0).count(),
+                        h32.iter().filter(|&&mask| mask != 0).count(),
+                        h64.iter().filter(|&&mask| mask != 0).count(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                bounded_sets.set_utf8_common_raw(h16, h32, h64);
+            }
+            if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_EXACT_MACRO_HORIZONS").is_some() {
+                let exact_started = std::time::Instant::now();
+                if let Some(rows) = observation_tokenizer
+                    .precompute_non_ascii_utf8_exact_shrinking_future_rows()
+                {
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_utf8_macro_exact_build] entries={} bytes={} elapsed_ms={:.3}",
+                            rows.len(),
+                            rows.len() * std::mem::size_of::<u64>(),
+                            exact_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    bounded_sets.set_utf8_exact_common_raw(rows);
+                }
+            }
+            let word_started = std::time::Instant::now();
+            if let Some((h16, h32, h64)) =
+                observation_tokenizer.precompute_unicode_word_shrinking_future_sets()
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_utf8_word_macro_build] states={} h16={} h32={} h64={} elapsed_ms={:.3}",
+                        observation_tokenizer.num_states(),
+                        h16.iter().filter(|&&mask| mask != 0).count(),
+                        h32.iter().filter(|&&mask| mask != 0).count(),
+                        h64.iter().filter(|&&mask| mask != 0).count(),
+                        word_started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                bounded_sets.set_utf8_word_common_raw(h16, h32, h64);
+            }
+            if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_EXACT_MACRO_HORIZONS").is_some() {
+                let word_exact_started = std::time::Instant::now();
+                if let Some(rows) = observation_tokenizer
+                    .precompute_unicode_word_exact_shrinking_future_rows()
+                {
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_utf8_word_macro_exact_build] entries={} bytes={} elapsed_ms={:.3}",
+                            rows.len(),
+                            rows.len() * std::mem::size_of::<u64>(),
+                            word_exact_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    bounded_sets.set_utf8_word_exact_common_raw(rows);
+                }
+            }
+            if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_UTF8_PREFIX_MACRO").is_some() {
+                let prefix_started = std::time::Instant::now();
+                if let Some(rows) = observation_tokenizer
+                    .precompute_unicode_word_prefix_exact_shrinking_future_rows()
+                {
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_utf8_word_prefix_macro_exact_build] entries={} bytes={} elapsed_ms={:.3}",
+                            rows.len(),
+                            rows.len() * std::mem::size_of::<u64>(),
+                            prefix_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    bounded_sets.set_utf8_word_prefix_exact_common_raw(rows);
+                }
+            }
+        }
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_UTF8_MACRO").is_some()
+            && !has_virtual_residual_runtime
+            && observation_tokenizer.num_states() <= 16_384
+        {
+            let started = std::time::Instant::now();
+            if let Some((h16, h32, h64)) =
+                observation_tokenizer.precompute_non_ascii_utf8_shrinking_future_sets()
+            {
+                let requested = std::env::var("GLRMASK_PROFILE_DYNAMIC_UTF8_MACRO_STATES")
+                    .ok()
+                    .into_iter()
+                    .flat_map(|value| {
+                        value
+                            .split(',')
+                            .filter_map(|part| part.trim().parse::<u32>().ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let rows = requested
+                    .iter()
+                    .map(|&state| {
+                        (
+                            state,
+                            h16.get(state as usize).copied().unwrap_or(0),
+                            h32.get(state as usize).copied().unwrap_or(0),
+                            h64.get(state as usize).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/profile][dynamic_utf8_macro] states={} h16={} h32={} h64={} requested={:?} elapsed_ms={:.3}",
+                    observation_tokenizer.num_states(),
+                    h16.iter().filter(|&&mask| mask != 0).count(),
+                    h32.iter().filter(|&&mask| mask != 0).count(),
+                    h64.iter().filter(|&&mask| mask != 0).count(),
+                    rows,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
         let bounded_state_count = bounded_sets.state_count();
         let bounded_unique_set_count = bounded_sets.unique_set_count();
         dynamic_mask_vocab.set_bounded_observation_sets(bounded_sets);
+        let terminal_bounded_started_at = profile.then(std::time::Instant::now);
+        if std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_TERMINAL_BOUNDED_SETS").is_some() {
+            let terminal_count = observation_tokenizer.num_terminals() as usize;
+            let ignore_terminal = self.ignore_terminal;
+            let tables = (0..terminal_count)
+                .into_par_iter()
+                .map(|terminal| {
+                    let mut active = BitSet::new(terminal_count);
+                    active.set(terminal);
+                    if let Some(ignore) = ignore_terminal {
+                        active.set(ignore as usize);
+                    }
+                    observation_tokenizer
+                        .precompute_bounded_observation_safe_byte_sets_for_terminals(&active)
+                })
+                .collect::<Vec<_>>();
+            dynamic_mask_vocab.set_terminal_bounded_observation_sets(
+                DynamicTerminalBoundedObservationSets::from_raw(tables),
+            );
+        }
+        let terminal_bounded_ms = terminal_bounded_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let (terminal_bounded_terminals, terminal_bounded_states, terminal_bounded_unique_sets) =
+            dynamic_mask_vocab.terminal_bounded_observation_set_counts();
         let bounded_sets_ms = bounded_sets_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_started_at = profile.then(std::time::Instant::now);
@@ -5004,13 +6048,14 @@ impl Constraint {
                             && !value.eq_ignore_ascii_case("off"))
                 })
                 .unwrap_or(true);
-        let (self_loop_projections, projection_alias_vocab) = if build_self_loop_projections {
+        let (self_loop_projections, projection_alias_vocab, root_effect_projections) =
+            if build_self_loop_projections {
             self.build_dynamic_self_loop_projections(
                 &dynamic_mask_vocab,
                 &tokenizer_fast_transitions,
             )
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
         let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -5028,6 +6073,7 @@ impl Constraint {
             self.build_dynamic_terminal_observation_classes()
         };
         dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
+        dynamic_mask_vocab.set_root_effect_projections(root_effect_projections);
         dynamic_mask_vocab.set_projection_alias_vocab(projection_alias_vocab);
         dynamic_mask_vocab.set_projection_alias_h64(projection_alias_h64);
         dynamic_mask_vocab.set_terminal_observation_classes(terminal_observation_classes);
@@ -5043,7 +6089,7 @@ impl Constraint {
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} bounded_sets_ms={:.3} bounded_states={} bounded_unique_sets={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} bounded_sets_ms={:.3} bounded_states={} bounded_unique_sets={} terminal_bounded_ms={:.3} terminal_bounded_terminals={} terminal_bounded_states={} terminal_bounded_unique_sets={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 tokenizer_fast_ms,
@@ -5053,6 +6099,10 @@ impl Constraint {
                 bounded_sets_ms,
                 bounded_state_count,
                 bounded_unique_set_count,
+                terminal_bounded_ms,
+                terminal_bounded_terminals,
+                terminal_bounded_states,
+                terminal_bounded_unique_sets,
                 hot_frontier_ms,
                 hot_frontier_count,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -5137,12 +6187,15 @@ impl Constraint {
             token_id: has_token.then_some(entries[0].0 as u32),
             first_child: 0,
             child_len: 0,
+            layout_class: 0,
             subtree_token_start: 0,
             subtree_token_end: 0,
             subtree_bytes: [0; 4],
             subtree_first_bytes: [0; 4],
             prefix_byte_len: 0,
             subtree_max_byte_len: 0,
+            subtree_max_utf8_char_len: 0,
+            subtree_all_utf8_word_prefix: false,
         });
 
         let child_entries = if has_token { &entries[1..] } else { entries };
@@ -5242,12 +6295,15 @@ impl Constraint {
                 token_id: None,
                 first_child: 0,
                 child_len: 0,
+                layout_class: partition,
                 subtree_token_start: 0,
                 subtree_token_end: 0,
                 subtree_bytes: [0; 4],
                 subtree_first_bytes: [0; 4],
                 prefix_byte_len: 0,
                 subtree_max_byte_len: 0,
+                subtree_max_utf8_char_len: 0,
+                subtree_all_utf8_word_prefix: false,
             });
             Self::build_dynamic_mask_trie_children(
                 partition_entries,
@@ -5255,6 +6311,9 @@ impl Constraint {
                 partition_node,
                 &mut trie,
             );
+            for node in &mut trie.nodes[partition_node as usize..] {
+                node.layout_class = partition;
+            }
             let (byte_start, byte_len) = trie.push_edge_bytes(&[]);
             partition_edges.push(DynamicMaskTrieEdge {
                 byte_start,
@@ -7395,7 +8454,9 @@ impl Constraint {
         Self::compute_tokenizer_fast_transitions_for(&self.tokenizer)
     }
 
-    fn compute_tokenizer_fast_transitions_for(tokenizer: &Tokenizer) -> FastTokenizerTransitions {
+    pub(crate) fn compute_tokenizer_fast_transitions_for(
+        tokenizer: &Tokenizer,
+    ) -> FastTokenizerTransitions {
         let num_states = tokenizer.num_states();
         if tokenizer.has_packed_runtime_transitions() {
             return FastTokenizerTransitions::Fallback(num_states as usize);

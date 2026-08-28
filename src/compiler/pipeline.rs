@@ -655,6 +655,28 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option<Tokenizer>> {
     const HYBRID_MIN_BOUND: usize = 4_096;
 
+    fn contains_bounded_repeat_at_least(expr: &Expr, threshold: usize) -> bool {
+        match expr {
+            Expr::Repeat { expr, max, .. } => {
+                max.is_some_and(|max| max >= threshold)
+                    || contains_bounded_repeat_at_least(expr, threshold)
+            }
+            Expr::Seq(parts) | Expr::Choice(parts) => parts
+                .iter()
+                .any(|part| contains_bounded_repeat_at_least(part, threshold)),
+            Expr::Intersect { expr, intersect } => {
+                contains_bounded_repeat_at_least(expr, threshold)
+                    || contains_bounded_repeat_at_least(intersect, threshold)
+            }
+            Expr::Exclude { expr, exclude } => {
+                contains_bounded_repeat_at_least(expr, threshold)
+                    || contains_bounded_repeat_at_least(exclude, threshold)
+            }
+            Expr::Shared(expr) => contains_bounded_repeat_at_least(expr, threshold),
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+        }
+    }
+
     let expressions = grammar
         .terminals
         .iter()
@@ -669,6 +691,28 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
                 .then_some(terminal as TerminalID)
         })
         .collect::<Vec<_>>();
+    // Experiment only: force ordinary finite bounded-repeat terminals onto the
+    // general exact residual runtime below the normal 4096-state protection
+    // threshold. This lets us measure the representation independently from
+    // JSON-Schema chunking without changing the accepted language.
+    let force_residual_bounded_min = std::env::var(
+        "GLRMASK_EXPERIMENT_DYNAMIC_FORCE_RESIDUAL_BOUNDED_MIN",
+    )
+    .ok()
+    .and_then(|value| value.trim().parse::<usize>().ok())
+    .filter(|&value| value > 0);
+    let forced_residual_terminals = force_residual_bounded_min
+        .map(|threshold| {
+            expressions
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, expression)| {
+                    contains_bounded_repeat_at_least(expression, threshold)
+                        .then_some(terminal as TerminalID)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     // A bounded-code intersection can have a declared bound below the generic
     // 4096 giant-repeat threshold and still explode when eagerly materialized
     // (pattern/format + JSON decoded-length envelopes are a common example).
@@ -687,7 +731,10 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     } else {
         Vec::new()
     };
-    if giant_terminals.is_empty() && bounded_code_terminals.is_empty() {
+    if giant_terminals.is_empty()
+        && bounded_code_terminals.is_empty()
+        && forced_residual_terminals.is_empty()
+    {
         return Ok(None);
     }
     if !giant_terminals.is_empty()
@@ -739,11 +786,17 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
             "validated protected tokenizer component could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
         ))
     };
-    let general_residual_terminals = if giant_terminals.is_empty() {
-        &bounded_code_terminals
+    let mut general_residual_terminals_storage = if giant_terminals.is_empty() {
+        bounded_code_terminals.clone()
     } else {
-        &giant_terminals
+        giant_terminals.clone()
     };
+    for terminal in forced_residual_terminals {
+        if !general_residual_terminals_storage.contains(&terminal) {
+            general_residual_terminals_storage.push(terminal);
+        }
+    }
+    let general_residual_terminals = &general_residual_terminals_storage;
 
     let build_general_residual = || -> crate::Result<Option<Tokenizer>> {
         let mut proxy_expressions = expressions.clone();
@@ -787,7 +840,10 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         Ok(Some(tokenizer))
     };
 
-    if giant_terminals.is_empty() || !all_giants_specialized {
+    if giant_terminals.is_empty()
+        || !all_giants_specialized
+        || force_residual_bounded_min.is_some()
+    {
         return build_general_residual();
     }
 
@@ -5084,10 +5140,23 @@ fn compile_dynamic_owned_impl(
         let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
             || -> crate::Result<((Tokenizer, Option<(Tokenizer, Vec<u32>)>), f64)> {
                 let started_at = Instant::now();
+                let force_quotient_over_virtual = std::env::var_os(
+                    "GLRMASK_EXPERIMENT_FORCE_DYNAMIC_MASK_TOKEN_QUOTIENT",
+                )
+                .is_some();
                 let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
                     .is_some()
-                    && !prepared_has_giant_repeat;
-                let virtual_tokenizer = build_dynamic_virtual_tokenizer(&prepared_grammar)?;
+                    && (!prepared_has_giant_repeat || force_quotient_over_virtual);
+                // Experiment only: force the certified full->mask structural
+                // quotient even for grammars that would normally select a
+                // virtual residual full lexer. Commit still uses the full
+                // tokenizer produced by the structural pair; masking uses the
+                // certified synthesized tokenizer.
+                let virtual_tokenizer = if force_quotient_over_virtual {
+                    None
+                } else {
+                    build_dynamic_virtual_tokenizer(&prepared_grammar)?
+                };
                 let quotient_pair = (virtual_tokenizer.is_none() && quotient_enabled)
                     .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
                     .flatten()
