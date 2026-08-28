@@ -11,6 +11,7 @@ use crate::automata::lexer::{
     tokenizer::{TerminalProjectedQuotient, Tokenizer},
 };
 use crate::automata::lexer::runtime_repeat_product::VirtualBinaryRepeatIntersectionMaskProjection;
+use crate::automata::lexer::tokenizer::VirtualResidualMaskProjection;
 use crate::automata::lexer::runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection;
 use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
@@ -2673,6 +2674,7 @@ pub(crate) struct DynamicMaskVocab {
     mask_source_subset_to_state: Arc<FxHashMap<Arc<[u32]>, u32>>,
     virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
     virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
+    virtual_residual_projections: Vec<VirtualResidualMaskProjection>,
 }
 
 impl DynamicMaskVocab {
@@ -2744,6 +2746,7 @@ impl DynamicMaskVocab {
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
+            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -2796,6 +2799,7 @@ impl DynamicMaskVocab {
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
+            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -2831,6 +2835,7 @@ impl DynamicMaskVocab {
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
+            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -2885,6 +2890,7 @@ impl DynamicMaskVocab {
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
+            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -3140,6 +3146,7 @@ impl DynamicMaskVocab {
         self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = None;
         self.virtual_repeat_intersection_projections.clear();
+        self.virtual_residual_projections.clear();
     }
 
     pub(crate) fn set_mask_tokenizer_source_subsets(
@@ -3237,6 +3244,7 @@ impl DynamicMaskVocab {
         self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = Some(projection);
         self.virtual_repeat_intersection_projections.clear();
+        self.virtual_residual_projections.clear();
     }
 
     pub(crate) fn set_virtual_repeat_intersection_mask_projection(
@@ -3260,6 +3268,20 @@ impl DynamicMaskVocab {
         self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = None;
         self.virtual_repeat_intersection_projections = projections;
+        self.virtual_residual_projections.clear();
+    }
+
+    pub(crate) fn set_virtual_residuals_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        projections: Vec<VirtualResidualMaskProjection>,
+    ) {
+        debug_assert!(!projections.is_empty());
+        self.mask_tokenizer = Some(Arc::new(tokenizer));
+        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.virtual_unit_repeat_projection = None;
+        self.virtual_repeat_intersection_projections.clear();
+        self.virtual_residual_projections = projections;
     }
 
     /// Preserve lexer-derived dynamic-mask metadata when a deferred vocabulary
@@ -3282,11 +3304,13 @@ impl DynamicMaskVocab {
         self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
         self.virtual_repeat_intersection_projections =
             source.virtual_repeat_intersection_projections.clone();
+        self.virtual_residual_projections = source.virtual_residual_projections.clone();
     }
 
     pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
         if self.virtual_unit_repeat_projection.is_some()
             || !self.virtual_repeat_intersection_projections.is_empty()
+            || !self.virtual_residual_projections.is_empty()
         {
             // This compact structural projection is rebuilt from the exact
             // virtual tokenizer and bound vocabulary after load. The legacy
@@ -3315,6 +3339,25 @@ impl DynamicMaskVocab {
 
     #[inline]
     pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
+        if !self.virtual_residual_projections.is_empty() {
+            for projection in &self.virtual_residual_projections {
+                if let Some(projected) = projection.project(full_state) {
+                    return projected;
+                }
+            }
+            // Ordinary physical states retain their IDs in the residual mask
+            // tokenizer; only exact virtual states require an owning projection.
+            if self
+                .virtual_residual_projections
+                .iter()
+                .all(|projection| full_state < projection.physical_state_count())
+            {
+                return full_state;
+            }
+            panic!(
+                "exact residual tokenizer state {full_state} has no owning finite-mask projection"
+            );
+        }
         if !self.virtual_repeat_intersection_projections.is_empty() {
             for projection in &self.virtual_repeat_intersection_projections {
                 if let Some(projected) = projection.project(full_state) {
@@ -3340,8 +3383,9 @@ impl DynamicMaskVocab {
 
     pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
         let tokenizer = self.mask_tokenizer.as_ref()?;
-        if !self.virtual_repeat_intersection_projections.is_empty() {
-            // The exact product state domain is populated lazily, so no finite
+        if !self.virtual_residual_projections.is_empty()
+            || !self.virtual_repeat_intersection_projections.is_empty() {
+            // The exact virtual state domain is populated lazily, so no finite
             // global full-state multiplicity table exists. Optimizations that
             // require such a table must simply decline.
             return None;
@@ -4112,6 +4156,7 @@ impl Default for DynamicMaskVocab {
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
+            virtual_residual_projections: Vec::new(),
         }
     }
 }
@@ -5247,6 +5292,52 @@ pub(crate) struct RecursiveParserLeafLayout {
     pub(crate) component_path: Vec<u32>,
 }
 
+const RECURSIVE_VIRTUAL_TOKENIZER_STATE_LIMIT: u32 = 1 << 31;
+
+#[derive(Debug, Default)]
+struct RecursiveVirtualTokenizerStateStore {
+    next_state: u32,
+    scoped_by_local: FxHashMap<(u32, u32), u32>,
+    local_by_scoped: FxHashMap<u32, (u32, u32)>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RecursiveVirtualTokenizerStates {
+    store: Mutex<RecursiveVirtualTokenizerStateStore>,
+}
+
+impl RecursiveVirtualTokenizerStates {
+    pub(crate) fn scoped_state(
+        &self,
+        physical_state_count: u32,
+        leaf_index: usize,
+        local_state: u32,
+    ) -> Option<u32> {
+        let leaf_index = u32::try_from(leaf_index).ok()?;
+        let mut store = self.store.lock().ok()?;
+        if let Some(&scoped) = store.scoped_by_local.get(&(leaf_index, local_state)) {
+            return Some(scoped);
+        }
+        if store.next_state < physical_state_count {
+            store.next_state = physical_state_count;
+        }
+        if store.next_state >= RECURSIVE_VIRTUAL_TOKENIZER_STATE_LIMIT {
+            return None;
+        }
+        let scoped = store.next_state;
+        store.next_state = store.next_state.checked_add(1)?;
+        store.scoped_by_local.insert((leaf_index, local_state), scoped);
+        store.local_by_scoped.insert(scoped, (leaf_index, local_state));
+        Some(scoped)
+    }
+
+    pub(crate) fn local_state(&self, scoped_state: u32) -> Option<(usize, u32)> {
+        let store = self.store.lock().ok()?;
+        let &(leaf_index, local_state) = store.local_by_scoped.get(&scoped_state)?;
+        Some((leaf_index as usize, local_state))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecursiveParserLayout {
     pub(crate) component_offsets: Vec<u32>,
@@ -5331,6 +5422,11 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// image genuinely set-valued, so this must not be collapsed to one TSID.
     #[serde(skip, default)]
     pub(crate) recursive_tokenizer_internal_tsids: OnceLock<Arc<Vec<Vec<u32>>>>,
+    /// Lazily allocated outer scoped IDs for exact virtual tokenizer states in
+    /// retained recursive leaves. Physical states keep their contiguous layout
+    /// IDs; only actually reached virtual states enter this runtime-only map.
+    #[serde(skip, default)]
+    pub(crate) recursive_virtual_tokenizer_states: Arc<RecursiveVirtualTokenizerStates>,
     /// The segmented A/B factorization is the masking implementation for this
     /// constraint, rather than an optional validation view of a flattened
     /// parser DWA. Current serialization preserves this split explicitly.
@@ -5412,6 +5508,9 @@ pub(crate) struct SegmentedParserComponent {
     /// this stores only exceptional many-scope aliases (currently globally
     /// equivalent ignore terminals).
     pub(crate) global_terminal_aliases: Vec<(u32, u32)>,
+    /// Component-local Static TSID -> composed Static TSID relation retained
+    /// for lazy exact tokenizer states that are allocated after link time.
+    pub(crate) local_tsid_to_global_tsids: Vec<Vec<u32>>,
     /// Legacy v22 compatibility metadata. New authoritative A+B compositions
     /// leave this `None`: component parser DWAs keep their standalone semantics
     /// unchanged, and scope/link behavior lives in the composed parser view/B.

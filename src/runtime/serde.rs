@@ -2325,6 +2325,7 @@ struct SegmentedParserComponentV24Ref<'a> {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
+    local_tsid_to_global_tsids: &'a [Vec<u32>],
     root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
     global_to_local_parser_state: &'a [u32],
@@ -2337,6 +2338,7 @@ struct SegmentedParserComponentV24 {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: Vec<(u32, u32)>,
+    local_tsid_to_global_tsids: Vec<Vec<u32>>,
     root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
     global_to_local_parser_state: Vec<u32>,
@@ -2394,6 +2396,7 @@ struct RecursiveSegmentedParserComponentV27Ref<'a> {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
+    local_tsid_to_global_tsids: &'a [Vec<u32>],
     root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
 }
@@ -2404,6 +2407,7 @@ struct RecursiveSegmentedParserComponentV27 {
     tokenizer_state_offset: u32,
     terminal_offset: u32,
     global_terminal_aliases: Vec<(u32, u32)>,
+    local_tsid_to_global_tsids: Vec<Vec<u32>>,
     root_entry_terminals: crate::ds::bitset::BitSet,
     root_disallowed_terminal: Option<u32>,
 }
@@ -2643,6 +2647,7 @@ fn segmented_runtime_artifact_v24_ref(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
+            local_tsid_to_global_tsids: &component.local_tsid_to_global_tsids,
             root_entry_terminals: serialized_component_root_entry_terminals(
                 component,
                 constraint.table.num_terminals as usize,
@@ -2756,6 +2761,7 @@ fn segmented_runtime_artifact_ref(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
+            local_tsid_to_global_tsids: &component.local_tsid_to_global_tsids,
             root_entry_terminals: serialized_component_root_entry_terminals(
                 component,
                 constraint.table.num_terminals as usize,
@@ -3052,6 +3058,7 @@ fn restore_segmented_runtime_v22(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: Vec::new(),
+            local_tsid_to_global_tsids: Vec::new(),
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: component.global_to_local_parser_state,
         });
@@ -3669,6 +3676,7 @@ fn restore_recursive_segmented_runtime_v27(
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: component.global_terminal_aliases,
+            local_tsid_to_global_tsids: component.local_tsid_to_global_tsids,
             root_disallowed_terminal: component.root_disallowed_terminal,
             global_to_local_parser_state: Vec::new(),
         });
@@ -5264,7 +5272,8 @@ impl Constraint {
                                     .then(|| self.dynamic_mask_vocab.to_vocab_artifact())
                                     .flatten(),
                                 virtual_runtimes: self
-                                    .uses_dynamic_runtime()
+                                    .tokenizer
+                                    .has_any_virtual_runtime()
                                     .then(|| self.tokenizer.virtual_runtime_metadata())
                                     .unwrap_or_default(),
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
@@ -6920,14 +6929,24 @@ impl Constraint {
                         .retained_terminal_exprs()
                         .map(|exprs| exprs.to_vec())
                 });
-                constraint
-                    .tokenizer
-                    .restore_terminal_exprs_with_virtual_runtime_metadata(
-                        terminal_exprs,
-                        &virtual_runtimes,
-                        false,
-                    )
-                    .map_err(crate::GlrMaskError::Serialization)?;
+                let restore_result = if constraint.uses_dynamic_runtime() {
+                    constraint
+                        .tokenizer
+                        .restore_terminal_exprs_with_virtual_runtime_metadata(
+                            terminal_exprs,
+                            &virtual_runtimes,
+                            false,
+                        )
+                } else {
+                    constraint
+                        .tokenizer
+                        .restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
+                            terminal_exprs,
+                            &virtual_runtimes,
+                            false,
+                        )
+                };
+                restore_result.map_err(crate::GlrMaskError::Serialization)?;
             }
             let restore_exprs_ms = restore_exprs_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -7233,6 +7252,7 @@ mod tests {
                     tokenizer_state_offset: 0,
                     terminal_offset: 0,
                     global_terminal_aliases: Vec::new(),
+                    local_tsid_to_global_tsids: Vec::new(),
                     root_entry_terminals,
                     root_disallowed_terminal: None,
                     global_to_local_parser_state: (0..current.table.num_states).collect(),
@@ -7303,6 +7323,7 @@ mod tests {
                         tokenizer_state_offset: 0,
                         terminal_offset: 0,
                         global_terminal_aliases: Vec::new(),
+                        local_tsid_to_global_tsids: Vec::new(),
                         root_entry_terminals: root_entry_terminals.clone(),
                         root_disallowed_terminal: None,
                         global_to_local_parser_state: projection.clone(),
@@ -7312,6 +7333,7 @@ mod tests {
                         tokenizer_state_offset: 0,
                         terminal_offset: 0,
                         global_terminal_aliases: Vec::new(),
+                        local_tsid_to_global_tsids: Vec::new(),
                         root_entry_terminals,
                         root_disallowed_terminal: None,
                         global_to_local_parser_state: projection.clone(),
@@ -7376,6 +7398,55 @@ mod tests {
         actual.commit_token(2).unwrap();
         assert_eq!(actual.is_accepting(), expected.is_accepting());
         assert!(actual.is_accepting());
+    }
+
+    #[test]
+    fn static_bounded_uri_virtual_projection_roundtrips_with_packed_vocab() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"x:".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"aa".to_vec()),
+        ]);
+        let schema = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+        let constraint = Constraint::from_json_schema(schema, &vocab)
+            .expect("large bounded URI should compile through the exact Static residual lane");
+        assert!(constraint.tokenizer.has_virtual_residual_runtime());
+        assert!(constraint.dynamic_mask_vocab.mask_projection_tokenizer().is_some());
+
+        let loaded = Constraint::load(constraint.save())
+            .expect("Static residual artifact should round-trip");
+        assert!(loaded.tokenizer.has_virtual_residual_runtime());
+        assert!(loaded.dynamic_mask_vocab.mask_projection_tokenizer().is_some());
+        assert!(loaded.token_bytes.is_empty());
+        assert!(loaded.packed_token_bytes.is_some());
+
+        let compare_mask = |prefix: &[u8]| {
+            let mut expected = constraint.start();
+            let mut actual = loaded.start();
+            expected.commit_bytes(prefix).unwrap();
+            actual.commit_bytes(prefix).unwrap();
+            assert_eq!(actual.mask(), expected.mask(), "prefix length {}", prefix.len());
+        };
+        compare_mask(b"\"x:");
+
+        let mut at_max = b"\"x:".to_vec();
+        at_max.extend(std::iter::repeat_n(b'a', 4_998));
+        compare_mask(&at_max);
+
+        let mut expected = constraint.start();
+        let mut actual = loaded.start();
+        expected.commit_bytes(&at_max).unwrap();
+        actual.commit_bytes(&at_max).unwrap();
+        expected.commit_bytes(b"\"").unwrap();
+        actual.commit_bytes(b"\"").unwrap();
+        assert!(expected.is_accepting());
+        assert!(actual.is_accepting());
+
+        let mut over_max = b"\"x:".to_vec();
+        over_max.extend(std::iter::repeat_n(b'a', 4_999));
+        assert!(constraint.start().commit_bytes(&over_max).is_err());
+        assert!(loaded.start().commit_bytes(&over_max).is_err());
     }
 
     #[test]

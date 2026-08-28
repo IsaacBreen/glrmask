@@ -2127,6 +2127,66 @@ mod tests {
     }
 
     #[test]
+    fn recursive_static_virtual_residual_child_handles_fused_boundaries_and_roundtrip() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"!".to_vec()),
+            (2, b"\"".to_vec()),
+            (3, b"x:".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"X\"".to_vec()),
+            (6, b"\"!".to_vec()),
+            (7, b"xa".to_vec()),
+            (8, b":".to_vec()),
+            (9, b"X\"x:".to_vec()),
+            (10, b"a\"!".to_vec()),
+            (11, b"aa".to_vec()),
+            (12, b"a\"".to_vec()),
+        ]);
+        let child = RuntimeConstraint::from_json_schema(
+            r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(child.tokenizer.has_virtual_residual_runtime());
+
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start document; extern grammar payload; nt document = \"X\" payload \"!\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let bound = parent.bind_grammar("payload", child).unwrap();
+        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+
+        let token_allowed = |mask: &[u32], token: u32| {
+            mask[token as usize / 32] & (1u32 << (token % 32)) != 0
+        };
+        for constraint in [&bound, &loaded] {
+            let mut state = constraint.start();
+            assert!(token_allowed(&state.mask(), 9));
+            state.commit_token(9).unwrap();
+            assert!(token_allowed(&state.mask(), 10));
+            state.commit_token(10).unwrap();
+            assert!(state.is_accepting());
+
+            let mut exact = constraint.start();
+            let mut exact_bytes = b"X\"x:".to_vec();
+            exact_bytes.extend(std::iter::repeat_n(b'a', 4998));
+            exact_bytes.extend_from_slice(b"\"!");
+            exact.commit_bytes(&exact_bytes).unwrap();
+            assert!(exact.is_accepting());
+
+            let mut over = constraint.start();
+            let mut over_bytes = b"X\"x:".to_vec();
+            over_bytes.extend(std::iter::repeat_n(b'a', 4999));
+            over_bytes.extend_from_slice(b"\"!");
+            assert!(over.commit_bytes(&over_bytes).is_err());
+        }
+    }
+
+    #[test]
     fn nested_static_boundaries_use_recursive_parser_coordinate_live_and_loaded() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),

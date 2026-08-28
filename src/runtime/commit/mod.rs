@@ -4,6 +4,7 @@ mod template_advance;
 pub(crate) use template_advance::advance_stacks_template_dfa;
 pub(crate) mod tokenizer_scan;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
@@ -1597,11 +1598,13 @@ fn runtime_tokenizer_is_reset_state(constraint: &Constraint, state: u32) -> bool
 fn runtime_tokenizer_future_terminals(
     constraint: &Constraint,
     state: u32,
-) -> Option<&crate::ds::bitset::BitSet> {
+) -> Option<Cow<'_, crate::ds::bitset::BitSet>> {
     if constraint.uses_compact_segmented_parser_runtime() {
         constraint.recursive_tokenizer_future_scoped_terminals(state)
     } else {
-        Some(constraint.tokenizer.possible_future_terminals(state))
+        Some(Cow::Borrowed(
+            constraint.tokenizer.possible_future_terminals(state),
+        ))
     }
 }
 
@@ -1616,13 +1619,12 @@ fn runtime_terminal_count(constraint: &Constraint) -> usize {
 
 #[inline]
 fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
-    runtime_tokenizer_is_reset_state(constraint, end_state)
-        || parser_may_advance_on_any(
-            constraint,
-            gss,
-            runtime_tokenizer_future_terminals(constraint, end_state)
-                .expect("runtime tokenizer end state must belong to its active coordinate"),
-        )
+    if runtime_tokenizer_is_reset_state(constraint, end_state) {
+        return true;
+    }
+    let future = runtime_tokenizer_future_terminals(constraint, end_state)
+        .expect("runtime tokenizer end state must belong to its active coordinate");
+    parser_may_advance_on_any(constraint, gss, future.as_ref())
 }
 
 /// For a tokenizer execution that produced several end states against the same
@@ -1650,9 +1652,8 @@ fn batched_end_state_admitted_terminals(
             continue;
         }
         non_initial += 1;
-        candidates.union_with_prefix(
-            runtime_tokenizer_future_terminals(constraint, end_state)?,
-        );
+        let future = runtime_tokenizer_future_terminals(constraint, end_state)?;
+        candidates.union_with_prefix(future.as_ref());
     }
     if non_initial <= 1 {
         return None;
@@ -1844,13 +1845,15 @@ fn end_state_may_advance_from_row_words(
     end_state: u32,
     admitted_words: &[u64; 32],
 ) -> bool {
-    runtime_tokenizer_is_reset_state(constraint, end_state)
-        || runtime_tokenizer_future_terminals(constraint, end_state)
-            .expect("runtime tokenizer end state must belong to its active coordinate")
-            .words()
-            .iter()
-            .zip(admitted_words.iter())
-            .any(|(&future, admitted)| (future & *admitted) != 0)
+    if runtime_tokenizer_is_reset_state(constraint, end_state) {
+        return true;
+    }
+    runtime_tokenizer_future_terminals(constraint, end_state)
+        .expect("runtime tokenizer end state must belong to its active coordinate")
+        .words()
+        .iter()
+        .zip(admitted_words.iter())
+        .any(|(&future, admitted)| (future & *admitted) != 0)
 }
 
 /// Cached exact-set version of `batched_end_state_admitted_terminals`.
@@ -1870,9 +1873,8 @@ fn cached_batched_end_state_admission(
             continue;
         }
         non_initial += 1;
-        candidates.union_with_prefix(
-            runtime_tokenizer_future_terminals(constraint, end_state)?,
-        );
+        let future = runtime_tokenizer_future_terminals(constraint, end_state)?;
+        candidates.union_with_prefix(future.as_ref());
     }
     if non_initial <= 1 {
         return None;
@@ -1904,6 +1906,7 @@ fn cached_single_end_state_may_advance(
     let Some(future) = runtime_tokenizer_future_terminals(constraint, end_state) else {
         return false;
     };
+    let future = future.as_ref();
     let index = admission_cache_entry_index(cache, gss, future.len());
     {
         let entry = &cache[index];
@@ -1933,11 +1936,12 @@ fn end_state_may_advance_from_cache_entry(
     end_state: u32,
     entry: &ParserAdmissionCacheEntry,
 ) -> bool {
-    runtime_tokenizer_is_reset_state(constraint, end_state)
-        || !entry.admitted.is_disjoint_prefix(
-            runtime_tokenizer_future_terminals(constraint, end_state)
-                .expect("runtime tokenizer end state must belong to its active coordinate"),
-        )
+    if runtime_tokenizer_is_reset_state(constraint, end_state) {
+        return true;
+    }
+    let future = runtime_tokenizer_future_terminals(constraint, end_state)
+        .expect("runtime tokenizer end state must belong to its active coordinate");
+    !entry.admitted.is_disjoint_prefix(future.as_ref())
 }
 
 
@@ -1952,10 +1956,11 @@ fn end_state_may_advance_with_batch(
         return true;
     }
     match admitted {
-        Some(admitted) => !admitted.is_disjoint_prefix(
-            runtime_tokenizer_future_terminals(constraint, end_state)
-                .expect("runtime tokenizer end state must belong to its active coordinate"),
-        ),
+        Some(admitted) => {
+            let future = runtime_tokenizer_future_terminals(constraint, end_state)
+                .expect("runtime tokenizer end state must belong to its active coordinate");
+            !admitted.is_disjoint_prefix(future.as_ref())
+        }
         None => end_state_may_advance(constraint, gss, end_state),
     }
 }
