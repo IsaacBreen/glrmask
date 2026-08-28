@@ -831,6 +831,9 @@ fn build_segmented_runtime_metadata(
             tokenizer_state_offset: tokenizer_state_offsets[component_index],
             terminal_offset,
             global_terminal_aliases,
+            local_tsid_to_global_tsids: automata_maps[component_index]
+                .local_to_global_tsids
+                .clone(),
             root_disallowed_terminal,
             global_to_local_parser_state,
         });
@@ -1146,6 +1149,7 @@ fn build_direct_component_state_coordinates_from_constraints(
 
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
     for (component_index, &(constraint, tokenizer_state_offset)) in components.iter().enumerate() {
+        let component_tokenizer = constraint.composition_tokenizer();
         // Dynamic constraints deliberately omit the static parser-DWA TSID
         // quotient. Preserve that backend and use the exact raw tokenizer
         // coordinate as this component's private TSID coordinate instead of
@@ -1153,12 +1157,12 @@ fn build_direct_component_state_coordinates_from_constraints(
         if constraint.state_to_internal_tsid.is_empty()
             && constraint.internal_tsid_to_states.is_empty()
         {
-            let local_tsid_count = constraint.tokenizer.num_states() as usize;
+            let local_tsid_count = component_tokenizer.num_states() as usize;
             if local_tsid_count == 0 {
                 return Err("component tokenizer contains no states".into());
             }
             let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
-            for local_state in 0..constraint.tokenizer.num_states() {
+            for local_state in 0..component_tokenizer.num_states() {
                 let merged_state = tokenizer_state_offset
                     .checked_add(local_state)
                     .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
@@ -1182,7 +1186,7 @@ fn build_direct_component_state_coordinates_from_constraints(
                 global_to_states.push(vec![merged_state]);
                 local_map[local_state as usize].push(global_tsid);
             }
-            let local_start = constraint.tokenizer.initial_state() as usize;
+            let local_start = component_tokenizer.initial_state() as usize;
             let Some(start_targets) = local_map.get_mut(local_start) else {
                 return Err("component start tokenizer state lies outside its raw-state domain".into());
             };
@@ -1192,11 +1196,11 @@ fn build_direct_component_state_coordinates_from_constraints(
             local_to_global_tsids.push(local_map);
             continue;
         }
-        if constraint.state_to_internal_tsid.len() != constraint.tokenizer.num_states() as usize {
+        if constraint.state_to_internal_tsid.len() != component_tokenizer.num_states() as usize {
             return Err(format!(
                 "component {component_index} tokenizer-state map does not cover its runtime tokenizer: mapped_states={} tokenizer_states={} dynamic={}",
                 constraint.state_to_internal_tsid.len(),
-                constraint.tokenizer.num_states(),
+                component_tokenizer.num_states(),
                 constraint.uses_dynamic_runtime(),
             ));
         }
@@ -1267,7 +1271,7 @@ fn build_direct_component_state_coordinates_from_constraints(
         // degenerates to the historical one-class-per-local-TSID mapping when
         // every raw state has singleton membership.
         let mut states_by_signature = BTreeMap::<Vec<u32>, Vec<u32>>::new();
-        for local_state in 0..constraint.tokenizer.num_states() {
+        for local_state in 0..component_tokenizer.num_states() {
             let mut signature = constraint.internal_tsids_for_state(local_state).to_vec();
             signature.sort_unstable();
             signature.dedup();
@@ -4348,7 +4352,7 @@ fn component_tokenizer_state_layout(components: &[&Constraint]) -> (Vec<u32>, us
     for component in components {
         offsets.push(next_state);
         next_state = next_state
-            .checked_add(component.tokenizer.num_states())
+            .checked_add(component.composition_tokenizer().num_states())
             .expect("composed tokenizer state count overflow");
     }
     (offsets, next_state as usize)
@@ -4392,7 +4396,7 @@ fn component_tokenizer_state_layout_owned_parent(
     for component in components {
         offsets.push(next_state);
         next_state = next_state
-            .checked_add(component.tokenizer.num_states())
+            .checked_add(component.composition_tokenizer().num_states())
             .expect("composed tokenizer state count overflow");
     }
     (offsets, next_state as usize)
@@ -4414,7 +4418,7 @@ fn expanded_component_reset_states(
     let mut resets = components
         .iter()
         .zip(tokenizer_state_offsets)
-        .map(|(component, offset)| offset + component.tokenizer.start_state())
+        .map(|(component, offset)| offset + component.composition_tokenizer().start_state())
         .collect::<Vec<_>>();
     resets.sort_unstable();
     resets.dedup();
@@ -4425,10 +4429,11 @@ fn component_reset_live_bytes(components: &[&Constraint]) -> Vec<U8Set> {
     components
         .iter()
         .map(|component| {
-            let closures = component.tokenizer.all_singleton_epsilon_closures();
+            let tokenizer = component.composition_tokenizer();
+            let closures = tokenizer.all_singleton_epsilon_closures();
             let mut bytes = U8Set::empty();
-            for &state in &closures[component.tokenizer.start_state() as usize] {
-                for (byte, _) in component.tokenizer.transitions_from(state) {
+            for &state in &closures[tokenizer.start_state() as usize] {
+                for (byte, _) in tokenizer.transitions_from(state) {
                     bytes.insert(byte);
                 }
             }
@@ -4452,10 +4457,9 @@ fn scan_component_residual_starts(
 
     let mut scan_local = |component_index: usize, local_start: u32| {
         let component = components[component_index];
+        let tokenizer = component.composition_tokenizer();
         let terminal_offset = terminal_offsets[component_index];
-        let (end_states, matches) = component
-            .tokenizer
-            .execute_summary_from_state(bytes, local_start);
+        let (end_states, matches) = tokenizer.execute_summary_from_state(bytes, local_start);
         result.matches.extend(
             matches
                 .into_iter()
@@ -4464,9 +4468,7 @@ fn scan_component_residual_starts(
         );
         for end_state in end_states {
             result.future_terminals.extend(
-                component
-                    .tokenizer
-                    .possible_future_terminals_iter(end_state)
+                tokenizer.possible_future_terminals_iter(end_state)
                     .map(|terminal| terminal_offset + terminal),
             );
         }
@@ -4480,7 +4482,7 @@ fn scan_component_residual_starts(
                 }) {
                     continue;
                 }
-                scan_local(component_index, component.tokenizer.start_state());
+                scan_local(component_index, component.composition_tokenizer().start_state());
             }
             continue;
         }
@@ -4492,7 +4494,7 @@ fn scan_component_residual_starts(
         };
         let offset = tokenizer_state_offsets[component_index];
         let local_start = global_start - offset;
-        if local_start < component.tokenizer.num_states() {
+        if local_start < component.composition_tokenizer().num_states() {
             scan_local(component_index, local_start);
         }
     }
@@ -4540,7 +4542,7 @@ fn scan_component_residual_start_groups(
         };
         let offset = tokenizer_state_offsets[component_index];
         let local_start = *representative - offset;
-        if local_start < component.tokenizer.num_states() {
+        if local_start < component.composition_tokenizer().num_states() {
             by_component[component_index].push((local_start, support_states));
         }
     }
@@ -4550,14 +4552,13 @@ fn scan_component_residual_start_groups(
             continue;
         }
         let component = components[component_index];
+        let tokenizer = component.composition_tokenizer();
         let state_offset = tokenizer_state_offsets[component_index];
         let terminal_offset = terminal_offsets[component_index];
         let local_starts = starts.iter().map(|(start, _)| *start).collect::<Vec<_>>();
         let support_by_start = starts.into_iter().collect::<FxHashMap<_, _>>();
 
-        for (end_states, matches, grouped_starts) in component
-            .tokenizer
-            .execute_summary_groups_from_states(bytes, &local_starts)
+        for (end_states, matches, grouped_starts) in tokenizer.execute_summary_groups_from_states(bytes, &local_starts)
         {
             let mut scan = ResidualScanResult::default();
             scan.matches.extend(
@@ -4568,9 +4569,7 @@ fn scan_component_residual_start_groups(
             );
             for end_state in end_states {
                 scan.future_terminals.extend(
-                    component
-                        .tokenizer
-                        .possible_future_terminals_iter(end_state)
+                    tokenizer.possible_future_terminals_iter(end_state)
                         .map(|terminal| terminal_offset + terminal),
                 );
             }
@@ -5938,24 +5937,47 @@ fn boundary_visible_residual_starts_by_first_byte(
     // candidate vocabulary tokens and for recovering their exact raw starts.
     let mut starts_by_first_byte = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
     for (component_index, component) in components.iter().enumerate() {
+        let tokenizer = component.composition_tokenizer();
         let terminal_offset = terminal_offsets[component_index];
         let state_offset = tokenizer_state_offsets[component_index];
-        let closures = component.tokenizer.all_singleton_epsilon_closures();
+        let closures = tokenizer.all_singleton_epsilon_closures();
         let mut relevant_states = Vec::<u32>::new();
-        for local_terminal in 0..component.tokenizer.num_terminals() {
+        for local_terminal in 0..tokenizer.num_terminals() {
             let global_terminal = terminal_offset + local_terminal;
             if !relevant_terminals.contains(global_terminal as usize) {
                 continue;
             }
-            let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
-                continue;
-            };
-            relevant_states.extend(
-                live_states
-                    .iter()
-                    .copied()
-                    .filter(|&state| state != component.tokenizer.start_state()),
-            );
+            if std::ptr::eq(tokenizer, &component.tokenizer) {
+                let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
+                    continue;
+                };
+                relevant_states.extend(
+                    live_states
+                        .iter()
+                        .copied()
+                        .filter(|&state| state != tokenizer.start_state()),
+                );
+            } else {
+                // Virtual-Static constraints commit in an exact symbolic tokenizer,
+                // while composition observes their finite Static tokenizer. The
+                // persisted terminal_live_states sidecar belongs to the exact
+                // runtime tokenizer, so derive the equivalent live-state inverse
+                // directly in the finite observation coordinate instead.
+                for local_state in 0..tokenizer.num_states() {
+                    if local_state == tokenizer.start_state() {
+                        continue;
+                    }
+                    let live = closures[local_state as usize].iter().any(|&closure_state| {
+                        tokenizer
+                            .matched_terminals_iter(closure_state)
+                            .chain(tokenizer.possible_future_terminals_iter(closure_state))
+                            .any(|terminal| terminal == local_terminal)
+                    });
+                    if live {
+                        relevant_states.push(local_state);
+                    }
+                }
+            }
         }
         relevant_states.sort_unstable();
         relevant_states.dedup();
@@ -5968,7 +5990,7 @@ fn boundary_visible_residual_starts_by_first_byte(
             };
             let mut bytes = U8Set::empty();
             for &closure_state in closure.iter() {
-                for (byte, _) in component.tokenizer.transitions_from(closure_state) {
+                for (byte, _) in tokenizer.transitions_from(closure_state) {
                     bytes.insert(byte);
                 }
             }
@@ -18050,6 +18072,7 @@ fn build_static_dynamic_overlay_metadata(
             recursive_parser_layout: Default::default(),
             recursive_compiler_table: Default::default(),
             recursive_tokenizer_internal_tsids: Default::default(),
+            recursive_virtual_tokenizer_states: Default::default(),
             segmented_mask_authoritative: false,
             segmented_static_baseline: false,
             segmented_component_union_root_dispatch: Vec::new(),
@@ -19024,7 +19047,7 @@ pub(crate) fn compose_constraints(
         .iter()
         .enumerate()
         .map(|(index, constraint)| {
-            (&constraint.tokenizer, composed_table.terminal_offsets[index])
+            (constraint.composition_tokenizer(), composed_table.terminal_offsets[index])
         })
         .collect::<Vec<_>>();
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
@@ -20042,7 +20065,7 @@ fn compose_constraints_owned_parent_impl(
         .iter()
         .enumerate()
         .map(|(index, constraint)| {
-            (&constraint.tokenizer, composed_table.terminal_offsets[index])
+            (constraint.composition_tokenizer(), composed_table.terminal_offsets[index])
         })
         .collect::<Vec<_>>();
 
@@ -20185,13 +20208,13 @@ fn compose_constraints_owned_parent_impl(
         rayon::join(
             || {
                 let started_at = Instant::now();
-                let parent_tokenizer = parent.tokenizer.clone();
+                let parent_tokenizer = parent.composition_tokenizer().clone();
                 let child_tokenizers = children
                     .iter()
                     .enumerate()
                     .map(|(index, child)| {
                         (
-                            &child.constraint.tokenizer,
+                            child.constraint.composition_tokenizer(),
                             composed_table.terminal_offsets[index + 1],
                         )
                     })
@@ -20975,6 +20998,7 @@ fn compose_constraints_owned_parent_impl(
                 recursive_parser_layout: Default::default(),
                 recursive_compiler_table: Default::default(),
                 recursive_tokenizer_internal_tsids: Default::default(),
+                recursive_virtual_tokenizer_states: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),
@@ -21438,6 +21462,7 @@ fn compose_constraints_owned_parent_impl(
                     tokenizer_state_offset: result.tokenizer_state_offsets[component_index],
                     terminal_offset,
                     global_terminal_aliases: Vec::new(),
+                    local_tsid_to_global_tsids: Vec::new(),
                     root_disallowed_terminal: None,
                     global_to_local_parser_state,
                 });
@@ -21456,6 +21481,7 @@ fn compose_constraints_owned_parent_impl(
                     recursive_parser_layout: Default::default(),
                     recursive_compiler_table: Default::default(),
                     recursive_tokenizer_internal_tsids: Default::default(),
+                    recursive_virtual_tokenizer_states: Default::default(),
                     segmented_mask_authoritative: false,
                     segmented_static_baseline: false,
                     segmented_component_union_root_dispatch: Vec::new(),
@@ -21525,6 +21551,7 @@ fn compose_constraints_owned_parent_impl(
                 recursive_parser_layout: Default::default(),
                 recursive_compiler_table: Default::default(),
                 recursive_tokenizer_internal_tsids: Default::default(),
+                recursive_virtual_tokenizer_states: Default::default(),
                 segmented_mask_authoritative: false,
                 segmented_static_baseline: false,
                 segmented_component_union_root_dispatch: Vec::new(),

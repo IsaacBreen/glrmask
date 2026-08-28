@@ -479,7 +479,7 @@ impl DFA {
         if self.has_epsilon_transitions() {
             return self.clone();
         }
-        self.minimize_impl(true).0
+        self.minimize_impl(true, false).0
     }
 
     /// Minimize a freshly constructed, fully reachable DFA in place.
@@ -517,10 +517,17 @@ impl DFA {
         if self.has_epsilon_transitions() {
             return (self.clone(), (0..self.states().len() as u32).collect());
         }
-        self.minimize_impl(true)
+        self.minimize_impl(true, false)
     }
 
-    fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
+    pub(super) fn minimize_with_state_mapping_preserve_unreachable(&self) -> (DFA, Vec<u32>) {
+        if self.has_epsilon_transitions() {
+            return (self.clone(), (0..self.states().len() as u32).collect());
+        }
+        self.minimize_impl(false, true)
+    }
+
+    fn minimize_impl(&self, drop_unreachable: bool, canonicalize_blocks: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
             return (self.clone(), Vec::new());
@@ -554,6 +561,10 @@ impl DFA {
         };
         match prerefine {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
+                let mut blocks = blocks;
+                if canonicalize_blocks {
+                    canonicalize_partition_blocks(&mut blocks);
+                }
                 let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
                 let composed = compose_mappings(&old_to_working, &block_map);
                 return (result, composed);
@@ -572,12 +583,18 @@ impl DFA {
         }
 
         if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
+            if canonicalize_blocks {
+                canonicalize_partition_blocks(&mut minimality_check_blocks);
+            }
             let (result, block_map) = working.rebuild_from_blocks_with_mapping(minimality_check_blocks);
             let composed = compose_mappings(&old_to_working, &block_map);
             return (result, composed);
         }
 
-        let blocks = hopcroft_refine_partition(&working, partition, blocks);
+        let mut blocks = hopcroft_refine_partition(&working, partition, blocks);
+        if canonicalize_blocks {
+            canonicalize_partition_blocks(&mut blocks);
+        }
 
         let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
         let composed = compose_mappings(&old_to_working, &block_map);
@@ -990,6 +1007,13 @@ impl DFA {
         (result, state_mapping)
     }
 
+}
+
+fn canonicalize_partition_blocks(blocks: &mut Vec<Vec<u32>>) {
+    for block in blocks.iter_mut() {
+        block.sort_unstable();
+    }
+    blocks.sort_unstable_by_key(|block| block.first().copied().unwrap_or(u32::MAX));
 }
 
 /// Compose two state mappings: first[i] → second[first[i]].
