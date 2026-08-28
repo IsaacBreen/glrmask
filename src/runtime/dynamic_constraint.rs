@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::automata::lexer::Lexer;
-use crate::automata::lexer::tokenizer::{Tokenizer, VirtualTokenizerRuntimeMetadata};
+use crate::automata::lexer::tokenizer::{
+    TerminalProjectedQuotient, Tokenizer, VirtualTokenizerRuntimeMetadata,
+};
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
@@ -39,9 +41,10 @@ const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17: u16 = 17;
 // v18 additionally persists the initialized dynamic-mask vocabulary trie so
 // self-contained loads do not rebuild the full vocabulary index from token bytes.
 const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18: u16 = 18;
-// v19 is the first post-integration wire: it combines residual-runtime, terminal-
-// observation, persisted-vocabulary, late-grammar, and boundary-trigger metadata.
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 19;
+// v20 additionally persists exact terminal-projected lexer quotients used by
+// dynamic-mask subtree certificates. As documented above, the pre-release
+// wire is intentionally allowed to replace the previous current layout.
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 20;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
@@ -53,8 +56,9 @@ const LEGACY_DYNAMIC_TRANSFER_VERSION_V5: u16 = 5;
 const LEGACY_DYNAMIC_TRANSFER_VERSION_V6: u16 = 6;
 // v7 additionally carries exact terminal-observation quotient certificates.
 const LEGACY_DYNAMIC_TRANSFER_VERSION_V7: u16 = 7;
-// v8 also carries reusable composition boundary-trigger metadata.
-const DYNAMIC_TRANSFER_VERSION: u16 = 8;
+// v9 also carries exact terminal-projected lexer quotients so a compile worker
+// and runtime process never rebuild them independently.
+const DYNAMIC_TRANSFER_VERSION: u16 = 9;
 
 mod compressed_terminal_exprs_serde {
     use super::Expr;
@@ -276,6 +280,7 @@ impl DynamicBoundaryTriggerWire {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintPayloadV7Alternative {
     base: DynamicConstraintPayloadV5Alternative,
+    projected_terminal_quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
     boundary_trigger: DynamicBoundaryTriggerWire,
     /// Present only for recursively composed alternatives. The ordinary
     /// dynamic fields above remain the compact standalone representation; the
@@ -387,6 +392,7 @@ struct DynamicConstraintTransferPayloadV3 {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintTransferAlternativeV4 {
     base: DynamicConstraintTransferAlternativeV3,
+    projected_terminal_quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
     boundary_trigger: DynamicBoundaryTriggerWire,
     recursive_constraint_artifact: Option<Vec<u8>>,
 }
@@ -996,6 +1002,9 @@ impl DynamicConstraint {
     fn payload_v7_for_constraint(constraint: &Constraint) -> DynamicConstraintPayloadV7Alternative {
         DynamicConstraintPayloadV7Alternative {
             base: Self::payload_v5_for_constraint(constraint),
+            projected_terminal_quotients: constraint
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_for_artifact(),
             boundary_trigger: DynamicBoundaryTriggerWire::from_trigger(
                 &constraint.boundary_trigger,
             ),
@@ -1041,6 +1050,30 @@ impl DynamicConstraint {
         Ok(())
     }
 
+    fn restore_projected_terminal_quotients(
+        constraint: &mut Constraint,
+        rows: Vec<(TerminalID, TerminalProjectedQuotient)>,
+    ) -> crate::Result<()> {
+        let mut seen = BTreeSet::<TerminalID>::new();
+        for (terminal, quotient) in &rows {
+            if !seen.insert(*terminal) {
+                return Err(crate::GlrMaskError::Serialization(format!(
+                    "projected-terminal quotient repeats terminal {terminal}"
+                )));
+            }
+            quotient
+                .validate_exact_projection(&constraint.tokenizer, *terminal)
+                .map_err(crate::GlrMaskError::Serialization)?;
+        }
+        // Calling the setter even for an empty row set is intentional: v20/v9
+        // use empty+prepared to mean compile-time analysis completed and found
+        // no useful quotient, so runtime load must not repeat that work.
+        constraint
+            .dynamic_mask_vocab
+            .set_projected_terminal_quotients(rows);
+        Ok(())
+    }
+
     fn transfer_payload_v3_from_constraint_owned(
         constraint: Constraint,
     ) -> DynamicConstraintTransferAlternativeV3 {
@@ -1078,12 +1111,16 @@ impl DynamicConstraint {
     fn transfer_payload_from_constraint_owned(
         constraint: Constraint,
     ) -> DynamicConstraintTransferAlternativeV4 {
+        let projected_terminal_quotients = constraint
+            .dynamic_mask_vocab
+            .projected_terminal_quotients_for_artifact();
         let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
             .then(|| constraint.save());
         DynamicConstraintTransferAlternativeV4 {
             base: Self::transfer_payload_v3_from_constraint_owned(constraint),
+            projected_terminal_quotients,
             boundary_trigger,
             recursive_constraint_artifact,
         }
@@ -1266,6 +1303,13 @@ impl DynamicConstraint {
     }
 
     fn from_payload_v6(payload: DynamicConstraintPayloadV6) -> crate::Result<Self> {
+        Self::from_payload_v6_with_projected_quotients(payload, None)
+    }
+
+    fn from_payload_v6_with_projected_quotients(
+        payload: DynamicConstraintPayloadV6,
+        projected_terminal_quotients: Option<Vec<Vec<(TerminalID, TerminalProjectedQuotient)>>>,
+    ) -> crate::Result<Self> {
         if payload.dynamic_mask_vocab.is_some() {
             let mut alternatives = payload.alternatives.iter();
             if let Some(first) = alternatives.next() {
@@ -1278,7 +1322,7 @@ impl DynamicConstraint {
                 }
             }
         }
-        let shared_dynamic_vocab = payload
+        let mut shared_dynamic_vocab = payload
             .dynamic_mask_vocab
             .map(DynamicMaskVocab::from_artifact)
             .transpose()
@@ -1291,8 +1335,24 @@ impl DynamicConstraint {
                 ));
             }
         }
+        if let (Some(vocab), Some(first)) = (&mut shared_dynamic_vocab, payload.alternatives.first()) {
+            vocab.restore_root_layout_metadata_from_token_bytes(&first.base.v2.v1.token_bytes);
+        }
+        let projected_terminal_quotients_prepared = projected_terminal_quotients.is_some();
+        let projected_terminal_quotients = projected_terminal_quotients
+            .unwrap_or_else(|| vec![Vec::new(); payload.alternatives.len()]);
+        if projected_terminal_quotients.len() != payload.alternatives.len() {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic artifact projected-terminal quotient rows do not align with alternatives"
+                    .to_owned(),
+            ));
+        }
         let mut alternatives = Vec::with_capacity(payload.alternatives.len());
-        for alternative in payload.alternatives {
+        for (alternative, projected_terminal_quotients) in payload
+            .alternatives
+            .into_iter()
+            .zip(projected_terminal_quotients)
+        {
             let DynamicConstraintPayloadV5Alternative {
                 mut base,
                 terminal_observation_classes,
@@ -1320,6 +1380,12 @@ impl DynamicConstraint {
                 &mut inner,
                 terminal_observation_classes,
             )?;
+            if projected_terminal_quotients_prepared {
+                Self::restore_projected_terminal_quotients(
+                    &mut inner,
+                    projected_terminal_quotients,
+                )?;
+            }
             inner.rebuild_dynamic_runtime_caches();
             alternatives.push(Self {
                 inner,
@@ -1336,25 +1402,25 @@ impl DynamicConstraint {
     }
 
     fn from_payload_v7(payload: DynamicConstraintPayloadV7) -> crate::Result<Self> {
-        let metadata = payload
-            .alternatives
-            .iter()
-            .map(|alternative| {
-                (
-                    alternative.boundary_trigger.clone(),
-                    alternative.recursive_constraint_artifact.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut metadata = Vec::with_capacity(payload.alternatives.len());
+        let mut projected_terminal_quotients = Vec::with_capacity(payload.alternatives.len());
+        let mut alternatives = Vec::with_capacity(payload.alternatives.len());
+        for alternative in payload.alternatives {
+            metadata.push((
+                alternative.boundary_trigger,
+                alternative.recursive_constraint_artifact,
+            ));
+            projected_terminal_quotients.push(alternative.projected_terminal_quotients);
+            alternatives.push(alternative.base);
+        }
         let base = DynamicConstraintPayloadV6 {
-            alternatives: payload
-                .alternatives
-                .into_iter()
-                .map(|alternative| alternative.base)
-                .collect(),
+            alternatives,
             dynamic_mask_vocab: payload.dynamic_mask_vocab,
         };
-        let mut constraint = Self::from_payload_v6(base)?;
+        let mut constraint = Self::from_payload_v6_with_projected_quotients(
+            base,
+            Some(projected_terminal_quotients),
+        )?;
         if constraint.constraints_mut().count() != metadata.len() {
             return Err(crate::GlrMaskError::Serialization(
                 "dynamic artifact alternative metadata count mismatch".to_owned(),
@@ -1364,6 +1430,12 @@ impl DynamicConstraint {
             constraint.constraints_mut().zip(metadata)
         {
             if let Some(recursive_artifact) = recursive_artifact {
+                let projected_terminal_quotients_prepared = inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_prepared();
+                let projected_terminal_quotients = inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_for_artifact();
                 let loaded = Constraint::load(recursive_artifact)?;
                 let same_vocab = loaded.token_bytes_count() == inner.token_bytes_count()
                     && inner.token_bytes.iter().all(|(&token_id, bytes)| {
@@ -1376,6 +1448,12 @@ impl DynamicConstraint {
                     ));
                 }
                 *inner = loaded;
+                if projected_terminal_quotients_prepared {
+                    Self::restore_projected_terminal_quotients(
+                        inner,
+                        projected_terminal_quotients,
+                    )?;
+                }
             }
             inner.boundary_trigger = trigger.into_trigger();
         }
@@ -1565,6 +1643,8 @@ impl DynamicConstraint {
         let payload_alternatives: Vec<(
             DynamicConstraintTransferAlternativeV2,
             Vec<(TerminalID, Vec<u32>)>,
+            Vec<(TerminalID, TerminalProjectedQuotient)>,
+            bool,
             DynamicBoundaryTriggerWire,
             Option<Vec<u8>>,
         )> = match version {
@@ -1579,6 +1659,8 @@ impl DynamicConstraint {
                     (
                         alternative.base.base,
                         alternative.base.terminal_observation_classes,
+                        alternative.projected_terminal_quotients,
+                        true,
                         alternative.boundary_trigger,
                         alternative.recursive_constraint_artifact,
                     )
@@ -1596,6 +1678,8 @@ impl DynamicConstraint {
                     (
                         alternative.base,
                         alternative.terminal_observation_classes,
+                        Vec::new(),
+                        false,
                         DynamicBoundaryTriggerWire::None,
                         None,
                     )
@@ -1609,7 +1693,16 @@ impl DynamicConstraint {
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
                 .alternatives
                 .into_iter()
-                .map(|alternative| (alternative, Vec::new(), DynamicBoundaryTriggerWire::None, None))
+                .map(|alternative| {
+                    (
+                        alternative,
+                        Vec::new(),
+                        Vec::new(),
+                        false,
+                        DynamicBoundaryTriggerWire::None,
+                        None,
+                    )
+                })
                 .collect()
             }
             DYNAMIC_TRANSFER_VERSION_V4 => {
@@ -1627,6 +1720,8 @@ impl DynamicConstraint {
                                 virtual_runtimes: Vec::new(),
                             },
                             Vec::new(),
+                            Vec::new(),
+                            false,
                             DynamicBoundaryTriggerWire::None,
                             None,
                         )
@@ -1656,6 +1751,8 @@ impl DynamicConstraint {
                             virtual_runtimes: Vec::new(),
                         },
                         Vec::new(),
+                        Vec::new(),
+                        false,
                         DynamicBoundaryTriggerWire::None,
                         None,
                     )
@@ -1684,6 +1781,8 @@ impl DynamicConstraint {
                             virtual_runtimes: Vec::new(),
                         },
                         Vec::new(),
+                        Vec::new(),
+                        false,
                         DynamicBoundaryTriggerWire::None,
                         None,
                     )
@@ -1712,6 +1811,8 @@ impl DynamicConstraint {
                             virtual_runtimes: Vec::new(),
                         },
                         Vec::new(),
+                        Vec::new(),
+                        false,
                         DynamicBoundaryTriggerWire::None,
                         None,
                     )
@@ -1722,9 +1823,22 @@ impl DynamicConstraint {
         let token_bytes = vocab.entries_arc();
         let mut alternatives = payload_alternatives
             .into_iter()
-            .map(|(mut alternative, terminal_observation_classes, boundary_trigger, recursive_artifact)| -> crate::Result<Self> {
+            .map(|(
+                mut alternative,
+                terminal_observation_classes,
+                projected_terminal_quotients,
+                projected_terminal_quotients_prepared,
+                boundary_trigger,
+                recursive_artifact,
+            )| -> crate::Result<Self> {
                 if let Some(recursive_artifact) = recursive_artifact {
                     let mut inner = Constraint::load_with_vocab(recursive_artifact, vocab)?;
+                    if projected_terminal_quotients_prepared {
+                        Self::restore_projected_terminal_quotients(
+                            &mut inner,
+                            projected_terminal_quotients,
+                        )?;
+                    }
                     inner.boundary_trigger = boundary_trigger.into_trigger();
                     return Ok(Self {
                         inner,
@@ -1773,6 +1887,12 @@ impl DynamicConstraint {
                     &mut inner,
                     terminal_observation_classes,
                 )?;
+                if projected_terminal_quotients_prepared {
+                    Self::restore_projected_terminal_quotients(
+                        &mut inner,
+                        projected_terminal_quotients,
+                    )?;
+                }
                 inner.boundary_trigger = boundary_trigger.into_trigger();
                 inner.rebuild_dynamic_runtime_caches();
                 Ok(Self {
@@ -2066,6 +2186,20 @@ impl<'a> DynamicConstraintState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod projected_quotient_fixture {
+        use crate as glrmask;
+
+        include!("../../tests/fixtures/snowplow_hostname.rsinc");
+
+        pub(super) fn schema_and_vocab() -> (&'static str, Vocab) {
+            (SNOWPLOW_SCHEMA, snowplow_vocab())
+        }
+
+        pub(super) fn replay_ids() -> &'static [u32] {
+            SNOWPLOW_REPLAY_IDS
+        }
+    }
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {
         let word = token_id as usize / 32;
@@ -2557,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_v19_persists_vocab_and_validates_shared_vocab() {
+    fn dynamic_v20_persists_vocab_and_validates_shared_vocab() {
         let vocab = Vocab::new(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
@@ -2696,6 +2830,7 @@ mod tests {
                         base,
                         terminal_observation_classes: Vec::new(),
                     },
+                    projected_terminal_quotients: Vec::new(),
                     boundary_trigger: DynamicBoundaryTriggerWire::None,
                     recursive_constraint_artifact: None,
                 }],
@@ -2744,7 +2879,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_v19_terminal_observation_certificate_is_shape_validated() {
+    fn dynamic_v20_terminal_observation_certificate_is_shape_validated() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = DynamicConstraint::from_glrm_grammar(
             r#"
@@ -2765,6 +2900,7 @@ mod tests {
             let payload = DynamicConstraintPayloadV7 {
                 alternatives: vec![DynamicConstraintPayloadV7Alternative {
                     base: alternative,
+                    projected_terminal_quotients: Vec::new(),
                     boundary_trigger: DynamicBoundaryTriggerWire::None,
                     recursive_constraint_artifact: None,
                 }],
@@ -2808,7 +2944,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_standalone_virtual_unit_v19_and_transfer_v8_round_trip() {
+    fn dynamic_standalone_virtual_unit_v20_and_transfer_v9_round_trip() {
         let vocab = Vocab::new(vec![
             (0, b"a".to_vec()),
             (1, b"aa".to_vec()),
@@ -2857,7 +2993,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_v19_combines_composition_and_residual_runtime_metadata() {
+    fn dynamic_v20_combines_composition_and_residual_runtime_metadata() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let mut constraint = DynamicConstraint::from_glrm_grammar(
             r#"
@@ -5120,6 +5256,121 @@ mod tests {
 
         let loaded = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert_eq!(original_mask, loaded.start().mask());
+    }
+
+    #[test]
+    fn dynamic_v20_round_trips_nonempty_projected_terminal_quotients() {
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (schema, vocab) = projected_quotient_fixture::schema_and_vocab();
+        let mut constraint = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        let quotients = constraint
+            .inner
+            .tokenizer
+            .build_shared_component_terminal_projected_quotients(256);
+        assert!(
+            !quotients.is_empty(),
+            "Snowplow fixture must exercise the production retained projected-quotient path"
+        );
+        constraint
+            .inner
+            .dynamic_mask_vocab
+            .set_projected_terminal_quotients(quotients);
+        let expected = constraint
+            .inner
+            .dynamic_mask_vocab
+            .projected_terminal_quotients_for_artifact();
+        assert!(!expected.is_empty());
+
+        let saved = constraint.save();
+        assert_eq!(
+            u16::from_le_bytes([saved[8], saved[9]]),
+            DYNAMIC_CONSTRAINT_VERSION,
+        );
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert!(loaded.inner.dynamic_mask_vocab.projected_terminal_quotients_prepared());
+        assert_eq!(
+            bincode::serialize(
+                &loaded
+                    .inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_for_artifact()
+            )
+            .unwrap(),
+            bincode::serialize(&expected).unwrap(),
+        );
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+
+        let transfer = constraint.clone().into_saved();
+        assert_eq!(
+            u16::from_le_bytes([transfer[8], transfer[9]]),
+            DYNAMIC_TRANSFER_VERSION,
+        );
+        let transferred = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert!(
+            transferred
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared()
+        );
+        assert_eq!(
+            bincode::serialize(
+                &transferred
+                    .inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_for_artifact()
+            )
+            .unwrap(),
+            bincode::serialize(&expected).unwrap(),
+        );
+        assert_eq!(transferred.start().mask(), constraint.start().mask());
+
+        let mut original_state = constraint.start();
+        let mut loaded_state = loaded.start();
+        let mut transferred_state = transferred.start();
+        for &token in projected_quotient_fixture::replay_ids() {
+            let expected = original_state.mask();
+            assert_eq!(loaded_state.mask(), expected, "self-contained load before token {token}");
+            assert_eq!(
+                transferred_state.mask(),
+                expected,
+                "transfer load before token {token}"
+            );
+            original_state.commit_token(token).unwrap();
+            loaded_state.commit_token(token).unwrap();
+            transferred_state.commit_token(token).unwrap();
+        }
+        assert_eq!(loaded_state.mask(), original_state.mask());
+        assert_eq!(transferred_state.mask(), original_state.mask());
+    }
+
+    #[test]
+    fn dynamic_v20_round_trips_prepared_empty_projected_terminal_quotients() {
+        let vocab = vocab();
+        let mut constraint = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
+        constraint
+            .inner
+            .dynamic_mask_vocab
+            .set_projected_terminal_quotients(Vec::new());
+        assert!(constraint.inner.dynamic_mask_vocab.projected_terminal_quotients_prepared());
+        assert!(!constraint.inner.dynamic_mask_vocab.has_projected_terminal_quotients());
+
+        let loaded = DynamicConstraint::load(&constraint.save()).unwrap();
+        assert!(loaded.inner.dynamic_mask_vocab.projected_terminal_quotients_prepared());
+        assert!(!loaded.inner.dynamic_mask_vocab.has_projected_terminal_quotients());
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+
+        let transfer = constraint.clone().into_saved();
+        let transferred = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert!(
+            transferred
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared()
+        );
+        assert!(!transferred.inner.dynamic_mask_vocab.has_projected_terminal_quotients());
+        assert_eq!(transferred.start().mask(), constraint.start().mask());
     }
 
     #[test]

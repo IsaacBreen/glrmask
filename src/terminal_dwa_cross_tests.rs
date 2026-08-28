@@ -1,9 +1,7 @@
 mod ti_mre_tests {
-    use std::{env, ffi::OsString, sync::Mutex};
+    use std::{env, ffi::OsString};
 
-    use crate::{Constraint as Constraint, Vocab};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::{Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
     struct EnvVarGuard {
         key: &'static str,

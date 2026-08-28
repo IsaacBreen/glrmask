@@ -6,7 +6,10 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
+use crate::automata::lexer::{
+    Lexer,
+    tokenizer::{TerminalProjectedQuotient, Tokenizer},
+};
 use crate::automata::lexer::runtime_repeat_product::VirtualBinaryRepeatIntersectionMaskProjection;
 use crate::automata::lexer::runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection;
 use crate::automata::regex::Expr;
@@ -17,6 +20,7 @@ use crate::compiler::glr::parser::{
     ParserComponentTableSource, ParserGSS, ScopedSubgrammarLink,
 };
 use crate::compiler::glr::table::GLRTable;
+use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_vocab_char_type;
 use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
@@ -1218,15 +1222,23 @@ pub(crate) struct DynamicMaskTrie {
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
+    /// Vocabulary-only layout class for each zero-byte structural child of the
+    /// true root. This metadata is an accelerator only; an empty table simply
+    /// disables root-class certificates.
+    root_layout_classes: Vec<u16>,
+    /// True iff every complete token in the corresponding structural root
+    /// class is valid UTF-8. Logical-scalar subtree proofs require this exact
+    /// vocabulary property before treating non-ASCII bytes as UTF-8 scalars.
+    root_layout_all_valid_utf8: Vec<bool>,
 }
 
 /// Vocab-only layout refinement used by the dynamic-mask radix trie.
 ///
 /// `base_partition` is the existing p0/p1/... character-type class.  The
 /// extra bits deliberately describe only coarse byte shape, not grammar
-/// semantics: their job is to stop a few lexer-sensitive bytes from
-/// contaminating otherwise uniform large subtrees.  The runtime never
-/// interprets this value after construction.
+/// semantics. They keep lexer-sensitive byte families in separate structural
+/// roots and let exact runtime certificates cheaply decide which coarse roots
+/// are worth proving; the class itself is never an admissibility proof.
 pub(crate) fn dynamic_mask_vocab_layout_class(base_partition: u8, bytes: &[u8]) -> u16 {
     #[inline]
     fn first_kind(byte: Option<u8>) -> u16 {
@@ -1269,7 +1281,22 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            root_layout_classes: Vec::new(),
+            root_layout_all_valid_utf8: Vec::new(),
         }
+    }
+
+    #[inline]
+    pub(crate) fn root_layout_class(&self, root_slot: usize) -> Option<u16> {
+        self.root_layout_classes.get(root_slot).copied()
+    }
+
+    #[inline]
+    pub(crate) fn root_layout_all_valid_utf8(&self, root_slot: usize) -> bool {
+        self.root_layout_all_valid_utf8
+            .get(root_slot)
+            .copied()
+            .unwrap_or(false)
     }
 
     #[inline]
@@ -1506,6 +1533,8 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            root_layout_classes: Vec::new(),
+            root_layout_all_valid_utf8: Vec::new(),
         };
         let root = Self::flatten_vocab_node(node, &mut output);
         debug_assert_eq!(root, 0);
@@ -1545,6 +1574,8 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::with_capacity(byte_capacity),
             subtree_tokens: Vec::with_capacity(node_capacity),
             walk_edges: Vec::with_capacity(edge_capacity),
+            root_layout_classes: Vec::new(),
+            root_layout_all_valid_utf8: Vec::new(),
         };
         output.nodes.push(DynamicMaskTrieNode {
             token_id: root.has_token().then_some(root.token_id() as u32),
@@ -1614,6 +1645,8 @@ impl DynamicMaskTrie {
         }
 
         let mut groups = Vec::<Self>::new();
+        let mut group_classes = Vec::<u16>::new();
+        let mut group_all_valid_utf8 = Vec::<bool>::new();
         let mut index = start;
         while index < entries.len() {
             let class = entries[index].0;
@@ -1627,6 +1660,12 @@ impl DynamicMaskTrie {
                 .map(|(_, token_id, bytes)| (*token_id, *bytes))
                 .collect::<Vec<_>>();
             debug_assert!(refs.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+            group_classes.push(class);
+            group_all_valid_utf8.push(
+                entries[group_start..index]
+                    .iter()
+                    .all(|(_, _, bytes)| std::str::from_utf8(bytes).is_ok()),
+            );
             let tree = VocabPrefixTree::build_presorted(&refs);
             groups.push(Self::from_vocab_prefix_tree_node(&tree.root));
         }
@@ -1664,6 +1703,8 @@ impl DynamicMaskTrie {
         }
 
         output.finalize_subtree_metadata();
+        output.root_layout_classes = group_classes;
+        output.root_layout_all_valid_utf8 = group_all_valid_utf8;
         output
     }
 }
@@ -2460,6 +2501,17 @@ pub(crate) struct DynamicMaskVocab {
     projection_alias_h64: Arc<[u32]>,
     bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
     terminal_observation_classes: Arc<[(TerminalID, Arc<[u32]>)]>,
+    projected_terminal_quotients: Arc<[(TerminalID, Arc<TerminalProjectedQuotient>)]>,
+    /// True once the exact projected-terminal analysis has run, including
+    /// when it proved that no quotient is worth retaining.  This distinguishes
+    /// a legitimate empty result from an unprepared legacy/runtime value.
+    projected_terminal_quotients_prepared: bool,
+    /// Parser-independent exact projected-text proof results.  The key is the
+    /// terminal residual coordinate plus the vocabulary alphabet being proved.
+    /// Sharing this across sequences is safe because parser admission only
+    /// decides whether a proof is queried; the proof result itself depends
+    /// solely on immutable lexer/vocabulary data.
+    projected_terminal_text_cache: Arc<Mutex<FxHashMap<(TerminalID, u32, U8Set, bool), bool>>>,
     /// Optional mask-only finite-token quotient. Commit continues to use the
     /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
     /// built in this smaller coordinate and indexed from exact runtime states
@@ -2526,6 +2578,9 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
+            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
+            projected_terminal_quotients_prepared: false,
+            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2571,6 +2626,9 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
+            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
+            projected_terminal_quotients_prepared: false,
+            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2599,6 +2657,9 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
+            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
+            projected_terminal_quotients_prepared: false,
+            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2644,6 +2705,9 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
+            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
+            projected_terminal_quotients_prepared: false,
+            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -2917,17 +2981,20 @@ impl DynamicMaskVocab {
         self.virtual_repeat_intersection_projections = projections;
     }
 
-    /// Preserve mask-only quotient metadata when a deferred dynamic-vocabulary
+    /// Preserve lexer-derived dynamic-mask metadata when a deferred vocabulary
     /// placeholder is replaced by its fully materialized runtime trie.
     ///
-    /// The quotient is constraint/lexer derived while the trie is vocabulary
-    /// derived, so deferred dynamic compilation may construct them at different
-    /// times. Sharing the immutable Arc-backed metadata avoids cloning the
-    /// quotient tokenizer during that handoff.
-    pub(crate) fn inherit_mask_tokenizer_quotient_from(&mut self, source: &Self) {
+    /// These quotients/projections are constraint/lexer derived while the trie
+    /// is vocabulary derived, so deferred dynamic compilation may construct
+    /// them at different times. Sharing the immutable Arc-backed metadata
+    /// avoids cloning it during that handoff.
+    pub(crate) fn inherit_dynamic_lexer_metadata_from(&mut self, source: &Self) {
         self.mask_tokenizer = source.mask_tokenizer.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
+        self.projected_terminal_quotients = Arc::clone(&source.projected_terminal_quotients);
+        self.projected_terminal_quotients_prepared =
+            source.projected_terminal_quotients_prepared;
         self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
         self.virtual_repeat_intersection_projections =
             source.virtual_repeat_intersection_projections.clone();
@@ -3143,6 +3210,91 @@ impl DynamicMaskVocab {
             .iter()
             .map(|(terminal, classes)| (*terminal, classes.as_ref().to_vec()))
             .collect()
+    }
+
+    pub(crate) fn set_projected_terminal_quotients(
+        &mut self,
+        mut quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
+    ) {
+        quotients.sort_unstable_by_key(|(terminal, _)| *terminal);
+        quotients.dedup_by_key(|(terminal, _)| *terminal);
+        self.projected_terminal_quotients = Arc::from(
+            quotients
+                .into_iter()
+                .map(|(terminal, quotient)| (terminal, Arc::new(quotient)))
+                .collect::<Vec<_>>(),
+        );
+        self.projected_terminal_quotients_prepared = true;
+        self.projected_terminal_text_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    pub(crate) fn projected_terminal_quotients_for_artifact(
+        &self,
+    ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
+        self.projected_terminal_quotients
+            .iter()
+            .map(|(terminal, quotient)| (*terminal, quotient.as_ref().clone()))
+            .collect()
+    }
+
+    #[inline]
+    pub(crate) fn projected_terminal_quotient(
+        &self,
+        terminal: TerminalID,
+        source: u32,
+    ) -> Option<&TerminalProjectedQuotient> {
+        let index = self
+            .projected_terminal_quotients
+            .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+            .ok()?;
+        let quotient = self.projected_terminal_quotients[index].1.as_ref();
+        quotient.contains_source(source).then_some(quotient)
+    }
+
+    #[inline]
+    pub(crate) fn has_projected_terminal_quotients(&self) -> bool {
+        !self.projected_terminal_quotients.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn projected_terminal_quotients_prepared(&self) -> bool {
+        self.projected_terminal_quotients_prepared
+    }
+
+    pub(crate) fn projected_terminal_text_liveness(
+        &self,
+        terminal: TerminalID,
+        source: u32,
+        alphabet: U8Set,
+        include_utf8_scalars: bool,
+    ) -> Option<bool> {
+        let quotient = self.projected_terminal_quotient(terminal, source)?;
+        let key = (terminal, source, alphabet, include_utf8_scalars);
+        if let Some(&cached) = self
+            .projected_terminal_text_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+        {
+            return Some(cached);
+        }
+        let certified = quotient
+            .text_liveness_closed_bounded(
+                source,
+                alphabet,
+                1_024,
+                200_000,
+                include_utf8_scalars,
+            )
+            .unwrap_or(false);
+        self.projected_terminal_text_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, certified);
+        Some(certified)
     }
 
     pub(crate) fn cached_direct_regular_frontier(
@@ -3428,6 +3580,8 @@ impl DynamicMaskVocab {
             edge_bytes: artifact.edge_bytes,
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            root_layout_classes: Vec::new(),
+            root_layout_all_valid_utf8: Vec::new(),
         };
         trie.finalize_subtree_metadata();
 
@@ -3472,6 +3626,60 @@ impl DynamicMaskVocab {
 }
 
 impl DynamicMaskVocab {
+    pub(crate) fn restore_root_layout_metadata_from_token_bytes(
+        &mut self,
+        token_bytes: &BTreeMap<u32, Vec<u8>>,
+    ) {
+        let mut canonical_meta = Vec::<Option<(u16, bool)>>::new();
+        canonical_meta.reserve(self.canonical_token_count());
+        for canonical in 0..self.canonical_token_count() as u32 {
+            let Some(originals) = self.token_ids(canonical) else {
+                return;
+            };
+            let Some(first_original) = originals.first() else {
+                return;
+            };
+            let Some(bytes) = token_bytes.get(first_original).map(Vec::as_slice) else {
+                return;
+            };
+            canonical_meta.push((!bytes.is_empty()).then(|| {
+                (
+                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(bytes), bytes),
+                    std::str::from_utf8(bytes).is_ok(),
+                )
+            }));
+        }
+
+        let mut root_layout_classes = Vec::with_capacity(self.trie.children(0).len());
+        let mut root_layout_all_valid_utf8 = Vec::with_capacity(self.trie.children(0).len());
+        for edge in self.trie.children(0) {
+            let mut class = None::<u16>;
+            let mut all_valid_utf8 = true;
+            let mut saw_token = false;
+            for &canonical in self.trie.subtree_tokens(edge.child) {
+                let Some(Some((token_class, valid_utf8))) = canonical_meta.get(canonical as usize)
+                else {
+                    return;
+                };
+                if class.is_some_and(|existing| existing != *token_class) {
+                    return;
+                }
+                class = Some(*token_class);
+                all_valid_utf8 &= *valid_utf8;
+                saw_token = true;
+            }
+            let Some(class) = class.filter(|_| saw_token) else {
+                return;
+            };
+            root_layout_classes.push(class);
+            root_layout_all_valid_utf8.push(all_valid_utf8);
+        }
+
+        let trie = Arc::make_mut(&mut self.trie);
+        trie.root_layout_classes = root_layout_classes;
+        trie.root_layout_all_valid_utf8 = root_layout_all_valid_utf8;
+    }
+
     /// Verify that this vocabulary-only runtime index represents exactly the
     /// supplied original token-id -> byte mapping. This is used when loading a
     /// self-contained dynamic artifact: the persisted trie is an accelerator,
@@ -3598,6 +3806,9 @@ impl Default for DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
+            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
+            projected_terminal_quotients_prepared: false,
+            projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
@@ -5952,6 +6163,46 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         artifact.nodes[0].child_len = 1;
         let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
         assert!(error.contains("overlapping child ranges"));
+    }
+
+    #[test]
+    fn vocab_artifact_restores_root_layout_metadata_from_token_bytes() {
+        let token_bytes = BTreeMap::from([
+            (0u32, b"abc".to_vec()),
+            (1u32, "é".as_bytes().to_vec()),
+        ]);
+        let mut entries = token_bytes
+            .iter()
+            .enumerate()
+            .map(|(canonical, (_, bytes))| {
+                (
+                    dynamic_mask_vocab_layout_class(classify_vocab_char_type(bytes), bytes),
+                    canonical,
+                    bytes.as_slice(),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.2.cmp(right.2))
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        let trie = DynamicMaskTrie::from_partitioned_token_refs(&entries);
+        let expected_classes = trie.root_layout_classes.clone();
+        let expected_utf8 = trie.root_layout_all_valid_utf8.clone();
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(trie),
+            Arc::new(vec![vec![0], vec![1]]),
+        );
+        let artifact = vocab.to_vocab_artifact().unwrap();
+        let mut loaded = DynamicMaskVocab::from_artifact(artifact).unwrap();
+        assert!(loaded.trie.root_layout_classes.is_empty());
+        assert!(loaded.trie.root_layout_all_valid_utf8.is_empty());
+
+        loaded.restore_root_layout_metadata_from_token_bytes(&token_bytes);
+        assert_eq!(loaded.trie.root_layout_classes, expected_classes);
+        assert_eq!(loaded.trie.root_layout_all_valid_utf8, expected_utf8);
     }
 
     #[test]

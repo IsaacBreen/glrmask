@@ -1,5 +1,5 @@
 use serde_json::json;
-use std::{env, ffi::OsString, process::Command, sync::Mutex};
+use std::{env, ffi::OsString, process::Command};
 
 use super::ast::StringSchema;
 use super::config::{JsonSchemaConfig, QuoteMerge};
@@ -23,9 +23,7 @@ use crate::grammar::ast::{
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::dump_json_schema_grammar_glrm;
-use crate::{DynamicConstraint, Constraint as Constraint, Vocab};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use crate::{DynamicConstraint, Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
 
 struct EnvVarGuard {
     key: &'static str,

@@ -94,6 +94,8 @@ pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
 pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar};
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod grammar_cross_tests;

@@ -2372,6 +2372,7 @@ fn bounded_observation_branch_certificate(
     }
     certified
 }
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn process_interned_dynamic_trie_node(
@@ -3556,6 +3557,107 @@ fn dynamic_config_projection_certifies_subtree(
     false
 }
 
+/// Exact large-root accelerator for a scalar lexer residual whose parser-live
+/// language is represented by one prebuilt terminal projection.
+///
+/// The vocabulary layout only chooses which coarse root classes are worth
+/// asking about. Acceptance is never inferred from the class: one concrete
+/// parser branch must admit exactly one live terminal, and that terminal's
+/// exact projected DFA must prove closure over every requested ASCII byte and,
+/// for non-ASCII classes, every complete RFC-3629 scalar. Any missing
+/// metadata/projection or failed proof simply leaves the root to the ordinary
+/// exact byte walk.
+#[allow(clippy::too_many_arguments)]
+fn certify_projected_terminal_root_subtrees(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_branches: &DynamicBranches,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> SmallVec<[u32; 16]> {
+    let mut covered = SmallVec::<[u32; 16]>::new();
+    if !vocab.has_projected_terminal_quotients()
+        || lexer_scan_cache.tokenizer().has_virtual_residual_runtime()
+    {
+        return covered;
+    }
+
+    // Resolve parser/lexer candidates once per mask, not once per vocabulary
+    // root.  This path deliberately accepts only scalar tokenizer configs: it
+    // never searches an NFA config for a convenient raw state.
+    let mut candidates = SmallVec::<[(u32, TerminalID); 4]>::new();
+    for branch in root_branches {
+        if branch.fresh_reset
+            || !branch.pending_terminals.is_empty()
+            || !branch.initial_prune_guard.is_passed()
+            || branch.tokenizer_config == initial_config
+            || lexer_scan_cache.config_len(branch.tokenizer_config) != 1
+        {
+            continue;
+        }
+        let source = lexer_scan_cache.config_state(branch.tokenizer_config, 0);
+        let futures = state.constraint.tokenizer.possible_future_terminals(source);
+        if futures.is_empty() {
+            continue;
+        }
+        let mut terminals =
+            admissible_terminals_cached(state.constraint, &branch.gss, traversal_cache).clone();
+        terminals.intersect_with(futures);
+        if terminals.count_ones() != 1 {
+            continue;
+        }
+        let terminal = terminals.iter_ones().next().unwrap() as TerminalID;
+        if vocab.projected_terminal_quotient(terminal, source).is_some()
+            && !candidates.contains(&(source, terminal))
+        {
+            candidates.push((source, terminal));
+        }
+    }
+    if candidates.is_empty() {
+        return covered;
+    }
+
+    for (root_slot, edge) in trie.children(0).iter().enumerate() {
+        let Some(class) = trie.root_layout_class(root_slot) else {
+            continue;
+        };
+        let base = (class >> 11) as u8;
+        if !matches!(base, 1 | 2 | 3 | 4) {
+            continue;
+        }
+        let subtree_tokens = trie.subtree_tokens(edge.child);
+        if subtree_tokens.len() < 512 {
+            continue;
+        }
+        let has_non_ascii = class & (1 << 7) != 0;
+        if has_non_ascii && !trie.root_layout_all_valid_utf8(root_slot) {
+            continue;
+        }
+        let alphabet = U8Set::from_words(trie.subtree_bytes(edge.child));
+        if alphabet.is_empty() {
+            continue;
+        }
+
+        let certified = candidates.iter().any(|&(source, terminal)| {
+            vocab
+                .projected_terminal_text_liveness(terminal, source, alphabet, has_non_ascii)
+                .unwrap_or(false)
+        });
+
+        if certified {
+            stats.subtree_marks += 1;
+            stats.subtree_mark_tokens += subtree_tokens.len();
+            mark_subtree_tokens(vocab, trie, edge.child, buf);
+            covered.push(edge.child);
+        }
+    }
+    covered
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_interned_dynamic_trie(
     state: &ConstraintState<'_>,
@@ -3658,6 +3760,22 @@ fn walk_interned_dynamic_trie(
         return Ok(());
     }
 
+    let projected_terminal_roots = if allow_skip_certificates && !require_repair_used {
+        certify_projected_terminal_root_subtrees(
+            state,
+            vocab,
+            trie,
+            &root_branches,
+            initial_config,
+            lexer_scan_cache,
+            traversal_cache,
+            buf,
+            stats,
+        )
+    } else {
+        SmallVec::new()
+    };
+
     let use_parallel_overlay = require_repair_used
         && std::env::var_os("GLRMASK_EXPERIMENT_PARALLEL_DYNAMIC_OVERLAY").is_some()
         && rayon::current_num_threads() > 1
@@ -3733,6 +3851,10 @@ fn walk_interned_dynamic_trie(
     while walk_index < walk_edges.len() {
         deadline_poll.check()?;
         let edge = walk_edges[walk_index];
+        if edge.parent_depth == 0 && projected_terminal_roots.contains(&edge.child) {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
         let config_projection_candidate = pre_match_projection.is_some_and(|projection| {
             !projection
                 .config_subtree_certificates_for_node(edge.child)

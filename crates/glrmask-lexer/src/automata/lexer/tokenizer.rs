@@ -4,9 +4,7 @@ use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use rustc_hash::FxHashMap;
-#[cfg(test)]
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rayon::prelude::*;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
@@ -88,6 +86,417 @@ pub struct VirtualTokenizerRuntimeMetadata {
     pub kind: VirtualTokenizerRuntimeKind,
     pub terminal: TerminalID,
     pub root_state: u32,
+}
+
+/// Exact single-terminal residual-language quotient for one deterministic
+/// tokenizer component.
+///
+/// The full tokenizer coordinate is stored sparsely rather than as one dense
+/// row per tokenizer state. Keeping only states that actually belong to the
+/// terminal's deterministic component avoids multiplying runtime memory by the
+/// total tokenizer-state count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalProjectedQuotient {
+    dfa: DFA,
+    full_states: Box<[u32]>,
+    projected_states: Box<[u32]>,
+    /// Exact global byte-equivalence alphabet for `dfa`. Two bytes share a
+    /// class iff their transition target is identical from every projected
+    /// state (including both transitions being dead).
+    byte_to_class: Box<[u8]>,
+    class_representatives: Box<[u8]>,
+    /// Dense projected-state × byte-class targets. `u32::MAX` is dead.
+    class_targets: Box<[u32]>,
+}
+
+impl TerminalProjectedQuotient {
+    fn exact_byte_classes(dfa: &DFA) -> (Box<[u8]>, Box<[u8]>, Box<[u32]>) {
+        let state_count = dfa.num_states();
+        let mut signature_to_class = FxHashMap::<Vec<u32>, u8>::default();
+        let mut byte_to_class = vec![0u8; 256];
+        let mut class_representatives = Vec::<u8>::new();
+
+        for byte in 0u16..=255 {
+            let byte = byte as u8;
+            let signature = (0..state_count as u32)
+                .map(|state| dfa.step(state, byte).unwrap_or(u32::MAX))
+                .collect::<Vec<_>>();
+            let class = if let Some(&class) = signature_to_class.get(&signature) {
+                class
+            } else {
+                let class_index = class_representatives.len();
+                debug_assert!(class_index <= u8::MAX as usize);
+                let class = class_index as u8;
+                class_representatives.push(byte);
+                signature_to_class.insert(signature, class);
+                class
+            };
+            byte_to_class[byte as usize] = class;
+        }
+
+        let class_count = class_representatives.len();
+        let mut class_targets = Vec::with_capacity(state_count.saturating_mul(class_count));
+        for state in 0..state_count as u32 {
+            for &representative in &class_representatives {
+                class_targets.push(dfa.step(state, representative).unwrap_or(u32::MAX));
+            }
+        }
+
+        (
+            byte_to_class.into_boxed_slice(),
+            class_representatives.into_boxed_slice(),
+            class_targets.into_boxed_slice(),
+        )
+    }
+
+    fn from_dense_mapping(
+        dfa: DFA,
+        full_to_projected: Vec<u32>,
+    ) -> Self {
+        let mapped = full_to_projected
+            .iter()
+            .filter(|&&projected_state| projected_state != u32::MAX)
+            .count();
+        let mut full_states = Vec::with_capacity(mapped);
+        let mut projected_states = Vec::with_capacity(mapped);
+        for (full_state, projected_state) in full_to_projected.into_iter().enumerate() {
+            if projected_state == u32::MAX {
+                continue;
+            }
+            full_states.push(full_state as u32);
+            projected_states.push(projected_state);
+        }
+        debug_assert_eq!(full_states.len(), projected_states.len());
+        let (byte_to_class, class_representatives, class_targets) = Self::exact_byte_classes(&dfa);
+        Self {
+            dfa,
+            full_states: full_states.into_boxed_slice(),
+            projected_states: projected_states.into_boxed_slice(),
+            byte_to_class,
+            class_representatives,
+            class_targets,
+        }
+    }
+
+    #[inline]
+    fn class_target(&self, state: u32, class: u8) -> Option<u32> {
+        let index = (state as usize)
+            .checked_mul(self.class_representatives.len())?
+            .checked_add(class as usize)?;
+        let target = *self.class_targets.get(index)?;
+        (target != u32::MAX).then_some(target)
+    }
+
+    fn classes_for_bytes(&self, bytes: impl Iterator<Item = u8>) -> Vec<u8> {
+        let mut present = [false; 256];
+        for byte in bytes {
+            present[self.byte_to_class[byte as usize] as usize] = true;
+        }
+        present
+            .iter()
+            .enumerate()
+            .filter_map(|(class, &is_present)| is_present.then_some(class as u8))
+            .collect()
+    }
+
+    fn classes_for_ranges(&self, ranges: &[(u8, u8)]) -> Vec<u8> {
+        self.classes_for_bytes(
+            ranges
+                .iter()
+                .flat_map(|&(first, last)| first..=last),
+        )
+    }
+
+    #[inline]
+    fn projected_state(&self, full_source: u32) -> Option<u32> {
+        let index = self.full_states.binary_search(&full_source).ok()?;
+        self.projected_states.get(index).copied()
+    }
+
+    #[inline]
+    pub fn contains_source(&self, source: u32) -> bool {
+        self.projected_state(source).is_some()
+    }
+
+    fn state_counts(&self) -> (usize, usize) {
+        (self.full_states.len(), self.dfa.num_states())
+    }
+
+    fn byte_class_count(&self) -> usize {
+        self.class_representatives.len()
+    }
+
+    /// Validate that a deserialized quotient is still an exact homomorphic
+    /// projection of `terminal` in `tokenizer`.
+    ///
+    /// Runtime subtree acceptance relies on this relationship, so wire data is
+    /// not trusted merely because its internal arrays are in bounds.  The
+    /// check also reconstructs the DFA's exact byte partition instead of
+    /// trusting serialized class metadata.
+    pub fn validate_exact_projection(
+        &self,
+        tokenizer: &Tokenizer,
+        terminal: TerminalID,
+    ) -> Result<(), String> {
+        if terminal >= tokenizer.num_terminals() {
+            return Err(format!(
+                "projected-terminal quotient references terminal {terminal}, but tokenizer has {} terminals",
+                tokenizer.num_terminals(),
+            ));
+        }
+        if tokenizer.has_any_virtual_runtime() {
+            return Err(
+                "projected-terminal quotients are invalid for tokenizers with virtual runtimes"
+                    .to_owned(),
+            );
+        }
+        if self.dfa.has_epsilon_transitions() {
+            return Err("projected-terminal quotient DFA has epsilon transitions".to_owned());
+        }
+        if self.full_states.is_empty() || self.full_states.len() != self.projected_states.len() {
+            return Err("projected-terminal quotient has an invalid sparse state map".to_owned());
+        }
+        if self
+            .full_states
+            .windows(2)
+            .any(|states| states[0] >= states[1])
+        {
+            return Err(
+                "projected-terminal quotient full-state map is not strictly sorted".to_owned(),
+            );
+        }
+        if self.byte_to_class.len() != 256 {
+            return Err(format!(
+                "projected-terminal quotient has {} byte-class entries, expected 256",
+                self.byte_to_class.len(),
+            ));
+        }
+        let (expected_byte_to_class, expected_representatives, expected_targets) =
+            Self::exact_byte_classes(&self.dfa);
+        if self.byte_to_class != expected_byte_to_class
+            || self.class_representatives != expected_representatives
+            || self.class_targets != expected_targets
+        {
+            return Err(
+                "projected-terminal quotient byte classes do not match its DFA".to_owned(),
+            );
+        }
+
+        let projected_live = |state: u32| {
+            self.dfa.finalizers(state).contains(0)
+                || self.dfa.possible_future_group_ids(state).contains(0)
+        };
+        for state in 0..self.dfa.num_states() as u32 {
+            if self.dfa.finalizers(state).iter().any(|group| group != 0)
+                || self
+                    .dfa
+                    .possible_future_group_ids(state)
+                    .iter()
+                    .any(|group| group != 0)
+            {
+                return Err(
+                    "projected-terminal quotient DFA contains a nonzero terminal group".to_owned(),
+                );
+            }
+        }
+
+        for (&full_state, &projected_state) in
+            self.full_states.iter().zip(self.projected_states.iter())
+        {
+            if full_state >= tokenizer.num_states() {
+                return Err(format!(
+                    "projected-terminal quotient references tokenizer state {full_state}, but tokenizer has {} states",
+                    tokenizer.num_states(),
+                ));
+            }
+            if projected_state >= self.dfa.num_states() as u32 {
+                return Err(format!(
+                    "projected-terminal quotient references projected state {projected_state}, but DFA has {} states",
+                    self.dfa.num_states(),
+                ));
+            }
+
+            let full_accepting = tokenizer
+                .matched_terminal_bitset(full_state)
+                .contains(terminal as usize);
+            let projected_accepting = self.dfa.finalizers(projected_state).contains(0);
+            let full_future = tokenizer
+                .possible_future_terminals(full_state)
+                .contains(terminal as usize);
+            let projected_future = self
+                .dfa
+                .possible_future_group_ids(projected_state)
+                .contains(0);
+            if full_accepting != projected_accepting || full_future != projected_future {
+                return Err(format!(
+                    "projected-terminal quotient observation mismatch at tokenizer state {full_state}"
+                ));
+            }
+            if !full_accepting && !full_future {
+                return Err(format!(
+                    "projected-terminal quotient maps dead tokenizer state {full_state}"
+                ));
+            }
+
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let full_target =
+                    tokenizer.terminal_projected_scalar_step(full_state, terminal, byte);
+                let projected_target = self
+                    .dfa
+                    .step(projected_state, byte)
+                    .filter(|&target| projected_live(target));
+                match (full_target, projected_target) {
+                    (None, None) => {}
+                    (Some(full_target), Some(projected_target))
+                        if self.projected_state(full_target) == Some(projected_target) => {}
+                    _ => {
+                        return Err(format!(
+                            "projected-terminal quotient transition mismatch at tokenizer state {full_state} on byte {byte}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Prove that every requested text continuation remains live in this exact
+    /// single-terminal residual coordinate. The quotient has one accepting
+    /// group, so residual distinctions belonging only to unrelated terminals
+    /// are absent from the proof state.
+    pub fn text_liveness_closed_bounded(
+        &self,
+        full_source: u32,
+        ascii_bytes: U8Set,
+        state_limit: usize,
+        transition_work_limit: usize,
+        include_utf8_scalars: bool,
+    ) -> Option<bool> {
+        let source = self.projected_state(full_source)?;
+        if state_limit == 0 || transition_work_limit == 0 {
+            return Some(false);
+        }
+        let safe_state = |state: u32| self.dfa.possible_future_group_ids(state).contains(0);
+        if !safe_state(source) {
+            return Some(false);
+        }
+
+        let utf8_branches: &[(&[(u8, u8)], &[(u8, u8)], usize)] = &[
+            (&[(0xC2, 0xDF)], &[(0x80, 0xBF)], 0),
+            (&[(0xE0, 0xE0)], &[(0xA0, 0xBF)], 1),
+            (&[(0xE1, 0xEC), (0xEE, 0xEF)], &[(0x80, 0xBF)], 1),
+            (&[(0xED, 0xED)], &[(0x80, 0x9F)], 1),
+            (&[(0xF0, 0xF0)], &[(0x90, 0xBF)], 2),
+            (&[(0xF1, 0xF3)], &[(0x80, 0xBF)], 2),
+            (&[(0xF4, 0xF4)], &[(0x80, 0x8F)], 2),
+        ];
+
+        let ascii_classes =
+            self.classes_for_bytes(ascii_bytes.iter().filter(|&byte| byte < 0x80));
+        let continuation_classes = self.classes_for_ranges(&[(0x80, 0xBF)]);
+        let utf8_class_branches = utf8_branches
+            .iter()
+            .map(|&(lead, second, extra_continuations)| {
+                (
+                    self.classes_for_ranges(lead),
+                    self.classes_for_ranges(second),
+                    extra_continuations,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut seen = FxHashSet::<u32>::default();
+        let mut queue = VecDeque::from([source]);
+        let mut work = 0usize;
+        while let Some(state) = queue.pop_front() {
+            if !seen.insert(state) {
+                continue;
+            }
+            if seen.len() > state_limit {
+                return None;
+            }
+            if !safe_state(state) {
+                return Some(false);
+            }
+
+            for &class in &ascii_classes {
+                work = work.saturating_add(1);
+                if work > transition_work_limit {
+                    return None;
+                }
+                let Some(target) = self.class_target(state, class) else {
+                    return Some(false);
+                };
+                if !safe_state(target) {
+                    return Some(false);
+                }
+                if !seen.contains(&target) {
+                    queue.push_back(target);
+                }
+            }
+
+            let advance_classes = |frontier: &[u32],
+                                   classes: &[u8],
+                                   work: &mut usize|
+             -> Option<Option<Vec<u32>>> {
+                let mut next = Vec::<u32>::new();
+                for &frontier_state in frontier {
+                    for &class in classes {
+                        *work = work.saturating_add(1);
+                        if *work > transition_work_limit {
+                            return None;
+                        }
+                        let Some(target) = self.class_target(frontier_state, class) else {
+                            return Some(None);
+                        };
+                        if !safe_state(target) {
+                            return Some(None);
+                        }
+                        if !next.contains(&target) {
+                            next.push(target);
+                        }
+                    }
+                }
+                next.sort_unstable();
+                Some(Some(next))
+            };
+
+            if include_utf8_scalars {
+                for (lead_classes, second_classes, extra_continuations) in &utf8_class_branches {
+                    let Some(mut frontier) =
+                        advance_classes(&[state], lead_classes, &mut work)?
+                    else {
+                        return Some(false);
+                    };
+                    let Some(after_second) =
+                        advance_classes(&frontier, second_classes, &mut work)?
+                    else {
+                        return Some(false);
+                    };
+                    frontier = after_second;
+                    for _ in 0..*extra_continuations {
+                        let Some(after_continuation) = advance_classes(
+                            &frontier,
+                            &continuation_classes,
+                            &mut work,
+                        )?
+                        else {
+                            return Some(false);
+                        };
+                        frontier = after_continuation;
+                    }
+                    for target in frontier {
+                        if !seen.contains(&target) {
+                            queue.push_back(target);
+                        }
+                    }
+                }
+            }
+        }
+        Some(true)
+    }
+
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -7973,6 +8382,231 @@ impl Tokenizer {
         hash
     }
 
+    /// Build the same exact single-terminal residual coordinate directly from
+    /// the retained terminal expression, then prove a homomorphism from this
+    /// tokenizer's terminal projection into that standalone DFA.
+    ///
+    /// This avoids minimizing the much larger combined tokenizer component.
+    /// The mapping is accepted only when every reachable projected byte edge
+    /// and accepting observation agrees exactly in the two automata.
+    fn terminal_expr_projected_quotient(
+        &self,
+        source: u32,
+        terminal: TerminalID,
+    ) -> Option<TerminalProjectedQuotient> {
+        self.terminal_expr_projected_quotient_with_byte_classes(source, terminal, None)
+    }
+
+    fn terminal_expr_projected_quotient_with_byte_classes(
+        &self,
+        source: u32,
+        terminal: TerminalID,
+        full_byte_classes: Option<&[u8; 256]>,
+    ) -> Option<TerminalProjectedQuotient> {
+        if self.has_any_virtual_runtime()
+            || source >= self.num_states()
+            || terminal >= self.num_terminals
+            || self.state_has_epsilon_transitions(source)
+        {
+            return None;
+        }
+        let expr = self.terminal_expr(terminal)?.clone();
+        let projected = expr.build().into_tokenizer(1, None);
+        if projected.has_epsilon_transitions() || projected.has_any_virtual_runtime() {
+            return None;
+        }
+
+        // When the caller has already proved an exact byte partition for the
+        // full deterministic component, intersect it with the standalone
+        // terminal DFA's exact byte partition. One representative from each
+        // intersection class is sufficient for the homomorphism proof: every
+        // byte in that class has the same full target from every component
+        // state and the same projected target from every projected state.
+        let proof_bytes = if let Some(full_byte_classes) = full_byte_classes {
+            let (projected_byte_classes, _, _) =
+                TerminalProjectedQuotient::exact_byte_classes(&projected.dfa);
+            let mut seen = FxHashSet::<(u8, u8)>::default();
+            let mut representatives = Vec::<u8>::new();
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let key = (
+                    full_byte_classes[byte as usize],
+                    projected_byte_classes[byte as usize],
+                );
+                if seen.insert(key) {
+                    representatives.push(byte);
+                }
+            }
+            representatives
+        } else {
+            (0u16..=255).map(|byte| byte as u8).collect::<Vec<_>>()
+        };
+
+        let full_root = self.terminal_scalar_dispatch_root(terminal)?;
+        let projected_root = projected.initial_state();
+        let mut full_to_projected = vec![u32::MAX; self.num_states() as usize];
+        let mut queue = VecDeque::from([(full_root, projected_root)]);
+        full_to_projected[full_root as usize] = projected_root;
+        while let Some((full_state, projected_state)) = queue.pop_front() {
+            let full_accepting = self
+                .matched_terminal_bitset(full_state)
+                .contains(terminal as usize);
+            let projected_accepting = projected.matched_terminal_bitset(projected_state).contains(0);
+            if full_accepting != projected_accepting {
+                return None;
+            }
+            let full_future = self
+                .possible_future_terminals(full_state)
+                .contains(terminal as usize);
+            let projected_future = projected.possible_future_terminals(projected_state).contains(0);
+            if full_future != projected_future {
+                return None;
+            }
+
+            for &byte in &proof_bytes {
+                let full_target = self.terminal_projected_scalar_step(full_state, terminal, byte);
+                let projected_target = projected
+                    .step(projected_state, byte)
+                    .filter(|&target| projected.state_live_for_terminal(target, 0));
+                match (full_target, projected_target) {
+                    (None, None) => {}
+                    (Some(full_target), Some(projected_target)) => {
+                        let slot = &mut full_to_projected[full_target as usize];
+                        if *slot == u32::MAX {
+                            *slot = projected_target;
+                            queue.push_back((full_target, projected_target));
+                        } else if *slot != projected_target {
+                            return None;
+                        }
+                    }
+                    _ => {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if full_to_projected[source as usize] == u32::MAX {
+            return None;
+        }
+        Some(TerminalProjectedQuotient::from_dense_mapping(
+            projected.dfa,
+            full_to_projected,
+        ))
+    }
+
+    fn deterministic_component_byte_classes(&self, states: &[u32]) -> [u8; 256] {
+        let mut classes = [0u8; 256];
+        let mut by_signature = FxHashMap::<Vec<u32>, u8>::default();
+        let mut next_class = 0usize;
+        for byte in 0u16..=255 {
+            let byte = byte as u8;
+            let signature = states
+                .iter()
+                .map(|&state| self.step(state, byte).unwrap_or(u32::MAX))
+                .collect::<Vec<_>>();
+            let class = if let Some(&class) = by_signature.get(&signature) {
+                class
+            } else {
+                debug_assert!(next_class <= u8::MAX as usize);
+                let class = next_class as u8;
+                next_class += 1;
+                by_signature.insert(signature, class);
+                class
+            };
+            classes[byte as usize] = class;
+        }
+        classes
+    }
+
+    /// Build the exact expression-projected quotient from this terminal's
+    /// deterministic dispatch root.  Kept as a diagnostic/compile-time helper
+    /// so callers do not need access to the raw dispatch-root coordinate.
+    fn terminal_expr_projected_quotient_from_root(
+        &self,
+        terminal: TerminalID,
+    ) -> Option<TerminalProjectedQuotient> {
+        let source = self.terminal_scalar_dispatch_root(terminal)?;
+        self.terminal_expr_projected_quotient(source, terminal)
+    }
+
+    /// Build exact single-terminal residual coordinates only for terminals in
+    /// sufficiently large shared deterministic dispatch components.
+    ///
+    /// A single-terminal component cannot contain residual distinctions caused
+    /// by other terminals, so projecting it buys nothing. Every returned
+    /// quotient is certified by the exact expression-projected homomorphism.
+    pub fn build_shared_component_terminal_projected_quotients(
+        &self,
+        min_component_states: usize,
+    ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
+        if min_component_states == 0 || !self.has_scalar_deterministic_dispatch() {
+            return Vec::new();
+        }
+        let Some(roots) = self.deterministic_dispatch_roots() else {
+            return Vec::new();
+        };
+        let Some(components) = self.disjoint_dispatch_components() else {
+            return Vec::new();
+        };
+        if roots.len() != components.len() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::<(TerminalID, Arc<[u8; 256]>)>::new();
+        for (&root, states) in roots.iter().zip(&components) {
+            if states.len() < min_component_states {
+                continue;
+            }
+            let terminals = (0..self.num_terminals)
+                .filter(|&terminal| self.terminal_scalar_dispatch_root(terminal) == Some(root))
+                .collect::<Vec<_>>();
+            if terminals.len() < 2 {
+                continue;
+            }
+            let byte_classes = Arc::new(self.deterministic_component_byte_classes(states));
+            candidates.extend(
+                terminals
+                    .into_iter()
+                    .map(|terminal| (terminal, Arc::clone(&byte_classes))),
+            );
+        }
+        candidates.sort_unstable_by_key(|(terminal, _)| *terminal);
+        candidates.dedup_by_key(|(terminal, _)| *terminal);
+
+        let profile =
+            std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTED_QUOTIENT_BUILD").is_some();
+        let results = candidates
+            .into_par_iter()
+            .filter_map(|(terminal, byte_classes)| {
+                let source = self.terminal_scalar_dispatch_root(terminal)?;
+                let quotient = self.terminal_expr_projected_quotient_with_byte_classes(
+                    source,
+                    terminal,
+                    Some(byte_classes.as_ref()),
+                )?;
+                let (mapped, projected) = quotient.state_counts();
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_projected_quotient_build] terminal={} mapped={} projected={} retained={}",
+                        terminal,
+                        mapped,
+                        projected,
+                        projected < mapped,
+                    );
+                }
+                (projected < mapped).then_some((terminal, quotient))
+            })
+            .collect::<Vec<_>>();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_projected_quotient_build_summary] retained={}",
+                results.len(),
+            );
+        }
+        results
+    }
+
     /// A bounded language-observation fingerprint for candidate indexing.
     ///
     /// For scalar deterministic terminal branches this recursively records the
@@ -9685,6 +10319,45 @@ mod tests {
             num_terminals,
             Some(Arc::from(exprs.into_boxed_slice())),
         )
+    }
+
+    #[test]
+    fn terminal_expr_projected_quotient_proves_exact_text_closure() {
+        let tokenizer = tokenizer_from_exprs(vec![plus(bytes(b"a")), plus(bytes(b"b"))]);
+        let source = tokenizer
+            .terminal_scalar_dispatch_root(0)
+            .expect("deterministic test tokenizer has a scalar terminal root");
+        let quotient = tokenizer
+            .terminal_expr_projected_quotient_from_root(0)
+            .expect("retained terminal expression should admit an exact projected quotient");
+
+        assert!(quotient.contains_source(source));
+        assert!(quotient.byte_class_count() < 256);
+        quotient
+            .validate_exact_projection(&tokenizer, 0)
+            .expect("freshly built projected quotient must validate against its tokenizer");
+
+        let mut malformed = quotient.clone();
+        malformed.byte_to_class[0] ^= 1;
+        assert!(
+            malformed.validate_exact_projection(&tokenizer, 0).is_err(),
+            "wire validation must reject corrupted byte-class metadata"
+        );
+
+        let mut only_a = U8Set::empty();
+        only_a.insert(b'a');
+        assert_eq!(
+            quotient.text_liveness_closed_bounded(source, only_a, 128, 4_096, false),
+            Some(true),
+        );
+
+        let mut a_or_b = only_a;
+        a_or_b.insert(b'b');
+        assert_eq!(
+            quotient.text_liveness_closed_bounded(source, a_or_b, 128, 4_096, false),
+            Some(false),
+            "a byte outside the projected terminal language must fail closed",
+        );
     }
 
     fn serialized_roundtrip(tokenizer: &Tokenizer) -> Tokenizer {

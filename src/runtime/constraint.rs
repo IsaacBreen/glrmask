@@ -6604,6 +6604,25 @@ impl Constraint {
             .set_terminal_observation_classes(classes);
     }
 
+    /// Build the exact single-terminal projected lexer quotients needed by the
+    /// dynamic mask accelerator without materializing the rest of the runtime
+    /// cache set. Serialized dynamic compilation uses this before emitting its
+    /// transfer artifact so the execution process can reuse the exact compile-
+    /// time proof coordinate rather than reconstructing it after transport.
+    pub(crate) fn prepare_dynamic_projected_terminal_quotients_for_artifact(&mut self) {
+        if self
+            .dynamic_mask_vocab
+            .projected_terminal_quotients_prepared()
+        {
+            return;
+        }
+        let quotients = self
+            .tokenizer
+            .build_shared_component_terminal_projected_quotients(256);
+        self.dynamic_mask_vocab
+            .set_projected_terminal_quotients(quotients);
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         self.table.rebuild_unconditional_advance_rows();
@@ -6632,7 +6651,7 @@ impl Constraint {
             }
             if !dynamic_mask_vocab.is_initialized() {
                 let mut materialized = self.build_dynamic_mask_vocab();
-                materialized.inherit_mask_tokenizer_quotient_from(&dynamic_mask_vocab);
+                materialized.inherit_dynamic_lexer_metadata_from(&dynamic_mask_vocab);
                 dynamic_mask_vocab = materialized;
             }
             let elapsed = started_at
@@ -6672,6 +6691,12 @@ impl Constraint {
         } else {
             rayon::join(|| rayon::join(build_vocab, build_fast), build_support)
         };
+        if !dynamic_mask_vocab.projected_terminal_quotients_prepared() {
+            let quotients = self
+                .tokenizer
+                .build_shared_component_terminal_projected_quotients(256);
+            dynamic_mask_vocab.set_projected_terminal_quotients(quotients);
+        }
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
