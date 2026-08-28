@@ -3003,6 +3003,18 @@ impl DynamicMaskVocab {
         self.virtual_residual_projections = projections;
     }
 
+    pub(crate) fn virtual_residual_mask_projection_parts(
+        &self,
+    ) -> Option<(&Tokenizer, &[VirtualResidualMaskProjection])> {
+        if self.virtual_residual_projections.is_empty() {
+            return None;
+        }
+        Some((
+            self.mask_tokenizer.as_deref()?,
+            self.virtual_residual_projections.as_slice(),
+        ))
+    }
+
     /// Preserve lexer-derived dynamic-mask metadata when a deferred vocabulary
     /// placeholder is replaced by its fully materialized runtime trie.
     ///

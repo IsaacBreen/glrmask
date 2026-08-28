@@ -46,7 +46,8 @@ const PREVIOUS_SEGMENTED_MATERIALIZATION_CONSTRAINT_VERSION: u16 = 21;
 const PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION: u16 = 22;
 const PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION: u16 = 23;
 const PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION: u16 = 24;
-const CONSTRAINT_VERSION: u16 = 27;
+const PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION: u16 = 27;
+const CONSTRAINT_VERSION: u16 = 28;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -74,6 +75,8 @@ const V24_SECTION_MAGIC: [u8; 4] = *b"S24\0";
 const V24_SECTION_HEADER_LEN: usize = V24_SECTION_MAGIC.len() + 11 * 8;
 const V27_SECTION_MAGIC: [u8; 4] = *b"S27\0";
 const V27_SECTION_HEADER_LEN: usize = V27_SECTION_MAGIC.len() + 11 * 8;
+const V28_SECTION_MAGIC: [u8; 4] = *b"S28\0";
+const V28_SECTION_HEADER_LEN: usize = V28_SECTION_MAGIC.len() + 11 * 8;
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC: [u8; 4] = *b"C19\0";
 const PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_HEADER_LEN: usize =
     PREVIOUS_PREVIOUS_PREVIOUS_CURRENT_CORE_MAGIC.len() + 2 * 8;
@@ -91,6 +94,7 @@ fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION
             | PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION
             | PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION
             | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
@@ -2489,17 +2493,45 @@ enum SegmentedRuntimeArtifactV27 {
 }
 
 #[derive(Serialize)]
+struct StaticVirtualResidualMaskArtifactRef<'a> {
+    mask_tokenizer_bytes: Vec<u8>,
+    projections: Vec<
+        crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifactRef<'a>,
+    >,
+}
+
+#[derive(Deserialize)]
+struct StaticVirtualResidualMaskArtifact {
+    mask_tokenizer_bytes: Vec<u8>,
+    projections: Vec<
+        crate::automata::lexer::tokenizer::VirtualResidualMaskProjectionArtifact,
+    >,
+}
+
+#[derive(Serialize)]
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
     terminal_live_states: &'a [Vec<u32>],
     segmented_runtime: Option<SegmentedRuntimeArtifactV27Ref<'a>>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
+    static_virtual_residual_mask: Option<StaticVirtualResidualMaskArtifactRef<'a>>,
     packed_dwa_dense_mask_ids: &'a [u32],
     packed_dwa_dense_mask_rows: &'a [u64],
 }
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
+    terminal_live_states: Vec<Vec<u32>>,
+    segmented_runtime: Option<SegmentedRuntimeArtifactV27>,
+    dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
+    virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
+    static_virtual_residual_mask: Option<StaticVirtualResidualMaskArtifact>,
+    packed_dwa_dense_mask_ids: Vec<u32>,
+    packed_dwa_dense_mask_rows: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV27Runtime {
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
@@ -2560,6 +2592,7 @@ struct DecodedConstraintRuntime {
     segmented_runtime_v27: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
     virtual_runtimes: Vec<crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeMetadata>,
+    static_virtual_residual_mask: Option<StaticVirtualResidualMaskArtifact>,
     packed_dwa_dense_masks: Option<(Vec<u32>, Vec<u64>)>,
 }
 
@@ -4315,6 +4348,81 @@ fn v24_sections(
     ))
 }
 
+fn v28_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    if payload.len() < V28_SECTION_HEADER_LEN || !payload.starts_with(&V28_SECTION_MAGIC) {
+        return Err("invalid v28 constraint section header".to_owned());
+    }
+    let mut pos = V28_SECTION_MAGIC.len();
+    let mut take_len = || {
+        let end = pos + 8;
+        let value = u64::from_le_bytes(
+            payload[pos..end]
+                .try_into()
+                .expect("v27 section length has fixed width"),
+        );
+        pos = end;
+        usize::try_from(value)
+            .map_err(|_| "v27 section length does not fit this platform".to_owned())
+    };
+    let lengths = [
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+        take_len()?,
+    ];
+    let total = lengths.iter().try_fold(V28_SECTION_HEADER_LEN, |sum, &len| {
+        sum.checked_add(len)
+            .ok_or_else(|| "v28 constraint section lengths overflow".to_owned())
+    })?;
+    if total != payload.len() {
+        return Err("invalid v28 constraint section lengths".to_owned());
+    }
+    let mut pos = V28_SECTION_HEADER_LEN;
+    let mut next = |len: usize| {
+        let section = &payload[pos..pos + len];
+        pos += len;
+        section
+    };
+    Ok((
+        next(lengths[0]),
+        next(lengths[1]),
+        next(lengths[2]),
+        next(lengths[3]),
+        next(lengths[4]),
+        next(lengths[5]),
+        next(lengths[6]),
+        next(lengths[7]),
+        next(lengths[8]),
+        next(lengths[9]),
+        next(lengths[10]),
+    ))
+}
+
+
 fn v27_sections(
     payload: &[u8],
 ) -> Result<
@@ -5264,7 +5372,28 @@ impl Constraint {
                         || {
                             let started = profile.then(std::time::Instant::now);
                             let packed_dwa_dense_masks = &self.packed_dwa_token_dense_masks;
-                            let bytes = bincode::serialize(&ConstraintArtifactCurrentRuntimeRef {
+                            let static_virtual_residual_mask = if self.uses_dynamic_runtime() {
+                                None
+                            } else {
+                                self.dynamic_mask_vocab
+                                    .virtual_residual_mask_projection_parts()
+                                    .map(|(mask_tokenizer, projections)| {
+                                        StaticVirtualResidualMaskArtifactRef {
+                                            mask_tokenizer_bytes:
+                                                crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(mask_tokenizer),
+                                            projections: projections
+                                                .iter()
+                                                .map(|projection| projection.artifact_ref())
+                                                .collect(),
+                                        }
+                                    })
+                            };
+                            // The finite observation tokenizer is compiled Static
+                            // state, not a load-time cache. Its native fast wire
+                            // avoids serde materialization and keeps the runtime
+                            // record independent of Tokenizer's derived caches.
+                            let mut bytes = Vec::with_capacity(3 * 1024 * 1024);
+                            let encoded = bincode::serialize_into(&mut bytes, &ConstraintArtifactCurrentRuntimeRef {
                                 terminal_live_states: &self.terminal_live_states,
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
                                 dynamic_mask_vocab: self
@@ -5276,10 +5405,11 @@ impl Constraint {
                                     .has_any_virtual_runtime()
                                     .then(|| self.tokenizer.virtual_runtime_metadata())
                                     .unwrap_or_default(),
+                                static_virtual_residual_mask,
                                 packed_dwa_dense_mask_ids: packed_dwa_dense_masks.token_set_ids(),
                                 packed_dwa_dense_mask_rows: packed_dwa_dense_masks.flat_rows(),
-                            })
-                            .expect("Constraint runtime metadata serialization should succeed");
+                            });
+                            encoded.expect("Constraint runtime metadata serialization should succeed");
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=runtime ms={:.3} bytes={}",
@@ -5365,7 +5495,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V27_SECTION_HEADER_LEN
+            + V28_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5392,7 +5522,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V27_SECTION_HEADER_LEN
+            + V28_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5412,7 +5542,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V27_SECTION_HEADER_LEN
+        let payload_len = V28_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -5444,7 +5574,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V27_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V28_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -5453,8 +5583,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V27_SECTION_MAGIC.len()].copy_from_slice(&V27_SECTION_MAGIC);
-            pos += V27_SECTION_MAGIC.len();
+            header[pos..pos + V28_SECTION_MAGIC.len()].copy_from_slice(&V28_SECTION_MAGIC);
+            pos += V28_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -5653,7 +5783,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V27_SECTION_MAGIC);
+        bytes.extend_from_slice(&V28_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -5786,6 +5916,7 @@ impl Constraint {
                 | PREVIOUS_BOUNDARY_SHARDLESS_CONSTRAINT_VERSION
                 | PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION
                 | PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION
+                | PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -5910,6 +6041,22 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v28_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v27_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -6195,6 +6342,44 @@ impl Constraint {
                                                 segmented_runtime_v27: runtime.segmented_runtime,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 virtual_runtimes: runtime.virtual_runtimes,
+                                                static_virtual_residual_mask: runtime.static_virtual_residual_mask,
+                                                packed_dwa_dense_masks,
+                                            })
+                                        })
+                                    } else if version == PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION {
+                                        bincode::deserialize::<ConstraintArtifactV27Runtime>(
+                                            runtime_section,
+                                        )
+                                        .and_then(|runtime| {
+                                            let packed_dwa_dense_masks = if runtime
+                                                .packed_dwa_dense_mask_ids
+                                                .is_empty()
+                                            {
+                                                if !runtime.packed_dwa_dense_mask_rows.is_empty() {
+                                                    return Err(bincode::Error::new(
+                                                        bincode::ErrorKind::Custom(
+                                                            "packed DWA dense-mask slab has rows but no ids"
+                                                                .to_owned(),
+                                                        ),
+                                                    ));
+                                                }
+                                                None
+                                            } else {
+                                                Some((
+                                                    runtime.packed_dwa_dense_mask_ids,
+                                                    runtime.packed_dwa_dense_mask_rows,
+                                                ))
+                                            };
+                                            Ok(DecodedConstraintRuntime {
+                                                terminal_live_states: runtime.terminal_live_states,
+                                                segmented_runtime_v20: None,
+                                                segmented_runtime_v22: None,
+                                                segmented_runtime_v23: None,
+                                                segmented_runtime_v24: None,
+                                                segmented_runtime_v27: runtime.segmented_runtime,
+                                                dynamic_mask_vocab: runtime.dynamic_mask_vocab,
+                                                virtual_runtimes: runtime.virtual_runtimes,
+                                                static_virtual_residual_mask: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6231,6 +6416,7 @@ impl Constraint {
                                                 segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 virtual_runtimes: Vec::new(),
+                                                static_virtual_residual_mask: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6267,6 +6453,7 @@ impl Constraint {
                                                 segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 virtual_runtimes: Vec::new(),
+                                                static_virtual_residual_mask: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6303,6 +6490,7 @@ impl Constraint {
                                                 segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: runtime.dynamic_mask_vocab,
                                                 virtual_runtimes: Vec::new(),
+                                                static_virtual_residual_mask: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6339,6 +6527,7 @@ impl Constraint {
                                                 segmented_runtime_v27: None,
                                                 dynamic_mask_vocab: None,
                                                 virtual_runtimes: Vec::new(),
+                                                static_virtual_residual_mask: None,
                                                 packed_dwa_dense_masks,
                                             })
                                         })
@@ -6355,6 +6544,7 @@ impl Constraint {
                                             segmented_runtime_v27: None,
                                             dynamic_mask_vocab: None,
                                             virtual_runtimes: Vec::new(),
+                                            static_virtual_residual_mask: None,
                                             packed_dwa_dense_masks: None,
                                         })
                                     } else {
@@ -6370,6 +6560,7 @@ impl Constraint {
                                             segmented_runtime_v27: None,
                                             dynamic_mask_vocab: None,
                                             virtual_runtimes: Vec::new(),
+                                            static_virtual_residual_mask: None,
                                             packed_dwa_dense_masks: None,
                                         })
                                     }
@@ -6877,8 +7068,10 @@ impl Constraint {
                     .map_err(crate::GlrMaskError::Serialization)?;
             }
             let mut virtual_runtimes = Vec::new();
+            let mut static_virtual_residual_mask = None;
             if let Some(runtime) = runtime {
                 virtual_runtimes = runtime.virtual_runtimes;
+                static_virtual_residual_mask = runtime.static_virtual_residual_mask;
                 constraint.terminal_live_states = runtime.terminal_live_states;
                 if let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
@@ -6947,6 +7140,28 @@ impl Constraint {
                         )
                 };
                 restore_result.map_err(crate::GlrMaskError::Serialization)?;
+            }
+            if let Some(static_mask) = static_virtual_residual_mask {
+                let StaticVirtualResidualMaskArtifact {
+                    mask_tokenizer_bytes,
+                    projections,
+                } = static_mask;
+                let mask_tokenizer =
+                    crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes(
+                        &mask_tokenizer_bytes,
+                    )
+                    .map_err(crate::GlrMaskError::Serialization)?;
+                let restored = constraint
+                    .tokenizer
+                    .restore_virtual_residual_mask_projections(
+                        constraint.max_token_byte_len(),
+                        &mask_tokenizer,
+                        projections,
+                    )
+                    .map_err(crate::GlrMaskError::Serialization)?;
+                constraint
+                    .dynamic_mask_vocab
+                    .set_virtual_residuals_mask_projection(mask_tokenizer, restored);
             }
             let restore_exprs_ms = restore_exprs_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
