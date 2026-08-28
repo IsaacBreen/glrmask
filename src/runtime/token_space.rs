@@ -165,7 +165,20 @@ impl Constraint {
 			.collect()
 	}
 
+	#[inline]
+	fn static_observation_state(&self, tokenizer_state: u32) -> u32 {
+		if !self.uses_dynamic_runtime()
+			&& self.tokenizer.has_virtual_residual_runtime()
+			&& self.dynamic_mask_vocab.mask_projection_tokenizer().is_some()
+		{
+			self.dynamic_mask_vocab.mask_projection_state(tokenizer_state)
+		} else {
+			tokenizer_state
+		}
+	}
+
 	pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
+		let tokenizer_state = self.static_observation_state(tokenizer_state);
 		self.state_to_internal_tsid
 			.get(tokenizer_state as usize)
 			.copied()
@@ -173,7 +186,7 @@ impl Constraint {
 	}
 
 	pub(crate) fn internal_tsids_for_state(&self, tokenizer_state: u32) -> &[u32] {
-		let state = tokenizer_state as usize;
+		let state = self.static_observation_state(tokenizer_state) as usize;
 		if let (Some(&start), Some(&end)) = (
 			self.state_internal_tsid_offsets.get(state),
 			self.state_internal_tsid_offsets.get(state + 1),
