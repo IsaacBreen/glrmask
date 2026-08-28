@@ -1790,7 +1790,7 @@ impl Constraint {
     }
 
     #[inline]
-    fn max_token_byte_len(&self) -> usize {
+    pub(crate) fn max_token_byte_len(&self) -> usize {
         self.packed_token_bytes.as_ref().map_or_else(
             || self.token_bytes.values().map(Vec::len).max().unwrap_or(0),
             |packed| packed.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0),

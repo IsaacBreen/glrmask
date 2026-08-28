@@ -18,7 +18,12 @@ use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
     VirtualBinaryRepeatIntersectionRuntime, VirtualRuntimeStateOwners, VirtualStateAllocator,
 };
-pub use super::runtime_residual::VirtualResidualMaskProjection;
+pub use super::runtime_residual::{
+    VirtualResidualMaskProjection, VirtualResidualMaskProjectionArtifact,
+};
+#[doc(hidden)]
+pub type VirtualResidualMaskProjectionArtifactRef<'a> =
+    super::runtime_residual::VirtualResidualMaskProjectionArtifactRef<'a>;
 use super::runtime_residual::VirtualResidualRuntime;
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
@@ -8194,6 +8199,60 @@ impl Tokenizer {
     }
 
     #[doc(hidden)]
+    pub fn restore_virtual_residual_mask_projections(
+        &self,
+        horizon: usize,
+        mask_tokenizer: &Tokenizer,
+        artifacts: Vec<VirtualResidualMaskProjectionArtifact>,
+    ) -> Result<Vec<VirtualResidualMaskProjection>, String> {
+        if artifacts.len() != self.virtual_residuals.len() {
+            return Err(format!(
+                "virtual residual projection count mismatch: artifact={} runtime={}",
+                artifacts.len(),
+                self.virtual_residuals.len(),
+            ));
+        }
+        if mask_tokenizer.num_terminals() != self.num_terminals {
+            return Err(format!(
+                "virtual residual mask tokenizer terminal mismatch: mask={} source={}",
+                mask_tokenizer.num_terminals(),
+                self.num_terminals,
+            ));
+        }
+        if mask_tokenizer.has_any_virtual_runtime() {
+            return Err("serialized virtual residual mask tokenizer must be finite".to_owned());
+        }
+        let mask_states = mask_tokenizer.num_states();
+        let offsets = artifacts
+            .iter()
+            .map(VirtualResidualMaskProjectionArtifact::state_offset)
+            .collect::<Vec<_>>();
+        if offsets.windows(2).any(|pair| pair[0] >= pair[1])
+            || offsets.last().is_some_and(|&offset| offset >= mask_states)
+        {
+            return Err("virtual residual projection offsets are invalid".to_owned());
+        }
+        let mut restored = Vec::with_capacity(artifacts.len());
+        for (index, (runtime, artifact)) in self
+            .virtual_residuals
+            .iter()
+            .zip(artifacts.into_iter())
+            .enumerate()
+        {
+            let start = offsets[index];
+            let end = offsets.get(index + 1).copied().unwrap_or(mask_states);
+            if end <= start {
+                return Err("virtual residual projection component is empty".to_owned());
+            }
+            restored.push(runtime.restore_finite_mask_projection(
+                horizon,
+                end - start,
+                artifact,
+            )?);
+        }
+        Ok(restored)
+    }
+
     pub fn virtual_residuals_mask_tokenizer(
         &self,
         horizon: usize,

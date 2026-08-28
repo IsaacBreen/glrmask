@@ -1392,7 +1392,44 @@ pub struct VirtualResidualMaskProjection {
     local_to_mask_state: Arc<[u32]>,
 }
 
+/// Serialized half of a [`VirtualResidualMaskProjection`].
+///
+/// The exact residual runtime is already reconstructed from the terminal
+/// expression + virtual-runtime metadata. Persist only the compiled finite
+/// observation transport and reattach it to that exact runtime after load.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[doc(hidden)]
+pub struct VirtualResidualMaskProjectionArtifact {
+    terminal: TerminalID,
+    state_offset: u32,
+    local_to_mask_state: Vec<u32>,
+}
+
+#[derive(serde::Serialize)]
+#[doc(hidden)]
+pub struct VirtualResidualMaskProjectionArtifactRef<'a> {
+    terminal: TerminalID,
+    state_offset: u32,
+    local_to_mask_state: &'a [u32],
+}
+
+impl VirtualResidualMaskProjectionArtifact {
+    #[doc(hidden)]
+    pub fn state_offset(&self) -> u32 {
+        self.state_offset
+    }
+}
+
 impl VirtualResidualMaskProjection {
+    #[doc(hidden)]
+    pub fn artifact_ref(&self) -> VirtualResidualMaskProjectionArtifactRef<'_> {
+        VirtualResidualMaskProjectionArtifactRef {
+            terminal: self.runtime.terminal(),
+            state_offset: self.state_offset,
+            local_to_mask_state: self.local_to_mask_state.as_ref(),
+        }
+    }
+
     fn local_state_for_coordinate(&self, coordinate: BoundedCodeOracleCoordinate) -> Option<u32> {
         let pattern = coordinate.pattern_state as usize;
         if pattern >= self.pattern_states {
@@ -1461,6 +1498,28 @@ impl VirtualResidualMaskProjection {
 }
 
 impl BoundedCodeIntersectionOracle {
+    fn finite_mask_dense_state_count(&self, mask_max: usize) -> Option<usize> {
+        if mask_max < self.min || mask_max > self.max {
+            return None;
+        }
+        let pattern_states = self.pattern.num_states();
+        let body_states = self.body.num_states();
+        let prefix_states = self.prefix.len().checked_mul(pattern_states)?;
+        let body_states_total = mask_max
+            .checked_add(1)?
+            .checked_mul(body_states)?
+            .checked_mul(pattern_states)?;
+        let suffix_states = self
+            .suffix
+            .len()
+            .saturating_sub(1)
+            .checked_mul(pattern_states)?;
+        prefix_states
+            .checked_add(body_states_total)?
+            .checked_add(suffix_states)?
+            .checked_add(pattern_states)
+    }
+
     fn coordinate_local_state(
         &self,
         coordinate: BoundedCodeOracleCoordinate,
@@ -1504,25 +1563,8 @@ impl BoundedCodeIntersectionOracle {
     }
 
     fn finite_mask_dfa(&self, mask_max: usize) -> Option<(DFA, u32, Vec<u32>)> {
-        if mask_max < self.min || mask_max > self.max {
-            return None;
-        }
         let pattern_states = self.pattern.num_states();
-        let body_states = self.body.num_states();
-        let prefix_states = self.prefix.len().checked_mul(pattern_states)?;
-        let body_states_total = mask_max
-            .checked_add(1)?
-            .checked_mul(body_states)?
-            .checked_mul(pattern_states)?;
-        let suffix_states = self
-            .suffix
-            .len()
-            .saturating_sub(1)
-            .checked_mul(pattern_states)?;
-        let dense_state_count = prefix_states
-            .checked_add(body_states_total)?
-            .checked_add(suffix_states)?
-            .checked_add(pattern_states)?;
+        let dense_state_count = self.finite_mask_dense_state_count(mask_max)?;
         if dense_state_count == 0 || dense_state_count > 262_144 {
             return None;
         }
@@ -2296,6 +2338,85 @@ impl VirtualResidualRuntime {
             BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
             BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => None,
         }
+    }
+
+    pub(super) fn restore_finite_mask_projection(
+        self: &Arc<Self>,
+        max_token_len: usize,
+        component_state_count: u32,
+        artifact: VirtualResidualMaskProjectionArtifact,
+    ) -> Result<VirtualResidualMaskProjection, String> {
+        if artifact.terminal != self.terminal {
+            return Err(format!(
+                "virtual residual projection terminal mismatch: artifact={} runtime={}",
+                artifact.terminal, self.terminal,
+            ));
+        }
+        if !self.preserve_oracle_coordinate {
+            return Err(
+                "virtual residual projection requires coordinate-preserving residual runtime"
+                    .to_owned(),
+            );
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "virtual residual runtime lock poisoned".to_owned())?;
+        let oracle = store
+            .liveness_oracle
+            .as_ref()
+            .ok_or_else(|| "virtual residual projection has no bounded-code oracle".to_owned())?;
+        let minimum_body_width = oracle
+            .body
+            .min_match_byte_len()
+            .ok_or_else(|| "virtual residual projection body has no minimum byte width".to_owned())?
+            .max(1);
+        let crossed_boundaries = max_token_len
+            .div_ceil(minimum_body_width)
+            .saturating_add(1);
+        if oracle.min > crossed_boundaries.saturating_add(1) {
+            return Err("virtual residual projection lower bound exceeds finite stencil".to_owned());
+        }
+        let desired_mask_max = oracle
+            .min
+            .checked_add(crossed_boundaries)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| "virtual residual projection stencil overflow".to_owned())?;
+        let mask_max = oracle.max.min(desired_mask_max);
+        if mask_max == oracle.max {
+            return Err("virtual residual projection no longer needs a virtual stencil".to_owned());
+        }
+        let expected_dense_states = oracle
+            .finite_mask_dense_state_count(mask_max)
+            .filter(|&states| states <= 262_144)
+            .ok_or_else(|| "virtual residual projection dense coordinate is invalid".to_owned())?;
+        if artifact.local_to_mask_state.len() != expected_dense_states {
+            return Err(format!(
+                "virtual residual projection map has {} entries, expected {}",
+                artifact.local_to_mask_state.len(), expected_dense_states,
+            ));
+        }
+        if artifact.local_to_mask_state.iter().any(|&state| {
+            state != u32::MAX && state >= component_state_count
+        }) {
+            return Err(format!(
+                "virtual residual projection references state outside component width {}",
+                component_state_count,
+            ));
+        }
+        Ok(VirtualResidualMaskProjection {
+            runtime: Arc::clone(self),
+            state_offset: artifact.state_offset,
+            pattern_states: oracle.pattern.num_states(),
+            body_states: oracle.body.num_states(),
+            prefix_len: oracle.prefix.len(),
+            suffix_len: oracle.suffix.len(),
+            min: oracle.min,
+            full_max: oracle.max,
+            mask_max,
+            crossed_boundaries,
+            local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
+        })
     }
 
     pub(super) fn build_finite_mask_projection(
