@@ -875,6 +875,7 @@ pub(crate) enum FastTokenizerTransitions {
     Flat16 {
         transitions: Arc<[u16]>,
         finalizer_code: Arc<[u32]>,
+        single_finalizer_continues: Arc<[u8]>,
     },
     /// Runtime tokenizer already owns an allocation-light exact transition
     /// table; call through instead of rebuilding a second dense table.
@@ -918,9 +919,16 @@ impl FastTokenizerTransitions {
                 _ => MULTI,
             })
             .collect::<Vec<_>>();
+        let single_finalizer_continues = (0..num_states)
+            .map(|state| match tokenizer.matched_terminals_slice(state) {
+                [terminal] if tokenizer.possible_future_terminals(state).contains(*terminal as usize) => 1u8,
+                _ => 0u8,
+            })
+            .collect::<Vec<_>>();
         Some(Self::Flat16 {
             transitions: Arc::from(flat),
             finalizer_code: Arc::from(finalizer_code),
+            single_finalizer_continues: Arc::from(single_finalizer_continues),
         })
     }
 

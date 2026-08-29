@@ -1726,7 +1726,7 @@ fn exact_simulation_prefiltered_admitted_terminals(
 }
 
 #[inline]
-fn exact_admitted_terminals_for_candidates(
+pub(crate) fn exact_admitted_terminals_for_candidates(
     constraint: &Constraint,
     gss: &ParserGSS,
     candidates: &crate::ds::bitset::BitSet,
