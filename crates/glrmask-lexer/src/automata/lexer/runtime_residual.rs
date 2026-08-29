@@ -870,7 +870,7 @@ enum BoundedCodeOracleSlot {
     Ambiguous,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BoolRelation {
     rows: Vec<BitSet>,
 }
@@ -926,7 +926,7 @@ pub(crate) fn expression_supports_bounded_code_liveness_oracle(expr: &Expr) -> b
     BoundedCodeIntersectionOracle::from_expr(expr).is_some()
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct BoundedCodeIntersectionOracle {
     pattern: Arc<DFA>,
     body: Arc<DFA>,
@@ -1403,6 +1403,13 @@ pub struct VirtualResidualMaskProjectionArtifact {
     terminal: TerminalID,
     state_offset: u32,
     local_to_mask_state: Vec<u32>,
+    oracle_bytes: Vec<u8>,
+    #[serde(skip)]
+    runtime_expr_bytes: Vec<u8>,
+    #[serde(skip)]
+    compiled_mask_max: usize,
+    #[serde(skip)]
+    compiled_crossed_boundaries: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -1411,12 +1418,50 @@ pub struct VirtualResidualMaskProjectionArtifactRef<'a> {
     terminal: TerminalID,
     state_offset: u32,
     local_to_mask_state: &'a [u32],
+    oracle_bytes: Vec<u8>,
 }
 
 impl VirtualResidualMaskProjectionArtifact {
     #[doc(hidden)]
     pub fn state_offset(&self) -> u32 {
         self.state_offset
+    }
+
+    #[doc(hidden)]
+    pub fn terminal(&self) -> TerminalID {
+        self.terminal
+    }
+
+    #[doc(hidden)]
+    pub fn oracle_bytes(&self) -> &[u8] {
+        &self.oracle_bytes
+    }
+
+    #[doc(hidden)]
+    pub fn runtime_expr_bytes(&self) -> &[u8] {
+        &self.runtime_expr_bytes
+    }
+
+    #[doc(hidden)]
+    pub fn compiled_mask_max(&self) -> usize { self.compiled_mask_max }
+
+    #[doc(hidden)]
+    pub fn compiled_crossed_boundaries(&self) -> usize { self.compiled_crossed_boundaries }
+
+    #[doc(hidden)]
+    pub fn from_wire(
+        terminal: TerminalID,
+        state_offset: u32,
+        local_to_mask_state: Vec<u32>,
+        oracle_bytes: Vec<u8>,
+        runtime_expr_bytes: Vec<u8>,
+        compiled_mask_max: usize,
+        compiled_crossed_boundaries: usize,
+    ) -> Self {
+        Self {
+            terminal, state_offset, local_to_mask_state, oracle_bytes, runtime_expr_bytes,
+            compiled_mask_max, compiled_crossed_boundaries,
+        }
     }
 }
 
@@ -1427,7 +1472,20 @@ impl VirtualResidualMaskProjection {
             terminal: self.runtime.terminal(),
             state_offset: self.state_offset,
             local_to_mask_state: self.local_to_mask_state.as_ref(),
+            oracle_bytes: self.runtime.serialized_bounded_code_oracle(),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn artifact_wire_parts(&self) -> (TerminalID, u32, &[u32], Vec<u8>, usize, usize) {
+        (
+            self.runtime.terminal(),
+            self.state_offset,
+            self.local_to_mask_state.as_ref(),
+            self.runtime.serialized_bounded_code_oracle(),
+            self.mask_max,
+            self.crossed_boundaries,
+        )
     }
 
     fn local_state_for_coordinate(&self, coordinate: BoundedCodeOracleCoordinate) -> Option<u32> {
@@ -2270,6 +2328,93 @@ impl VirtualResidualRuntime {
         Some((accepting, future))
     }
 
+    pub(super) fn serialized_bounded_code_oracle(&self) -> Vec<u8> {
+        let store = self.store.lock().unwrap();
+        let oracle = store
+            .liveness_oracle
+            .as_ref()
+            .expect("Static residual projection requires bounded-code oracle");
+        bincode::serialize(oracle).expect("bounded-code oracle serialization should succeed")
+    }
+
+    pub(super) fn new_preserving_oracle_coordinate_from_oracle_bytes(
+        expr: &Expr,
+        oracle_bytes: &[u8],
+        runtime_index: u32,
+        terminal: TerminalID,
+        num_terminals: u32,
+        physical_state_count: u32,
+        root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
+    ) -> Option<Self> {
+        if terminal >= num_terminals
+            || physical_state_count == 0
+            || root_state >= physical_state_count
+            || state_owners.owner_index(root_state) != Some(runtime_index as usize)
+        {
+            return None;
+        }
+        let (mut arena, root) = ResidualArena::from_expr(expr)?;
+        let liveness_oracle: BoundedCodeIntersectionOracle =
+            bincode::deserialize(oracle_bytes).ok()?;
+        let root_oracle_coordinate = liveness_oracle.root_coordinate();
+        // Structural checks sufficient for compiled-artifact restoration. The
+        // exact residual derivative remains authoritative for transitions and
+        // will fail closed if a coordinate ceases to track it.
+        if liveness_oracle.pattern.num_states() == 0
+            || liveness_oracle.pattern.num_states() > MAX_BOUNDED_CODE_ORACLE_PATTERN_STATES
+            || liveness_oracle.body.num_states() == 0
+            || liveness_oracle.body_productive.len() != liveness_oracle.body.num_states()
+            || liveness_oracle.completion_relations.len() != liveness_oracle.body.num_states()
+            || liveness_oracle.min > liveness_oracle.max
+            || liveness_oracle.prefix.is_empty()
+            || liveness_oracle.suffix.is_empty()
+        {
+            return None;
+        }
+        let pattern_states = liveness_oracle.pattern.num_states();
+        let relation_valid = |relation: &BoolRelation| {
+            relation.rows.len() == pattern_states
+                && relation.rows.iter().all(|row| row.iter().all(|state| state < pattern_states))
+        };
+        if liveness_oracle
+            .completion_relations
+            .iter()
+            .flatten()
+            .any(|relation| !relation_valid(relation))
+            || liveness_oracle.exact_powers.iter().any(|relation| !relation_valid(relation))
+            || liveness_oracle.prefix_sums.iter().any(|relation| !relation_valid(relation))
+        {
+            return None;
+        }
+        let root_live = arena.conservative_has_future(root);
+        let mut state_by_residual = vec![u32::MAX; root as usize + 1];
+        state_by_residual[root as usize] = root_state;
+        let mut oracle_coordinates = vec![BoundedCodeOracleSlot::Unknown; arena.state_count()];
+        let oracle_futures = vec![None; arena.state_count()];
+        oracle_coordinates[root as usize] = BoundedCodeOracleSlot::Exact(root_oracle_coordinate);
+        let mut state_by_residual_coordinate = FxHashMap::default();
+        let mut coordinate_by_state = FxHashMap::default();
+        state_by_residual_coordinate.insert((root, root_oracle_coordinate), root_state);
+        coordinate_by_state.insert(root_state, root_oracle_coordinate);
+        let mut accepting = BitSet::new(num_terminals as usize);
+        accepting.set(terminal as usize);
+        let live = accepting.clone();
+        Some(Self {
+            runtime_index, terminal, physical_state_count, root_state, root_has_future: root_live,
+            preserve_oracle_coordinate: true, state_allocator, state_owners, accepting, live,
+            dead: BitSet::new(num_terminals as usize),
+            accepting_list: vec![terminal].into_boxed_slice(),
+            store: Mutex::new(ResidualRuntimeStore {
+                arena, root, state_by_residual, residual_by_state: FxHashMap::default(),
+                state_by_residual_coordinate, coordinate_by_state,
+                oracle_future_by_state: FxHashMap::default(),
+                liveness_oracle: Some(liveness_oracle), oracle_coordinates, oracle_futures,
+            }),
+        })
+    }
+
     pub(super) fn root_has_future(&self) -> bool {
         self.root_has_future
     }
@@ -2338,6 +2483,61 @@ impl VirtualResidualRuntime {
             BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
             BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => None,
         }
+    }
+
+    pub(super) fn restore_compiled_finite_mask_projection(
+        self: &Arc<Self>,
+        component_state_count: u32,
+        artifact: VirtualResidualMaskProjectionArtifact,
+    ) -> Result<VirtualResidualMaskProjection, String> {
+        if artifact.terminal != self.terminal {
+            return Err(format!(
+                "virtual residual projection terminal mismatch: artifact={} runtime={}",
+                artifact.terminal, self.terminal,
+            ));
+        }
+        if !self.preserve_oracle_coordinate {
+            return Err("compiled virtual residual projection requires coordinate-preserving runtime".to_owned());
+        }
+        let store = self.store.lock().map_err(|_| "virtual residual runtime lock poisoned".to_owned())?;
+        let oracle = store.liveness_oracle.as_ref().ok_or_else(|| "compiled virtual residual projection has no bounded-code oracle".to_owned())?;
+        let mask_max = artifact.compiled_mask_max;
+        let crossed_boundaries = artifact.compiled_crossed_boundaries;
+        if crossed_boundaries == 0
+            || mask_max >= oracle.max
+            || oracle.min.checked_add(crossed_boundaries).and_then(|value| value.checked_add(1)) != Some(mask_max)
+        {
+            return Err("compiled virtual residual projection stencil is inconsistent".to_owned());
+        }
+        let expected_dense_states = oracle
+            .finite_mask_dense_state_count(mask_max)
+            .filter(|&states| states <= 262_144)
+            .ok_or_else(|| "compiled virtual residual projection dense coordinate is invalid".to_owned())?;
+        if artifact.local_to_mask_state.len() != expected_dense_states {
+            return Err(format!(
+                "compiled virtual residual projection map has {} entries, expected {}",
+                artifact.local_to_mask_state.len(), expected_dense_states,
+            ));
+        }
+        if artifact.local_to_mask_state.iter().any(|&state| state != u32::MAX && state >= component_state_count) {
+            return Err(format!(
+                "compiled virtual residual projection references state outside component width {}",
+                component_state_count,
+            ));
+        }
+        Ok(VirtualResidualMaskProjection {
+            runtime: Arc::clone(self),
+            state_offset: artifact.state_offset,
+            pattern_states: oracle.pattern.num_states(),
+            body_states: oracle.body.num_states(),
+            prefix_len: oracle.prefix.len(),
+            suffix_len: oracle.suffix.len(),
+            min: oracle.min,
+            full_max: oracle.max,
+            mask_max,
+            crossed_boundaries,
+            local_to_mask_state: Arc::from(artifact.local_to_mask_state.into_boxed_slice()),
+        })
     }
 
     pub(super) fn restore_finite_mask_projection(
