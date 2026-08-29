@@ -2656,6 +2656,13 @@ pub(crate) struct DynamicMaskVocab {
     mask_tokenizer: Option<Arc<Tokenizer>>,
     mask_tokenizer_fast_transitions: Option<FastTokenizerTransitions>,
     full_to_mask_state: Arc<[u32]>,
+    /// Derived exact subset provenance for the dense mask tokenizer. Keys are
+    /// epsilon-closed source-tokenizer state sets and values are the already
+    /// materialized deterministic mask states representing those sets.
+    /// Runtime mask roots may use this only when every source state in the set
+    /// carries the same parser object by identity.
+    mask_state_source_subsets: Arc<[Arc<[u32]>]>,
+    mask_source_subset_to_state: Arc<FxHashMap<Arc<[u32]>, u32>>,
     virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
     virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
 }
@@ -2725,6 +2732,8 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
+            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
         }
@@ -2775,6 +2784,8 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
+            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
         }
@@ -2808,6 +2819,8 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
+            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
         }
@@ -2860,6 +2873,8 @@ impl DynamicMaskVocab {
             mask_tokenizer: None,
             mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
+            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
         }
@@ -3113,8 +3128,89 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(full_to_mask_state);
+        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = None;
         self.virtual_repeat_intersection_projections.clear();
+    }
+
+    pub(crate) fn set_mask_tokenizer_source_subsets(
+        &mut self,
+        source_subsets: Vec<Box<[u32]>>,
+    ) {
+        let Some(tokenizer) = self.mask_tokenizer.as_ref() else {
+            self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+            self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
+            return;
+        };
+        if source_subsets.len() != tokenizer.num_states() as usize {
+            self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+            self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
+            return;
+        }
+        let by_state = source_subsets
+            .into_iter()
+            .map(Arc::<[u32]>::from)
+            .collect::<Vec<_>>();
+        let mut by_subset = FxHashMap::default();
+        by_subset.reserve(by_state.len());
+        for (state, subset) in by_state.iter().enumerate() {
+            by_subset.insert(Arc::clone(subset), state as u32);
+        }
+        self.mask_state_source_subsets = Arc::from(by_state);
+        self.mask_source_subset_to_state = Arc::new(by_subset);
+    }
+
+    #[inline]
+    pub(crate) fn has_mask_tokenizer_source_subsets(&self) -> bool {
+        !self.mask_source_subset_to_state.is_empty()
+    }
+
+    pub(crate) fn mask_projection_state_for_source_states(
+        &self,
+        source_tokenizer: &Tokenizer,
+        source_states: &[u32],
+    ) -> Option<u32> {
+        if source_states.is_empty() || self.mask_source_subset_to_state.is_empty() {
+            return None;
+        }
+        let mut subset = SmallVec::<[u32; 16]>::new();
+        for &state in source_states {
+            let closure = source_tokenizer.singleton_epsilon_closure(state);
+            subset.extend_from_slice(&closure);
+        }
+        subset.sort_unstable();
+        subset.dedup();
+        self.mask_source_subset_to_state
+            .get(subset.as_slice())
+            .copied()
+    }
+
+    /// Return an already-materialized deterministic mask state whose exact
+    /// source-state subset is the union of `projection_states`.
+    ///
+    /// This never creates a DFA state at runtime. It is only an inverse lookup
+    /// into source-subset provenance retained from compile-time determinization.
+    pub(crate) fn mask_projection_state_for_projection_states(
+        &self,
+        projection_states: &[u32],
+    ) -> Option<u32> {
+        if projection_states.is_empty()
+            || self.mask_state_source_subsets.is_empty()
+            || self.mask_source_subset_to_state.is_empty()
+        {
+            return None;
+        }
+        let mut subset = SmallVec::<[u32; 32]>::new();
+        for &state in projection_states {
+            let source = self.mask_state_source_subsets.get(state as usize)?;
+            subset.extend_from_slice(source);
+        }
+        subset.sort_unstable();
+        subset.dedup();
+        self.mask_source_subset_to_state
+            .get(subset.as_slice())
+            .copied()
     }
 
     pub(crate) fn set_virtual_unit_repeat_mask_projection(
@@ -3129,6 +3225,8 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = Some(projection);
         self.virtual_repeat_intersection_projections.clear();
     }
@@ -3150,6 +3248,8 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = None;
         self.virtual_repeat_intersection_projections = projections;
     }
@@ -3165,6 +3265,8 @@ impl DynamicMaskVocab {
         self.mask_tokenizer = source.mask_tokenizer.clone();
         self.mask_tokenizer_fast_transitions = source.mask_tokenizer_fast_transitions.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
+        self.mask_state_source_subsets = Arc::clone(&source.mask_state_source_subsets);
+        self.mask_source_subset_to_state = Arc::clone(&source.mask_source_subset_to_state);
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
         self.projected_terminal_quotients = Arc::clone(&source.projected_terminal_quotients);
         self.projected_terminal_quotients_prepared =
@@ -3998,6 +4100,8 @@ impl Default for DynamicMaskVocab {
             mask_tokenizer: None,
             mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
+            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
+            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
         }
@@ -6327,6 +6431,42 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         artifact.nodes.clear();
         let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
         assert!(error.contains("no trie root"));
+    }
+
+    #[test]
+    fn dense_mask_projection_union_lookup_matches_exact_source_subset_union() {
+        let source =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let (built, full_to_mask_state) = source
+            .try_full_determinization_all_starts(256, 16_384)
+            .expect("small epsilon tokenizer should determinize from every raw start");
+        let source_subsets = built.source_subsets.clone();
+        let state_count = built.tokenizer.num_states();
+
+        let mut vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        vocab.set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state);
+        vocab.set_mask_tokenizer_source_subsets(source_subsets.clone());
+
+        for left in 0..state_count {
+            for right in 0..state_count {
+                let mut union = source_subsets[left as usize].to_vec();
+                union.extend_from_slice(&source_subsets[right as usize]);
+                union.sort_unstable();
+                union.dedup();
+                let expected = source_subsets
+                    .iter()
+                    .position(|subset| subset.as_ref() == union.as_slice())
+                    .map(|state| state as u32);
+                assert_eq!(
+                    vocab.mask_projection_state_for_projection_states(&[left, right]),
+                    expected,
+                    "projection-state union mismatch for ({left}, {right})",
+                );
+            }
+        }
     }
 
     #[test]

@@ -6722,9 +6722,37 @@ impl Constraint {
                             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
                     );
                 }
+                let source_subsets = built.source_subsets.clone();
                 dynamic_mask_vocab
                     .set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state);
+                dynamic_mask_vocab.set_mask_tokenizer_source_subsets(source_subsets);
             }
+        }
+        // Dynamic compile-transfer persists the deterministic mask tokenizer
+        // and dense singleton-entry map, but source-subset provenance is
+        // derived runtime metadata. Reconstruct it after load rather than
+        // extending the transfer/save format: the same exact builder is
+        // deterministic, and the dense raw-state map proves
+        // that its state numbering matches the transferred tokenizer.
+        if dynamic_mask_vocab.has_dense_mask_tokenizer_projection()
+            && !dynamic_mask_vocab.has_mask_tokenizer_source_subsets()
+            && self.tokenizer.num_states() <= FULL_WALK_RAW_STATE_LIMIT
+            && self.tokenizer.has_epsilon_transitions()
+            && !self.tokenizer.has_any_virtual_runtime()
+            && let Some((rebuilt, full_to_mask_state)) = self
+                .tokenizer
+                .try_full_determinization_all_starts(
+                    FULL_WALK_MASK_STATE_LIMIT,
+                    FULL_WALK_TRANSITION_LIMIT,
+                )
+            && dynamic_mask_vocab
+                .mask_projection_tokenizer()
+                .is_some_and(|mask| mask.num_states() == rebuilt.tokenizer.num_states())
+            && full_to_mask_state.iter().enumerate().all(|(raw, &mask)| {
+                dynamic_mask_vocab.mask_projection_state(raw as u32) == mask
+            })
+        {
+            dynamic_mask_vocab.set_mask_tokenizer_source_subsets(rebuilt.source_subsets);
         }
         if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
             let max_token_len = self
