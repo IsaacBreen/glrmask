@@ -312,7 +312,7 @@ enum FullWalkTwoStepOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[inline(never)]
+#[inline(always)]
 fn full_walk_step_two(
     branches: ((u32, u32), (u32, u32)),
     byte: u8,
@@ -342,6 +342,31 @@ fn full_walk_step_two(
         };
     }
 
+    full_walk_step_two_finalizing(
+        branches,
+        first_cell,
+        second_cell,
+        initial_lexer_state,
+        finalizer_code,
+        tokenizer,
+        parser_cache,
+        constraint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn full_walk_step_two_finalizing(
+    branches: ((u32, u32), (u32, u32)),
+    first_cell: u16,
+    second_cell: u16,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    tokenizer: &Tokenizer,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+) -> FullWalkTwoStepOutcome {
     let mut next = FullWalkBranches::new();
     for (cell, (source_lexer, parser_node)) in
         [(first_cell, branches.0), (second_cell, branches.1)]
