@@ -1369,7 +1369,16 @@ impl DynamicConstraint {
                 .map_err(crate::GlrMaskError::Serialization)?;
             let dynamic_mask_vocab = shared_dynamic_vocab
                 .as_ref()
-                .map(DynamicMaskVocab::fresh_runtime_instance)
+                .map(|shared| {
+                    let mut fresh = shared.fresh_runtime_instance();
+                    // The shared artifact may carry immutable constraint-local
+                    // lexer metadata (notably the exact mask-only deterministic
+                    // tokenizer for a single-alternative dynamic constraint).
+                    // Preserve it while still recreating all mutable runtime
+                    // caches on the fresh instance.
+                    fresh.inherit_dynamic_lexer_metadata_from(shared);
+                    fresh
+                })
                 .unwrap_or_default();
             let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
                 base.v2,
@@ -1563,9 +1572,13 @@ impl DynamicConstraint {
         });
         let dynamic_mask_vocab = share_vocab
             .then(|| {
-                constraints
-                    .iter()
-                    .find_map(|constraint| constraint.dynamic_mask_vocab.to_vocab_artifact())
+                if constraints.len() == 1 {
+                    constraints[0].dynamic_mask_vocab.to_artifact()
+                } else {
+                    constraints
+                        .iter()
+                        .find_map(|constraint| constraint.dynamic_mask_vocab.to_vocab_artifact())
+                }
             })
             .flatten();
         let payload = DynamicConstraintPayloadV7 {

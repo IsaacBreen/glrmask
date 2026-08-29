@@ -6691,15 +6691,41 @@ impl Constraint {
         } else {
             rayon::join(|| rayon::join(build_vocab, build_fast), build_support)
         };
-        if !dynamic_mask_vocab.projected_terminal_quotients_prepared() {
-            let quotients = self
-                .tokenizer
-                .build_shared_component_terminal_projected_quotients(256);
-            dynamic_mask_vocab.set_projected_terminal_quotients(quotients);
-        }
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
+        const FULL_WALK_RAW_STATE_LIMIT: u32 = 3_300;
+        const FULL_WALK_MASK_STATE_LIMIT: usize = 8_192;
+        const FULL_WALK_TRANSITION_LIMIT: usize = 500_000;
+        if dynamic_mask_vocab.mask_projection_tokenizer().is_none()
+            && self.tokenizer.num_states() <= FULL_WALK_RAW_STATE_LIMIT
+            && self.tokenizer.has_epsilon_transitions()
+            && !self.tokenizer.has_any_virtual_runtime()
+        {
+            let started_at = profile.then(std::time::Instant::now);
+            if let Some((built, full_to_mask_state)) = self
+                .tokenizer
+                .try_full_determinization_all_starts(
+                    FULL_WALK_MASK_STATE_LIMIT,
+                    FULL_WALK_TRANSITION_LIMIT,
+                )
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=full_determinized full_states={} mask_states={} transitions={} elapsed_ms={:.3}",
+                        self.tokenizer.num_states(),
+                        built.tokenizer.num_states(),
+                        (0..built.tokenizer.num_states())
+                            .map(|state| built.tokenizer.transitions_from(state).count())
+                            .sum::<usize>(),
+                        started_at
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                    );
+                }
+                dynamic_mask_vocab
+                    .set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state);
+            }
+        }
         if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
             let max_token_len = self
                 .token_bytes
@@ -6738,16 +6764,28 @@ impl Constraint {
                     .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
             }
         }
+        if !dynamic_mask_vocab.has_dense_mask_tokenizer_projection()
+            && !dynamic_mask_vocab.projected_terminal_quotients_prepared()
+        {
+            let quotients = self
+                .tokenizer
+                .build_shared_component_terminal_projected_quotients(256);
+            dynamic_mask_vocab.set_projected_terminal_quotients(quotients);
+        }
         let has_virtual_residual_runtime = self.tokenizer.has_virtual_residual_runtime();
+        let has_dense_mask_projection =
+            dynamic_mask_vocab.has_dense_mask_tokenizer_projection();
         let bounded_sets_started_at = profile.then(std::time::Instant::now);
         let observation_tokenizer = dynamic_mask_vocab
             .mask_projection_tokenizer()
             .unwrap_or(&self.tokenizer);
-        let (bounded16, bounded64) = if has_virtual_residual_runtime {
+        let (bounded16, bounded64) = if has_virtual_residual_runtime || has_dense_mask_projection {
             // General residual states are created lazily outside the physical
             // DFA domain, and dynamic traversal deliberately does not consume
-            // physical observation certificates for this runtime family.
-            // Avoid computing tables that cannot be used.
+            // physical observation certificates for this runtime family. A
+            // complete dense mask projection likewise takes the direct full
+            // walker before these older subtree accelerators, so preparing
+            // them over the expanded deterministic coordinate is redundant.
             (
                 Vec::<U8Set>::new().into_boxed_slice(),
                 Vec::<U8Set>::new().into_boxed_slice(),
@@ -6763,6 +6801,7 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_started_at = profile.then(std::time::Instant::now);
         let build_self_loop_projections = !has_virtual_residual_runtime
+            && !has_dense_mask_projection
             && std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
                 .map(|value| {
                     let value = value.trim();
@@ -6791,7 +6830,9 @@ impl Constraint {
         } else {
             Vec::new()
         };
-        let terminal_observation_classes = if dynamic_mask_vocab.has_terminal_observation_classes() {
+        let terminal_observation_classes = if has_dense_mask_projection {
+            dynamic_mask_vocab.terminal_observation_classes_cloned()
+        } else if dynamic_mask_vocab.has_terminal_observation_classes() {
             dynamic_mask_vocab.terminal_observation_classes_cloned()
         } else {
             self.build_dynamic_terminal_observation_classes()
@@ -9166,6 +9207,14 @@ impl Constraint {
 
     fn compute_tokenizer_fast_transitions_for(tokenizer: &Tokenizer) -> FastTokenizerTransitions {
         let num_states = tokenizer.num_states();
+        // The strict full-vocabulary dynamic walker uses one compact direct
+        // transition cell per consumed byte. Keep this bounded so large exact
+        // tokenizers retain their existing sparse/packed runtime layout.
+        if num_states <= 8_192
+            && let Some(flat16) = FastTokenizerTransitions::flat16_for(tokenizer)
+        {
+            return flat16;
+        }
         if tokenizer.has_packed_runtime_transitions() {
             return FastTokenizerTransitions::Fallback(num_states as usize);
         }

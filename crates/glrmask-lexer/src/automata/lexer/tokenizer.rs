@@ -6122,6 +6122,139 @@ impl Tokenizer {
         })
     }
 
+    /// Fully determinize the physical tokenizer from every raw runtime state.
+    ///
+    /// The ordinary full determinization only contains subsets reachable from
+    /// the global reset state. Dynamic masking can begin at any exact raw lexer
+    /// state retained by the committed parser frontier, so a mask-only
+    /// deterministic coordinate also needs every singleton epsilon closure as
+    /// a legal entry state. This extends the ordinary exact subset DFA with
+    /// those additional roots and anything reachable from them.
+    pub fn try_full_determinization_all_starts(
+        &self,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<(FullTokenizerDeterminization, Vec<u32>)> {
+        let mut built = self.try_full_determinization(state_limit, transition_limit)?;
+        let closures = self.all_singleton_epsilon_closures();
+        let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
+        state_by_subset.reserve(state_limit.min(closures.len().saturating_mul(2)));
+        for (state, subset) in built.source_subsets.iter().enumerate() {
+            state_by_subset.insert(subset.clone(), state as u32);
+        }
+
+        let metadata = |subset: &[u32]| {
+            let mut finalizers = BitSet::new(self.num_terminals as usize);
+            let mut futures = BitSet::new(self.num_terminals as usize);
+            for &state in subset {
+                for terminal in self.dfa.finalizers(state).iter() {
+                    finalizers.set(terminal);
+                }
+                for terminal in self.dfa.possible_future_group_ids(state).iter() {
+                    futures.set(terminal);
+                }
+            }
+            (finalizers, futures)
+        };
+
+        let mut full_to_determinized = vec![u32::MAX; closures.len()];
+        let mut worklist = VecDeque::<u32>::new();
+        for (raw_state, closure) in closures.iter().enumerate() {
+            if let Some(&state) = state_by_subset.get(closure.as_ref()) {
+                full_to_determinized[raw_state] = state;
+                continue;
+            }
+            if built.source_subsets.len() >= state_limit {
+                return None;
+            }
+            let state = built.tokenizer.dfa.add_state();
+            debug_assert_eq!(state as usize, built.source_subsets.len());
+            let key = closure.to_vec().into_boxed_slice();
+            let (finalizers, futures) = metadata(&key);
+            built
+                .tokenizer
+                .dfa
+                .overwrite_state_metadata(state, finalizers, futures);
+            state_by_subset.insert(key.clone(), state);
+            built.source_subsets.push(key);
+            built.exact_source_states.push(raw_state as u32);
+            full_to_determinized[raw_state] = state;
+            worklist.push_back(state);
+        }
+
+        let mut transitions_built = (0..built.tokenizer.num_states())
+            .map(|state| built.tokenizer.transitions_from(state).count())
+            .sum::<usize>();
+        while let Some(determinized_state) = worklist.pop_front() {
+            let subset = built.source_subsets[determinized_state as usize].clone();
+            let mut transitions = Vec::<(u8, u32)>::new();
+            for byte in 0u16..=255 {
+                let mut targets = SmallVec::<[u32; 8]>::new();
+                for &source_state in subset.iter() {
+                    if let Some(target) = self.step(source_state, byte as u8) {
+                        targets.extend_from_slice(&closures[target as usize]);
+                    }
+                }
+                if targets.is_empty() {
+                    continue;
+                }
+                targets.sort_unstable();
+                targets.dedup();
+                transitions_built = transitions_built.saturating_add(1);
+                if transitions_built > transition_limit {
+                    return None;
+                }
+                let closed = targets.into_vec().into_boxed_slice();
+                let target = if let Some(&existing) = state_by_subset.get(closed.as_ref()) {
+                    existing
+                } else {
+                    if built.source_subsets.len() >= state_limit {
+                        return None;
+                    }
+                    let new_state = built.tokenizer.dfa.add_state();
+                    debug_assert_eq!(new_state as usize, built.source_subsets.len());
+                    let (finalizers, futures) = metadata(&closed);
+                    built
+                        .tokenizer
+                        .dfa
+                        .overwrite_state_metadata(new_state, finalizers, futures);
+                    state_by_subset.insert(closed.clone(), new_state);
+                    built.source_subsets.push(closed);
+                    built.exact_source_states.push(u32::MAX);
+                    worklist.push_back(new_state);
+                    new_state
+                };
+                transitions.push((byte as u8, target));
+            }
+            built
+                .tokenizer
+                .dfa
+                .set_transitions_from_sorted_entries(determinized_state, transitions);
+        }
+
+        // Some raw states share an epsilon closure. Preserve one exact scalar
+        // representative per deterministic subset for existing source-fallback
+        // users, while the returned dense map retains every raw entry state.
+        let initial = self.initial_state_id();
+        let mut source_by_closure = FxHashMap::<Box<[u32]>, u32>::default();
+        source_by_closure.insert(
+            closures[initial as usize].to_vec().into_boxed_slice(),
+            initial,
+        );
+        for (state, closure) in closures.iter().enumerate() {
+            source_by_closure
+                .entry(closure.to_vec().into_boxed_slice())
+                .or_insert(state as u32);
+        }
+        built.exact_source_states = built
+            .source_subsets
+            .iter()
+            .map(|subset| source_by_closure.get(subset).copied().unwrap_or(u32::MAX))
+            .collect();
+        built.tokenizer.invalidate_derived_caches();
+        Some((built, full_to_determinized))
+    }
+
     /// Move the exact source tokenizer behind a completed subset tokenizer.
     ///
     /// Product states are safe only while one parser language is uniformly
@@ -12589,6 +12722,53 @@ mod tests {
                 source_result.end_state.iter().copied().collect(),
                 "input={input:?}",
             );
+        }
+    }
+
+    #[test]
+    fn full_determinization_all_starts_maps_every_raw_runtime_state_exactly() {
+        let source = arbitrary_epsilon_l1_test_tokenizer();
+        let (built, raw_to_determinized) = source
+            .try_full_determinization_all_starts(256, 16_384)
+            .expect("small epsilon tokenizer must determinize from all raw starts");
+        let deterministic = &built.tokenizer;
+        let closures = source.all_singleton_epsilon_closures();
+
+        assert_eq!(raw_to_determinized.len(), source.num_states() as usize);
+        assert!(raw_to_determinized
+            .iter()
+            .all(|&state| state < deterministic.num_states()));
+
+        for raw_state in 0..source.num_states() {
+            let deterministic_state = raw_to_determinized[raw_state as usize];
+            assert_eq!(
+                built.source_subsets[deterministic_state as usize].as_ref(),
+                closures[raw_state as usize].as_ref(),
+                "raw_state={raw_state}",
+            );
+
+            for byte in 0u16..=255 {
+                let mut targets = SmallVec::<[u32; 8]>::new();
+                for &source_state in closures[raw_state as usize].iter() {
+                    if let Some(target) = source.step(source_state, byte as u8) {
+                        targets.extend_from_slice(&closures[target as usize]);
+                    }
+                }
+                targets.sort_unstable();
+                targets.dedup();
+
+                match deterministic.step(deterministic_state, byte as u8) {
+                    Some(target) => assert_eq!(
+                        built.source_subsets[target as usize].as_ref(),
+                        targets.as_slice(),
+                        "raw_state={raw_state} byte={byte}",
+                    ),
+                    None => assert!(
+                        targets.is_empty(),
+                        "raw_state={raw_state} byte={byte}",
+                    ),
+                }
+            }
         }
     }
 }

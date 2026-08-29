@@ -869,6 +869,13 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
     Flat(Arc<[u32]>),
+    /// Compact exact dense DFA rows for tokenizers with fewer than 32,768
+    /// states. The high bit marks a target state with at least one finalizer;
+    /// u16::MAX is the dead-transition sentinel.
+    Flat16 {
+        transitions: Arc<[u16]>,
+        finalizer_code: Arc<[u32]>,
+    },
     /// Runtime tokenizer already owns an allocation-light exact transition
     /// table; call through instead of rebuilding a second dense table.
     Fallback(usize),
@@ -885,6 +892,38 @@ impl Default for FastTokenizerTransitions {
 }
 
 impl FastTokenizerTransitions {
+    pub(crate) fn flat16_for(tokenizer: &Tokenizer) -> Option<Self> {
+        let num_states = tokenizer.num_states();
+        if num_states >= 0x8000 {
+            return None;
+        }
+        let mut flat = vec![u16::MAX; num_states as usize * 256];
+        for state in 0..num_states {
+            let row_start = state as usize * 256;
+            for (byte, target) in tokenizer.transitions_from(state) {
+                let mut encoded = u16::try_from(target)
+                    .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
+                if !tokenizer.matched_terminals_slice(target).is_empty() {
+                    encoded |= 0x8000;
+                }
+                flat[row_start + byte as usize] = encoded;
+            }
+        }
+        const NONE: u32 = u32::MAX;
+        const MULTI: u32 = u32::MAX - 1;
+        let finalizer_code = (0..num_states)
+            .map(|state| match tokenizer.matched_terminals_slice(state) {
+                [] => NONE,
+                [terminal] => *terminal,
+                _ => MULTI,
+            })
+            .collect::<Vec<_>>();
+        Some(Self::Flat16 {
+            transitions: Arc::from(flat),
+            finalizer_code: Arc::from(finalizer_code),
+        })
+    }
+
     #[inline]
     pub(crate) fn transition(
         &self,
@@ -906,6 +945,21 @@ impl FastTokenizerTransitions {
                 .and_then(|offset| offset.checked_add(byte as usize))
                 .and_then(|index| flat.get(index))
                 .copied()
+                .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
+            Self::Flat16 { transitions, .. } => state
+                .try_into()
+                .ok()
+                .and_then(|state: usize| state.checked_mul(256))
+                .and_then(|offset| offset.checked_add(byte as usize))
+                .and_then(|index| transitions.get(index))
+                .copied()
+                .map(|target| {
+                    if target == u16::MAX {
+                        u32::MAX
+                    } else {
+                        u32::from(target & 0x7fff)
+                    }
+                })
                 .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
             Self::Fallback(_) => tokenizer.get_transition(state, byte),
             Self::Hybrid {
@@ -929,6 +983,7 @@ impl FastTokenizerTransitions {
         match self {
             Self::Dense(rows) => rows.len(),
             Self::Flat(flat) => flat.len() / 256,
+            Self::Flat16 { transitions, .. } => transitions.len() / 256,
             Self::Fallback(len) => *len,
             Self::Hybrid {
                 state_to_dense_row,
@@ -993,7 +1048,7 @@ impl FastTokenizerTransitions {
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
-                    Self::Fallback(_) => return None,
+                    Self::Flat16 { .. } | Self::Fallback(_) => return None,
                     Self::Hybrid {
                         state_to_dense_row,
                         dense_rows,
@@ -1004,7 +1059,7 @@ impl FastTokenizerTransitions {
                         return None;
                     }
                     match child {
-                        Self::Fallback(_) => return None,
+                        Self::Flat16 { .. } | Self::Fallback(_) => return None,
                         Self::Dense(rows) => {
                             for row in rows {
                                 let dense = dense_rows.len() as u32;
@@ -1215,6 +1270,37 @@ pub(crate) struct DynamicMaskTrieWalkEdge {
     pub(crate) parent_depth: u16,
 }
 
+/// One sequential operation in the strict full-vocabulary byte walk. Every
+/// radix edge contributes at least one op; non-empty edges contribute one op
+/// per consumed byte. This is purely a flatter view of the vocabulary trie: it
+/// does not omit or summarize any edge.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DynamicMaskTrieFullWalkOp {
+    meta: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<DynamicMaskTrieFullWalkOp>() == 4);
+
+impl DynamicMaskTrieFullWalkOp {
+    const CONSUME: u32 = 1 << 24;
+    const START: u32 = 1 << 25;
+    const END: u32 = 1 << 26;
+    const TOKEN: u32 = 1 << 27;
+
+    #[inline(always)]
+    pub(crate) fn byte(&self) -> u8 { self.meta as u8 }
+    #[inline(always)]
+    pub(crate) fn parent_depth(&self) -> u16 { ((self.meta >> 8) & 0xffff) as u16 }
+    #[inline(always)]
+    pub(crate) fn consumes_byte(&self) -> bool { self.meta & Self::CONSUME != 0 }
+    #[inline(always)]
+    pub(crate) fn starts_edge(&self) -> bool { self.meta & Self::START != 0 }
+    #[inline(always)]
+    pub(crate) fn ends_edge(&self) -> bool { self.meta & Self::END != 0 }
+    #[inline(always)]
+    pub(crate) fn child_is_token(&self) -> bool { self.meta & Self::TOKEN != 0 }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
@@ -1222,6 +1308,8 @@ pub(crate) struct DynamicMaskTrie {
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
+    full_walk_ops: Vec<DynamicMaskTrieFullWalkOp>,
+    full_walk_token_nodes: Vec<u32>,
     /// Vocabulary-only layout class for each zero-byte structural child of the
     /// true root. This metadata is an accelerator only; an empty table simply
     /// disables root-class certificates.
@@ -1281,6 +1369,8 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            full_walk_ops: Vec::new(),
+            full_walk_token_nodes: Vec::new(),
             root_layout_classes: Vec::new(),
             root_layout_all_valid_utf8: Vec::new(),
         }
@@ -1334,6 +1424,16 @@ impl DynamicMaskTrie {
         let start = edge.byte_start as usize;
         let end = start + edge.byte_len as usize;
         &self.edge_bytes[start..end]
+    }
+
+    #[inline]
+    pub(crate) fn full_walk_ops(&self) -> &[DynamicMaskTrieFullWalkOp] {
+        &self.full_walk_ops
+    }
+
+    #[inline]
+    pub(crate) fn full_walk_token_nodes(&self) -> &[u32] {
+        &self.full_walk_token_nodes
     }
 
     #[inline]
@@ -1485,6 +1585,38 @@ impl DynamicMaskTrie {
             self.append_walk_edges(0, 0);
         }
         debug_assert_eq!(self.walk_edges.len(), self.edges.len());
+
+        self.full_walk_ops.clear();
+        self.full_walk_token_nodes.clear();
+        self.full_walk_ops.reserve(self.edge_bytes.len().max(self.walk_edges.len()));
+        self.full_walk_token_nodes.reserve(self.walk_edges.len());
+        for edge in self.walk_edges.iter().copied() {
+            let start = edge.byte_start as usize;
+            let end = start + edge.byte_len as usize;
+            let bytes = &self.edge_bytes[start..end];
+            let depth = u32::from(edge.parent_depth) << 8;
+            let child_is_token = self.nodes[edge.child as usize].token_id.is_some();
+            if bytes.is_empty() {
+                let mut meta = depth
+                    | DynamicMaskTrieFullWalkOp::START
+                    | DynamicMaskTrieFullWalkOp::END;
+                if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
+                self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
+                if child_is_token { self.full_walk_token_nodes.push(edge.child); }
+                continue;
+            }
+            for (index, &byte) in bytes.iter().enumerate() {
+                let mut meta = u32::from(byte) | depth | DynamicMaskTrieFullWalkOp::CONSUME;
+                if index == 0 { meta |= DynamicMaskTrieFullWalkOp::START; }
+                let last = index + 1 == bytes.len();
+                if last {
+                    meta |= DynamicMaskTrieFullWalkOp::END;
+                    if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
+                }
+                self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
+                if last && child_is_token { self.full_walk_token_nodes.push(edge.child); }
+            }
+        }
     }
 
     fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
@@ -1533,6 +1665,8 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            full_walk_ops: Vec::new(),
+            full_walk_token_nodes: Vec::new(),
             root_layout_classes: Vec::new(),
             root_layout_all_valid_utf8: Vec::new(),
         };
@@ -1574,6 +1708,8 @@ impl DynamicMaskTrie {
             edge_bytes: Vec::with_capacity(byte_capacity),
             subtree_tokens: Vec::with_capacity(node_capacity),
             walk_edges: Vec::with_capacity(edge_capacity),
+            full_walk_ops: Vec::with_capacity(byte_capacity.max(edge_capacity)),
+            full_walk_token_nodes: Vec::with_capacity(edge_capacity),
             root_layout_classes: Vec::new(),
             root_layout_all_valid_utf8: Vec::new(),
         };
@@ -2488,6 +2624,7 @@ pub(crate) struct DynamicMaskVocab {
     node_token_markers: Arc<Vec<u64>>,
     subtree_original_token_offsets: Arc<Vec<u32>>,
     subtree_original_tokens: Arc<Vec<u32>>,
+    all_original_token_words: Arc<Vec<u32>>,
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
@@ -2517,6 +2654,7 @@ pub(crate) struct DynamicMaskVocab {
     /// built in this smaller coordinate and indexed from exact runtime states
     /// through `full_to_mask_state`.
     mask_tokenizer: Option<Arc<Tokenizer>>,
+    mask_tokenizer_fast_transitions: Option<FastTokenizerTransitions>,
     full_to_mask_state: Arc<[u32]>,
     virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
     virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
@@ -2558,6 +2696,8 @@ impl DynamicMaskVocab {
                 &canonical_original_token_offsets,
                 &canonical_original_tokens,
             );
+        let all_original_token_words =
+            Self::build_all_original_token_words(&subtree_original_tokens);
         Self {
             trie,
             token_aliases,
@@ -2566,6 +2706,7 @@ impl DynamicMaskVocab {
             node_token_markers,
             subtree_original_token_offsets,
             subtree_original_tokens,
+            all_original_token_words,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -2582,6 +2723,7 @@ impl DynamicMaskVocab {
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
+            mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
@@ -2610,6 +2752,7 @@ impl DynamicMaskVocab {
                 &self.subtree_original_token_offsets,
             ),
             subtree_original_tokens: Arc::clone(&self.subtree_original_tokens),
+            all_original_token_words: Arc::clone(&self.all_original_token_words),
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -2630,6 +2773,7 @@ impl DynamicMaskVocab {
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
+            mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
@@ -2645,6 +2789,7 @@ impl DynamicMaskVocab {
             node_token_markers: Arc::new(vec![0]),
             subtree_original_token_offsets: Arc::new(vec![0]),
             subtree_original_tokens: Arc::new(Vec::new()),
+            all_original_token_words: Arc::new(Vec::new()),
             pending_source: Some(source),
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -2661,6 +2806,7 @@ impl DynamicMaskVocab {
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
+            mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
@@ -2685,6 +2831,8 @@ impl DynamicMaskVocab {
                 &canonical_original_token_offsets,
                 &canonical_original_tokens,
             );
+        let all_original_token_words =
+            Self::build_all_original_token_words(&subtree_original_tokens);
         Self {
             trie,
             token_aliases,
@@ -2693,6 +2841,7 @@ impl DynamicMaskVocab {
             node_token_markers,
             subtree_original_token_offsets,
             subtree_original_tokens,
+            all_original_token_words,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -2709,6 +2858,7 @@ impl DynamicMaskVocab {
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
+            mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
@@ -2738,6 +2888,8 @@ impl DynamicMaskVocab {
                 &self.canonical_original_token_offsets,
                 &self.canonical_original_tokens,
             );
+        self.all_original_token_words =
+            Self::build_all_original_token_words(&self.subtree_original_tokens);
         self.initialized = true;
         true
     }
@@ -2773,6 +2925,24 @@ impl DynamicMaskVocab {
             offsets.push(originals.len() as u32);
         }
         (Arc::new(offsets), Arc::new(originals))
+    }
+
+    fn build_all_original_token_words(originals: &[u32]) -> Arc<Vec<u32>> {
+        let word_len = originals
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |token| token as usize / 32 + 1);
+        let mut words = vec![0u32; word_len];
+        for &token in originals {
+            words[token as usize / 32] |= 1u32 << (token % 32);
+        }
+        Arc::new(words)
+    }
+
+    #[inline]
+    pub(crate) fn all_original_token_words(&self) -> &[u32] {
+        self.all_original_token_words.as_ref()
     }
 
     fn flatten_subtree_original_tokens(
@@ -2940,6 +3110,7 @@ impl DynamicMaskVocab {
         debug_assert!(full_to_mask_state
             .iter()
             .all(|&state| state < tokenizer.num_states()));
+        self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(full_to_mask_state);
         self.virtual_unit_repeat_projection = None;
@@ -2955,6 +3126,7 @@ impl DynamicMaskVocab {
             tokenizer.num_states(),
             projection.mask_state_count(),
         );
+        self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
         self.virtual_unit_repeat_projection = Some(projection);
@@ -2975,6 +3147,7 @@ impl DynamicMaskVocab {
         projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
     ) {
         debug_assert!(!projections.is_empty());
+        self.mask_tokenizer_fast_transitions = FastTokenizerTransitions::flat16_for(&tokenizer);
         self.mask_tokenizer = Some(Arc::new(tokenizer));
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
         self.virtual_unit_repeat_projection = None;
@@ -2990,6 +3163,7 @@ impl DynamicMaskVocab {
     /// avoids cloning it during that handoff.
     pub(crate) fn inherit_dynamic_lexer_metadata_from(&mut self, source: &Self) {
         self.mask_tokenizer = source.mask_tokenizer.clone();
+        self.mask_tokenizer_fast_transitions = source.mask_tokenizer_fast_transitions.clone();
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
         self.projected_terminal_quotients = Arc::clone(&source.projected_terminal_quotients);
@@ -3017,6 +3191,16 @@ impl DynamicMaskVocab {
     #[inline]
     pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
         self.mask_tokenizer.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn has_dense_mask_tokenizer_projection(&self) -> bool {
+        self.mask_tokenizer.is_some() && !self.full_to_mask_state.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn mask_projection_fast_transitions(&self) -> Option<&FastTokenizerTransitions> {
+        self.mask_tokenizer_fast_transitions.as_ref()
     }
 
     #[inline]
@@ -3386,6 +3570,9 @@ impl DynamicMaskVocab {
         if !self.initialized || self.pending_source.is_some() {
             return None;
         }
+        let mask_quotient = include_mask_quotient
+            .then(|| self.mask_tokenizer_quotient_for_transfer())
+            .flatten();
         let nodes = self
             .trie
             .nodes
@@ -3438,14 +3625,10 @@ impl DynamicMaskVocab {
             edge_bytes: self.trie.edge_bytes.clone(),
             alias_offsets,
             aliases,
-            mask_tokenizer: include_mask_quotient
-                .then(|| self.mask_tokenizer.as_deref().cloned())
-                .flatten(),
-            full_to_mask_state: if include_mask_quotient {
-                self.full_to_mask_state.as_ref().to_vec()
-            } else {
-                Vec::new()
-            },
+            mask_tokenizer: mask_quotient.as_ref().map(|(tokenizer, _)| tokenizer.clone()),
+            full_to_mask_state: mask_quotient
+                .map(|(_, full_to_mask_state)| full_to_mask_state)
+                .unwrap_or_default(),
         })
     }
 
@@ -3580,6 +3763,8 @@ impl DynamicMaskVocab {
             edge_bytes: artifact.edge_bytes,
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
+            full_walk_ops: Vec::new(),
+            full_walk_token_nodes: Vec::new(),
             root_layout_classes: Vec::new(),
             root_layout_all_valid_utf8: Vec::new(),
         };
@@ -3794,6 +3979,7 @@ impl Default for DynamicMaskVocab {
             node_token_markers: Arc::new(vec![0]),
             subtree_original_token_offsets: Arc::new(vec![0]),
             subtree_original_tokens: Arc::new(Vec::new()),
+            all_original_token_words: Arc::new(Vec::new()),
             pending_source: None,
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -3810,6 +3996,7 @@ impl Default for DynamicMaskVocab {
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
+            mask_tokenizer_fast_transitions: None,
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             virtual_unit_repeat_projection: None,
             virtual_repeat_intersection_projections: Vec::new(),
@@ -6140,6 +6327,40 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         artifact.nodes.clear();
         let error = DynamicMaskVocab::from_artifact(artifact).unwrap_err();
         assert!(error.contains("no trie root"));
+    }
+
+    #[test]
+    fn full_artifact_round_trips_dense_mask_tokenizer_quotient() {
+        let source =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let (built, full_to_mask_state) = source
+            .try_full_determinization_all_starts(256, 16_384)
+            .expect("small epsilon tokenizer should determinize from every raw start");
+        let expected_states = built.tokenizer.num_states();
+
+        let mut vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        vocab.set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state.clone());
+
+        let artifact = vocab.to_artifact().expect("full runtime artifact should serialize");
+        assert_eq!(artifact.full_to_mask_state, full_to_mask_state);
+        assert_eq!(
+            artifact.mask_tokenizer.as_ref().map(Tokenizer::num_states),
+            Some(expected_states),
+        );
+
+        let loaded = DynamicMaskVocab::from_artifact(artifact).unwrap();
+        assert_eq!(loaded.full_to_mask_state.as_ref(), full_to_mask_state.as_slice());
+        assert_eq!(
+            loaded.mask_projection_tokenizer().map(Tokenizer::num_states),
+            Some(expected_states),
+        );
+        assert!(matches!(
+            loaded.mask_projection_fast_transitions(),
+            Some(FastTokenizerTransitions::Flat16 { .. }),
+        ));
     }
 
     #[test]
