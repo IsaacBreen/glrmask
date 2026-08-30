@@ -893,7 +893,19 @@ fn build_dynamic_virtual_tokenizer(
     Ok(Some(tokenizer))
 }
 
-fn static_virtual_residual_candidate(grammar: &GrammarDef) -> bool {
+fn static_virtual_residual_candidate(
+    grammar: &GrammarDef,
+    allow_bounded_code_fallback: bool,
+) -> bool {
+    // Static residual projection is primarily a safety lane for giant bounded
+    // repeats, but bounded-code intersections can explode far below the generic
+    // 4096-repeat threshold. Use the existing expression-volume estimate to
+    // recognize those cases before eagerly materializing their Cartesian product.
+    // The threshold is deliberately far above the ordinary bounded-format cohort
+    // (for example email + maxLength=1024), which remains faster on the structural
+    // vocabulary quotient path.
+    const LARGE_BOUNDED_CODE_ESTIMATE: u128 = 256_000_000;
+
     let expressions = grammar
         .terminals
         .iter()
@@ -910,7 +922,15 @@ fn static_virtual_residual_candidate(grammar: &GrammarDef) -> bool {
             return false;
         }
     }
-    saw_giant
+    if saw_giant {
+        return true;
+    }
+
+    allow_bounded_code_fallback
+        && expressions.iter().any(|expression| {
+            expression_supports_bounded_code_residual_runtime(expression)
+                && estimated_synthesis_state_volume(expression) >= LARGE_BOUNDED_CODE_ESTIMATE
+        })
 }
 
 fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
@@ -3579,13 +3599,16 @@ fn compile_prepared_with_profile_and_table_construction(
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
-                let static_virtual_pair = if static_virtual_residual_candidate(prepared_grammar_ref) {
+                let static_virtual_pair = if static_virtual_residual_candidate(
+                    prepared_grammar_ref,
+                    synthetic_tokenizer_plan_ref.is_none(),
+                ) {
                     build_dynamic_virtual_tokenizer(prepared_grammar_ref, true)
                         .ok()
                         .flatten()
                         .and_then(|exact| {
                             exact
-                                .virtual_residuals_mask_tokenizer(vocab.max_token_byte_len())
+                                .virtual_residuals_mask_tokenizer_with_vocab(vocab.max_token_byte_len(), Some(vocab))
                                 .map(|(mask, projections)| (mask, exact, projections))
                         })
                 } else {

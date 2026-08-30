@@ -11,12 +11,13 @@ use std::sync::{Arc, Mutex};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ast::Expr;
-use super::compile::{compile_terminal_expr_dfa, expression_contains_large_bounded_repeat};
+use super::compile::{compile_terminal_expr_dfa, expression_contains_large_bounded_repeat, VocabularyRepeatHorizonCache};
 use super::dfa::DFA;
 use super::runtime_repeat_product::{VirtualRuntimeStateOwners, VirtualStateAllocator};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
+use crate::Vocab;
 
 pub(crate) type ResidualId = u32;
 
@@ -54,6 +55,7 @@ pub(crate) struct ResidualArena {
 
 const TRANSITION_UNKNOWN: u32 = u32::MAX;
 const DEFAULT_LIVENESS_STATE_BUDGET: usize = 262_144;
+const MAX_FINITE_MASK_DENSE_STATES: usize = 8 * 1024 * 1024;
 const DEFAULT_LIVENESS_TRANSITION_BUDGET: usize = 4_194_304;
 
 struct ResidualLivenessBudget {
@@ -1550,6 +1552,10 @@ impl VirtualResidualMaskProjection {
             .checked_add(self.state_offset)
     }
 
+    pub(super) fn set_state_offset(&mut self, state_offset: u32) {
+        self.state_offset = state_offset;
+    }
+
     pub fn physical_state_count(&self) -> u32 {
         self.runtime.physical_state_count()
     }
@@ -1621,9 +1627,11 @@ impl BoundedCodeIntersectionOracle {
     }
 
     fn finite_mask_dfa(&self, mask_max: usize) -> Option<(DFA, u32, Vec<u32>)> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+        let total_started = std::time::Instant::now();
         let pattern_states = self.pattern.num_states();
         let dense_state_count = self.finite_mask_dense_state_count(mask_max)?;
-        if dense_state_count == 0 || dense_state_count > 262_144 {
+        if dense_state_count == 0 || dense_state_count > MAX_FINITE_MASK_DENSE_STATES {
             return None;
         }
         let mask_oracle = BoundedCodeIntersectionOracle {
@@ -1690,6 +1698,7 @@ impl BoundedCodeIntersectionOracle {
             }
         }
 
+        let seeds_started = std::time::Instant::now();
         let mut dense_to_sparse = vec![u32::MAX; dense_state_count];
         let mut coordinates = Vec::<BoundedCodeOracleCoordinate>::new();
         let mut seed_count = 0usize;
@@ -1715,7 +1724,9 @@ impl BoundedCodeIntersectionOracle {
             }
         }
         drop(add_seed);
+        let seeds_ms = seeds_started.elapsed().as_secs_f64() * 1000.0;
 
+        let expand_started = std::time::Instant::now();
         let mut dfa = DFA::new(coordinates.len());
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, crate::ds::u8set::U8Set::all());
@@ -1755,6 +1766,7 @@ impl BoundedCodeIntersectionOracle {
             source += 1;
         }
         dfa.recompute_possible_futures();
+        let expand_ms = expand_started.elapsed().as_secs_f64() * 1000.0;
 
         let sparse_state_count = dfa.num_states();
         let root_dense = mask_oracle
@@ -1766,11 +1778,14 @@ impl BoundedCodeIntersectionOracle {
         // Every sparse state is reachable from at least one exact projection
         // seed, but many seeds are intentionally disconnected from state 0.
         // Preserve those roots while quotienting language-equivalent states.
+        let minimize_started = std::time::Instant::now();
         let (dfa, sparse_to_minimized) = dfa.minimize_with_state_mapping_preserve_unreachable();
+        let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
         let root = *sparse_to_minimized.get(root_sparse as usize)?;
         if root == u32::MAX {
             return None;
         }
+        let remap_started = std::time::Instant::now();
         let dense_to_minimized = dense_to_sparse
             .into_iter()
             .map(|sparse| {
@@ -1781,13 +1796,12 @@ impl BoundedCodeIntersectionOracle {
                 }
             })
             .collect::<Vec<_>>();
-        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+        let remap_ms = remap_started.elapsed().as_secs_f64() * 1000.0;
+        if profile {
             eprintln!(
-                "[glrmask/profile][residual_mask_symbolic_sources] dense_states={} seeds={} sparse_states={} minimized_states={}",
-                dense_state_count,
-                seed_count,
-                sparse_state_count,
-                dfa.num_states(),
+                "[glrmask/profile][residual_mask_symbolic_sources] dense_states={} seeds={} sparse_states={} minimized_states={} seeds_ms={:.3} expand_ms={:.3} minimize_ms={:.3} remap_ms={:.3} total_ms={:.3}",
+                dense_state_count, seed_count, sparse_state_count, dfa.num_states(),
+                seeds_ms, expand_ms, minimize_ms, remap_ms, total_started.elapsed().as_secs_f64() * 1000.0,
             );
         }
         Some((dfa, root, dense_to_minimized))
@@ -2328,6 +2342,16 @@ impl VirtualResidualRuntime {
         Some((accepting, future))
     }
 
+    pub(super) fn vocabulary_repeat_boundary_horizon(
+        &self,
+        vocab: &Vocab,
+        cache: &VocabularyRepeatHorizonCache,
+    ) -> Option<usize> {
+        let store = self.store.lock().ok()?;
+        let oracle = store.liveness_oracle.as_ref()?;
+        cache.horizon_for_dfa(oracle.body.as_ref(), vocab)
+    }
+
     pub(super) fn serialized_bounded_code_oracle(&self) -> Vec<u8> {
         let store = self.store.lock().unwrap();
         let oracle = store
@@ -2503,15 +2527,17 @@ impl VirtualResidualRuntime {
         let oracle = store.liveness_oracle.as_ref().ok_or_else(|| "compiled virtual residual projection has no bounded-code oracle".to_owned())?;
         let mask_max = artifact.compiled_mask_max;
         let crossed_boundaries = artifact.compiled_crossed_boundaries;
-        if crossed_boundaries == 0
-            || mask_max >= oracle.max
-            || oracle.min.checked_add(crossed_boundaries).and_then(|value| value.checked_add(1)) != Some(mask_max)
-        {
+        let desired_mask_max = oracle
+            .min
+            .checked_add(crossed_boundaries)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| "compiled virtual residual projection stencil overflow".to_owned())?;
+        if crossed_boundaries == 0 || mask_max != oracle.max.min(desired_mask_max) {
             return Err("compiled virtual residual projection stencil is inconsistent".to_owned());
         }
         let expected_dense_states = oracle
             .finite_mask_dense_state_count(mask_max)
-            .filter(|&states| states <= 262_144)
+            .filter(|&states| states <= MAX_FINITE_MASK_DENSE_STATES)
             .ok_or_else(|| "compiled virtual residual projection dense coordinate is invalid".to_owned())?;
         if artifact.local_to_mask_state.len() != expected_dense_states {
             return Err(format!(
@@ -2583,12 +2609,9 @@ impl VirtualResidualRuntime {
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| "virtual residual projection stencil overflow".to_owned())?;
         let mask_max = oracle.max.min(desired_mask_max);
-        if mask_max == oracle.max {
-            return Err("virtual residual projection no longer needs a virtual stencil".to_owned());
-        }
         let expected_dense_states = oracle
             .finite_mask_dense_state_count(mask_max)
-            .filter(|&states| states <= 262_144)
+            .filter(|&states| states <= MAX_FINITE_MASK_DENSE_STATES)
             .ok_or_else(|| "virtual residual projection dense coordinate is invalid".to_owned())?;
         if artifact.local_to_mask_state.len() != expected_dense_states {
             return Err(format!(
@@ -2641,9 +2664,10 @@ impl VirtualResidualRuntime {
             .checked_add(crossed_boundaries)?
             .checked_add(1)?;
         let mask_max = oracle.max.min(desired_mask_max);
-        if mask_max == oracle.max {
-            return None;
-        }
+        // Even when the declared upper bound already fits inside one model-token
+        // stencil, keep using the finite oracle coordinate. The absence of a
+        // truncating stencil does not imply that eagerly materializing the
+        // original pattern × length product is cheap.
         let (dfa, root, local_to_mask_state) = oracle.finite_mask_dfa(mask_max)?;
         let projection = VirtualResidualMaskProjection {
             runtime: Arc::clone(self),
