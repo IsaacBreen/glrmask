@@ -12493,6 +12493,13 @@ pub fn expression_supports_bounded_code_residual_runtime(expr: &Expr) -> bool {
     super::runtime_residual::expression_supports_bounded_code_liveness_oracle(expr)
 }
 
+/// Cheap shape-only prefilter used by Static compilation before the preserving
+/// residual constructor performs the full exact oracle certification.
+#[doc(hidden)]
+pub fn expression_may_support_bounded_code_residual_runtime(expr: &Expr) -> bool {
+    super::runtime_residual::expression_may_support_bounded_code_liveness_oracle(expr)
+}
+
 /// Whether this expression contains any bounded repetition large enough that
 /// falling through to the ordinary repeat compiler could allocate in direct
 /// proportion to the declared bound.
