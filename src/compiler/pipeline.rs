@@ -26,6 +26,7 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
+    expression_may_support_bounded_code_residual_runtime,
     expression_supports_bounded_code_residual_runtime,
     expression_supports_deferred_dense_runtime,
     factor_regex_expr,
@@ -699,8 +700,12 @@ fn build_dynamic_virtual_tokenizer(
             .iter()
             .enumerate()
             .filter_map(|(terminal, expression)| {
-                expression_supports_bounded_code_residual_runtime(expression)
-                    .then_some(terminal as TerminalID)
+                let supported = if preserve_residual_oracle_coordinates {
+                    expression_may_support_bounded_code_residual_runtime(expression)
+                } else {
+                    expression_supports_bounded_code_residual_runtime(expression)
+                };
+                supported.then_some(terminal as TerminalID)
             })
             .collect::<Vec<_>>()
     } else {
@@ -933,7 +938,7 @@ fn static_virtual_residual_candidate(
             continue;
         }
         saw_giant = true;
-        if !expression_supports_bounded_code_residual_runtime(expression) {
+        if !expression_may_support_bounded_code_residual_runtime(expression) {
             return false;
         }
     }
@@ -943,7 +948,7 @@ fn static_virtual_residual_candidate(
 
     allow_bounded_code_fallback
         && expressions.iter().any(|expression| {
-            expression_supports_bounded_code_residual_runtime(expression)
+            expression_may_support_bounded_code_residual_runtime(expression)
                 && estimated_synthesis_state_volume(expression) >= LARGE_BOUNDED_CODE_ESTIMATE
         })
 }

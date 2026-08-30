@@ -16,6 +16,7 @@ use super::compile::{compile_terminal_expr_dfa, expression_contains_large_bounde
 use super::dfa::DFA;
 use super::runtime_repeat_product::{VirtualRuntimeStateOwners, VirtualStateAllocator};
 use crate::ds::bitset::BitSet;
+use crate::ds::char_transitions::CharTransitions;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
@@ -920,6 +921,56 @@ impl BoolRelation {
     }
 }
 
+/// Cheap structural prefilter for Static residual selection. This deliberately
+/// does not claim that the full oracle is constructible: state/product/resource
+/// certification remains in `BoundedCodeIntersectionOracle::from_expr`. Static
+/// construction uses the preserving runtime constructor as that exact final
+/// proof and falls back if it fails, avoiding repeated expensive proof builds.
+pub(crate) fn expression_may_support_bounded_code_liveness_oracle(expr: &Expr) -> bool {
+    let mut operands = Vec::new();
+    flatten_intersection_operands(expr, &mut operands);
+    if operands.len() < 2 {
+        return false;
+    }
+    let mut envelope: Option<(Vec<u8>, Expr, usize, usize, Vec<u8>)> = None;
+    let mut pattern_operands = Vec::new();
+    for operand in operands {
+        if let Some((prefix, body, min, max, suffix)) = bounded_code_envelope(operand) {
+            match &mut envelope {
+                None => {
+                    envelope = Some((prefix, body, min, max, suffix));
+                    continue;
+                }
+                Some((existing_prefix, existing_body, existing_min, existing_max, existing_suffix))
+                    if *existing_prefix == prefix
+                        && *existing_body == body
+                        && *existing_suffix == suffix =>
+                {
+                    *existing_min = (*existing_min).max(min);
+                    *existing_max = (*existing_max).min(max);
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
+        pattern_operands.push(operand.clone());
+    }
+    let Some((_, body_expr, _, max, _)) = envelope else {
+        return false;
+    };
+    if pattern_operands.is_empty() || max == usize::MAX {
+        return false;
+    }
+    let Some(pattern_expr) = pattern_operands.into_iter().reduce(|expr, intersect| Expr::Intersect {
+        expr: Box::new(expr),
+        intersect: Box::new(intersect),
+    }) else {
+        return false;
+    };
+    !expression_contains_large_bounded_repeat(&pattern_expr)
+        && !expression_contains_large_bounded_repeat(&body_expr)
+}
+
 /// Return whether the exact bounded-code liveness oracle can be constructed
 /// for this expression without changing its language. Dynamic compilation uses
 /// this as a proof-backed representation selector for bounded intersections
@@ -1004,6 +1055,92 @@ fn canonicalize_bounded_code_oracle_dfa(dfa: DFA) -> DFA {
     }
     out.recompute_possible_futures();
     out
+}
+
+fn dfa_global_byte_classes(dfa: &DFA) -> Vec<Vec<u8>> {
+    let mut signatures: [Vec<(u32, u32)>; 256] = std::array::from_fn(|_| Vec::new());
+    for (state_index, state) in dfa.states().iter().enumerate() {
+        let state_index = state_index as u32;
+        for (byte, &target) in state.transitions.iter() {
+            signatures[byte as usize].push((state_index, target));
+        }
+    }
+    let mut grouped = FxHashMap::<Vec<(u32, u32)>, Vec<u8>>::default();
+    for byte in 0u16..=255 {
+        grouped
+            .entry(std::mem::take(&mut signatures[byte as usize]))
+            .or_default()
+            .push(byte as u8);
+    }
+    let mut classes = grouped.into_values().collect::<Vec<_>>();
+    classes.sort_unstable_by_key(|members| members[0]);
+    classes
+}
+
+fn bounded_code_byte_classes(
+    pattern: &DFA,
+    body: &DFA,
+    prefix: &[u8],
+    suffix: &[u8],
+) -> Vec<Vec<u8>> {
+    let pattern_classes = dfa_global_byte_classes(pattern);
+    let body_classes = dfa_global_byte_classes(body);
+    let mut pattern_class = [0u8; 256];
+    let mut body_class = [0u8; 256];
+    for (class, members) in pattern_classes.iter().enumerate() {
+        for &byte in members {
+            pattern_class[byte as usize] = class as u8;
+        }
+    }
+    for (class, members) in body_classes.iter().enumerate() {
+        for &byte in members {
+            body_class[byte as usize] = class as u8;
+        }
+    }
+    let mut literal = [false; 256];
+    for &byte in prefix.iter().chain(suffix.iter()) {
+        literal[byte as usize] = true;
+    }
+    let mut grouped = FxHashMap::<(u8, u8, u16), Vec<u8>>::default();
+    for byte in 0u16..=255 {
+        let b = byte as u8;
+        // Literal bytes must remain individually distinguishable because a
+        // prefix/suffix coordinate tests equality with that exact byte.
+        let literal_tag = literal[byte as usize].then_some(byte + 1).unwrap_or(0);
+        grouped
+            .entry((
+                pattern_class[byte as usize],
+                body_class[byte as usize],
+                literal_tag,
+            ))
+            .or_default()
+            .push(b);
+    }
+    let mut classes = grouped.into_values().collect::<Vec<_>>();
+    classes.sort_unstable_by_key(|members| members[0]);
+    classes
+}
+
+fn expand_exact_byte_classes(dfa: &mut DFA, class_members: &[Vec<u8>]) {
+    for state in dfa.states_mut() {
+        let class_transitions = std::mem::take(&mut state.transitions);
+        let capacity = class_transitions
+            .iter()
+            .map(|(class, _)| class_members[class as usize].len())
+            .sum();
+        let mut entries = Vec::with_capacity(capacity);
+        for (class, &target) in class_transitions.iter() {
+            entries.extend(
+                class_members[class as usize]
+                    .iter()
+                    .copied()
+                    .map(|byte| (byte, target)),
+            );
+        }
+        entries.sort_unstable_by_key(|entry| entry.0);
+        state.transitions = CharTransitions::from_sorted_entries(entries);
+    }
+    dfa.recompute_possible_futures();
 }
 
 impl BoundedCodeIntersectionOracle {
@@ -1648,6 +1785,12 @@ impl BoundedCodeIntersectionOracle {
             exact_powers: self.exact_powers.clone(),
             prefix_sums: self.prefix_sums.clone(),
         };
+        let byte_classes = bounded_code_byte_classes(
+            &mask_oracle.pattern,
+            &mask_oracle.body,
+            &mask_oracle.prefix,
+            &mask_oracle.suffix,
+        );
 
         // The finite envelope deliberately identifies the huge exact count
         // interval with a small one-token stencil. A state that is a valid
@@ -1744,12 +1887,13 @@ impl BoundedCodeIntersectionOracle {
                 .map(|&coordinate| {
                     let accepting = matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
                         && !mask_oracle.pattern.finalizers(coordinate.pattern_state).is_empty();
-                    let transitions = (0u16..=255)
-                        .filter_map(|byte| {
-                            let byte = byte as u8;
-                            let next = mask_oracle.step_coordinate(coordinate, byte)?;
+                    let transitions = byte_classes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(class, members)| {
+                            let next = mask_oracle.step_coordinate(coordinate, members[0])?;
                             let dense = mask_oracle.coordinate_local_state(next, mask_max)? as usize;
-                            Some((byte, next, dense))
+                            Some((class as u8, next, dense))
                         })
                         .collect::<Vec<_>>();
                     Some((accepting, transitions))
@@ -1794,7 +1938,9 @@ impl BoundedCodeIntersectionOracle {
         // seed, but many seeds are intentionally disconnected from state 0.
         // Preserve those roots while quotienting language-equivalent states.
         let minimize_started = std::time::Instant::now();
-        let (dfa, sparse_to_minimized) = dfa.minimize_with_state_mapping_preserve_unreachable();
+        let (mut dfa, sparse_to_minimized) =
+            dfa.minimize_with_state_mapping_preserve_unreachable();
+        expand_exact_byte_classes(&mut dfa, &byte_classes);
         let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
         let root = *sparse_to_minimized.get(root_sparse as usize)?;
         if root == u32::MAX {
@@ -1814,8 +1960,8 @@ impl BoundedCodeIntersectionOracle {
         let remap_ms = remap_started.elapsed().as_secs_f64() * 1000.0;
         if profile {
             eprintln!(
-                "[glrmask/profile][residual_mask_symbolic_sources] dense_states={} seeds={} sparse_states={} minimized_states={} seeds_ms={:.3} expand_ms={:.3} minimize_ms={:.3} remap_ms={:.3} total_ms={:.3}",
-                dense_state_count, seed_count, sparse_state_count, dfa.num_states(),
+                "[glrmask/profile][residual_mask_symbolic_sources] dense_states={} seeds={} sparse_states={} minimized_states={} byte_classes={} seeds_ms={:.3} expand_ms={:.3} minimize_ms={:.3} remap_ms={:.3} total_ms={:.3}",
+                dense_state_count, seed_count, sparse_state_count, dfa.num_states(), byte_classes.len(),
                 seeds_ms, expand_ms, minimize_ms, remap_ms, total_started.elapsed().as_secs_f64() * 1000.0,
             );
         }
