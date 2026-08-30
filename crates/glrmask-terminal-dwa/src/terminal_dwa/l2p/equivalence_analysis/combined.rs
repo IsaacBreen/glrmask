@@ -1,3 +1,4 @@
+use crate::terminal_dwa::cpu_timer::CpuTimer;
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -589,6 +590,47 @@ struct CombinedEquivalenceResult {
     state_classes: BTreeSet<BTreeSet<usize>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct L2pVocabEquivResult {
+    pub vocab_map: ManyToOneIdMap,
+    pub prep_ms: f64,
+    pub prep_cpu_ms: f64,
+    pub pre_state_ms: f64,
+    pub pre_state_cpu_ms: f64,
+    pub exact_state_refine_ms: f64,
+    pub exact_state_refine_cpu_ms: f64,
+    pub vocab_equiv_ms: f64,
+    pub vocab_equiv_cpu_ms: f64,
+    pub finalize_ms: f64,
+    pub finalize_cpu_ms: f64,
+    pub total_wall_ms: f64,
+    pub total_cpu_ms: f64,
+    pub vocab_first: bool,
+    pub vocab_classes_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum CombinedAnalysisOutcome {
+    Full(InternalIdMap, CombinedEquivalenceProfile),
+    VocabOnly(L2pVocabEquivResult),
+}
+
+impl CombinedAnalysisOutcome {
+    pub fn expect_full(self) -> (InternalIdMap, CombinedEquivalenceProfile) {
+        match self {
+            CombinedAnalysisOutcome::Full(map, prof) => (map, prof),
+            CombinedAnalysisOutcome::VocabOnly(_) => panic!("expected full analysis outcome"),
+        }
+    }
+    pub fn expect_vocab_only(self) -> L2pVocabEquivResult {
+        match self {
+            CombinedAnalysisOutcome::VocabOnly(res) => res,
+            CombinedAnalysisOutcome::Full(_, _) => panic!("expected vocab-only outcome"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct CombinedEquivalenceProfile {
     pub initial_states_considered: usize,
     pub max_length_skipped: bool,
@@ -990,7 +1032,8 @@ fn try_analyze_equivalences_with_token_position_partition(
     token_position_partition: &GlobalTokenPositionStatePartition,
     effective_follows_prepare_ms: f64,
     pre_normalized_disallowed_follows: Option<&[BitSet]>,
-) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
+    vocab_only: bool,
+) -> Option<CombinedAnalysisOutcome> {
     let active_groups = active_groups?;
     let seed = token_position_partition.as_many_to_one();
     let num_states = tokenizer.num_states() as usize;
@@ -1301,7 +1344,27 @@ fn try_analyze_equivalences_with_token_position_partition(
     let id_map_finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     let exact_reps = internal_id_map.tokenizer_states.num_internal_ids() as usize;
 
-    Some((
+    if vocab_only {
+        return Some(CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+            vocab_map: internal_id_map.vocab_tokens,
+            prep_ms: prepare_inputs_ms,
+            prep_cpu_ms: 0.0,
+            pre_state_ms: 0.0,
+            pre_state_cpu_ms: 0.0,
+            exact_state_refine_ms: exact_state_equiv_ms,
+            exact_state_refine_cpu_ms: 0.0,
+            vocab_equiv_ms,
+            vocab_equiv_cpu_ms: 0.0,
+            finalize_ms: id_map_finalize_ms,
+            finalize_cpu_ms: 0.0,
+            total_wall_ms: prepare_inputs_ms + exact_state_equiv_ms + vocab_equiv_ms + id_map_finalize_ms,
+            total_cpu_ms: 0.0,
+            vocab_first: false,
+            vocab_classes_count: vocab_classes.len(),
+        }));
+    }
+
+    Some(CombinedAnalysisOutcome::Full(
         internal_id_map,
         CombinedEquivalenceProfile {
             initial_states_considered: seed_states.len(),
@@ -1344,7 +1407,8 @@ fn try_analyze_equivalences_with_raw_quotient(
     initial_state_map: Option<&ManyToOneIdMap>,
     effective_follows_prepare_ms: f64,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
-) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
+    vocab_only: bool,
+) -> Option<CombinedAnalysisOutcome> {
     let active_groups = active_groups?;
     let flat_trans = flat_trans?;
     if flat_trans.len() != tokenizer.num_states() as usize * 256 {
@@ -1530,7 +1594,26 @@ fn try_analyze_equivalences_with_raw_quotient(
                 exact_state_equiv_ms,
             );
         }
-        return Some((
+        if vocab_only {
+            return Some(CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: internal_id_map.vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: 0.0,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: exact_state_equiv_ms,
+                exact_state_refine_cpu_ms: 0.0,
+                vocab_equiv_ms: 0.0,
+                vocab_equiv_cpu_ms: 0.0,
+                finalize_ms: id_map_finalize_ms,
+                finalize_cpu_ms: 0.0,
+                total_wall_ms: prepare_inputs_ms + exact_state_equiv_ms + id_map_finalize_ms,
+                total_cpu_ms: 0.0,
+                vocab_first: false,
+                vocab_classes_count: prepared.token_ids.len(),
+            }));
+        }
+        return Some(CombinedAnalysisOutcome::Full(
             internal_id_map,
             CombinedEquivalenceProfile {
                 initial_states_considered: prepared.initial_states.len(),
@@ -1773,7 +1856,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         exact_state_equiv_ms,
         vocab_equiv_ms,
     ) = if vocab_first {
-        let vocab_equiv_started_at = Instant::now();
+        let vocab_equiv_timer = CpuTimer::start();
         let precomputed_vocab =
             vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
                 &analysis_view,
@@ -1785,7 +1868,34 @@ fn try_analyze_equivalences_with_raw_quotient(
                 None,
                 None,
             );
-        let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (vocab_equiv_ms, vocab_equiv_cpu_ms) = vocab_equiv_timer.elapsed();
+        if vocab_only {
+            let fin_timer = CpuTimer::start();
+            let vocab_classes = expand_vocab_classes(
+                precomputed_vocab.0,
+                &dedup.original_to_repr,
+                dedup.representative_token_bytes.len(),
+            );
+            let vocab_tokens = build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id);
+            let (fin_ms, fin_cpu_ms) = fin_timer.elapsed();
+            return Some(CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: restricted_observation_state_equiv_ms,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: 0.0,
+                exact_state_refine_cpu_ms: 0.0,
+                vocab_equiv_ms,
+                vocab_equiv_cpu_ms,
+                finalize_ms: fin_ms,
+                finalize_cpu_ms: fin_cpu_ms,
+                total_wall_ms: prepare_inputs_ms + restricted_observation_state_equiv_ms + vocab_equiv_ms + fin_ms,
+                total_cpu_ms: vocab_equiv_cpu_ms + fin_cpu_ms,
+                vocab_first: true,
+                vocab_classes_count: vocab_classes.len(),
+            }));
+        }
         let representative_tokens = representative_tokens_for_vocab_classes(
             &precomputed_vocab.0,
             &dedup.representative_token_bytes,
@@ -1838,7 +1948,26 @@ fn try_analyze_equivalences_with_raw_quotient(
             deferred_vocab_singleton_original_ids: None,
         };
         let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
-        return Some((
+        if vocab_only {
+            return Some(CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: internal_id_map.vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: restricted_observation_state_equiv_ms,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: exact_state_equiv_ms,
+                exact_state_refine_cpu_ms: 0.0,
+                vocab_equiv_ms: 0.0,
+                vocab_equiv_cpu_ms: 0.0,
+                finalize_ms: id_map_finalize_ms,
+                finalize_cpu_ms: 0.0,
+                total_wall_ms: prepare_inputs_ms + restricted_observation_state_equiv_ms + exact_state_equiv_ms + id_map_finalize_ms,
+                total_cpu_ms: 0.0,
+                vocab_first: false,
+                vocab_classes_count: prepared.token_ids.len(),
+            }));
+        }
+        return Some(CombinedAnalysisOutcome::Full(
             internal_id_map,
             CombinedEquivalenceProfile {
                 initial_states_considered: prepared.initial_states.len(),
@@ -1911,7 +2040,27 @@ fn try_analyze_equivalences_with_raw_quotient(
     };
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    Some((
+    if vocab_only {
+        return Some(CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+            vocab_map: internal_id_map.vocab_tokens,
+            prep_ms: prepare_inputs_ms,
+            prep_cpu_ms: 0.0,
+            pre_state_ms: restricted_observation_state_equiv_ms,
+            pre_state_cpu_ms: 0.0,
+            exact_state_refine_ms: exact_state_equiv_ms,
+            exact_state_refine_cpu_ms: 0.0,
+            vocab_equiv_ms,
+            vocab_equiv_cpu_ms: 0.0,
+            finalize_ms: id_map_finalize_ms,
+            finalize_cpu_ms: 0.0,
+            total_wall_ms: prepare_inputs_ms + restricted_observation_state_equiv_ms + exact_state_equiv_ms + vocab_equiv_ms + id_map_finalize_ms,
+            total_cpu_ms: 0.0,
+            vocab_first: false,
+            vocab_classes_count: vocab_classes.len(),
+        }));
+    }
+
+    Some(CombinedAnalysisOutcome::Full(
         internal_id_map,
         CombinedEquivalenceProfile {
             initial_states_considered: prepared.initial_states.len(),
@@ -1982,7 +2131,53 @@ pub fn analyze_equivalences_with_group_filter(
         token_position_partition,
         precomputed_raw_observations,
         prebuilt_token_trie,
+        false,
     )
+    .expect_full()
+}
+
+pub fn analyze_vocab_equivalence_with_group_filter(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    disallowed_follows_are_ignore_transparent: bool,
+    pre_normalized_disallowed_follows: Option<&[BitSet]>,
+    active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_base_setup_ms: f64,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    initial_state_map_has_stable_restricted_observation: bool,
+    token_position_partition: Option<&GlobalTokenPositionStatePartition>,
+    precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> L2pVocabEquivResult {
+    analyze_equivalences_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        ignore_terminal,
+        disallowed_follows_are_ignore_transparent,
+        pre_normalized_disallowed_follows,
+        active_groups,
+        shared_vocab_dfa_cache,
+        shared_analysis_dfa_cache,
+        shared_base_setup_ms,
+        flat_trans,
+        shared_transition_cache,
+        initial_state_map,
+        initial_state_map_has_stable_restricted_observation,
+        token_position_partition,
+        precomputed_raw_observations,
+        prebuilt_token_trie,
+        true,
+    )
+    .expect_vocab_only()
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -2008,7 +2203,8 @@ fn analyze_equivalences_impl(
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
-) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    vocab_only: bool,
+) -> CombinedAnalysisOutcome {
     let prebuilt_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L2P_TOKEN_TRIE")
         .map(|value| {
             let trimmed = value.trim();
@@ -2044,6 +2240,7 @@ fn analyze_equivalences_impl(
                 token_position_partition,
                 effective_follows_prepare_ms,
                 pre_normalized_disallowed_follows,
+                vocab_only,
             ) {
                 return result;
             }
@@ -2878,7 +3075,26 @@ fn analyze_equivalences_impl(
         };
         let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
         let exact_reps = id_map.tokenizer_states.num_internal_ids() as usize;
-        return (
+        if vocab_only {
+            return CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: id_map.vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: pipeline_profile.restricted_observation_state_equiv_ms + pipeline_profile.max_length_state_equiv_ms,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: exact_state_equiv_ms,
+                exact_state_refine_cpu_ms: 0.0,
+                vocab_equiv_ms,
+                vocab_equiv_cpu_ms: 0.0,
+                finalize_ms: id_map_finalize_ms,
+                finalize_cpu_ms: 0.0,
+                total_wall_ms: prepare_inputs_ms + exact_state_equiv_ms + vocab_equiv_ms + id_map_finalize_ms,
+                total_cpu_ms: 0.0,
+                vocab_first: true,
+                vocab_classes_count: vocab_classes.len(),
+            });
+        }
+        return CombinedAnalysisOutcome::Full(
             id_map,
             CombinedEquivalenceProfile {
                 initial_states_considered: prepared.initial_states.len(),
@@ -2931,6 +3147,7 @@ fn analyze_equivalences_impl(
             token_position_partition,
             effective_follows_prepare_ms,
             pre_normalized_disallowed_follows,
+            vocab_only,
         ) {
             return result;
         }
@@ -2946,6 +3163,7 @@ fn analyze_equivalences_impl(
         initial_state_map,
         effective_follows_prepare_ms,
         precomputed_raw_observations,
+        vocab_only,
     ) {
         return result;
     }
@@ -3086,15 +3304,19 @@ fn analyze_equivalences_impl(
             vocab_first,
         );
     }
+    let total_timer = CpuTimer::start();
+    let prep_timer = CpuTimer::start();
     let (
         reduced_state_reps_for_pre_reduced,
         dedup_vocab_classes,
         vocab_analysis_dfa_build_ms,
         exact_state_equiv_ms,
+        exact_state_equiv_cpu_ms,
         vocab_equiv_ms,
+        vocab_equiv_cpu_ms,
         exact_rep_confirmation_used,
     ) = if vocab_first {
-        let vocab_equiv_started_at = Instant::now();
+        let vocab_equiv_timer = CpuTimer::start();
         let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
             vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
                 analysis_view,
@@ -3106,7 +3328,39 @@ fn analyze_equivalences_impl(
                 if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
                 if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
             );
-        let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (vocab_equiv_ms, vocab_equiv_cpu_ms) = vocab_equiv_timer.elapsed();
+        if vocab_only {
+            let finalize_timer = CpuTimer::start();
+            let vocab_classes = expand_vocab_classes(
+                dedup_vocab_classes,
+                &dedup.original_to_repr,
+                dedup.representative_token_bytes.len(),
+            );
+            let vocab_tokens = build_vocab_map(
+                &vocab_classes,
+                &prepared.token_ids,
+                prepared.max_token_id,
+            );
+            let (finalize_ms, finalize_cpu_ms) = finalize_timer.elapsed();
+            let (total_wall_ms, total_cpu_ms) = total_timer.elapsed();
+            return CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: pipeline_profile.restricted_observation_state_equiv_ms + pipeline_profile.max_length_state_equiv_ms,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: 0.0,
+                exact_state_refine_cpu_ms: 0.0,
+                vocab_equiv_ms,
+                vocab_equiv_cpu_ms,
+                finalize_ms,
+                finalize_cpu_ms,
+                total_wall_ms,
+                total_cpu_ms,
+                vocab_first: true,
+                vocab_classes_count: vocab_classes.len(),
+            });
+        }
         let representative_tokens = representative_tokens_for_vocab_classes(
             &dedup_vocab_classes,
             &dedup.representative_token_bytes,
@@ -3114,7 +3368,7 @@ fn analyze_equivalences_impl(
         let exact_rep_confirmation_used = pre_reduced_states.len()
             >= EXACT_REP_CONFIRMATION_MIN_STATES
             && representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
-        let exact_started_at = Instant::now();
+        let exact_timer = CpuTimer::start();
         let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
             state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
                 analysis_view,
@@ -3135,20 +3389,22 @@ fn analyze_equivalences_impl(
                 (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
             )
         };
-        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (exact_state_equiv_ms, exact_state_equiv_cpu_ms) = exact_timer.elapsed();
         (
             reduced_state_reps_for_pre_reduced,
             dedup_vocab_classes,
             vocab_analysis_dfa_build_ms,
             exact_state_equiv_ms,
+            exact_state_equiv_cpu_ms,
             vocab_equiv_ms,
+            vocab_equiv_cpu_ms,
             exact_rep_confirmation_used,
         )
     } else {
         let exact_rep_confirmation_used = pre_reduced_states.len()
             >= EXACT_REP_CONFIRMATION_MIN_STATES
             && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
-        let exact_started_at = Instant::now();
+        let exact_timer = CpuTimer::start();
         let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
             state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
                 analysis_view,
@@ -3169,11 +3425,11 @@ fn analyze_equivalences_impl(
                 (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
             )
         };
-        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (exact_state_equiv_ms, exact_state_equiv_cpu_ms) = exact_timer.elapsed();
         let mut final_state_representatives = reduced_state_reps_for_pre_reduced.clone();
         final_state_representatives.sort_unstable();
         final_state_representatives.dedup();
-        let vocab_equiv_started_at = Instant::now();
+        let vocab_equiv_timer = CpuTimer::start();
         let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
             vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
                 analysis_view,
@@ -3185,13 +3441,47 @@ fn analyze_equivalences_impl(
                 if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
                 if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
             );
-        let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (vocab_equiv_ms, vocab_equiv_cpu_ms) = vocab_equiv_timer.elapsed();
+        if vocab_only {
+            let finalize_timer = CpuTimer::start();
+            let vocab_classes = expand_vocab_classes(
+                dedup_vocab_classes,
+                &dedup.original_to_repr,
+                dedup.representative_token_bytes.len(),
+            );
+            let vocab_tokens = build_vocab_map(
+                &vocab_classes,
+                &prepared.token_ids,
+                prepared.max_token_id,
+            );
+            let (finalize_ms, finalize_cpu_ms) = finalize_timer.elapsed();
+            let (total_wall_ms, total_cpu_ms) = total_timer.elapsed();
+            return CombinedAnalysisOutcome::VocabOnly(L2pVocabEquivResult {
+                vocab_map: vocab_tokens,
+                prep_ms: prepare_inputs_ms,
+                prep_cpu_ms: 0.0,
+                pre_state_ms: pipeline_profile.restricted_observation_state_equiv_ms + pipeline_profile.max_length_state_equiv_ms,
+                pre_state_cpu_ms: 0.0,
+                exact_state_refine_ms: exact_state_equiv_ms,
+                exact_state_refine_cpu_ms: exact_state_equiv_cpu_ms,
+                vocab_equiv_ms,
+                vocab_equiv_cpu_ms,
+                finalize_ms,
+                finalize_cpu_ms,
+                total_wall_ms,
+                total_cpu_ms,
+                vocab_first: false,
+                vocab_classes_count: vocab_classes.len(),
+            });
+        }
         (
             reduced_state_reps_for_pre_reduced,
             dedup_vocab_classes,
             vocab_analysis_dfa_build_ms,
             exact_state_equiv_ms,
+            exact_state_equiv_cpu_ms,
             vocab_equiv_ms,
+            vocab_equiv_cpu_ms,
             exact_rep_confirmation_used,
         )
     };
@@ -3239,7 +3529,7 @@ fn analyze_equivalences_impl(
         build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    (
+    CombinedAnalysisOutcome::Full(
         internal_id_map,
         CombinedEquivalenceProfile {
             initial_states_considered: prepared.initial_states.len(),
@@ -3602,5 +3892,178 @@ mod prepass_selection_tests {
         // Larger vocabulary over a smaller byte alphabet amortizes the exact
         // prepass and should retain it.
         assert!(!direct_refinement_work_is_no_larger(900, 14, 19));
+    }
+
+    #[test]
+    fn test_vocab_only_equivalence_matches_full_production_and_tracks_cpu() {
+        use crate::Vocab;
+        use glrmask_lexer::parse_regex;
+        use glrmask_lexer::__private::automata::lexer::compile::build_regex;
+
+        let expr1 = parse_regex("a+", false);
+        let expr2 = parse_regex("b+", false);
+        let regex = build_regex(&[expr1, expr2]);
+        let tokenizer = regex.into_tokenizer(2, None);
+
+        let token_data: Vec<&[u8]> = vec![
+            b"a", b"b", b"aa", b"ab", b"ba", b"bb", b"x", b"y",
+        ];
+        let vocab_entries: Vec<(u32, Vec<u8>)> = token_data
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i as u32, t.to_vec()))
+            .collect();
+        let vocab = Vocab::new(vocab_entries);
+
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        // 1. Full production analysis
+        let (full_id_map, _full_profile) = analyze_equivalences_with_group_filter(
+            "test_p",
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        // 2. Vocab-only analysis
+        let vocab_only_result = analyze_vocab_equivalence_with_group_filter(
+            "test_p",
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert_same_many_to_one_partition(
+            &full_id_map.vocab_tokens,
+            &vocab_only_result.vocab_map,
+            "vocab-only equivalence matches full analysis",
+        );
+
+        assert_eq!(
+            vocab_only_result.vocab_classes_count,
+            full_id_map.vocab_tokens.num_internal_ids() as usize
+        );
+        assert!(vocab_only_result.total_wall_ms >= 0.0);
+        assert!(vocab_only_result.total_cpu_ms >= 0.0);
+    }
+
+    #[test]
+    fn test_vocab_only_vocab_first_matches_full_and_skips_state_refine() {
+        use crate::Vocab;
+        use glrmask_lexer::parse_regex;
+        use glrmask_lexer::__private::automata::lexer::compile::build_regex;
+
+        // Build a regex with >=260 states
+        let expr1 = parse_regex("a{260}", false);
+        let expr2 = parse_regex("b{260}", false);
+        let regex = build_regex(&[expr1, expr2]);
+        let tokenizer = regex.into_tokenizer(2, None);
+
+        let mut token_entries = Vec::with_capacity(8200);
+        for i in 0..8200 {
+            let mut s = Vec::new();
+            let mut n = i;
+            while n > 0 || s.is_empty() {
+                s.push(if n % 2 == 0 { b'a' } else { b'b' });
+                n /= 2;
+            }
+            token_entries.push((i as u32, s));
+        }
+        let vocab = Vocab::new(token_entries);
+
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        // 1. Full production analysis
+        let (full_id_map, _full_profile) = analyze_equivalences_with_group_filter(
+            "test_vf",
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        // 2. Vocab-only analysis
+        let vocab_only_result = analyze_vocab_equivalence_with_group_filter(
+            "test_vf",
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert!(vocab_only_result.vocab_first, "expected vocab_first to be true");
+        assert_eq!(
+            vocab_only_result.exact_state_refine_ms, 0.0,
+            "expected exact state refinement ms to be 0 in vocab-first vocab-only mode"
+        );
+        assert_eq!(
+            vocab_only_result.exact_state_refine_cpu_ms, 0.0,
+            "expected exact state refinement CPU ms to be 0 in vocab-first vocab-only mode"
+        );
+
+        assert_same_many_to_one_partition(
+            &full_id_map.vocab_tokens,
+            &vocab_only_result.vocab_map,
+            "vocab-first vocab-only equivalence matches full analysis",
+        );
+
+        assert_eq!(
+            vocab_only_result.vocab_classes_count,
+            full_id_map.vocab_tokens.num_internal_ids() as usize
+        );
     }
 }

@@ -8,6 +8,8 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+#[allow(unused_imports)]
+pub use equivalence_analysis::combined::{analyze_vocab_equivalence_with_group_filter, L2pVocabEquivResult};
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;

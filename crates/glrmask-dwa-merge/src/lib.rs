@@ -19,7 +19,8 @@ pub(crate) mod ds {
     pub(crate) use glrmask_weight::__private as weight;
 }
 
-pub(crate) mod merge;
+pub mod merge;
+pub use merge::merge_vocab_token_maps;
 pub(crate) mod types;
 
 /// Implementation details shared by the GLRMask workspace.

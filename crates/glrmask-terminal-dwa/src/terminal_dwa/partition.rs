@@ -26,7 +26,7 @@ use crate::Vocab;
 
 use super::build_branch_active_state_map;
 
-fn structural_branch_tokenizer_selected(
+pub fn structural_branch_tokenizer_selected(
     branch_label: &str,
     vocab_tokens: usize,
     active_terminals: usize,
@@ -110,7 +110,7 @@ fn automatic_structural_branch_tokenizer_selected(
     }
 }
 
-fn branch_active_state_map_selected(
+pub fn branch_active_state_map_selected(
     branch_label: &str,
     vocab_tokens: usize,
     active_terminals: usize,
@@ -165,7 +165,7 @@ fn inactive_component_branch_state_map_selected(branch_label: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn inactive_component_branch_state_map(
+pub fn inactive_component_branch_state_map(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
     inherited: Option<&ManyToOneIdMap>,
@@ -203,7 +203,7 @@ fn inactive_component_branch_state_map(
     Some((map, elapsed_ms))
 }
 
-fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
+pub fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
     let enabled = std::env::var("GLRMASK_MATERIALIZE_BRANCH_ACTIVE_TOKENIZER")
         .map(|value| {
             let value = value.trim();
@@ -224,7 +224,7 @@ fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn split_l2p_vocab_enabled() -> bool {
+pub fn split_l2p_vocab_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("GLRMASK_SPLIT_L2P_VOCAB")

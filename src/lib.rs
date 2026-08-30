@@ -82,6 +82,7 @@ mod error;
 mod public_api;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
+pub mod probe;
 pub(crate) mod programmatic_js;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]

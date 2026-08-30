@@ -36,6 +36,7 @@ glrmask-artifact = { version = "=0.1.1", path = "crates/glrmask-artifact", featu
 glrmask-invariant = { version = "=0.1.1", path = "crates/glrmask-invariant", features = ["internal-api"] }
 glrmask-terminal-dwa = { version = "=0.1.1", path = "crates/glrmask-terminal-dwa", features = ["internal-api"] }
 glrmask-parser-dwa = { version = "=0.1.1", path = "crates/glrmask-parser-dwa", features = ["internal-api"] }
+glrmask-dwa-merge = { version = "=0.1.1", path = "crates/glrmask-dwa-merge" }
 rustc-hash = "1"
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
@@ -54,6 +55,7 @@ regex-syntax = "0.8"
 derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }
 
 rayon = "1"
+libc = "0.2"
 dashmap = "6"
 rand = "0.8"
 thiserror = "1"

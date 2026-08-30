@@ -555,7 +555,7 @@ pub(crate) fn composition_grammar_summary_from_analysis(
     }
 }
 
-fn compute_disallowed_follows_from_ever(
+pub(crate) fn compute_disallowed_follows_from_ever(
     num_terminals: u32,
     ever_allowed: &[Vec<u32>],
 ) -> BTreeMap<u32, BitSet> {
@@ -884,7 +884,7 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     Ok(Some(tokenizer))
 }
 
-fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
+pub(crate) fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
     const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
 
     // Select the virtual lane before any general regex/NFA construction: the
@@ -1490,14 +1490,14 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
     }
 }
 
-struct SyntheticTokenizerPlan {
-    full_expressions: Vec<Expr>,
-    synthesized_expressions: Vec<Expr>,
-    changed_terminal_ids: Vec<u32>,
-    partition_ids: Vec<u32>,
-    residual_isolation_classes: Vec<Option<u32>>,
-    changed_terminal_count: usize,
-    repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
+pub(crate) struct SyntheticTokenizerPlan {
+    pub(crate) full_expressions: Vec<Expr>,
+    pub(crate) synthesized_expressions: Vec<Expr>,
+    pub(crate) changed_terminal_ids: Vec<u32>,
+    pub(crate) partition_ids: Vec<u32>,
+    pub(crate) residual_isolation_classes: Vec<Option<u32>>,
+    pub(crate) changed_terminal_count: usize,
+    pub(crate) repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
 }
 
 fn synthetic_state_reduction_is_profitable(full_states: usize, synthesized_states: usize) -> bool {
@@ -1547,7 +1547,7 @@ fn structural_state_reduction_is_profitable(
     small_compile_domain || substantial_large_reduction || exceptional_structural_reduction
 }
 
-fn plan_synthetic_tokenizer(
+pub(crate) fn plan_synthetic_tokenizer(
     grammar: &GrammarDef,
     vocab: &Vocab,
 ) -> Option<SyntheticTokenizerPlan> {
@@ -2016,6 +2016,62 @@ fn prepare_structural_tokenizer_pair(
             full_to_synthesized,
         },
     ))
+}
+
+/// Experimental measurement helper: construct exactly the tokenizer coordinate
+/// used by the default static compiler up to terminal-DWA construction, without
+/// building any terminal automata. Returns the compile tokenizer plus the
+/// optional certified initial state quotient used when the diagnostic
+/// full-coordinate route is selected.
+pub(crate) fn build_static_compile_tokenizer_for_vocab_equiv_probe(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+    plan: Option<&SyntheticTokenizerPlan>,
+) -> (Tokenizer, Option<ManyToOneIdMap>) {
+    let select_pair = |plan: &SyntheticTokenizerPlan| {
+        prepare_structural_tokenizer_pair(grammar, plan, vocab, None, true)
+            .and_then(|(synthesized, full, certified)| {
+                structural_state_reduction_is_profitable(
+                    full.num_states(),
+                    synthesized.num_states() as usize,
+                )
+                .then_some((synthesized, full, certified))
+            })
+    };
+
+    if let Some(plan) = plan {
+        if let Some((synthesized, deferred_full, certified)) = select_pair(plan) {
+            let direct_token_quotient_compile =
+                env_flag_enabled_by_default("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE");
+            if direct_token_quotient_compile {
+                return (synthesized, None);
+            }
+
+            let synthesized_states = synthesized.num_states() as usize;
+            let mut quotient_id_by_synthesized = vec![u32::MAX; synthesized_states];
+            let mut quotient_states = 0u32;
+            let mut full_to_quotient = certified.full_to_synthesized;
+            for state in &mut full_to_quotient {
+                let slot = quotient_id_by_synthesized
+                    .get_mut(*state as usize)
+                    .expect("certified synthesized state is in range");
+                if *slot == u32::MAX {
+                    *slot = quotient_states;
+                    quotient_states += 1;
+                }
+                *state = *slot;
+            }
+            let initial_state_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                full_to_quotient,
+                quotient_states,
+            );
+            return (deferred_full.finish(), Some(initial_state_map));
+        }
+    }
+
+    let mut tokenizer = build_ordinary_compile_tokenizer(grammar, None);
+    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    (tokenizer, None)
 }
 
 fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {

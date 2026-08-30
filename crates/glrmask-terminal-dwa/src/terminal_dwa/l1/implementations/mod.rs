@@ -15,6 +15,7 @@ mod dense;
 mod frontier;
 mod projected;
 pub(super) use projected::prepare_finite_vocab_projection;
+pub use projected::{build_projected_vocab_equivalence, L1VocabEquivResult};
 mod quotient;
 pub mod scalar;
 mod support;

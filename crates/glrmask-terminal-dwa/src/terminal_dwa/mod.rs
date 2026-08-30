@@ -20,7 +20,11 @@ pub mod l2p;
 pub mod synthetic_state_map;
 pub use glrmask_dwa_merge::__private::merge;
 pub mod partition;
+pub use partition::split_l2p_vocab_enabled;
 pub mod types;
+pub mod cpu_timer;
+#[allow(unused_imports)]
+pub use cpu_timer::CpuTimer;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -105,10 +109,10 @@ pub struct PartitionLocalSynthesisPlan {
     pub global_max_token_len: usize,
 }
 
-struct PartitionLocalTokenizer {
-    tokenizer: Tokenizer,
-    global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap,
-    build_ms: f64,
+pub struct PartitionLocalTokenizer {
+    pub tokenizer: Tokenizer,
+    pub global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap,
+    pub build_ms: f64,
 }
 
 struct PreparedPartitionLocalTokenizer {
@@ -258,7 +262,7 @@ fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool 
     )
 }
 
-fn use_global_single_terminal_l1(
+pub fn use_global_single_terminal_l1(
     grammar: &AnalyzedGrammar,
     ignore_terminal: Option<TerminalID>,
 ) -> bool {
@@ -354,7 +358,7 @@ fn fast_partition_local_synthesis_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn partition_local_synthesis_selected(partition_label: &str) -> bool {
+pub fn partition_local_synthesis_selected(partition_label: &str) -> bool {
     let Ok(filter) = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_FILTER") else {
         return true;
     };
@@ -583,7 +587,7 @@ fn short_horizon_partition_local_synthesis_estimate_is_profitable(
         >= PARTITION_LOCAL_SHORT_HORIZON_MIN_ESTIMATED_SAVING
 }
 
-fn build_partition_local_tokenizer(
+pub fn build_partition_local_tokenizer(
     global_tokenizer: &Tokenizer,
     vocab: &Vocab,
     plan: &PartitionLocalSynthesisPlan,
@@ -1112,7 +1116,7 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
         .unwrap_or(12)
 }
 
-fn automatic_p2_overflow_threshold(tokenizer_states: u32) -> Option<usize> {
+pub fn automatic_p2_overflow_threshold(tokenizer_states: u32) -> Option<usize> {
     let min_states = std::env::var("GLRMASK_P2_OVERFLOW_MIN_TOKENIZER_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
@@ -1214,7 +1218,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
         .into()
 }
 
-fn build_char_type_sub_vocabs(
+pub fn build_char_type_sub_vocabs(
     vocab: &Vocab,
     automatic_bounded_synthesis_overflow: bool,
     automatic_p2_overflow_threshold: Option<usize>,

@@ -3468,6 +3468,57 @@ fn remap_weight_with_token_remap(
     finalize_weight_map(map)
 }
 
+/// Merge vocabulary token maps across partitions/branches without building any automata.
+pub fn merge_vocab_token_maps(
+    inputs: &[&ManyToOneIdMap],
+    max_token_id: u32,
+) -> ManyToOneIdMap {
+    if inputs.is_empty() {
+        return ManyToOneIdMap::empty();
+    }
+    if inputs.len() == 1 {
+        return (*inputs[0]).clone();
+    }
+    let dummy_id_maps: Vec<InternalIdMap> = inputs
+        .iter()
+        .map(|m| InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::empty(),
+            vocab_tokens: (*m).clone(),
+            deferred_vocab_singleton_original_ids: None,
+        })
+        .collect();
+    let refs: Vec<&InternalIdMap> = dummy_id_maps.iter().collect();
+    let use_two_source_fast_path = std::env::var("GLRMASK_TWO_SOURCE_TOKEN_MERGE")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if use_two_source_fast_path {
+        build_unified_global_token_id_map_at_most_two(&refs, max_token_id)
+            .map(|(vocab_tokens, _)| vocab_tokens)
+            .unwrap_or_else(|| {
+                build_unified_global_token_id_map_sparse_generic(&refs, max_token_id).0
+            })
+    } else {
+        build_unified_global_token_id_map_sparse_generic(&refs, max_token_id).0
+    }
+}
+
+/// Merge vocabulary token maps assuming disjoint token domains across inputs.
+pub fn merge_vocab_token_maps_disjoint(
+    inputs: &[&InternalIdMap],
+    max_token_id: u32,
+) -> ManyToOneIdMap {
+    if inputs.is_empty() {
+        return ManyToOneIdMap::empty();
+    }
+    if inputs.len() == 1 {
+        return inputs[0].vocab_tokens.clone();
+    }
+    build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3967,6 +4018,24 @@ mod tests {
                 }
             }
             assert_eq!(actual, generic.eval_word(&word), "word={word:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_vocab_token_maps_common_refinement() {
+        let map_a = id_map_with_vocab_partition(vec![0, 1, 0, 1], 4);
+        let map_b = id_map_with_vocab_partition(vec![0, 0, 1, 1], 4);
+        let merged = merge_vocab_token_maps(&[&map_a.vocab_tokens, &map_b.vocab_tokens], 3);
+        // (0,0) -> 0, (1,0) -> 1, (0,1) -> 2, (1,1) -> 3: all 4 tokens have distinct tuples
+        assert_eq!(merged.num_internal_ids(), 4);
+        for t1 in 0..4 {
+            for t2 in 0..4 {
+                if t1 == t2 {
+                    assert_eq!(merged.original_to_internal[t1], merged.original_to_internal[t2]);
+                } else {
+                    assert_ne!(merged.original_to_internal[t1], merged.original_to_internal[t2]);
+                }
+            }
         }
     }
 }

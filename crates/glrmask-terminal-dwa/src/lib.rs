@@ -49,7 +49,7 @@ pub(crate) mod compiler {
     }
 }
 
-mod terminal_dwa;
+pub mod terminal_dwa;
 
 /// Implementation details shared by the GLRMask workspace.
 ///

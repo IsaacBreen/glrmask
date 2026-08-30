@@ -17,7 +17,7 @@ pub(super) struct Finished {
     pub token_classes: usize,
 }
 
-fn direct_vocab_id_map(
+pub(crate) fn direct_vocab_id_map(
     max_token_id: u32,
     aliases: &[Vec<u32>],
     token_class: &[u32],
