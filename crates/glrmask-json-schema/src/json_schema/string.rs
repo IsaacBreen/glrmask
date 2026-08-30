@@ -226,7 +226,7 @@ impl<'a> Lowerer<'a> {
     pub fn lower_isolated_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
-    ) -> ImportResult<Option<(GrammarExpr, Option<usize>)>> {
+    ) -> ImportResult<Option<(GrammarExpr, Option<usize>, bool)>> {
         let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
             return Ok(None);
         };
@@ -265,9 +265,13 @@ impl<'a> Lowerer<'a> {
         let repeat_complexity = string.pattern.as_deref().and_then(|pattern| {
             pattern_array_repeat_complexity_score(pattern, string.max_length)
         });
+        let prefer_grammar_level_repetition = string.pattern.is_none()
+            && string.max_length.is_some()
+            && recognized_string_format_body_regex_for_lowering(string.format.as_deref()).is_some();
         Ok(Some((
             self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
             repeat_complexity,
+            prefer_grammar_level_repetition,
         )))
     }
 

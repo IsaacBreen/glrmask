@@ -2948,6 +2948,37 @@ fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
 }
 
 #[test]
+fn unbounded_email_array_with_max_length_reuses_one_item_terminal() {
+    let schema = json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 1024
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("unbounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["a@example.com", "b@example.com"]"#,
+    ));
+}
+
+#[test]
 fn costly_bounded_pattern_string_arrays_reuse_one_item_terminal() {
     let schema = json!({
         "type": "array",

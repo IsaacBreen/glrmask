@@ -20,11 +20,14 @@ impl<'a> Lowerer<'a> {
             let isolated = self.with_terminal_partition_class(
                 JsonTerminalPartitionClass::Pattern,
                 |lowerer| -> ImportResult<Option<GrammarExpr>> {
-                    let Some((item, repeat_complexity)) =
+                    let Some((item, repeat_complexity, prefer_grammar_level_repetition)) =
                         lowerer.lower_isolated_array_string_item_expr(&schema.items)?
                     else {
                         return Ok(None);
                     };
+                    if prefer_grammar_level_repetition {
+                        return Ok(None);
+                    }
                     if lowerer.should_terminalize_whole_isolated_array(
                         repeat_complexity,
                         schema.max_items,
