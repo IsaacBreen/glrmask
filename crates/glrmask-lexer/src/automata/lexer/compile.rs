@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -1280,60 +1280,124 @@ fn count_nested_group_ops(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
     }
 }
 
-fn count_all_subexpressions(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
-    *counts.entry(expr.clone()).or_default() += 1;
-    match expr {
-        Expr::Exclude { expr, exclude } => {
-            count_all_subexpressions(expr, counts);
-            count_all_subexpressions(exclude, counts);
-        }
-        Expr::Intersect { expr, intersect } => {
-            count_all_subexpressions(expr, counts);
-            count_all_subexpressions(intersect, counts);
-        }
-        Expr::Seq(parts) | Expr::Choice(parts) => {
-            for part in parts {
-                count_all_subexpressions(part, counts);
-            }
-        }
-        Expr::Repeat { expr, .. } => {
-            count_all_subexpressions(expr, counts);
-        }
-        Expr::Shared(expr) => {
-            count_all_subexpressions(expr, counts);
-        }
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
-    }
+#[derive(Clone, Copy)]
+struct SubexpressionScanInfo {
+    fingerprint: u64,
+    size: usize,
 }
 
-fn collect_maximal_repeated_subexpressions(
+struct SubexpressionCount<'a> {
+    expr: &'a Expr,
+    count: usize,
+    size: usize,
+}
+
+fn scan_all_subexpressions<'a>(
+    expr: &'a Expr,
+    infos: &mut Vec<SubexpressionScanInfo>,
+    counts_by_fingerprint: &mut FxHashMap<u64, Vec<SubexpressionCount<'a>>>,
+    min_size: usize,
+) -> SubexpressionScanInfo {
+    let info_index = infos.len();
+    infos.push(SubexpressionScanInfo { fingerprint: 0, size: 0 });
+    let mut hasher = FxHasher::default();
+    let size = match expr {
+        Expr::U8Seq(bytes) => { 0u8.hash(&mut hasher); bytes.hash(&mut hasher); 1 }
+        Expr::U8Class(class) => { 1u8.hash(&mut hasher); class.hash(&mut hasher); 1 }
+        Expr::Dfa(dfa) => {
+            2u8.hash(&mut hasher);
+            (Arc::as_ptr(dfa) as usize).hash(&mut hasher);
+            1
+        }
+        Expr::Intersect { expr, intersect } => {
+            3u8.hash(&mut hasher);
+            let left = scan_all_subexpressions(expr, infos, counts_by_fingerprint, min_size);
+            let right = scan_all_subexpressions(intersect, infos, counts_by_fingerprint, min_size);
+            left.fingerprint.hash(&mut hasher); right.fingerprint.hash(&mut hasher);
+            1 + left.size + right.size
+        }
+        Expr::Seq(parts) => {
+            4u8.hash(&mut hasher); parts.len().hash(&mut hasher);
+            let mut size = 1usize;
+            for part in parts {
+                let child = scan_all_subexpressions(part, infos, counts_by_fingerprint, min_size);
+                child.fingerprint.hash(&mut hasher); size = size.saturating_add(child.size);
+            }
+            size
+        }
+        Expr::Choice(parts) => {
+            5u8.hash(&mut hasher); parts.len().hash(&mut hasher);
+            let mut size = 1usize;
+            for part in parts {
+                let child = scan_all_subexpressions(part, infos, counts_by_fingerprint, min_size);
+                child.fingerprint.hash(&mut hasher); size = size.saturating_add(child.size);
+            }
+            size
+        }
+        Expr::Exclude { expr, exclude } => {
+            6u8.hash(&mut hasher);
+            let left = scan_all_subexpressions(expr, infos, counts_by_fingerprint, min_size);
+            let right = scan_all_subexpressions(exclude, infos, counts_by_fingerprint, min_size);
+            left.fingerprint.hash(&mut hasher); right.fingerprint.hash(&mut hasher);
+            1 + left.size + right.size
+        }
+        Expr::Repeat { expr, min, max } => {
+            7u8.hash(&mut hasher); min.hash(&mut hasher); max.hash(&mut hasher);
+            let child = scan_all_subexpressions(expr, infos, counts_by_fingerprint, min_size);
+            child.fingerprint.hash(&mut hasher); 1 + child.size
+        }
+        Expr::Shared(inner) => {
+            8u8.hash(&mut hasher);
+            let child = scan_all_subexpressions(inner, infos, counts_by_fingerprint, min_size);
+            child.fingerprint.hash(&mut hasher); 1 + child.size
+        }
+        Expr::Epsilon => { 9u8.hash(&mut hasher); 1 }
+    };
+    let info = SubexpressionScanInfo { fingerprint: hasher.finish(), size };
+    infos[info_index] = info;
+    if size >= min_size {
+        let bucket = counts_by_fingerprint.entry(info.fingerprint).or_default();
+        if let Some(existing) = bucket.iter_mut().find(|entry| entry.expr == expr) {
+            existing.count += 1;
+        } else {
+            bucket.push(SubexpressionCount { expr, count: 1, size });
+        }
+    }
+    info
+}
+
+fn collect_maximal_repeated_subexpressions_fast(
     expr: &Expr,
+    infos: &[SubexpressionScanInfo],
+    cursor: &mut usize,
+    candidate_fingerprints: &FxHashSet<u64>,
     candidates: &FxHashSet<Expr>,
     selected: &mut FxHashSet<Expr>,
 ) {
-    if candidates.contains(expr) {
+    let info = infos[*cursor];
+    *cursor += 1;
+    if candidate_fingerprints.contains(&info.fingerprint) && candidates.contains(expr) {
         selected.insert(expr.clone());
+        *cursor += info.size.saturating_sub(1);
         return;
     }
     match expr {
         Expr::Exclude { expr, exclude } => {
-            collect_maximal_repeated_subexpressions(expr, candidates, selected);
-            collect_maximal_repeated_subexpressions(exclude, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(expr, infos, cursor, candidate_fingerprints, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(exclude, infos, cursor, candidate_fingerprints, candidates, selected);
         }
         Expr::Intersect { expr, intersect } => {
-            collect_maximal_repeated_subexpressions(expr, candidates, selected);
-            collect_maximal_repeated_subexpressions(intersect, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(expr, infos, cursor, candidate_fingerprints, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(intersect, infos, cursor, candidate_fingerprints, candidates, selected);
         }
-        Expr::Seq(parts) | Expr::Choice(parts) => {
-            for part in parts {
-                collect_maximal_repeated_subexpressions(part, candidates, selected);
-            }
-        }
+        Expr::Seq(parts) | Expr::Choice(parts) => for part in parts {
+            collect_maximal_repeated_subexpressions_fast(part, infos, cursor, candidate_fingerprints, candidates, selected);
+        },
         Expr::Repeat { expr, .. } => {
-            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(expr, infos, cursor, candidate_fingerprints, candidates, selected);
         }
         Expr::Shared(expr) => {
-            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+            collect_maximal_repeated_subexpressions_fast(expr, infos, cursor, candidate_fingerprints, candidates, selected);
         }
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
     }
@@ -1393,26 +1457,40 @@ fn materialize_repeated_subexpression_dfas_with_limits(
     debug_assert!(min_size > 1);
     debug_assert!(min_occurrences > 1);
     let started_at = Instant::now();
-    let mut counts = FxHashMap::<Expr, usize>::default();
+    let mut infos = Vec::<SubexpressionScanInfo>::new();
+    let mut counts_by_fingerprint = FxHashMap::<u64, Vec<SubexpressionCount<'_>>>::default();
     for expr in exprs {
-        count_all_subexpressions(expr, &mut counts);
+        scan_all_subexpressions(expr, &mut infos, &mut counts_by_fingerprint, min_size);
     }
-    let occurrences = counts.clone();
-    let candidates = counts
-        .into_iter()
-        .filter_map(|(expr, count)| {
-            (count >= min_occurrences
-                && expr_structural_size(&expr) >= min_size
-                && !expr_contains_group_op(&expr)
-                && !expression_contains_large_bounded_repeat(&expr)
-                && !matches!(expr, Expr::Dfa(_)))
-            .then_some(expr)
-        })
-        .collect::<FxHashSet<_>>();
+    let mut occurrences = FxHashMap::<Expr, usize>::default();
+    let mut candidate_fingerprints = FxHashSet::<u64>::default();
+    for (&fingerprint, bucket) in &counts_by_fingerprint {
+        for entry in bucket {
+            if entry.count >= min_occurrences
+                && entry.size >= min_size
+                && !expr_contains_group_op(entry.expr)
+                && !expression_contains_large_bounded_repeat(entry.expr)
+                && !matches!(entry.expr, Expr::Dfa(_))
+            {
+                candidate_fingerprints.insert(fingerprint);
+                occurrences.insert(entry.expr.clone(), entry.count);
+            }
+        }
+    }
+    let candidates = occurrences.keys().cloned().collect::<FxHashSet<_>>();
     let mut selected = FxHashSet::default();
+    let mut cursor = 0usize;
     for expr in exprs {
-        collect_maximal_repeated_subexpressions(expr, &candidates, &mut selected);
+        collect_maximal_repeated_subexpressions_fast(
+            expr,
+            &infos,
+            &mut cursor,
+            &candidate_fingerprints,
+            &candidates,
+            &mut selected,
+        );
     }
+    debug_assert_eq!(cursor, infos.len());
     if selected.is_empty() {
         return None;
     }
@@ -1479,12 +1557,12 @@ fn materialize_repeated_subexpression_dfas(exprs: &[Expr]) -> Option<Vec<Expr>> 
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 1)
-        .unwrap_or(128);
+        .unwrap_or(80);
     let min_occurrences = std::env::var("GLRMASK_SHARED_SUBEXPR_MIN_OCCURRENCES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 1)
-        .unwrap_or(8);
+        .unwrap_or(12);
     if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
         eprintln!(
             "[glrmask/profile][tokenizer] shared_subexpr_scan forced={} total_size={} min_total_size={} min_size={} min_occurrences={}",
@@ -1722,43 +1800,102 @@ fn build_exclusion_compile_plan_with_labels_and_cache(
         );
     }
 
-    for (index, expr) in exprs.iter().enumerate() {
-        let (base, excluded, intersections) = split_top_level_group_ops(expr);
-        let base = materialize_nested_group_ops(base, nested_group_op_cache);
-        let excluded = excluded
-            .into_iter()
-            .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
+    let parallel_materialize = visible_groups >= 64
+        && nested_group_op_cache.shared_duplicates.is_none()
+        && std::env::var_os("GLRMASK_DISABLE_PARALLEL_NESTED_GROUP_PLAN").is_none();
+    if parallel_materialize {
+        let materialized = exprs
+            .par_iter()
+            .map(|expr| {
+                let mut local_cache = NestedGroupOpCache::default();
+                let (base, excluded, intersections) = split_top_level_group_ops(expr);
+                let base = materialize_nested_group_ops(base, &mut local_cache);
+                let excluded = excluded
+                    .into_iter()
+                    .map(|expr| materialize_nested_group_ops(expr, &mut local_cache))
+                    .collect::<Vec<_>>();
+                let intersections = intersections
+                    .into_iter()
+                    .map(|expr| materialize_nested_group_ops(expr, &mut local_cache))
+                    .collect::<Vec<_>>();
+                (base, excluded, intersections, local_cache)
+            })
             .collect::<Vec<_>>();
-        let intersections = intersections
-            .into_iter()
-            .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
-            .collect::<Vec<_>>();
-        assert!(
-            !expr_contains_group_op(&base),
-            "Expr::Exclude and Expr::Intersect are currently only supported at the top level of a terminal expression"
-        );
-        for excluded_expr in &excluded {
+        for (index, (base, excluded, intersections, local_cache)) in
+            materialized.into_iter().enumerate()
+        {
+            nested_group_op_cache.cache_hits += local_cache.cache_hits;
+            nested_group_op_cache.cache_misses += local_cache.cache_misses;
+            nested_group_op_cache.compiled_ms += local_cache.compiled_ms;
+            nested_group_op_cache.max_compile_ms = nested_group_op_cache
+                .max_compile_ms
+                .max(local_cache.max_compile_ms);
             assert!(
-                !expr_contains_group_op(excluded_expr),
-                "nested Expr::Exclude/Expr::Intersect inside an exclusion branch is not supported"
+                !expr_contains_group_op(&base),
+                "Expr::Exclude and Expr::Intersect are currently only supported at the top level of a terminal expression"
             );
+            for excluded_expr in &excluded {
+                assert!(
+                    !expr_contains_group_op(excluded_expr),
+                    "nested Expr::Exclude/Expr::Intersect inside an exclusion branch is not supported"
+                );
+            }
+            for intersection_expr in &intersections {
+                assert!(
+                    !expr_contains_group_op(intersection_expr),
+                    "nested Expr::Exclude/Expr::Intersect inside an intersection branch is not supported"
+                );
+            }
+            compiled_exprs.push(base);
+            if let (Some(labels), Some(profile_labels)) = (visible_labels, profile_labels.as_mut()) {
+                profile_labels.push(ProductComponentProfileLabel {
+                    name: labels[index].clone(),
+                    origin: "visible",
+                    shared: expr_is_shared(&exprs[index]),
+                });
+            }
+            deferred_exclusions.push(excluded);
+            deferred_intersections.push(intersections);
         }
-        for intersection_expr in &intersections {
+    } else {
+        for (index, expr) in exprs.iter().enumerate() {
+            let (base, excluded, intersections) = split_top_level_group_ops(expr);
+            let base = materialize_nested_group_ops(base, nested_group_op_cache);
+            let excluded = excluded
+                .into_iter()
+                .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
+                .collect::<Vec<_>>();
+            let intersections = intersections
+                .into_iter()
+                .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
+                .collect::<Vec<_>>();
             assert!(
-                !expr_contains_group_op(intersection_expr),
-                "nested Expr::Exclude/Expr::Intersect inside an intersection branch is not supported"
+                !expr_contains_group_op(&base),
+                "Expr::Exclude and Expr::Intersect are currently only supported at the top level of a terminal expression"
             );
+            for excluded_expr in &excluded {
+                assert!(
+                    !expr_contains_group_op(excluded_expr),
+                    "nested Expr::Exclude/Expr::Intersect inside an exclusion branch is not supported"
+                );
+            }
+            for intersection_expr in &intersections {
+                assert!(
+                    !expr_contains_group_op(intersection_expr),
+                    "nested Expr::Exclude/Expr::Intersect inside an intersection branch is not supported"
+                );
+            }
+            compiled_exprs.push(base);
+            if let (Some(labels), Some(profile_labels)) = (visible_labels, profile_labels.as_mut()) {
+                profile_labels.push(ProductComponentProfileLabel {
+                    name: labels[index].clone(),
+                    origin: "visible",
+                    shared: expr_is_shared(expr),
+                });
+            }
+            deferred_exclusions.push(excluded);
+            deferred_intersections.push(intersections);
         }
-        compiled_exprs.push(base);
-        if let (Some(labels), Some(profile_labels)) = (visible_labels, profile_labels.as_mut()) {
-            profile_labels.push(ProductComponentProfileLabel {
-                name: labels[index].clone(),
-                origin: "visible",
-                shared: expr_is_shared(expr),
-            });
-        }
-        deferred_exclusions.push(excluded);
-        deferred_intersections.push(intersections);
     }
 
     let mut exclusions = BTreeMap::<u32, BTreeSet<u32>>::new();
