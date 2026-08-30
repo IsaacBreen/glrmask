@@ -1165,16 +1165,39 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         + profile_bookkeeping_ms;
     let timing_residual_ms = (total_ms - accounted_wall_ms).max(0.0);
 
+    // Under GLRMASK_DISABLE_MACRO_PARALLELISM these sibling branches are
+    // intentionally measured serially, but production can run them in
+    // parallel.  Report the recursively inferred critical path so a serial
+    // profiling run does not tempt callers to treat the serial sum as the
+    // abundant-core latency.
+    let l2p_parallel_overhead_ms =
+        (l2p_ms - l2p_boundary_ms - l2p_single_ms).max(0.0);
+    let l2p_parallel_critical_path_ms = l2p_parallel_overhead_ms
+        + l2p_boundary_ms.max(l2p_single_ms);
+    let partition_parallel_overhead_ms = (total_ms - l1_ms - l2p_ms).max(0.0);
+    let parallel_critical_path_ms = partition_parallel_overhead_ms
+        + l1_ms.max(l2p_parallel_critical_path_ms);
+    let dominant_branch = if l1_ms >= l2p_parallel_critical_path_ms {
+        "l1"
+    } else if l2p_boundary_ms >= l2p_single_ms {
+        "l2p_boundary"
+    } else {
+        "l2p_nested_l1"
+    };
+
     if compile_profile_enabled()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_TOP").is_some()
     {
         eprintln!(
-            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} l1_branch_wall_ms={:.3} l2p_branch_wall_ms={:.3} l2p_boundary_wall_ms={:.3} l2p_single_l1_wall_ms={:.3} post_branch_ms={:.3} profile_bookkeeping_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} dominant_branch={} parallel_critical_path_ms={:.3} l2p_parallel_critical_path_ms={:.3} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} l1_branch_wall_ms={:.3} l2p_branch_wall_ms={:.3} l2p_boundary_wall_ms={:.3} l2p_single_l1_wall_ms={:.3} post_branch_ms={:.3} profile_bookkeeping_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
             partition_label,
             vocab.entries_map().len(),
             num_zero,
             num_one,
             num_two_plus,
+            dominant_branch,
+            parallel_critical_path_ms,
+            l2p_parallel_critical_path_ms,
             pre_classify_setup_ms,
             classify_ms,
             routing_ms,
