@@ -8595,21 +8595,44 @@ impl Tokenizer {
         &self,
         horizon: usize,
     ) -> Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)> {
+        self.virtual_residuals_mask_tokenizer_with_vocab(horizon, None)
+    }
+
+    pub fn virtual_residuals_mask_tokenizer_with_vocab(
+        &self,
+        horizon: usize,
+        vocab: Option<&crate::Vocab>,
+    ) -> Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)> {
         if self.virtual_residuals.is_empty() {
             return None;
         }
         let mut mask = self.clone();
-        // The mask coordinate is finite and self-contained. Exact virtual
-        // sidecars remain authoritative only on the source tokenizer.
         mask.virtual_unit_repeat = None;
         mask.virtual_repeat_intersections.clear();
         mask.virtual_residuals.clear();
         let start = mask.start_state();
-        let mut projections = Vec::with_capacity(self.virtual_residuals.len());
-        for runtime in &self.virtual_residuals {
+        let repeat_horizons = super::compile::VocabularyRepeatHorizonCache::new();
+
+        // Residual components are independent symbolic languages. Build their
+        // finite one-token observation DFAs concurrently; append/rebase them
+        // deterministically afterward so state numbering remains stable.
+        let built = self
+            .virtual_residuals
+            .par_iter()
+            .map(|runtime| {
+                let runtime_horizon = vocab
+                    .and_then(|vocab| runtime.vocabulary_repeat_boundary_horizon(vocab, &repeat_horizons))
+                    .map(|value| value.saturating_add(1))
+                    .unwrap_or(horizon);
+                let (component, local_root, projection) =
+                    runtime.build_finite_mask_projection(runtime_horizon, 0)?;
+                Some((Arc::clone(runtime), component, local_root, projection))
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut projections = Vec::with_capacity(built.len());
+        for (runtime, component, local_root, mut projection) in built {
             let offset = u32::try_from(mask.dfa.num_states()).ok()?;
-            let (component, local_root, projection) =
-                runtime.build_finite_mask_projection(horizon, offset)?;
             let proxy_root = runtime.root_state();
             let root_eps = &mut mask.dfa.states_mut()[start as usize].epsilon_transitions;
             let before = root_eps.len();
@@ -8623,6 +8646,7 @@ impl Tokenizer {
                 return None;
             }
             mask.dfa.add_epsilon_transition(start, offset.checked_add(local_root)?);
+            projection.set_state_offset(offset);
             projections.push(projection);
         }
         mask.dfa.recompute_possible_futures();
@@ -12594,6 +12618,72 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn virtual_residual_mask_projection_accepts_full_bound_stencil() {
+        const HORIZON: usize = 4;
+        const MAX: usize = 3;
+        let body = Expr::U8Class(U8Set::from_bytes(b"ab"));
+        let envelope = Expr::Seq(vec![
+            bytes(b"\""),
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 0,
+                max: Some(MAX),
+            },
+            bytes(b"\""),
+        ]);
+        let pattern = Expr::Seq(vec![
+            bytes(b"\""),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: None,
+            },
+            bytes(b"\""),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(envelope),
+            intersect: Box::new(pattern),
+        };
+        let mut exact = Tokenizer::from_parts(DFA::new(1), 1, None);
+        exact
+            .install_virtual_residual_components_preserving_oracle_coordinates(vec![(expression, 0)])
+            .expect("bounded-code residual runtime must install");
+        let (mask, projections) = exact
+            .virtual_residuals_mask_tokenizer(HORIZON)
+            .expect("a cheap full-bound finite projection must remain available");
+        let projection = &projections[0];
+        let root = exact
+            .epsilon_closure_states(&[exact.start_state()])
+            .into_iter()
+            .find(|&state| state != exact.start_state())
+            .unwrap();
+
+        let mask_root = projection.project(root).unwrap();
+        enumerate_bytes(b"ab\"x", HORIZON, |suffix| {
+            let mut full = root;
+            let mut finite = mask_root;
+            for &byte in suffix {
+                let full_next = exact.get_transition(full, byte);
+                let finite_next = mask.get_transition(finite, byte);
+                assert_eq!(full_next == u32::MAX, finite_next == u32::MAX);
+                if full_next == u32::MAX {
+                    break;
+                }
+                assert_eq!(
+                    exact.matched_terminal_bitset(full_next),
+                    mask.matched_terminal_bitset(finite_next),
+                );
+                assert_eq!(
+                    exact.possible_future_terminals(full_next),
+                    mask.possible_future_terminals(finite_next),
+                );
+                full = full_next;
+                finite = finite_next;
+            }
+        });
     }
 
     #[test]
