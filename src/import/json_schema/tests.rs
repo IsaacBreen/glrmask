@@ -1292,6 +1292,20 @@ fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_pa
 }
 
 #[test]
+fn json_schema_value_pattern_literal_does_not_splice_partial_unicode_escape() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "string",
+        "pattern": "^ab$"
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#""ab""#));
+    assert!(schema_accepts_bytes(&schema, br#""\u0061b""#));
+    assert!(!schema_accepts_bytes(&schema, br#""\u006b""#));
+}
+
+#[test]
 fn json_schema_pattern_property_literal_accepts_complete_unicode_escape_spelling() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
@@ -4041,9 +4055,14 @@ fn shorter_word_pattern_preserves_max_length_above_product_budget() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
+    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
         panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
     };
+    assert!(
+        !matches!(expr.as_ref(), GrammarExpr::RawRegex(_)),
+        "high-cost fully anchored pattern should retain structural form inside the single terminal: {:?}",
+        expr
+    );
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };

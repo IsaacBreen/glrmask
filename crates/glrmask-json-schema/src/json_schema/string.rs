@@ -580,6 +580,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut length_clamped_pattern = None;
+        let mut structural_bounded_pattern = None;
         if let (Some(pattern), Some(max_length)) =
             (schema.pattern.as_deref(), schema.max_length)
         {
@@ -612,6 +613,17 @@ impl<'a> Lowerer<'a> {
                                     "pattern/maxLength requires an exact tokenizer product above the compiler structural budget (estimated complexity {score}, limit {hard_limit}); the length constraint was not dropped"
                                 )));
                             }
+                            if score > self.config.pattern_max_length_complexity_limit {
+                                let hir = Parser::new().parse(&preprocessed).map_err(|error| {
+                                    SchemaImportError::new(format!(
+                                        "invalid string pattern {preprocessed:?}: {error}"
+                                    ))
+                                })?;
+                                let (body, anchored_start, anchored_end) = strip_outer_anchors(hir);
+                                if anchored_start && anchored_end {
+                                    structural_bounded_pattern = Some(body);
+                                }
+                            }
                         }
                     }
                 }
@@ -623,7 +635,13 @@ impl<'a> Lowerer<'a> {
             // Preserve the exact length envelope alongside the pattern. Static
             // complexity estimates may choose a different construction strategy,
             // but they must never delete a finite schema bound.
-            if split_pattern {
+            if let Some(body) = structural_bounded_pattern.as_ref() {
+                seq(vec![
+                    lit("\""),
+                    self.lower_large_ordinary_pattern_hir_expr(body, true)?,
+                    lit("\""),
+                ])
+            } else if split_pattern {
                 if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
                     pattern_expr
                 } else {
@@ -4288,13 +4306,12 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
     {
         return canonical;
     }
-    let escaped = if mode == JsonStringCompatMode::JsonSchema
-        && matches!(context, JsonStringContext::KeyStrict)
-    {
-        // Complete pattern-property keys accept complete character spellings.
-        // A full \uXXXX branch still has live intermediate DFA states after
-        // `\u`, `\u0`, etc., so partial tokens remain maskable without
-        // making those prefixes accepting alternatives between key characters.
+    let escaped = if mode == JsonStringCompatMode::JsonSchema {
+        // Complete JSON-Schema pattern matches consume complete decoded-character
+        // spellings. A full \uXXXX branch still has live intermediate DFA states
+        // after `\u`, `\u0`, etc., so partial tokens remain maskable without
+        // making those prefixes accepting alternatives that can splice into the
+        // following decoded pattern character.
         json_unicode_escape_for_char_regex(ch)
     } else {
         json_unicode_escape_prefix_regex_for_char(ch)
