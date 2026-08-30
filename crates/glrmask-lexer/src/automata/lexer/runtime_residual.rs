@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use rayon::prelude::*;
 
 use super::ast::Expr;
 use super::compile::{compile_terminal_expr_dfa, expression_contains_large_bounded_repeat, VocabularyRepeatHorizonCache};
@@ -1731,39 +1732,53 @@ impl BoundedCodeIntersectionOracle {
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, crate::ds::u8set::U8Set::all());
         let mut source = 0usize;
+        const EXPANSION_BATCH: usize = 1_024;
         while source < coordinates.len() {
             while dfa.num_states() < coordinates.len() {
                 dfa.add_state();
             }
-            let coordinate = coordinates[source];
-            let source_state = source as u32;
-            let mut finalizers = BitSet::new(1);
-            if matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
-                && !mask_oracle.pattern.finalizers(coordinate.pattern_state).is_empty()
-            {
-                finalizers.set(0);
-            }
-            dfa.overwrite_state_metadata(source_state, finalizers, BitSet::new(1));
-            for byte in 0u16..=255 {
-                let byte = byte as u8;
-                let Some(next) = mask_oracle.step_coordinate(coordinate, byte) else {
-                    continue;
-                };
-                let dense = mask_oracle.coordinate_local_state(next, mask_max)? as usize;
-                let target = if dense_to_sparse[dense] == u32::MAX {
-                    let target = u32::try_from(coordinates.len()).ok()?;
-                    dense_to_sparse[dense] = target;
-                    coordinates.push(next);
-                    target
-                } else {
-                    dense_to_sparse[dense]
-                };
-                while dfa.num_states() <= target as usize {
-                    dfa.add_state();
+            let batch_end = coordinates.len().min(source.saturating_add(EXPANSION_BATCH));
+            let batch = coordinates[source..batch_end].to_vec();
+            let rows = batch
+                .par_iter()
+                .map(|&coordinate| {
+                    let accepting = matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
+                        && !mask_oracle.pattern.finalizers(coordinate.pattern_state).is_empty();
+                    let transitions = (0u16..=255)
+                        .filter_map(|byte| {
+                            let byte = byte as u8;
+                            let next = mask_oracle.step_coordinate(coordinate, byte)?;
+                            let dense = mask_oracle.coordinate_local_state(next, mask_max)? as usize;
+                            Some((byte, next, dense))
+                        })
+                        .collect::<Vec<_>>();
+                    Some((accepting, transitions))
+                })
+                .collect::<Option<Vec<_>>>()?;
+
+            for (row_offset, (accepting, transitions)) in rows.into_iter().enumerate() {
+                let source_state = (source + row_offset) as u32;
+                let mut finalizers = BitSet::new(1);
+                if accepting {
+                    finalizers.set(0);
                 }
-                dfa.add_transition(source_state, byte, target);
+                dfa.overwrite_state_metadata(source_state, finalizers, BitSet::new(1));
+                for (byte, next, dense) in transitions {
+                    let target = if dense_to_sparse[dense] == u32::MAX {
+                        let target = u32::try_from(coordinates.len()).ok()?;
+                        dense_to_sparse[dense] = target;
+                        coordinates.push(next);
+                        target
+                    } else {
+                        dense_to_sparse[dense]
+                    };
+                    while dfa.num_states() <= target as usize {
+                        dfa.add_state();
+                    }
+                    dfa.add_transition(source_state, byte, target);
+                }
             }
-            source += 1;
+            source = batch_end;
         }
         dfa.recompute_possible_futures();
         let expand_ms = expand_started.elapsed().as_secs_f64() * 1000.0;
