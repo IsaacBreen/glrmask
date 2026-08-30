@@ -3690,7 +3690,7 @@ fn is_unicode_non_decimal_digit_class(class: &Class) -> bool {
 }
 
 const PATTERN_WHITESPACE_CHARS: &[char] = &[
-    ' ', '\n', '\r', '\t', '\u{0c}', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}',
+    ' ', '\n', '\r', '\t', '\u{0b}', '\u{0c}', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}',
     '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
     '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
 ];
@@ -4476,6 +4476,40 @@ mod tests {
         assert!(regex.is_match(r#""1234abcd""#));
         assert!(!regex.is_match(r#""\u0031234abcd""#));
         assert!(!regex.is_match(r#""\uC1234abcd""#));
+    }
+
+    #[test]
+    fn pattern_whitespace_table_matches_regex_syntax_unicode_space_class() {
+        use regex_syntax::hir::{Class, HirKind};
+        use regex_syntax::Parser;
+
+        let hir = Parser::new().parse(r"\s").unwrap();
+        let HirKind::Class(Class::Unicode(class)) = hir.kind() else {
+            panic!(r"expected Unicode class for \s");
+        };
+        let mut actual = std::collections::BTreeSet::new();
+        for range in class.ranges() {
+            for codepoint in u32::from(range.start())..=u32::from(range.end()) {
+                if let Some(ch) = char::from_u32(codepoint) {
+                    actual.insert(ch);
+                }
+            }
+        }
+        let expected = super::PATTERN_WHITESPACE_CHARS.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn json_schema_pattern_whitespace_classes_include_vertical_tab() {
+        TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::JsonSchema));
+
+        let whitespace = string_pattern_as_body_regex(r"^\s$", JsonStringContext::Value).unwrap();
+        let whitespace = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&whitespace))).unwrap();
+        assert!(whitespace.is_match(r#""\u000b""#));
+
+        let non_whitespace = string_pattern_as_body_regex(r"^\S$", JsonStringContext::Value).unwrap();
+        let non_whitespace = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&non_whitespace))).unwrap();
+        assert!(!non_whitespace.is_match(r#""\u000b""#));
     }
 
     #[test]
