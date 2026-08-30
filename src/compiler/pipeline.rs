@@ -329,7 +329,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
         .ok()
 });
 
-fn run_with_compile_thread_pool<F, R>(f: F) -> R
+pub(crate) fn run_with_compile_thread_pool<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send,
     R: Send,
@@ -2082,6 +2082,22 @@ pub(crate) fn build_static_compile_tokenizer_for_vocab_equiv_probe(
     vocab: &Vocab,
     plan: Option<&SyntheticTokenizerPlan>,
 ) -> (Tokenizer, Option<ManyToOneIdMap>) {
+    // Keep the probe on the same exact compile coordinate as production Static.
+    // Explosive bounded-code terminals may use an exact symbolic runtime lexer
+    // plus a finite vocabulary-relative mask tokenizer. Equivalence analysis
+    // belongs on that finite compile coordinate; falling through to the ordinary
+    // byte-product tokenizer can manufacture millions of states that production
+    // never analyzes.
+    if static_virtual_residual_candidate(grammar, plan.is_none()) {
+        if let Ok(Some(exact)) = build_dynamic_virtual_tokenizer(grammar, true) {
+            if let Some((mask, _projections)) = exact
+                .virtual_residuals_mask_tokenizer_with_vocab(vocab.max_token_byte_len(), Some(vocab))
+            {
+                return (mask, None);
+            }
+        }
+    }
+
     let select_pair = |plan: &SyntheticTokenizerPlan| {
         prepare_structural_tokenizer_pair(grammar, plan, vocab, None, true)
             .and_then(|(synthesized, full, certified)| {

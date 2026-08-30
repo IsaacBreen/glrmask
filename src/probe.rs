@@ -26,6 +26,7 @@ use crate::compiler::pipeline::{
     build_static_compile_tokenizer_for_vocab_equiv_probe,
     plan_synthetic_tokenizer,
     compute_disallowed_follows_from_ever,
+    run_with_compile_thread_pool,
 };
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::{
@@ -196,6 +197,17 @@ fn parse_named_grammar_from_source(format: &str, source_text: &str) -> crate::Re
 }
 
 pub fn probe_problem_vocab_equivalence(
+    problem_id: &str,
+    format: &str,
+    source_text: &str,
+    vocab: &Vocab,
+) -> ProbeOutcome {
+    run_with_compile_thread_pool(|| {
+        probe_problem_vocab_equivalence_in_pool(problem_id, format, source_text, vocab)
+    })
+}
+
+fn probe_problem_vocab_equivalence_in_pool(
     problem_id: &str,
     format: &str,
     source_text: &str,
