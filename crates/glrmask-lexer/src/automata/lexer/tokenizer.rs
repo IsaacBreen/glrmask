@@ -8539,12 +8539,14 @@ impl Tokenizer {
             .virtual_residuals
             .par_iter()
             .map(|runtime| {
-                let runtime_horizon = vocab
+                let built = if let Some(crossed_boundaries) = vocab
                     .and_then(|vocab| runtime.vocabulary_repeat_boundary_horizon(vocab, &repeat_horizons))
-                    .map(|value| value.saturating_add(1))
-                    .unwrap_or(horizon);
-                let (component, local_root, projection) =
-                    runtime.build_finite_mask_projection(runtime_horizon, 0)?;
+                {
+                    runtime.build_finite_mask_projection_for_crossed_boundaries(crossed_boundaries, 0)
+                } else {
+                    runtime.build_finite_mask_projection(horizon, 0)
+                }?;
+                let (component, local_root, projection) = built;
                 Some((Arc::clone(runtime), component, local_root, projection))
             })
             .collect::<Option<Vec<_>>>()?;
