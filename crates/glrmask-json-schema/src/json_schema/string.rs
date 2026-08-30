@@ -409,15 +409,26 @@ impl<'a> Lowerer<'a> {
         let Some(plan) = self.complex_anchored_pattern_plan(schema)? else {
             return Ok(None);
         };
+        let large_ordinary = schema.min_length == 0
+            && schema.max_length.is_none()
+            && schema
+                .pattern
+                .as_deref()
+                .is_some_and(should_structurally_lower_large_ordinary_pattern);
         let partition_key = JsonPatternPartitionKey::from(schema);
         let mut alternatives = Vec::new();
         for branch in plan.branches {
             match branch {
                 ComplexPatternBranch::Passthrough(body) => {
-                    let Some(body) = self
-                        .lower_decoded_regex_hir_to_json_body_expr_at_start(&body, true)?
-                    else {
-                        return Ok(None);
+                    let body = if large_ordinary {
+                        self.lower_large_ordinary_pattern_hir_expr(&body, true)?
+                    } else {
+                        let Some(body) = self
+                            .lower_decoded_regex_hir_to_json_body_expr_at_start(&body, true)?
+                        else {
+                            return Ok(None);
+                        };
+                        body
                     };
                     alternatives.push(self.add_complex_pattern_terminal(
                         "passthrough",
@@ -427,7 +438,11 @@ impl<'a> Lowerer<'a> {
                 }
                 ComplexPatternBranch::Counted(branch) => {
                     let Some(mut branch_alternatives) =
-                        self.lower_counted_complex_pattern_branch(branch, partition_key.clone())?
+                        self.lower_counted_complex_pattern_branch(
+                            branch,
+                            partition_key.clone(),
+                            large_ordinary,
+                        )?
                     else {
                         return Ok(None);
                     };
@@ -442,21 +457,31 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branch: CountedPatternBranch,
         partition_key: JsonPatternPartitionKey,
+        large_ordinary: bool,
     ) -> ImportResult<Option<Vec<GrammarExpr>>> {
-        let Some(prefix_body) = self
-            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.prefix, true)?
-        else {
-            return Ok(None);
-        };
-        let Some(body) = self
-            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.body, true)?
-        else {
-            return Ok(None);
-        };
-        let Some(suffix_body) = self
-            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.suffix, false)?
-        else {
-            return Ok(None);
+        let (prefix_body, body, suffix_body) = if large_ordinary {
+            (
+                self.lower_large_ordinary_pattern_hir_expr(&branch.prefix, true)?,
+                self.lower_large_ordinary_pattern_hir_expr(&branch.body, true)?,
+                self.lower_large_ordinary_pattern_hir_expr(&branch.suffix, false)?,
+            )
+        } else {
+            let Some(prefix_body) = self
+                .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.prefix, true)?
+            else {
+                return Ok(None);
+            };
+            let Some(body) = self
+                .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.body, true)?
+            else {
+                return Ok(None);
+            };
+            let Some(suffix_body) = self
+                .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.suffix, false)?
+            else {
+                return Ok(None);
+            };
+            (prefix_body, body, suffix_body)
         };
 
         let prefix = self.add_complex_pattern_terminal(
@@ -664,13 +689,20 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         }
         let (_body_hir, anchored_start, anchored_end) = strip_outer_anchors(hir.clone());
-        if anchored_start && anchored_end {
+        let large_ordinary = matches!(json_string_compat_mode(), JsonStringCompatMode::JsonSchema)
+            && pattern.len() >= LARGE_ORDINARY_PATTERN_STRUCTURAL_THRESHOLD;
+        if anchored_start && anchored_end && !large_ordinary {
             // A fully anchored value pattern is already a single terminal language;
             // splitting it into per-regex-symbol grammar items only moves lexer work
             // into the parser and creates very slow per-character TBM paths.
             return Ok(None);
         }
-        let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir)? else {
+        let branches = if large_ordinary {
+            self.lower_large_ordinary_pattern_hir_branch_expr_parts(hir)?
+        } else {
+            self.lower_string_pattern_hir_branch_expr_parts(hir)?
+        };
+        let Some(branches) = branches else {
             return Ok(None);
         };
         Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)))
@@ -731,6 +763,18 @@ impl<'a> Lowerer<'a> {
         let hir = Parser::new()
             .parse(&pattern)
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        if matches!(json_string_compat_mode(), JsonStringCompatMode::JsonSchema)
+            && pattern.len() >= LARGE_ORDINARY_PATTERN_STRUCTURAL_THRESHOLD
+        {
+            let Some(branches) = self.lower_large_ordinary_pattern_hir_branch_expr_parts(hir)? else {
+                return Ok(None);
+            };
+            if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
+                return Ok(None);
+            }
+            return Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)));
+        }
+
         let branches = lower_string_pattern_hir_branch_parts(hir, JsonStringContext::Value)?;
         if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
             return Ok(None);
@@ -914,6 +958,117 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_pattern_body");
         self.add_pattern_terminal_rule(&name, body_expr);
         r(&name)
+    }
+
+
+    fn lower_large_ordinary_pattern_hir_branch_expr_parts(
+        &mut self,
+        hir: Hir,
+    ) -> ImportResult<Option<Vec<(GrammarExpr, bool, bool)>>> {
+        match hir.kind() {
+            HirKind::Alternation(parts) => {
+                let mut lowered = Vec::with_capacity(parts.len());
+                for part in parts.iter().cloned() {
+                    let (body, anchored_start, anchored_end) = strip_outer_anchors(part);
+                    let lowered_body = self.lower_large_ordinary_pattern_hir_expr(&body, true)?;
+                    lowered.push((lowered_body, anchored_start, anchored_end));
+                }
+                Ok(Some(lowered))
+            }
+            HirKind::Capture(capture) => {
+                self.lower_large_ordinary_pattern_hir_branch_expr_parts(*capture.sub.clone())
+            }
+            _ => {
+                let (body, anchored_start, anchored_end) = strip_outer_anchors(hir);
+                let lowered = self.lower_large_ordinary_pattern_hir_expr(&body, true)?;
+                Ok(Some(vec![(lowered, anchored_start, anchored_end)]))
+            }
+        }
+    }
+
+    fn lower_large_ordinary_pattern_hir_expr(
+        &mut self,
+        hir: &Hir,
+        at_start: bool,
+    ) -> ImportResult<GrammarExpr> {
+        Ok(match hir.kind() {
+            HirKind::Empty => GrammarExpr::Epsilon,
+            HirKind::Literal(Literal(bytes)) => {
+                let literal = std::str::from_utf8(bytes).map_err(|error| {
+                    SchemaImportError::new(format!(
+                        "string pattern literal is not valid UTF-8 after parsing: {error}"
+                    ))
+                })?;
+                seq(
+                    literal
+                        .chars()
+                        .map(|ch| {
+                            json_body_char_expr_for_pattern_literal_in_mode(
+                                ch,
+                                JsonStringCompatMode::JsonSchema,
+                                JsonStringContext::Value,
+                                false,
+                            )
+                        })
+                        .collect(),
+                )
+            }
+            HirKind::Class(class) => self
+                .lower_decoded_class_to_json_body_expr(class, at_start)
+                .unwrap_or_else(|| {
+                    GrammarExpr::RawRegex(lower_decoded_class_to_json_body_regex_at_start(
+                        class,
+                        JsonStringContext::Value,
+                        at_start,
+                    ))
+                }),
+            HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => {
+                GrammarExpr::Epsilon
+            }
+            HirKind::Look(look) => {
+                return Err(SchemaImportError::new(format!(
+                    "unsupported zero-width assertion in string pattern: {look:?}"
+                )));
+            }
+            HirKind::Repetition(repetition) => {
+                let sub = self.lower_large_ordinary_pattern_hir_expr(&repetition.sub, at_start)?;
+                match (repetition.min, repetition.max) {
+                    (0, Some(0)) => GrammarExpr::Epsilon,
+                    (0, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
+                    (1, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::OnePlus),
+                    (0, Some(1)) => GrammarExpr::Quantified(Box::new(sub), Quantifier::Optional),
+                    (min, Some(max)) => GrammarExpr::Quantified(
+                        Box::new(sub),
+                        Quantifier::Range(min.try_into().unwrap(), Some(max.try_into().unwrap())),
+                    ),
+                    (min, None) => seq(vec![
+                        GrammarExpr::Quantified(
+                            Box::new(sub.clone()),
+                            Quantifier::Range(min.try_into().unwrap(), Some(min.try_into().unwrap())),
+                        ),
+                        GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
+                    ]),
+                }
+            }
+            HirKind::Capture(capture) => {
+                self.lower_large_ordinary_pattern_hir_expr(&capture.sub, at_start)?
+            }
+            HirKind::Concat(parts) => {
+                let mut current_at_start = at_start;
+                let mut lowered = Vec::with_capacity(parts.len());
+                for part in parts {
+                    lowered.push(self.lower_large_ordinary_pattern_hir_expr(part, current_at_start)?);
+                    current_at_start = current_at_start && hir_can_match_empty(part);
+                }
+                seq(lowered)
+            }
+            HirKind::Alternation(parts) => choice(
+                parts
+                    .iter()
+                    .map(|part| self.lower_large_ordinary_pattern_hir_expr(part, at_start))
+                    .collect::<ImportResult<Vec<_>>>()?,
+            ),
+        })
     }
 
     fn lower_string_pattern_hir_branch_expr_parts(
@@ -3088,6 +3243,17 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
     }
 }
 
+// Very large ordinary-mode patterns can duplicate the JSON spelling machinery
+// for each decoded regex atom when flattened into one byte regex. Keep small and
+// bounded patterns on the established lowering paths; only this high-cost,
+// unbounded class uses the structurally factored equivalent representation.
+const LARGE_ORDINARY_PATTERN_STRUCTURAL_THRESHOLD: usize = 512;
+
+fn should_structurally_lower_large_ordinary_pattern(pattern: &str) -> bool {
+    matches!(json_string_compat_mode(), JsonStringCompatMode::JsonSchema)
+        && preprocess_ascii_shorthand(pattern).len() >= LARGE_ORDINARY_PATTERN_STRUCTURAL_THRESHOLD
+}
+
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
     let context = if preprocess_ascii_shorthand(pattern).is_empty() {
         JsonStringContext::KeyAdditional
@@ -4122,7 +4288,17 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
     {
         return canonical;
     }
-    let escaped = json_unicode_escape_prefix_regex_for_char(ch);
+    let escaped = if mode == JsonStringCompatMode::JsonSchema
+        && matches!(context, JsonStringContext::KeyStrict)
+    {
+        // Complete pattern-property keys accept complete character spellings.
+        // A full \uXXXX branch still has live intermediate DFA states after
+        // `\u`, `\u0`, etc., so partial tokens remain maskable without
+        // making those prefixes accepting alternatives between key characters.
+        json_unicode_escape_for_char_regex(ch)
+    } else {
+        json_unicode_escape_prefix_regex_for_char(ch)
+    };
     format!(r#"(?:{}|{})"#, canonical, escaped)
 }
 
