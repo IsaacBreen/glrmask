@@ -3367,10 +3367,13 @@ fn build_and_color_hybrid(
         )
         .map(HybridColoring::ordinary)
     } else {
+        const DIRECT_OVERLAY_MIN_LARGE_CANDIDATES: usize = 96;
+        let default_overlay =
+            broad_small_bucket || candidates.len() >= DIRECT_OVERLAY_MIN_LARGE_CANDIDATES;
         let requested_overlay_slots = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(if broad_small_bucket { 256 } else { 0 });
+            .unwrap_or(if default_overlay { 256 } else { 0 });
         let direct_overlay_slots = if requested_overlay_slots == 0 {
             0
         } else {
