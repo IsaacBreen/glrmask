@@ -420,6 +420,12 @@ struct RestrictedTopology {
     raw_state_count: usize,
     /// Raw scanner state selected for each discovery-domain state.
     raw_representative_by_state: Option<Arc<[u32]>>,
+    /// Same representative vector, but with synthetic/unrepresented classes
+    /// assigned an arbitrary in-range raw representative so it can be shared
+    /// directly by transport quotient maps. This is immutable per topology;
+    /// constructing it once avoids one allocation/copy for every accepted TI
+    /// witness.
+    transport_representative_by_state: Option<Arc<[u32]>>,
     /// Discovery-domain state for every raw scanner state.
     state_for_raw: Option<Arc<[u32]>>,
     /// Exact frozen output rows for a powerset discovery domain. Ordinary raw
@@ -569,6 +575,27 @@ impl RestrictedTopology {
             .map_or(tokenizer.initial_state_id() as usize, |classes| {
                 classes[tokenizer.initial_state_id() as usize] as usize
             });
+        let transport_representative_by_state = raw_representative_by_state.as_ref().map(|raw| {
+            if raw.iter().all(|&representative| representative != u32::MAX) {
+                return Arc::clone(raw);
+            }
+            let fallback = raw
+                .iter()
+                .copied()
+                .find(|&representative| representative != u32::MAX)
+                .unwrap_or(0);
+            raw.iter()
+                .copied()
+                .map(|representative| {
+                    if representative == u32::MAX {
+                        fallback
+                    } else {
+                        representative
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into()
+        });
         Self {
             bytes,
             edge_offsets,
@@ -577,6 +604,7 @@ impl RestrictedTopology {
             observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state,
+            transport_representative_by_state,
             state_for_raw,
             nfa_output_rows: None,
             nfa_configurations: None,
@@ -676,6 +704,31 @@ impl RestrictedTopology {
             })
             .collect::<Vec<_>>();
 
+        let raw_representative_by_state: Arc<[u32]> = raw_representative_by_state.into();
+        let fallback = raw_representative_by_state
+            .iter()
+            .copied()
+            .find(|&representative| representative != u32::MAX)
+            .unwrap_or(0);
+        let transport_representative_by_state: Arc<[u32]> = if raw_representative_by_state
+            .iter()
+            .all(|&representative| representative != u32::MAX)
+        {
+            Arc::clone(&raw_representative_by_state)
+        } else {
+            raw_representative_by_state
+                .iter()
+                .copied()
+                .map(|representative| {
+                    if representative == u32::MAX {
+                        fallback
+                    } else {
+                        representative
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into()
+        };
         Self {
             bytes: view.bytes,
             edge_offsets,
@@ -683,7 +736,8 @@ impl RestrictedTopology {
             reverse_predecessors: reverse_predecessors.into(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
-            raw_representative_by_state: Some(raw_representative_by_state.into()),
+            raw_representative_by_state: Some(raw_representative_by_state),
+            transport_representative_by_state: Some(transport_representative_by_state),
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
             nfa_output_rows: Some((finalizers.into(), future.into())),
             nfa_configurations: Some(nfa_configurations),
@@ -5763,31 +5817,14 @@ impl InterchangeabilityDfa {
         }
         deviations.sort_unstable_by_key(|&(target, _)| target);
 
-        let scanner_state_map = if let (Some(state_for_raw), Some(raw_representatives)) = (
+        let scanner_state_map = if let (Some(state_for_raw), Some(representative_for_class)) = (
             self.topology.state_for_raw.as_ref(),
-            self.topology.raw_representative_by_state.as_ref(),
+            self.topology.transport_representative_by_state.as_ref(),
         ) {
-            let unused_representative = raw_representatives
-                .iter()
-                .copied()
-                .find(|&representative| representative != u32::MAX)
-                .unwrap_or(0);
-            let representative_for_class: Arc<[u32]> = raw_representatives
-                .iter()
-                .copied()
-                .map(|representative| {
-                    if representative == u32::MAX {
-                        unused_representative
-                    } else {
-                        representative
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into();
             TransportScannerStateMap::Quotient {
                 state_count: self.topology.raw_state_count,
                 class_for_original: Arc::clone(state_for_raw),
-                representative_for_class,
+                representative_for_class: Arc::clone(representative_for_class),
                 source_class_for_target_deviations: deviations.into_boxed_slice(),
             }
         } else {
@@ -11338,7 +11375,6 @@ pub fn expand_representative_dwa_after_minimization(
     // The ordinary representative mode remains a singleton deliberately: it
     // has multiple possible first labels rather than one stable gate.
     let mut mode_groups = vec![vec![0usize]];
-    let mut entry_union_by_group = vec![Weight::empty()];
     // Exact entry unions computed while proving disjointness can be reused
     // later for suffix states with the same complete member-mode set.
     let mut known_member_entry_domain_by_mode_set = FxHashMap::<Vec<usize>, Weight>::default();
@@ -11375,12 +11411,9 @@ pub fn expand_representative_dwa_after_minimization(
         .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
         .collect();
 
-    // `entry_union_by_group[0]` (group 0 = ordinary + any co-disjoint members)
-    // is written below but never read: the disjointness search only scans the
-    // member-derived groups (indices `1..`). We therefore avoid materializing
-    // the expensive `union_all` of every ordinary entry weight. The ordinary
-    // union being disjoint from the member union is exactly equivalent to every
-    // individual ordinary entry weight being disjoint from that member union.
+    // The ordinary union itself is never needed. Ordinary/member disjointness
+    // is exactly equivalent to every ordinary entry weight being disjoint from
+    // the member union, so avoid materializing another potentially large weight.
     let ordinary_and_members_are_disjoint = member_entries_are_pairwise_disjoint
         && ordinary_entry_weights
             .iter()
@@ -11394,8 +11427,6 @@ pub fn expand_representative_dwa_after_minimization(
             group_for_mode[mode_index] = Some(0);
         }
         mode_groups[0].extend(modes_in_group);
-        // group-0 union is unused downstream; keep it cheap.
-        entry_union_by_group[0] = Weight::empty();
     } else if member_entries_are_pairwise_disjoint {
         let group_index = mode_groups.len();
         let modes_in_group: Vec<usize> = member_entry_weights
@@ -11408,23 +11439,94 @@ pub fn expand_representative_dwa_after_minimization(
         known_member_entry_domain_by_mode_set
             .insert(modes_in_group.clone(), all_member_entry_union.clone());
         mode_groups.push(modes_in_group);
-        entry_union_by_group.push(all_member_entry_union);
     } else {
+        // First-fit coloring only needs to know whether the incoming entry
+        // domain overlaps anything already assigned to a group. The old path
+        // materialized a new immutable `Weight` union after every insertion;
+        // on o21328 p0 those 239 unions account for essentially the entire
+        // grouping cost, even though the resulting unions are never consumed
+        // after coloring.
+        //
+        // Keep the exact occupied token sets directly in the already-compact
+        // final TSID coordinate domain instead. Since every member inside one
+        // group is pairwise disjoint, storing its component token sets is
+        // sufficient: a candidate conflicts with a group iff one of its token
+        // sets intersects one occupied component at the same TSID. Shared token
+        // sets are interned, so cache the small number of structural overlap
+        // queries by Arc identity.
+        let final_tsid_count = final_state_map.representative_original_ids.len();
+        let mut occupied_by_tsid =
+            vec![Vec::<(usize, SharedTokenSet)>::new(); final_tsid_count];
+        let mut groups_with_full_domain = Vec::<bool>::with_capacity(modes.len() + 1);
+        groups_with_full_domain.push(false); // ordinary group
+        let mut forbidden_epoch = vec![0u32; modes.len() + 1];
+        let mut epoch = 0u32;
+        let mut token_overlap_cache = FxHashMap::<(usize, usize), bool>::default();
+
         for (mode_index, _, entry_weight) in &member_entry_weights {
+            epoch = epoch.wrapping_add(1);
+            if epoch == 0 {
+                forbidden_epoch.fill(0);
+                epoch = 1;
+            }
+
+            if entry_weight.is_full() {
+                for group in 1..mode_groups.len() {
+                    forbidden_epoch[group] = epoch;
+                }
+            } else {
+                for (start, end, tokens) in entry_weight.range_entries() {
+                    debug_assert!((end as usize) < final_tsid_count);
+                    for tsid in start..=end {
+                        for (group, occupied_tokens) in &occupied_by_tsid[tsid as usize] {
+                            if forbidden_epoch[*group] == epoch {
+                                continue;
+                            }
+                            let left = Arc::as_ptr(tokens) as usize;
+                            let right = Arc::as_ptr(occupied_tokens) as usize;
+                            let key = if left <= right {
+                                (left, right)
+                            } else {
+                                (right, left)
+                            };
+                            let overlaps = *token_overlap_cache.entry(key).or_insert_with(|| {
+                                !tokens.as_ref().is_disjoint(occupied_tokens.as_ref())
+                            });
+                            if overlaps {
+                                forbidden_epoch[*group] = epoch;
+                            }
+                        }
+                    }
+                }
+                for (group, &full) in groups_with_full_domain.iter().enumerate().skip(1) {
+                    if full {
+                        forbidden_epoch[group] = epoch;
+                    }
+                }
+            }
+
             let group_index = (1..mode_groups.len())
-                .find(|&group_index| entry_weight.is_disjoint(&entry_union_by_group[group_index]))
+                .find(|&group| forbidden_epoch[group] != epoch)
                 .unwrap_or_else(|| {
-                    let group_index = mode_groups.len();
+                    let group = mode_groups.len();
                     mode_groups.push(Vec::new());
-                    entry_union_by_group.push(Weight::empty());
-                    group_index
+                    groups_with_full_domain.push(false);
+                    group
                 });
-            entry_union_by_group[group_index] = entry_union_by_group[group_index].union(entry_weight);
+
+            if entry_weight.is_full() {
+                groups_with_full_domain[group_index] = true;
+            } else {
+                for (start, end, tokens) in entry_weight.range_entries() {
+                    for tsid in start..=end {
+                        occupied_by_tsid[tsid as usize]
+                            .push((group_index, Arc::clone(tokens)));
+                    }
+                }
+            }
             mode_groups[group_index].push(*mode_index);
             group_for_mode[*mode_index] = Some(group_index);
         }
-        // group-0 union is unused downstream; keep it cheap.
-        entry_union_by_group[0] = Weight::empty();
     }
 
     let mut core_reachable_from = vec![vec![false; core_states.len()]; core_states.len()];
@@ -12550,6 +12652,7 @@ mod tests {
             observed_destinations: Arc::from([false, false, false]),
             raw_state_count: 1,
             raw_representative_by_state: Some(Arc::from([0, u32::MAX])),
+            transport_representative_by_state: Some(Arc::from([0, 0])),
             state_for_raw: Some(Arc::from([0])),
             nfa_output_rows: None,
             nfa_configurations: None,

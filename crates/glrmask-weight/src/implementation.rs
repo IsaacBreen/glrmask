@@ -2880,6 +2880,23 @@ impl Weight {
         Some(self.0.ranges().collect())
     }
 
+    /// Return the cardinality of the finite TSID projection of this weight
+    /// without materializing a `RangeSetBlaze`. `None` denotes the full
+    /// sentinel weight.
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn tsid_coverage_len(&self) -> Option<usize> {
+        if self.is_full() {
+            return None;
+        }
+        Some(
+            self.0
+                .ranges()
+                .map(|range| (*range.end() as usize - *range.start() as usize) + 1)
+                .sum(),
+        )
+    }
+
     pub fn union(&self, other: &Self) -> Self {
         if self.is_full() || other.is_full() {
             return Self::all();
