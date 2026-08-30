@@ -3,6 +3,7 @@ use crate::automata::lexer::{
     Lexer,
 };
 use crate::automata::regex::Expr;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1733,6 +1734,24 @@ impl Constraint {
         subgrammar_child_return_pop(&root.table, root.retained_table_rules()?)
     }
 
+    /// Finite tokenizer coordinate used by Static composition/link analysis.
+    ///
+    /// Static constraints with an exact virtual residual lexer commit in the
+    /// exact symbolic coordinate, but their parser DWA / TSID tables were
+    /// compiled against the finite vocabulary-horizon observation tokenizer.
+    /// Composition is likewise a whole-model-token analysis, so it must use
+    /// that same finite coordinate. The retained component constraint remains
+    /// exact and is used unchanged by the segmented runtime.
+    pub(crate) fn composition_tokenizer(&self) -> &Tokenizer {
+        if !self.uses_dynamic_runtime() && self.tokenizer.has_virtual_residual_runtime() {
+            self.dynamic_mask_vocab
+                .mask_projection_tokenizer()
+                .expect("Static virtual-residual constraint requires its finite observation tokenizer")
+        } else {
+            &self.tokenizer
+        }
+    }
+
     pub(crate) fn token_bytes_match_vocab(&self, vocab: &crate::Vocab) -> bool {
         let vocab_entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &vocab_entries) {
@@ -1768,6 +1787,14 @@ impl Constraint {
         self.packed_token_bytes
             .as_ref()
             .map_or_else(|| self.token_bytes.len(), |packed| packed.len())
+    }
+
+    #[inline]
+    pub(crate) fn max_token_byte_len(&self) -> usize {
+        self.packed_token_bytes.as_ref().map_or_else(
+            || self.token_bytes.values().map(Vec::len).max().unwrap_or(0),
+            |packed| packed.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0),
+        )
     }
 
     pub(crate) fn token_bytes_iter(&self) -> Box<dyn Iterator<Item = (u32, &[u8])> + '_> {
@@ -2391,18 +2418,22 @@ impl Constraint {
         scoped_state: u32,
     ) -> Option<(usize, u32)> {
         let layout = self.recursive_parser_layout().ok().flatten()?;
-        if scoped_state >= layout.total_tokenizer_states {
-            return None;
+        if scoped_state < layout.total_tokenizer_states {
+            let leaf_index = layout
+                .leaf_tokenizer_state_offsets
+                .partition_point(|&offset| offset <= scoped_state)
+                .checked_sub(1)?;
+            let offset = *layout.leaf_tokenizer_state_offsets.get(leaf_index)?;
+            let local_state = scoped_state.checked_sub(offset)?;
+            let leaf = layout.leaves.get(leaf_index)?;
+            let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
+            return (local_state < constraint.tokenizer.num_states())
+                .then_some((leaf_index, local_state));
         }
-        let leaf_index = layout
-            .leaf_tokenizer_state_offsets
-            .partition_point(|&offset| offset <= scoped_state)
-            .checked_sub(1)?;
-        let offset = *layout.leaf_tokenizer_state_offsets.get(leaf_index)?;
-        let local_state = scoped_state.checked_sub(offset)?;
-        let leaf = layout.leaves.get(leaf_index)?;
-        let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
-        (local_state < constraint.tokenizer.num_states()).then_some((leaf_index, local_state))
+        self.static_dynamic_overlay
+            .as_ref()?
+            .recursive_virtual_tokenizer_states
+            .local_state(scoped_state)
     }
 
     #[inline]
@@ -2414,13 +2445,19 @@ impl Constraint {
         let layout = self.recursive_parser_layout().ok().flatten()?;
         let leaf = layout.leaves.get(leaf_index)?;
         let constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
-        if local_state >= constraint.tokenizer.num_states() {
+        if local_state < constraint.tokenizer.num_states() {
+            return layout
+                .leaf_tokenizer_state_offsets
+                .get(leaf_index)?
+                .checked_add(local_state);
+        }
+        if !constraint.tokenizer.contains_runtime_state(local_state) {
             return None;
         }
-        layout
-            .leaf_tokenizer_state_offsets
-            .get(leaf_index)?
-            .checked_add(local_state)
+        self.static_dynamic_overlay
+            .as_ref()?
+            .recursive_virtual_tokenizer_states
+            .scoped_state(layout.total_tokenizer_states, leaf_index, local_state)
     }
 
     /// Project one tokenizer state from this composition's recursive leaf
@@ -2432,16 +2469,8 @@ impl Constraint {
         component_index: usize,
         scoped_state: u32,
     ) -> Option<u32> {
+        let (leaf_index, local_state) = self.recursive_tokenizer_leaf_state(scoped_state)?;
         let layout = self.recursive_parser_layout_ref()?;
-        if scoped_state >= layout.total_tokenizer_states {
-            return None;
-        }
-        let leaf_index = layout
-            .leaf_tokenizer_state_offsets
-            .partition_point(|&offset| offset <= scoped_state)
-            .checked_sub(1)?;
-        let leaf_offset = *layout.leaf_tokenizer_state_offsets.get(leaf_index)?;
-        let local_state = scoped_state.checked_sub(leaf_offset)?;
         let leaf = layout.leaves.get(leaf_index)?;
         let (&owner, descendant_path) = leaf.component_path.split_first()?;
         if owner as usize != component_index {
@@ -2453,7 +2482,7 @@ impl Constraint {
         let component_constraint = component.constraint.as_ref();
         if !component_constraint.uses_compact_segmented_parser_runtime() {
             if !descendant_path.is_empty()
-                || local_state >= component_constraint.tokenizer.num_states()
+                || !component_constraint.tokenizer.contains_runtime_state(local_state)
             {
                 return None;
             }
@@ -2477,17 +2506,49 @@ impl Constraint {
         tokenizer_state: u32,
     ) -> Option<SmallVec<[u32; 4]>> {
         if self.uses_compact_segmented_parser_runtime() {
-            return self
-                .static_dynamic_overlay
-                .as_ref()?
-                .recursive_tokenizer_internal_tsids
-                .get()?
-                .get(tokenizer_state as usize)
-                .map(|row| row.iter().copied().collect());
+            let layout = self.recursive_parser_layout_ref()?;
+            if tokenizer_state < layout.total_tokenizer_states {
+                return self
+                    .static_dynamic_overlay
+                    .as_ref()?
+                    .recursive_tokenizer_internal_tsids
+                    .get()?
+                    .get(tokenizer_state as usize)
+                    .map(|row| row.iter().copied().collect());
+            }
+            let (leaf_index, _) = self.recursive_tokenizer_leaf_state(tokenizer_state)?;
+            let leaf = layout.leaves.get(leaf_index)?;
+            let owner = *leaf.component_path.first()? as usize;
+            let overlay = self.static_dynamic_overlay.as_ref()?;
+            let component = overlay.segmented_parser_components.get(owner)?;
+            let component_state =
+                self.recursive_tokenizer_state_for_component(owner, tokenizer_state)?;
+            let local_tsids = component
+                .constraint
+                .runtime_internal_tsids_for_tokenizer_state(component_state)?;
+            let mut global = SmallVec::<[u32; 4]>::new();
+            for local_tsid in local_tsids {
+                global.extend(
+                    component
+                        .local_tsid_to_global_tsids
+                        .get(local_tsid as usize)?
+                        .iter()
+                        .copied(),
+                );
+            }
+            global.sort_unstable();
+            global.dedup();
+            return (!global.is_empty()).then_some(global);
         }
         if self.state_to_internal_tsid.is_empty() && self.internal_tsid_to_states.is_empty() {
             return (tokenizer_state < self.tokenizer.num_states())
                 .then(|| smallvec::smallvec![tokenizer_state]);
+        }
+        if self.tokenizer.has_virtual_residual_runtime() {
+            return self
+                .tokenizer
+                .contains_runtime_state(tokenizer_state)
+                .then(|| self.internal_tsids_for_state(tokenizer_state).iter().copied().collect());
         }
         (tokenizer_state < self.tokenizer.num_states())
             .then(|| self.internal_tsids_for_state(tokenizer_state).iter().copied().collect())
@@ -2672,24 +2733,12 @@ impl Constraint {
     pub(crate) fn recursive_tokenizer_future_scoped_terminals(
         &self,
         scoped_state: u32,
-    ) -> Option<&BitSet> {
+    ) -> Option<Cow<'_, BitSet>> {
         let layout = self.recursive_parser_layout_ref()?;
-        if scoped_state >= layout.total_tokenizer_states {
-            return None;
-        }
-        let leaf_index = layout
-            .leaf_tokenizer_state_offsets
-            .partition_point(|&offset| offset <= scoped_state)
-            .checked_sub(1)?;
-        let offset = layout.leaf_tokenizer_state_offsets[leaf_index];
-        let local_state = scoped_state.checked_sub(offset)?;
+        let (leaf_index, local_state) = self.recursive_tokenizer_leaf_state(scoped_state)?;
         let leaf = layout.leaves.get(leaf_index)?;
         let leaf_constraint = self.constraint_at_recursive_component_path(&leaf.component_path)?;
-        if local_state >= leaf_constraint.tokenizer.num_states() {
-            return None;
-        }
-        let cache = layout.tokenizer_future_scoped.get(scoped_state as usize)?;
-        Some(cache.get_or_init(|| {
+        let build_scoped = || {
             let local_future = leaf_constraint
                 .tokenizer
                 .possible_future_terminals(local_state);
@@ -2705,10 +2754,14 @@ impl Constraint {
                 }
             }
             scoped
-        }))
+        };
+        if scoped_state < layout.total_tokenizer_states {
+            let cache = layout.tokenizer_future_scoped.get(scoped_state as usize)?;
+            return Some(Cow::Borrowed(cache.get_or_init(build_scoped)));
+        }
+        Some(Cow::Owned(build_scoped()))
     }
 
-    #[inline]
     pub(crate) fn recursive_leaf_constraint(&self, leaf_index: usize) -> Option<&Constraint> {
         let layout = self.recursive_parser_layout().ok().flatten()?;
         let leaf = layout.leaves.get(leaf_index)?;
@@ -6722,17 +6775,40 @@ impl Constraint {
                             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
                     );
                 }
+                let source_subsets = built.source_subsets.clone();
                 dynamic_mask_vocab
                     .set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state);
+                dynamic_mask_vocab.set_mask_tokenizer_source_subsets(source_subsets);
             }
         }
+        // Dynamic compile-transfer persists the deterministic mask tokenizer
+        // and dense singleton-entry map, but source-subset provenance is
+        // derived runtime metadata. Reconstruct it after load rather than
+        // extending the transfer/save format: the same exact builder is
+        // deterministic, and the dense raw-state map proves
+        // that its state numbering matches the transferred tokenizer.
+        if dynamic_mask_vocab.has_dense_mask_tokenizer_projection()
+            && !dynamic_mask_vocab.has_mask_tokenizer_source_subsets()
+            && self.tokenizer.num_states() <= FULL_WALK_RAW_STATE_LIMIT
+            && self.tokenizer.has_epsilon_transitions()
+            && !self.tokenizer.has_any_virtual_runtime()
+            && let Some((rebuilt, full_to_mask_state)) = self
+                .tokenizer
+                .try_full_determinization_all_starts(
+                    FULL_WALK_MASK_STATE_LIMIT,
+                    FULL_WALK_TRANSITION_LIMIT,
+                )
+            && dynamic_mask_vocab
+                .mask_projection_tokenizer()
+                .is_some_and(|mask| mask.num_states() == rebuilt.tokenizer.num_states())
+            && full_to_mask_state.iter().enumerate().all(|(raw, &mask)| {
+                dynamic_mask_vocab.mask_projection_state(raw as u32) == mask
+            })
+        {
+            dynamic_mask_vocab.set_mask_tokenizer_source_subsets(rebuilt.source_subsets);
+        }
         if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
-            let max_token_len = self
-                .token_bytes
-                .values()
-                .map(Vec::len)
-                .max()
-                .unwrap_or(0);
+            let max_token_len = self.max_token_byte_len();
             if let Some((mask_tokenizer, projection)) = self
                 .tokenizer
                 .virtual_binary_repeat_intersections_mask_tokenizer(max_token_len)
@@ -8700,6 +8776,28 @@ impl Constraint {
             );
         }
 
+        if self.tokenizer.has_virtual_residual_runtime()
+            && self.dynamic_mask_vocab.mask_projection_tokenizer().is_none()
+        {
+            let max_token_len = self.max_token_byte_len();
+            let projection_started_at = profile.then(std::time::Instant::now);
+            if let Some((mask_tokenizer, projections)) =
+                self.tokenizer.virtual_residuals_mask_tokenizer(max_token_len)
+            {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][static_runtime_finalize] mask_lexer=virtual_residual components={} mask_states={} horizon={} ms={:.3}",
+                        projections.len(),
+                        mask_tokenizer.num_states(),
+                        max_token_len,
+                        projection_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                    );
+                }
+                self.dynamic_mask_vocab
+                    .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
+            }
+        }
+
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             if self.table.num_rules == 0 {
@@ -8712,7 +8810,13 @@ impl Constraint {
         let guarded_index_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let state_relation_started_at = profile.then(std::time::Instant::now);
-        let state_count = self.tokenizer.num_states() as usize;
+        let state_count = if self.tokenizer.has_virtual_residual_runtime() {
+            self.dynamic_mask_vocab
+                .mask_projection_tokenizer()
+                .map_or(self.tokenizer.num_states(), |tokenizer| tokenizer.num_states())
+        } else {
+            self.tokenizer.num_states()
+        } as usize;
         let singleton_state_relation_ready = self.state_internal_tsid_offsets.as_slice()
             == [u32::MAX]
             && self.state_internal_tsids.is_empty()

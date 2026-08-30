@@ -23,6 +23,7 @@ use crate::automata::lexer::compile::{
     compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
+    expression_may_support_bounded_code_residual_runtime,
     expression_supports_bounded_code_residual_runtime,
     expression_supports_deferred_dense_runtime,
     factor_regex_expr,
@@ -652,7 +653,10 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     )
 }
 
-fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option<Tokenizer>> {
+fn build_dynamic_virtual_tokenizer(
+    grammar: &GrammarDef,
+    preserve_residual_oracle_coordinates: bool,
+) -> crate::Result<Option<Tokenizer>> {
     const HYBRID_MIN_BOUND: usize = 4_096;
 
     let expressions = grammar
@@ -673,15 +677,20 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     // 4096 giant-repeat threshold and still explode when eagerly materialized
     // (pattern/format + JSON decoded-length envelopes are a common example).
     // When no older virtual family is already required, let the exact oracle
-    // itself certify these terminals for the general residual runtime. Keeping
-    // this lane dynamic-only leaves static representation policy unchanged.
+    // itself certify these terminals for the general residual runtime. Static
+    // compilation may also reuse this exact representation when every giant
+    // terminal is certified and a finite vocabulary-horizon projection exists.
     let bounded_code_terminals = if giant_terminals.is_empty() {
         expressions
             .iter()
             .enumerate()
             .filter_map(|(terminal, expression)| {
-                expression_supports_bounded_code_residual_runtime(expression)
-                    .then_some(terminal as TerminalID)
+                let supported = if preserve_residual_oracle_coordinates {
+                    expression_may_support_bounded_code_residual_runtime(expression)
+                } else {
+                    expression_supports_bounded_code_residual_runtime(expression)
+                };
+                supported.then_some(terminal as TerminalID)
             })
             .collect::<Vec<_>>()
     } else {
@@ -769,13 +778,18 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
         tokenizer
             .restore_terminal_exprs_without_virtual_runtime(Some(expressions.clone()))
             .map_err(|detail| build_error(&format!("terminal expression restoration failed: {detail}")))?;
-        tokenizer
-            .install_virtual_residual_components(
-                general_residual_terminals
-                    .iter()
-                    .map(|&terminal| (expressions[terminal as usize].clone(), terminal))
-                    .collect(),
+        let residual_components = general_residual_terminals
+            .iter()
+            .map(|&terminal| (expressions[terminal as usize].clone(), terminal))
+            .collect();
+        let installed = if preserve_residual_oracle_coordinates {
+            tokenizer.install_virtual_residual_components_preserving_oracle_coordinates(
+                residual_components,
             )
+        } else {
+            tokenizer.install_virtual_residual_components(residual_components)
+        };
+        installed
             .ok_or_else(|| build_error("general residual component installation failed"))?;
         if compile_profile_enabled() {
             eprintln!(
@@ -884,12 +898,52 @@ fn build_dynamic_virtual_tokenizer(grammar: &GrammarDef) -> crate::Result<Option
     Ok(Some(tokenizer))
 }
 
+fn static_virtual_residual_candidate(
+    grammar: &GrammarDef,
+    allow_bounded_code_fallback: bool,
+) -> bool {
+    // Static residual projection is primarily a safety lane for giant bounded
+    // repeats, but bounded-code intersections can explode far below the generic
+    // 4096-repeat threshold. Use the existing expression-volume estimate to
+    // recognize those cases before eagerly materializing their Cartesian product.
+    // The threshold is deliberately far above the ordinary bounded-format cohort
+    // (for example email + maxLength=1024), which remains faster on the structural
+    // vocabulary quotient path.
+    const LARGE_BOUNDED_CODE_ESTIMATE: u128 = 256_000_000;
+
+    let expressions = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let mut saw_giant = false;
+    for expression in &expressions {
+        if !expression_contains_large_bounded_repeat(expression) {
+            continue;
+        }
+        saw_giant = true;
+        if !expression_may_support_bounded_code_residual_runtime(expression) {
+            return false;
+        }
+    }
+    if saw_giant {
+        return true;
+    }
+
+    allow_bounded_code_fallback
+        && expressions.iter().any(|expression| {
+            expression_may_support_bounded_code_residual_runtime(expression)
+                && estimated_synthesis_state_volume(expression) >= LARGE_BOUNDED_CODE_ESTIMATE
+        })
+}
+
 pub(crate) fn build_dynamic_tokenizer(grammar: &GrammarDef) -> crate::Result<Tokenizer> {
     const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
 
     // Select the virtual lane before any general regex/NFA construction: the
     // latter is exactly where a huge bounded repeat would be materialized.
-    if let Some(tokenizer) = build_dynamic_virtual_tokenizer(grammar)? {
+    if let Some(tokenizer) = build_dynamic_virtual_tokenizer(grammar, false)? {
         return Ok(tokenizer);
     }
 
@@ -2380,6 +2434,8 @@ struct TokenizerDagLane {
 struct RuntimeTokenizerDagResult {
     runtime_tokenizer: Option<Tokenizer>,
     full_to_synthesized_state_map: Option<CertifiedFullToSynthesizedStateMap>,
+    virtual_residual_projections:
+        Vec<crate::automata::lexer::tokenizer::VirtualResidualMaskProjection>,
     finish_ms: f64,
 }
 
@@ -3604,6 +3660,21 @@ fn compile_prepared_with_profile_and_table_construction(
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
+                let static_virtual_pair = if static_virtual_residual_candidate(
+                    prepared_grammar_ref,
+                    synthetic_tokenizer_plan_ref.is_none(),
+                ) {
+                    build_dynamic_virtual_tokenizer(prepared_grammar_ref, true)
+                        .ok()
+                        .flatten()
+                        .and_then(|exact| {
+                            exact
+                                .virtual_residuals_mask_tokenizer_with_vocab(vocab.max_token_byte_len(), Some(vocab))
+                                .map(|(mask, projections)| (mask, exact, projections))
+                        })
+                } else {
+                    None
+                };
                 let build_global_tokenizer = || {
                     if let Some(plan) = synthetic_tokenizer_plan_ref {
                         let select_pair = |vocabulary_token_quotient: bool| {
@@ -3653,8 +3724,20 @@ fn compile_prepared_with_profile_and_table_construction(
                 };
                 let prebuild_partition_locals = partition_local_synthesis_plan_ref.is_some()
                     && crate::compiler::stages::id_map_and_terminal_dwa::prebuild_partition_local_synthesis_enabled();
+                let mut static_virtual_runtime = None;
                 let (global_tokenizer_result, prepared_partition_local_tokenizers) =
-                    if prebuild_partition_locals {
+                    if let Some((mask_tokenizer, exact_tokenizer, projections)) = static_virtual_pair {
+                        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                            eprintln!(
+                                "[glrmask/profile][tokenizer] static_virtual_residual selected=true runtime_physical_states={} compile_states={} compile_transitions={}",
+                                exact_tokenizer.num_states(),
+                                mask_tokenizer.num_states(),
+                                mask_tokenizer.transition_count(),
+                            );
+                        }
+                        static_virtual_runtime = Some((exact_tokenizer, projections));
+                        ((mask_tokenizer, None, None, 0.0, false), None)
+                    } else if prebuild_partition_locals {
                         rayon::join(
                             build_global_tokenizer,
                             || {
@@ -3723,7 +3806,9 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
-                if deferred_runtime_tokenizer.is_none() {
+                if deferred_runtime_tokenizer.is_none()
+                    && static_virtual_runtime.is_none()
+                {
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 }
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -3763,7 +3848,17 @@ fn compile_prepared_with_profile_and_table_construction(
                     .then_some(prepared_partition_local_tokenizers)
                     .flatten();
 
-                if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
+                if let Some((runtime_tokenizer, virtual_residual_projections)) = static_virtual_runtime {
+                    *runtime_tokenizer_result_ref
+                        .lock()
+                        .expect("runtime tokenizer result slot poisoned") =
+                        Some(RuntimeTokenizerDagResult {
+                            runtime_tokenizer: Some(runtime_tokenizer),
+                            full_to_synthesized_state_map: None,
+                            virtual_residual_projections,
+                            finish_ms: 0.0,
+                        });
+                } else if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
                     // Finishing the exact runtime tokenizer is independent of
                     // terminal-DWA construction. Delaying large tokenizers was
                     // intended to reduce memory-bandwidth contention, but the
@@ -3800,6 +3895,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             Some(RuntimeTokenizerDagResult {
                                 runtime_tokenizer: Some(runtime_tokenizer),
                                 full_to_synthesized_state_map,
+                                virtual_residual_projections: Vec::new(),
                                 finish_ms,
                             });
                     });
@@ -3810,6 +3906,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         Some(RuntimeTokenizerDagResult {
                             runtime_tokenizer: None,
                             full_to_synthesized_state_map: None,
+                            virtual_residual_projections: Vec::new(),
                             finish_ms: 0.0,
                         });
                 }
@@ -4175,6 +4272,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let RuntimeTokenizerDagResult {
             mut runtime_tokenizer,
             full_to_synthesized_state_map,
+            virtual_residual_projections,
             finish_ms: runtime_tokenizer_finish_ms,
         } = runtime_tokenizer_result
             .into_inner()
@@ -4282,7 +4380,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.split_terminal_dwa_total_ms = terminal_phase_profile.split_terminal_dwa_total_ms;
         profile.global_merge_ms = terminal_phase_profile.global_merge_ms;
 
-        let runtime_dynamic_vocab = cpm_result.runtime_dynamic_vocab;
+        let mut dynamic_mask_vocab = cpm_result.runtime_dynamic_vocab.vocab;
         let possible_matches_complete = cpm_result.complete;
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
@@ -4798,7 +4896,18 @@ fn compile_prepared_with_profile_and_table_construction(
         )
         .is_none()
         .then(|| composition_grammar_summary_from_analysis(&analyzed_grammar));
-        let mut tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
+        let mut tokenizer = if virtual_residual_projections.is_empty() {
+            runtime_tokenizer.unwrap_or(tokenizer)
+        } else {
+            let exact = runtime_tokenizer
+                .take()
+                .expect("static virtual residual projection requires an exact runtime tokenizer");
+            dynamic_mask_vocab.set_virtual_residuals_mask_projection(
+                tokenizer,
+                virtual_residual_projections,
+            );
+            exact
+        };
         if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
@@ -4827,7 +4936,7 @@ fn compile_prepared_with_profile_and_table_construction(
             tokenizer_has_epsilon_transitions: false,
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,
-            dynamic_mask_vocab: runtime_dynamic_vocab.vocab,
+            dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             possible_matches: possible_matches.into_artifact(),
             possible_matches_complete,
@@ -5144,7 +5253,7 @@ fn compile_dynamic_owned_impl(
                 let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
                     .is_some()
                     && !prepared_has_giant_repeat;
-                let virtual_tokenizer = build_dynamic_virtual_tokenizer(&prepared_grammar)?;
+                let virtual_tokenizer = build_dynamic_virtual_tokenizer(&prepared_grammar, false)?;
                 let quotient_pair = (virtual_tokenizer.is_none() && quotient_enabled)
                     .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
                     .flatten()

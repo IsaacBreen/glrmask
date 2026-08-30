@@ -130,6 +130,15 @@ struct FullWalkBranch {
 
 type FullWalkBranches = SmallVec<[FullWalkBranch; 4]>;
 
+#[derive(Clone)]
+enum FullWalkManyState {
+    Branches(FullWalkBranches),
+    ThreeSameParser {
+        lexers: (u32, u32, u32),
+        parser_node: u32,
+    },
+}
+
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
@@ -147,22 +156,39 @@ struct FullWalkParserCache {
 impl FullWalkParserCache {
     const DEAD: u32 = u32::MAX;
 
-    fn from_roots(root_branches: &DynamicBranches, lexer_state_count: usize) -> Self {
-        let nodes = root_branches
-            .iter()
-            .map(|branch| FullWalkParserNode {
+    fn from_roots(
+        root_branches: &DynamicBranches,
+        lexer_state_count: usize,
+    ) -> (Self, SmallVec<[u32; 4]>) {
+        let mut nodes = Vec::<FullWalkParserNode>::new();
+        let mut root_nodes = SmallVec::<[u32; 4]>::new();
+        for branch in root_branches {
+            if let Some((index, _)) = nodes
+                .iter()
+                .enumerate()
+                .find(|(_, node)| node.gss.ptr_eq(&branch.gss))
+            {
+                root_nodes.push(index as u32);
+                continue;
+            }
+            let id = nodes.len() as u32;
+            nodes.push(FullWalkParserNode {
                 gss: branch.gss.clone(),
                 admitted: None,
                 token_boundary_allowed: vec![0; lexer_state_count],
                 children: SmallVec::new(),
                 last_child_terminal: TerminalID::MAX,
                 last_child_target: Self::DEAD,
-            })
-            .collect();
-        Self {
-            nodes,
-            lexer_state_count,
+            });
+            root_nodes.push(id);
         }
+        (
+            Self {
+                nodes,
+                lexer_state_count,
+            },
+            root_nodes,
+        )
     }
 
     #[inline]
@@ -188,6 +214,25 @@ impl FullWalkParserCache {
             self.nodes[node_index].last_child_terminal = terminal;
             self.nodes[node_index].last_child_target = cached;
             return (cached != Self::DEAD).then_some(cached);
+        }
+        // With no zero-width control terminals, a single-top parser frontier
+        // whose LR row has no action for this terminal cannot advance. This is
+        // exactly the first branch that the generic GLR advance would reject;
+        // avoid constructing an empty-accumulator GSS and entering the GLR
+        // engine for that overwhelmingly common negative lookup.
+        if Some(terminal) != constraint.ignore_terminal
+            && !constraint.uses_sparse_direct_regular_runtime()
+            && !constraint.uses_compact_segmented_parser_runtime()
+            && constraint.table.control_terminals.is_empty()
+            && self.nodes[node_index]
+                .gss
+                .single_top_value()
+                .is_some_and(|top| constraint.table.action(top, terminal).is_none())
+        {
+            self.nodes[node_index].children.push((terminal, Self::DEAD));
+            self.nodes[node_index].last_child_terminal = terminal;
+            self.nodes[node_index].last_child_target = Self::DEAD;
+            return None;
         }
         let next = parser_child(constraint, &self.nodes[node_index].gss, terminal);
         let target = if let Some(gss) = next {
@@ -218,7 +263,11 @@ impl FullWalkParserCache {
                 .direct_regular_admissible_terminals(&parser_gss)
                 .unwrap_or_else(|| {
                     let candidates = BitSet::all(constraint.table.num_terminals as usize);
-                    stack_admissible_terminals(&constraint.table, &parser_gss, &candidates)
+                    super::commit::exact_admitted_terminals_for_candidates(
+                        constraint,
+                        &parser_gss,
+                        &candidates,
+                    )
                 });
             self.nodes[index].admitted = Some(admitted);
         }
@@ -259,6 +308,24 @@ impl FullWalkParserCache {
     }
 
     #[inline(always)]
+    fn token_boundary_allowed_raw(
+        &mut self,
+        constraint: &Constraint,
+        tokenizer: &Tokenizer,
+        initial_lexer_state: u32,
+        lexer_state: u32,
+        parser_node: u32,
+    ) -> bool {
+        lexer_state == initial_lexer_state
+            || self.physical_token_boundary_allowed(
+                constraint,
+                tokenizer,
+                parser_node,
+                lexer_state,
+            )
+    }
+
+    #[inline(always)]
     fn token_boundary_allowed(
         &mut self,
         constraint: &Constraint,
@@ -266,13 +333,13 @@ impl FullWalkParserCache {
         initial_lexer_state: u32,
         branch: &FullWalkBranch,
     ) -> bool {
-        branch.lexer_state == initial_lexer_state
-            || self.physical_token_boundary_allowed(
-                constraint,
-                tokenizer,
-                branch.parser_node,
-                branch.lexer_state,
-            )
+        self.token_boundary_allowed_raw(
+            constraint,
+            tokenizer,
+            initial_lexer_state,
+            branch.lexer_state,
+            branch.parser_node,
+        )
     }
 
 }
@@ -301,6 +368,7 @@ fn full_walk_flat16_transition(flat: &[u16], state: u32, byte: u8) -> u32 {
 
 enum FullWalkScalarFinalizerOutcome {
     Scalar(FullWalkBranch),
+    Two(FullWalkBranch, FullWalkBranch),
     Many(FullWalkBranches),
 }
 
@@ -318,6 +386,7 @@ fn full_walk_step_two(
     byte: u8,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
     flat16: &[u16],
     parser_cache: &mut FullWalkParserCache,
@@ -325,6 +394,21 @@ fn full_walk_step_two(
 ) -> FullWalkTwoStepOutcome {
     let first_cell = full_walk_flat16_transition_cell(flat16, branches.0.0, byte);
     let second_cell = full_walk_flat16_transition_cell(flat16, branches.1.0, byte);
+
+    // Dominant correlated-parser case: both deterministic lexer branches stay
+    // alive without finalizing, while their exact parser identities differ.
+    // Keep the correlation tuple intact and skip the general option/collapse
+    // classification below.
+    if branches.0.1 != branches.1.1
+        && first_cell != u16::MAX
+        && second_cell != u16::MAX
+        && (first_cell | second_cell) & 0x8000 == 0
+    {
+        return FullWalkTwoStepOutcome::Two(
+            (u32::from(first_cell), branches.0.1),
+            (u32::from(second_cell), branches.1.1),
+        );
+    }
 
     // Dominant two-branch case: neither branch finalizes. Keep the whole byte
     // step as two table loads plus a tiny collapse; only the rare finalizer
@@ -348,6 +432,7 @@ fn full_walk_step_two(
         second_cell,
         initial_lexer_state,
         finalizer_code,
+        single_finalizer_continues,
         tokenizer,
         parser_cache,
         constraint,
@@ -363,6 +448,7 @@ fn full_walk_step_two_finalizing(
     second_cell: u16,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
@@ -392,12 +478,17 @@ fn full_walk_step_two_finalizing(
             parser_node,
             initial_lexer_state,
             finalizer_code,
+            single_finalizer_continues,
             tokenizer,
             parser_cache,
             constraint,
         ) {
             FullWalkScalarFinalizerOutcome::Scalar(branch) => {
                 full_walk_push_unique(&mut next, branch);
+            }
+            FullWalkScalarFinalizerOutcome::Two(first, second) => {
+                full_walk_push_unique(&mut next, first);
+                full_walk_push_unique(&mut next, second);
             }
             FullWalkScalarFinalizerOutcome::Many(branches) => {
                 for branch in branches {
@@ -432,12 +523,46 @@ fn full_walk_scalar_finalizer(
     parser_node: u32,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkScalarFinalizerOutcome {
     const MULTI: u32 = u32::MAX - 1;
     let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    if code != MULTI {
+        if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
+            let reset = FullWalkBranch {
+                lexer_state: initial_lexer_state,
+                parser_node: next_parser,
+                prune_guard: if Some(code) == constraint.ignore_terminal {
+                    FullWalkPruneGuard::Passed
+                } else {
+                    if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
+                        FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
+                    } else {
+                        FullWalkPruneGuard::Passed
+                    }
+                },
+            };
+            let continuing = FullWalkBranch {
+                lexer_state: target,
+                parser_node,
+                prune_guard: FullWalkPruneGuard::Passed,
+            };
+            if reset == continuing {
+                return FullWalkScalarFinalizerOutcome::Scalar(continuing);
+            }
+            return FullWalkScalarFinalizerOutcome::Two(reset, continuing);
+        }
+        return FullWalkScalarFinalizerOutcome::Scalar(FullWalkBranch {
+            lexer_state: target,
+            parser_node,
+            prune_guard: FullWalkPruneGuard::Passed,
+        });
+    }
+
+
     let mut next = FullWalkBranches::new();
     if code == MULTI {
         for &terminal in tokenizer.matched_terminals_slice(target) {
@@ -458,21 +583,6 @@ fn full_walk_scalar_finalizer(
                 );
             }
         }
-    } else if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
-        full_walk_push_unique(
-            &mut next,
-            FullWalkBranch {
-                lexer_state: initial_lexer_state,
-                parser_node: next_parser,
-                prune_guard: if Some(code) == constraint.ignore_terminal {
-                    FullWalkPruneGuard::Passed
-                } else {
-                    FullWalkPruneGuard::Passed.remember_terminal_match(
-                        tokenizer, target, code,
-                    )
-                },
-            },
-        );
     }
 
     if next.is_empty() {
@@ -574,6 +684,202 @@ fn full_walk_step_many(
     next
 }
 
+#[inline]
+fn full_walk_projection_union_two(
+    vocab: &DynamicMaskVocab,
+    cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+    first: u32,
+    second: u32,
+) -> Option<u32> {
+    let key = if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    if let Some(&cached) = cache.get(&key) {
+        return cached;
+    }
+    let result = vocab.mask_projection_state_for_projection_states(&[key.0, key.1]);
+    cache.insert(key, result);
+    result
+}
+
+#[inline]
+fn full_walk_projection_union_three(
+    vocab: &DynamicMaskVocab,
+    cache: &mut FxHashMap<(u32, u32, u32), Option<u32>>,
+    first: u32,
+    second: u32,
+    third: u32,
+) -> Option<u32> {
+    let mut states = [first, second, third];
+    states.sort_unstable();
+    let key = (states[0], states[1], states[2]);
+    if let Some(&cached) = cache.get(&key) {
+        return cached;
+    }
+    let result = vocab.mask_projection_state_for_projection_states(&states);
+    cache.insert(key, result);
+    result
+}
+
+#[inline]
+fn full_walk_merge_two_same_parser(
+    vocab: &DynamicMaskVocab,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+    first: (u32, u32),
+    second: (u32, u32),
+) -> Option<(u32, u32)> {
+    if first.1 != second.1 {
+        return None;
+    }
+    full_walk_projection_union_two(vocab, pair_union_cache, first.0, second.0)
+        .map(|lexer_state| (lexer_state, first.1))
+}
+
+#[inline]
+fn full_walk_merge_three_same_parser(
+    vocab: &DynamicMaskVocab,
+    triple_union_cache: &mut FxHashMap<(u32, u32, u32), Option<u32>>,
+    lexers: (u32, u32, u32),
+    parser_node: u32,
+) -> Option<(u32, u32)> {
+    full_walk_projection_union_three(
+        vocab,
+        triple_union_cache,
+        lexers.0,
+        lexers.1,
+        lexers.2,
+    )
+    .map(|lexer_state| (lexer_state, parser_node))
+}
+
+#[inline]
+fn full_walk_merge_branches_same_parser(
+    vocab: &DynamicMaskVocab,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+    triple_union_cache: &mut FxHashMap<(u32, u32, u32), Option<u32>>,
+    branches: &FullWalkBranches,
+) -> Option<(u32, u32)> {
+    let first = branches.first()?;
+    if branches.len() < 2
+        || !first.prune_guard.is_passed()
+        || branches.iter().skip(1).any(|branch| {
+            !branch.prune_guard.is_passed() || branch.parser_node != first.parser_node
+        })
+    {
+        return None;
+    }
+    let lexer_state = match branches.as_slice() {
+        [first, second] => full_walk_projection_union_two(
+            vocab,
+            pair_union_cache,
+            first.lexer_state,
+            second.lexer_state,
+        ),
+        [first, second, third] => full_walk_projection_union_three(
+            vocab,
+            triple_union_cache,
+            first.lexer_state,
+            second.lexer_state,
+            third.lexer_state,
+        ),
+        _ => {
+            let lexers = branches
+                .iter()
+                .map(|branch| branch.lexer_state)
+                .collect::<SmallVec<[u32; 4]>>();
+            vocab.mask_projection_state_for_projection_states(&lexers)
+        }
+    }?;
+    Some((lexer_state, first.parser_node))
+}
+
+#[inline]
+fn full_walk_many_state_from_branches(branches: FullWalkBranches) -> FullWalkManyState {
+    if let [first, second, third] = branches.as_slice()
+        && first.prune_guard.is_passed()
+        && second.prune_guard.is_passed()
+        && third.prune_guard.is_passed()
+        && first.parser_node == second.parser_node
+        && first.parser_node == third.parser_node
+    {
+        return FullWalkManyState::ThreeSameParser {
+            lexers: (first.lexer_state, second.lexer_state, third.lexer_state),
+            parser_node: first.parser_node,
+        };
+    }
+    FullWalkManyState::Branches(branches)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn full_walk_step_many_state(
+    state: &FullWalkManyState,
+    byte: u8,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    tokenizer: &Tokenizer,
+    flat16: &[u16],
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+) -> FullWalkManyState {
+    match state {
+        FullWalkManyState::Branches(branches) => full_walk_many_state_from_branches(
+            full_walk_step_many(
+                branches,
+                byte,
+                initial_lexer_state,
+                finalizer_code,
+                tokenizer,
+                flat16,
+                parser_cache,
+                constraint,
+            ),
+        ),
+        FullWalkManyState::ThreeSameParser {
+            lexers,
+            parser_node,
+        } => {
+            let first = full_walk_flat16_transition_cell(flat16, lexers.0, byte);
+            let second = full_walk_flat16_transition_cell(flat16, lexers.1, byte);
+            let third = full_walk_flat16_transition_cell(flat16, lexers.2, byte);
+            if first & 0x8000 == 0 && second & 0x8000 == 0 && third & 0x8000 == 0 {
+                let next = (
+                    u32::from(first & 0x7fff),
+                    u32::from(second & 0x7fff),
+                    u32::from(third & 0x7fff),
+                );
+                if next.0 != next.1 && next.0 != next.2 && next.1 != next.2 {
+                    return FullWalkManyState::ThreeSameParser {
+                        lexers: next,
+                        parser_node: *parser_node,
+                    };
+                }
+            }
+
+            let mut branches = FullWalkBranches::new();
+            for lexer_state in [lexers.0, lexers.1, lexers.2] {
+                branches.push(FullWalkBranch {
+                    lexer_state,
+                    parser_node: *parser_node,
+                    prune_guard: FullWalkPruneGuard::Passed,
+                });
+            }
+            full_walk_many_state_from_branches(full_walk_step_many(
+                &branches,
+                byte,
+                initial_lexer_state,
+                finalizer_code,
+                tokenizer,
+                flat16,
+                parser_cache,
+                constraint,
+            ))
+        }
+    }
+}
+
 
 
 /// Exact direct dynamic-mask path for bounded deterministic lexer coordinates.
@@ -616,9 +922,9 @@ fn try_full_walk_mask(
     } else {
         vocab.mask_projection_fast_transitions()
     };
-    let (flat16, finalizer_code) = match fast_transitions {
-        Some(FastTokenizerTransitions::Flat16 { transitions, finalizer_code }) => {
-            (transitions.as_ref(), finalizer_code.as_ref())
+    let (flat16, finalizer_code, single_finalizer_continues) = match fast_transitions {
+        Some(FastTokenizerTransitions::Flat16 { transitions, finalizer_code, single_finalizer_continues }) => {
+            (transitions.as_ref(), finalizer_code.as_ref(), single_finalizer_continues.as_ref())
         }
         Some(_) | None => return Ok(false),
     };
@@ -637,43 +943,70 @@ fn try_full_walk_mask(
     buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
     if copy_len < buf.len() { buf[copy_len..].fill(0); }
 
-    let mut parser_cache = FullWalkParserCache::from_roots(
+    let (mut parser_cache, root_parser_nodes) = FullWalkParserCache::from_roots(
         root_branches,
         lexer_scan_cache.tokenizer().num_states() as usize,
     );
     // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
     // lexer-state coordinate so the common DFS path needs no separate kind
     // load/store. Real lexer states are < 0x8000 in this Flat16 lane.
+    const FULL_WALK_LEXER_TWO_DISTINCT: u32 = u32::MAX - 3;
     const FULL_WALK_LEXER_TWO: u32 = u32::MAX - 2;
     const FULL_WALK_LEXER_MULTI: u32 = u32::MAX - 1;
     const FULL_WALK_LEXER_DEAD: u32 = u32::MAX;
     let mut stack_lexer = [FULL_WALK_LEXER_DEAD; 256];
     let mut stack_parser = [0u32; 256];
     let mut stack_two = [((0u32, 0u32), (0u32, 0u32)); 256];
-    let mut stack_many: [FullWalkBranches; 256] =
-        std::array::from_fn(|_| FullWalkBranches::new());
+    let mut stack_many: [FullWalkManyState; 256] = std::array::from_fn(|_| {
+        FullWalkManyState::Branches(FullWalkBranches::new())
+    });
+    let mut pair_union_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
+    let mut triple_union_cache = FxHashMap::<(u32, u32, u32), Option<u32>>::default();
     if root_branches.len() == 1 && root_branches[0].initial_prune_guard.is_passed() {
         stack_lexer[0] = root_branches[0].tokenizer_config;
-        stack_parser[0] = 0;
+        stack_parser[0] = root_parser_nodes[0];
     } else if root_branches.len() == 2
         && root_branches.iter().all(|root| root.initial_prune_guard.is_passed())
     {
-        stack_lexer[0] = FULL_WALK_LEXER_TWO;
-        stack_two[0] = (
-            (root_branches[0].tokenizer_config, 0),
-            (root_branches[1].tokenizer_config, 1),
-        );
+        let first = (root_branches[0].tokenizer_config, root_parser_nodes[0]);
+        let second = (root_branches[1].tokenizer_config, root_parser_nodes[1]);
+        if let Some((lexer_state, parser_node)) =
+            full_walk_merge_two_same_parser(vocab, &mut pair_union_cache, first, second)
+        {
+            stack_lexer[0] = lexer_state;
+            stack_parser[0] = parser_node;
+        } else {
+            stack_lexer[0] = if first.1 != second.1 {
+                FULL_WALK_LEXER_TWO_DISTINCT
+            } else {
+                FULL_WALK_LEXER_TWO
+            };
+            stack_two[0] = (first, second);
+        }
     } else {
         stack_lexer[0] = FULL_WALK_LEXER_MULTI;
-        for (parser_node, root) in root_branches.iter().enumerate() {
+        let mut roots = FullWalkBranches::new();
+        for (root_index, root) in root_branches.iter().enumerate() {
             full_walk_push_unique(
-                &mut stack_many[0],
+                &mut roots,
                 FullWalkBranch {
                     lexer_state: root.tokenizer_config,
-                    parser_node: parser_node as u32,
+                    parser_node: root_parser_nodes[root_index],
                     prune_guard: FullWalkPruneGuard::from_initial(&root.initial_prune_guard, vocab),
                 },
             );
+        }
+        if let Some((lexer_state, parser_node)) = full_walk_merge_branches_same_parser(
+            vocab,
+            &mut pair_union_cache,
+            &mut triple_union_cache,
+            &roots,
+        )
+        {
+            stack_lexer[0] = lexer_state;
+            stack_parser[0] = parser_node;
+        } else {
+            stack_many[0] = full_walk_many_state_from_branches(roots);
         }
     }
 
@@ -685,15 +1018,15 @@ fn try_full_walk_mask(
     let mut scalar_lexer = FULL_WALK_LEXER_DEAD;
     let mut scalar_parser = 0u32;
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
-    let mut current_many = FullWalkBranches::new();
+    let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
 
     for &op in walk_ops {
         let parent_depth = op.parent_depth() as usize;
         if op.starts_edge() {
             scalar_lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
-            if scalar_lexer < FULL_WALK_LEXER_TWO {
+            if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                 scalar_parser = unsafe { *stack_parser.get_unchecked(parent_depth) };
-            } else if scalar_lexer == FULL_WALK_LEXER_TWO {
+            } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                 current_two = unsafe { *stack_two.get_unchecked(parent_depth) };
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
                 current_many.clone_from(unsafe { stack_many.get_unchecked(parent_depth) });
@@ -702,7 +1035,8 @@ fn try_full_walk_mask(
 
         if op.consumes_byte() {
             let byte = op.byte();
-            if scalar_lexer < FULL_WALK_LEXER_TWO {
+            if scalar_lexer == FULL_WALK_LEXER_DEAD {
+            } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                 let cell = full_walk_flat16_transition_cell(flat16, scalar_lexer, byte);
                 if cell == u16::MAX {
                     scalar_lexer = FULL_WALK_LEXER_DEAD;
@@ -716,6 +1050,7 @@ fn try_full_walk_mask(
                             scalar_parser,
                             initial_lexer_state,
                             finalizer_code,
+            single_finalizer_continues,
                             tokenizer,
                             &mut parser_cache,
                             state.constraint,
@@ -724,50 +1059,203 @@ fn try_full_walk_mask(
                                 scalar_lexer = branch.lexer_state;
                                 scalar_parser = branch.parser_node;
                             }
+                            FullWalkScalarFinalizerOutcome::Two(first, second) => {
+                                if first.prune_guard.is_passed() && second.prune_guard.is_passed() {
+                                    if let Some((lexer_state, parser_node)) =
+                                        full_walk_merge_two_same_parser(
+                                            vocab,
+                                            &mut pair_union_cache,
+                                            (first.lexer_state, first.parser_node),
+                                            (second.lexer_state, second.parser_node),
+                                        )
+                                    {
+                                        scalar_lexer = lexer_state;
+                                        scalar_parser = parser_node;
+                                    } else {
+                                        scalar_lexer = if first.parser_node != second.parser_node {
+                                            FULL_WALK_LEXER_TWO_DISTINCT
+                                        } else {
+                                            FULL_WALK_LEXER_TWO
+                                        };
+                                        current_two = (
+                                            (first.lexer_state, first.parser_node),
+                                            (second.lexer_state, second.parser_node),
+                                        );
+                                    }
+                                } else {
+                                    let mut next = FullWalkBranches::new();
+                                    next.push(first);
+                                    next.push(second);
+                                    scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                    current_many = full_walk_many_state_from_branches(next);
+                                }
+                            }
                             FullWalkScalarFinalizerOutcome::Many(next) => {
-                                if next.len() == 2
-                                    && next.iter().all(|branch| branch.prune_guard.is_passed())
+                                if let [first, second] = next.as_slice() {
+                                    if first.prune_guard.is_passed() && second.prune_guard.is_passed() {
+                                        if let Some((lexer_state, parser_node)) =
+                                            full_walk_merge_two_same_parser(
+                                                vocab,
+                                                &mut pair_union_cache,
+                                                (first.lexer_state, first.parser_node),
+                                                (second.lexer_state, second.parser_node),
+                                            )
+                                        {
+                                            scalar_lexer = lexer_state;
+                                            scalar_parser = parser_node;
+                                        } else {
+                                            scalar_lexer = if first.parser_node != second.parser_node {
+                                                FULL_WALK_LEXER_TWO_DISTINCT
+                                            } else {
+                                                FULL_WALK_LEXER_TWO
+                                            };
+                                            current_two = (
+                                                (first.lexer_state, first.parser_node),
+                                                (second.lexer_state, second.parser_node),
+                                            );
+                                        }
+                                    } else {
+                                        scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                        current_many = full_walk_many_state_from_branches(next);
+                                    }
+                                } else if let Some((lexer_state, parser_node)) =
+                                    full_walk_merge_branches_same_parser(
+                                        vocab,
+                                        &mut pair_union_cache,
+                                        &mut triple_union_cache,
+                                        &next,
+                                    )
                                 {
-                                    scalar_lexer = FULL_WALK_LEXER_TWO;
-                                    current_two = (
-                                        (next[0].lexer_state, next[0].parser_node),
-                                        (next[1].lexer_state, next[1].parser_node),
-                                    );
+                                    scalar_lexer = lexer_state;
+                                    scalar_parser = parser_node;
                                 } else {
                                     scalar_lexer = FULL_WALK_LEXER_MULTI;
-                                    current_many = next;
+                                    current_many = full_walk_many_state_from_branches(next);
                                 }
+                            }
+                        }
+                    }
+                }
+            } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT {
+                let first_cell = full_walk_flat16_transition_cell(flat16, current_two.0.0, byte);
+                let second_cell = full_walk_flat16_transition_cell(flat16, current_two.1.0, byte);
+                if first_cell != u16::MAX
+                    && second_cell != u16::MAX
+                    && (first_cell | second_cell) & 0x8000 == 0
+                {
+                    current_two.0.0 = u32::from(first_cell);
+                    current_two.1.0 = u32::from(second_cell);
+                } else {
+                    match full_walk_step_two(
+                        current_two,
+                        byte,
+                        initial_lexer_state,
+                        finalizer_code,
+                        single_finalizer_continues,
+                        tokenizer,
+                        flat16,
+                        &mut parser_cache,
+                        state.constraint,
+                    ) {
+                        FullWalkTwoStepOutcome::Dead => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                        FullWalkTwoStepOutcome::One((lexer, parser)) => {
+                            scalar_lexer = lexer;
+                            scalar_parser = parser;
+                        }
+                        FullWalkTwoStepOutcome::Two(first, second) => {
+                            if let Some((lexer_state, parser_node)) =
+                                full_walk_merge_two_same_parser(
+                                    vocab,
+                                    &mut pair_union_cache,
+                                    first,
+                                    second,
+                                )
+                            {
+                                scalar_lexer = lexer_state;
+                                scalar_parser = parser_node;
+                            } else {
+                                scalar_lexer = if first.1 != second.1 {
+                                    FULL_WALK_LEXER_TWO_DISTINCT
+                                } else {
+                                    FULL_WALK_LEXER_TWO
+                                };
+                                current_two = (first, second);
+                            }
+                        }
+                        FullWalkTwoStepOutcome::Many(next) => {
+                            if let Some((lexer_state, parser_node)) =
+                                full_walk_merge_branches_same_parser(
+                                            vocab,
+                                            &mut pair_union_cache,
+                                            &mut triple_union_cache,
+                                            &next,
+                                        )
+                            {
+                                scalar_lexer = lexer_state;
+                                scalar_parser = parser_node;
+                            } else {
+                                scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                current_many = full_walk_many_state_from_branches(next);
                             }
                         }
                     }
                 }
             } else if scalar_lexer == FULL_WALK_LEXER_TWO {
                 match full_walk_step_two(
-                    current_two,
-                    byte,
-                    initial_lexer_state,
-                    finalizer_code,
-                    tokenizer,
-                    flat16,
-                    &mut parser_cache,
-                    state.constraint,
-                ) {
-                    FullWalkTwoStepOutcome::Dead => scalar_lexer = FULL_WALK_LEXER_DEAD,
-                    FullWalkTwoStepOutcome::One((lexer, parser)) => {
-                        scalar_lexer = lexer;
-                        scalar_parser = parser;
+                        current_two,
+                        byte,
+                        initial_lexer_state,
+                        finalizer_code,
+                        single_finalizer_continues,
+                        tokenizer,
+                        flat16,
+                        &mut parser_cache,
+                        state.constraint,
+                    ) {
+                        FullWalkTwoStepOutcome::Dead => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                        FullWalkTwoStepOutcome::One((lexer, parser)) => {
+                            scalar_lexer = lexer;
+                            scalar_parser = parser;
+                        }
+                        FullWalkTwoStepOutcome::Two(first, second) => {
+                            if let Some((lexer_state, parser_node)) =
+                                full_walk_merge_two_same_parser(
+                                    vocab,
+                                    &mut pair_union_cache,
+                                    first,
+                                    second,
+                                )
+                            {
+                                scalar_lexer = lexer_state;
+                                scalar_parser = parser_node;
+                            } else {
+                                scalar_lexer = if first.1 != second.1 {
+                                    FULL_WALK_LEXER_TWO_DISTINCT
+                                } else {
+                                    FULL_WALK_LEXER_TWO
+                                };
+                                current_two = (first, second);
+                            }
+                        }
+                        FullWalkTwoStepOutcome::Many(next) => {
+                            if let Some((lexer_state, parser_node)) =
+                                full_walk_merge_branches_same_parser(
+                                            vocab,
+                                            &mut pair_union_cache,
+                                            &mut triple_union_cache,
+                                            &next,
+                                        )
+                            {
+                                scalar_lexer = lexer_state;
+                                scalar_parser = parser_node;
+                            } else {
+                                scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                current_many = full_walk_many_state_from_branches(next);
+                            }
+                        }
                     }
-                    FullWalkTwoStepOutcome::Two(first, second) => {
-                        scalar_lexer = FULL_WALK_LEXER_TWO;
-                        current_two = (first, second);
-                    }
-                    FullWalkTwoStepOutcome::Many(next) => {
-                        scalar_lexer = FULL_WALK_LEXER_MULTI;
-                        current_many = next;
-                    }
-                }
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                let next = full_walk_step_many(
+                let next = full_walk_step_many_state(
                     &current_many,
                     byte,
                     initial_lexer_state,
@@ -777,24 +1265,72 @@ fn try_full_walk_mask(
                     &mut parser_cache,
                     state.constraint,
                 );
-                match next.len() {
-                    0 => {
-                        scalar_lexer = FULL_WALK_LEXER_DEAD;
+                match next {
+                    FullWalkManyState::Branches(next) => {
+                        match next.as_slice() {
+                            [] => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                            [branch] if branch.prune_guard.is_passed() => {
+                                scalar_lexer = branch.lexer_state;
+                                scalar_parser = branch.parser_node;
+                            }
+                            [first, second]
+                                if first.prune_guard.is_passed() && second.prune_guard.is_passed() =>
+                            {
+                                if let Some((lexer_state, parser_node)) =
+                                    full_walk_merge_two_same_parser(
+                                        vocab,
+                                        &mut pair_union_cache,
+                                        (first.lexer_state, first.parser_node),
+                                        (second.lexer_state, second.parser_node),
+                                    )
+                                {
+                                    scalar_lexer = lexer_state;
+                                    scalar_parser = parser_node;
+                                } else {
+                                    scalar_lexer = if first.parser_node != second.parser_node {
+                                        FULL_WALK_LEXER_TWO_DISTINCT
+                                    } else {
+                                        FULL_WALK_LEXER_TWO
+                                    };
+                                    current_two = (
+                                        (first.lexer_state, first.parser_node),
+                                        (second.lexer_state, second.parser_node),
+                                    );
+                                }
+                            }
+                            _ => {
+                                if let Some((lexer_state, parser_node)) =
+                                    full_walk_merge_branches_same_parser(
+                                        vocab,
+                                        &mut pair_union_cache,
+                                        &mut triple_union_cache,
+                                        &next,
+                                    )
+                                {
+                                    scalar_lexer = lexer_state;
+                                    scalar_parser = parser_node;
+                                } else {
+                                    scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                    current_many = FullWalkManyState::Branches(next);
+                                }
+                            }
+                        }
                     }
-                    1 if next[0].prune_guard.is_passed() => {
-                        scalar_lexer = next[0].lexer_state;
-                        scalar_parser = next[0].parser_node;
-                    }
-                    2 if next.iter().all(|branch| branch.prune_guard.is_passed()) => {
-                        scalar_lexer = FULL_WALK_LEXER_TWO;
-                        current_two = (
-                            (next[0].lexer_state, next[0].parser_node),
-                            (next[1].lexer_state, next[1].parser_node),
-                        );
-                    }
-                    _ => {
-                        scalar_lexer = FULL_WALK_LEXER_MULTI;
-                        current_many = next;
+                    next @ FullWalkManyState::ThreeSameParser { lexers, parser_node } => {
+                        if let Some((lexer_state, parser_node)) =
+                            full_walk_merge_three_same_parser(
+                                vocab,
+                                &mut triple_union_cache,
+                                lexers,
+                                parser_node,
+                            )
+                        {
+                            scalar_lexer = lexer_state;
+                            scalar_parser = parser_node;
+                        } else {
+                            scalar_lexer = FULL_WALK_LEXER_MULTI;
+                            current_many = next;
+                        }
                     }
                 }
             }
@@ -804,40 +1340,63 @@ fn try_full_walk_mask(
             if op.child_is_token() {
                 let token_node = unsafe { *token_nodes.get_unchecked(token_node_index) };
                 token_node_index += 1;
-                let allowed = if scalar_lexer < FULL_WALK_LEXER_TWO {
-                    parser_cache.token_boundary_allowed(
+                let allowed = if scalar_lexer == FULL_WALK_LEXER_DEAD {
+                    false
+                } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
+                    parser_cache.token_boundary_allowed_raw(
                         state.constraint,
                         tokenizer,
                         initial_lexer_state,
-                        &FullWalkBranch {
-                            lexer_state: scalar_lexer,
-                            parser_node: scalar_parser,
-                            prune_guard: FullWalkPruneGuard::Passed,
-                        },
+                        scalar_lexer,
+                        scalar_parser,
                     )
-                } else if scalar_lexer == FULL_WALK_LEXER_TWO {
-                    [current_two.0, current_two.1].iter().any(|&(lexer_state, parser_node)| {
-                        parser_cache.token_boundary_allowed(
-                            state.constraint,
-                            tokenizer,
-                            initial_lexer_state,
-                            &FullWalkBranch {
-                                lexer_state,
-                                parser_node,
-                                prune_guard: FullWalkPruneGuard::Passed,
-                            },
-                        )
-                    })
+                } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
+                    parser_cache.token_boundary_allowed_raw(
+                        state.constraint,
+                        tokenizer,
+                        initial_lexer_state,
+                        current_two.0.0,
+                        current_two.0.1,
+                    ) || parser_cache.token_boundary_allowed_raw(
+                        state.constraint,
+                        tokenizer,
+                        initial_lexer_state,
+                        current_two.1.0,
+                        current_two.1.1,
+                    )
                 } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                    current_many.iter()
-                        .any(|branch| {
+                    match &current_many {
+                        FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
                             parser_cache.token_boundary_allowed(
                                 state.constraint,
                                 tokenizer,
                                 initial_lexer_state,
                                 branch,
                             )
-                        })
+                        }),
+                        FullWalkManyState::ThreeSameParser {
+                            lexers,
+                            parser_node,
+                        } => parser_cache.token_boundary_allowed_raw(
+                            state.constraint,
+                            tokenizer,
+                            initial_lexer_state,
+                            lexers.0,
+                            *parser_node,
+                        ) || parser_cache.token_boundary_allowed_raw(
+                            state.constraint,
+                            tokenizer,
+                            initial_lexer_state,
+                            lexers.1,
+                            *parser_node,
+                        ) || parser_cache.token_boundary_allowed_raw(
+                            state.constraint,
+                            tokenizer,
+                            initial_lexer_state,
+                            lexers.2,
+                            *parser_node,
+                        ),
+                    }
                 } else {
                     false
                 };
@@ -848,9 +1407,10 @@ fn try_full_walk_mask(
 
             unsafe {
                 *stack_lexer.get_unchecked_mut(parent_depth + 1) = scalar_lexer;
-                if scalar_lexer < FULL_WALK_LEXER_TWO {
+                if scalar_lexer == FULL_WALK_LEXER_DEAD {
+                } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                     *stack_parser.get_unchecked_mut(parent_depth + 1) = scalar_parser;
-                } else if scalar_lexer == FULL_WALK_LEXER_TWO {
+                } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                     *stack_two.get_unchecked_mut(parent_depth + 1) = current_two;
                 } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
                     stack_many
@@ -5010,11 +5570,87 @@ fn fill_mask_dynamic_impl(
         }
     }
 
-    for (&tokenizer_state, gss) in &state.state {
+    let mut seed_entries = SmallVec::<[(u32, u32, &ParserGSS); 16]>::new();
+    if !additive_static_baseline && vocab.has_mask_tokenizer_source_subsets() {
+        let mut groups = SmallVec::<[(usize, &ParserGSS, SmallVec<[u32; 8]>); 8]>::new();
+        for (&tokenizer_state, gss) in &state.state {
+            let key = gss.ptr_key();
+            if let Some((_, _, states)) = groups.iter_mut().find(|(candidate, _, _)| *candidate == key) {
+                states.push(tokenizer_state);
+            } else {
+                groups.push((key, gss, SmallVec::from_slice(&[tokenizer_state])));
+            }
+        }
+        for (_, gss, mut states) in groups {
+            states.sort_unstable();
+            states.dedup();
+            if states.len() > 1
+                && let Some(projected) = vocab.mask_projection_state_for_source_states(
+                    &state.constraint.tokenizer,
+                    &states,
+                )
+            {
+                seed_entries.push((states[0], projected, gss));
+            } else {
+                for raw_state in states {
+                    seed_entries.push((raw_state, vocab.mask_projection_state(raw_state), gss));
+                }
+            }
+        }
+    } else {
+        for (&tokenizer_state, gss) in &state.state {
+            seed_entries.push((
+                tokenizer_state,
+                vocab.mask_projection_state(tokenizer_state),
+                gss,
+            ));
+        }
+    }
+
+    // Preserve exact parser identity across lexer-only fanout. `state.state`
+    // can contain several tokenizer states carrying the same ParserGSS object.
+    // Partitioning that object independently for every lexer state would create
+    // distinct transformed ParserStacks objects and erase that provenance.
+    // Partition once, then clone the resulting ParserStacks for each lexer
+    // seed; those clones retain pointer identity by construction.
+    let mut seed_groups =
+        SmallVec::<[(usize, &ParserGSS, SmallVec<[(u32, u32); 8]>); 8]>::new();
+    for (tokenizer_state, projected_tokenizer_state, gss) in seed_entries {
+        let key = gss.ptr_key();
+        if let Some((_, _, seeds)) = seed_groups
+            .iter_mut()
+            .find(|(candidate, _, _)| *candidate == key)
+        {
+            seeds.push((tokenizer_state, projected_tokenizer_state));
+        } else {
+            seed_groups.push((
+                key,
+                gss,
+                SmallVec::from_slice(&[(tokenizer_state, projected_tokenizer_state)]),
+            ));
+        }
+    }
+    let mut partitioned_seed_entries =
+        SmallVec::<[(u32, u32, ParserStacks, TerminalsDisallowed); 16]>::new();
+    for (_, gss, seeds) in seed_groups {
         deadline_poll.check()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
-            deadline_poll.check()?;
-            let initial_prune_guard = InitialPruneGuard::new(vocab, &terminals_disallowed);
+            for &(tokenizer_state, projected_tokenizer_state) in &seeds {
+                partitioned_seed_entries.push((
+                    tokenizer_state,
+                    projected_tokenizer_state,
+                    stacks.clone(),
+                    terminals_disallowed.clone(),
+                ));
+            }
+        }
+    }
+
+    for (tokenizer_state, projected_tokenizer_state, stacks, terminals_disallowed) in
+        partitioned_seed_entries
+    {
+        deadline_poll.check()?;
+        let initial_prune_guard = InitialPruneGuard::new(vocab, &terminals_disallowed);
             if profile {
                 // Keep diagnostic parser-signature queries out of the live
                 // traversal cache.  They must not prime or otherwise alter
@@ -5136,7 +5772,6 @@ fn fill_mask_dynamic_impl(
                         stack,
                     );
                 }
-                let projected_tokenizer_state = vocab.mask_projection_state(tokenizer_state);
                 let loop_bytes = cached_self_loop_bytes(
                     lexer_scan_cache.tokenizer(),
                     projected_tokenizer_state,
@@ -5176,10 +5811,9 @@ fn fill_mask_dynamic_impl(
                     ),
                 );
             }
-            let projected_tokenizer_state = vocab.mask_projection_state(tokenizer_state);
             let tokenizer_config =
                 lexer_scan_cache.config_for_raw_start(projected_tokenizer_state)?;
-            if !push_unique_dynamic_branch(
+                if !push_unique_dynamic_branch(
                 &mut root_branches,
                 DynamicBranch {
                     tokenizer_config,
@@ -5205,7 +5839,6 @@ fn fill_mask_dynamic_impl(
                 Some(existing) if existing == projected_tokenizer_state => Some(existing),
                 Some(_) => Some(u32::MAX),
             };
-        }
     }
 
     let full_walk_used = if !additive_static_baseline && candidate_mask.is_none() {

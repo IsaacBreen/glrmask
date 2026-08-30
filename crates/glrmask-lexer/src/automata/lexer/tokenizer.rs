@@ -18,6 +18,12 @@ use super::runtime_repeat_product::{
     VirtualBinaryRepeatIntersectionDescriptor, VirtualBinaryRepeatIntersectionMaskProjection,
     VirtualBinaryRepeatIntersectionRuntime, VirtualRuntimeStateOwners, VirtualStateAllocator,
 };
+pub use super::runtime_residual::{
+    VirtualResidualMaskProjection, VirtualResidualMaskProjectionArtifact,
+};
+#[doc(hidden)]
+pub type VirtualResidualMaskProjectionArtifactRef<'a> =
+    super::runtime_residual::VirtualResidualMaskProjectionArtifactRef<'a>;
 use super::runtime_residual::VirtualResidualRuntime;
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
@@ -3690,26 +3696,76 @@ pub mod artifact_serde {
             return Err("fast tokenizer terminal id out of range".to_owned());
         }
         let metadata_build_started = profile.then(std::time::Instant::now);
-        let dfa = DFA::new_from_sparse_metadata(
-            group_id_to_u8set,
-            &epsilon_offsets,
-            &epsilon_targets,
-            &finalizer_offsets,
-            &finalizers,
-            &future_offsets,
-            &futures,
-        );
+        // Current fast artifacts already carry sparse per-state observation
+        // metadata. Keep that information in the runtime's compact metadata
+        // sidecar instead of eagerly allocating one full DFAState (including
+        // two terminal bitsets) for every state. Byte transitions already live
+        // in PackedRuntimeTransitions, so the structural DFA only needs the
+        // reset-state stub and terminal byte-group mapping until a later
+        // composition/structural mutation explicitly asks to materialize it.
+        let pack_rows = |offsets: &[u32], values: &[u32]| {
+            let mut row_map = FxHashMap::<Box<[u32]>, u32>::default();
+            let mut rows = Vec::<BitSet>::new();
+            let mut row_ids = Vec::<u32>::with_capacity(state_count);
+            for state in 0..state_count {
+                let start = offsets[state] as usize;
+                let end = offsets[state + 1] as usize;
+                let sparse = &values[start..end];
+                let row = if let Some(&row) = row_map.get(sparse) {
+                    row
+                } else {
+                    let row = rows.len() as u32;
+                    let mut bits = BitSet::new(num_terminals as usize);
+                    for &terminal in sparse {
+                        bits.set(terminal as usize);
+                    }
+                    rows.push(bits);
+                    row_map.insert(sparse.into(), row);
+                    row
+                };
+                row_ids.push(row);
+            }
+            (rows, row_ids)
+        };
+        let (finalizer_rows, finalizer_row_ids) = pack_rows(&finalizer_offsets, &finalizers);
+        let finalizer_lists = finalizer_rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|terminal| terminal as TerminalID)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .collect::<Vec<_>>();
+        let (future_rows, future_row_ids) = pack_rows(&future_offsets, &futures);
+        let mut epsilon_states = Vec::<u32>::new();
+        let mut packed_epsilon_offsets = vec![0u32];
+        for state in 0..state_count {
+            if epsilon_offsets[state] == epsilon_offsets[state + 1] {
+                continue;
+            }
+            epsilon_states.push(state as u32);
+            packed_epsilon_offsets.push(epsilon_offsets[state + 1]);
+        }
+        let packed_metadata = Arc::new(PackedTokenizerMetadata {
+            state_count: state_count as u32,
+            finalizer_row_ids: packed_row_ids_from_u32(finalizer_row_ids, finalizer_rows.len()),
+            finalizer_rows: Arc::from(finalizer_rows.into_boxed_slice()),
+            finalizer_lists: Arc::from(finalizer_lists.into_boxed_slice()),
+            future_row_ids: packed_row_ids_from_u32(future_row_ids, future_rows.len()),
+            future_rows: Arc::from(future_rows.into_boxed_slice()),
+            epsilon_states: Arc::from(epsilon_states.into_boxed_slice()),
+            epsilon_offsets: Arc::from(packed_epsilon_offsets.into_boxed_slice()),
+            epsilon_targets: Arc::from(epsilon_targets.into_boxed_slice()),
+        });
+        let mut dfa = DFA::new(1);
+        dfa.ensure_group_capacity(num_terminals as usize);
+        for (terminal, group) in group_id_to_u8set.into_iter().enumerate() {
+            dfa.set_group_u8set(terminal as u32, group);
+        }
         let metadata_build_ms = metadata_build_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        // Static-constraint finalization always primes this cache before the
-        // constraint is returned. Build it here while tokenizer decode is one
-        // branch of the outer parallel section fan-out, rather than paying the
-        // same work serially after every section has joined.
-        let singleton_epsilon_closures = {
-            let cache = OnceLock::new();
-            let _ = cache.set(Arc::new(dfa.all_singleton_epsilon_closures()));
-            cache
-        };
+        let singleton_epsilon_closures = OnceLock::new();
         if let Some(total_started) = total_started {
             let epsilon_rows = epsilon_offsets
                 .windows(2)
@@ -3750,7 +3806,7 @@ pub mod artifact_serde {
             })),
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
-            packed_runtime_metadata: None,
+            packed_runtime_metadata: Some(packed_metadata),
             packed_runtime_metadata_segments: Arc::from([]),
             packed_compressed_transition_segments: Arc::from([]),
             virtual_unit_repeat: None,
@@ -5689,9 +5745,13 @@ impl Tokenizer {
             let global_groups = (0..tokenizer.num_terminals)
                 .map(|terminal| (terminal_offset + terminal) as usize)
                 .collect::<Vec<_>>();
+            let mut component = tokenizer.dfa.clone();
+            while component.num_states() < tokenizer.num_states() as usize {
+                component.add_state();
+            }
             let state_offset = parent
                 .dfa
-                .append_rebased_component_ref(&tokenizer.dfa, &global_groups);
+                .append_rebased_component(component, &global_groups);
             state_offsets.push(state_offset);
             if let Some(closures) = tokenizer.cached_singleton_epsilon_closures() {
                 child_closures.push((Arc::clone(closures), state_offset, tokenizer.start_state()));
@@ -5846,7 +5906,10 @@ impl Tokenizer {
             // equivalent runtime caches, which is catastrophic for million-state
             // composed tokenizers. Segment targets are local to the segment, so
             // rebasing only its state offset is exact.
-            let component = tokenizer.dfa.clone();
+            let mut component = tokenizer.dfa.clone();
+            while component.num_states() < tokenizer.num_states() as usize {
+                component.add_state();
+            }
             let global_groups = (0..tokenizer.num_terminals)
                 .map(|terminal| (terminal_offset + terminal) as usize)
                 .collect::<Vec<_>>();
@@ -6910,6 +6973,9 @@ impl Tokenizer {
     /// DFA epsilon edges.
     fn materialize_runtime_metadata_for_structural_mutation(&mut self) {
         if let Some(metadata) = self.packed_runtime_metadata.take() {
+            while self.dfa.num_states() < metadata.state_count as usize {
+                self.dfa.add_state();
+            }
             for state in 0..metadata.state_count {
                 let finalizers = metadata
                     .finalizers(state)
@@ -6968,6 +7034,34 @@ impl Tokenizer {
 
     fn materialized_dfa(&self) -> DFA {
         let mut dfa = self.dfa.clone();
+        while dfa.num_states() < self.num_states() as usize {
+            dfa.add_state();
+        }
+        if let Some(metadata) = self.packed_runtime_metadata.as_deref() {
+            for state in 0..metadata.state_count {
+                dfa.overwrite_state_metadata(
+                    state,
+                    metadata.finalizers(state).expect("packed metadata covers every state").clone(),
+                    metadata.futures(state).expect("packed metadata covers every state").clone(),
+                );
+                for &target in metadata.epsilon_targets(state) {
+                    dfa.add_epsilon_transition(state, target);
+                }
+            }
+        }
+        for segment in self.packed_runtime_metadata_segments.iter() {
+            for local_state in 0..segment.metadata.state_count {
+                let state = segment.state_offset + local_state;
+                dfa.overwrite_state_metadata(
+                    state,
+                    segment.metadata.finalizers(local_state).expect("packed metadata segment covers every state").clone(),
+                    segment.metadata.futures(local_state).expect("packed metadata segment covers every state").clone(),
+                );
+                for &target in segment.metadata.epsilon_targets(local_state) {
+                    dfa.add_epsilon_transition(state, segment.state_offset + target);
+                }
+            }
+        }
         if let Some(packed) = &self.packed_runtime_transitions {
             for state in 0..packed.state_count() as u32 {
                 if let Some((bytes, targets)) = packed.row(state) {
@@ -7130,6 +7224,18 @@ impl Tokenizer {
                 .iter()
                 .any(|segment| segment.metadata.has_epsilon_transitions())
             || self.dfa.has_epsilon_transitions()
+    }
+
+    #[inline]
+    #[doc(hidden)]
+    pub fn contains_runtime_state(&self, state: u32) -> bool {
+        state < self.num_states()
+            || self.virtual_residual_runtime_for_state(state).is_some()
+            || self.virtual_repeat_runtime_for_state(state).is_some()
+            || self
+                .virtual_unit_repeat
+                .as_deref()
+                .is_some_and(|runtime| runtime.handles_state(state))
     }
 
     #[inline]
@@ -7381,6 +7487,158 @@ impl Tokenizer {
         metadata: &[VirtualTokenizerRuntimeMetadata],
         allow_legacy_exact_dead_residual_roots: bool,
     ) -> Result<(), String> {
+        self.restore_terminal_exprs_with_virtual_runtime_metadata_impl(
+            exprs,
+            metadata,
+            allow_legacy_exact_dead_residual_roots,
+            false,
+            None,
+        )
+    }
+
+    /// Static compiled constraints use the same exact residual language as the
+    /// dynamic runtime, but retain the bounded-code oracle coordinate in the
+    /// lazy state identity so every runtime state has a deterministic finite
+    /// Static TSID projection. This is a representation policy, not additional
+    /// serialized grammar semantics, so it is selected by the Static loader.
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        allow_legacy_exact_dead_residual_roots: bool,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_with_virtual_runtime_metadata_impl(
+            exprs,
+            metadata,
+            allow_legacy_exact_dead_residual_roots,
+            true,
+            None,
+        )
+    }
+
+    /// Restore a current Static residual runtime directly from its compiled
+    /// artifact program without materializing the constraint's complete list
+    /// of terminal source expressions. The full expression blob remains
+    /// deferred for later composition; only each residual owner's tiny source
+    /// expression is decoded to rebuild the derivative arena.
+    #[doc(hidden)]
+    pub fn restore_compiled_static_residual_runtimes(
+        &mut self,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        projections: &[VirtualResidualMaskProjectionArtifact],
+    ) -> Result<(), String> {
+        if metadata.is_empty() || metadata.len() != projections.len() {
+            return Err("compiled static residual runtime/projection count mismatch".to_owned());
+        }
+        if metadata.iter().any(|entry| entry.kind != VirtualTokenizerRuntimeKind::ResidualExpr) {
+            return Err("compiled static residual fast path requires residual-only virtual runtimes".to_owned());
+        }
+        self.virtual_unit_repeat = None;
+        self.virtual_repeat_intersections.clear();
+        self.virtual_residuals.clear();
+        self.exprs = None;
+
+        let physical_state_count = self.num_states();
+        let start_state = self.start_state();
+        let reset_closure = self.epsilon_closure_states(&[start_state]);
+        let mut seen_terminals = BTreeSet::new();
+        let mut seen_roots = BTreeSet::new();
+        for entry in metadata {
+            if entry.terminal >= self.num_terminals
+                || !seen_terminals.insert(entry.terminal)
+                || !seen_roots.insert(entry.root_state)
+                || entry.root_state == start_state
+                || entry.root_state >= physical_state_count
+                || !reset_closure.contains(&entry.root_state)
+                || self.state_has_epsilon_transitions(entry.root_state)
+                || self.transitions_from(entry.root_state).next().is_some()
+                || !self.state_finalizers(entry.root_state).is_empty()
+            {
+                return Err("compiled static residual runtime has invalid terminal/root ownership".to_owned());
+            }
+        }
+        let projection_terminals = projections
+            .iter()
+            .map(VirtualResidualMaskProjectionArtifact::terminal)
+            .collect::<BTreeSet<_>>();
+        if projection_terminals != seen_terminals || projection_terminals.len() != projections.len() {
+            return Err("compiled static residual projection terminal ownership mismatch".to_owned());
+        }
+
+        let allocator = Arc::new(
+            VirtualStateAllocator::new(physical_state_count)
+                .ok_or_else(|| "compiled static residual runtime has no virtual state namespace".to_owned())?,
+        );
+        let roots = metadata.iter().map(|entry| entry.root_state).collect::<Vec<_>>();
+        let owners = Arc::new(
+            VirtualRuntimeStateOwners::new(physical_state_count, &roots)
+                .ok_or_else(|| "compiled static residual runtime has invalid state ownership".to_owned())?,
+        );
+        let mut runtimes = Vec::with_capacity(metadata.len());
+        for (runtime_index, entry) in metadata.iter().enumerate() {
+            let projection = projections
+                .iter()
+                .find(|projection| projection.terminal() == entry.terminal)
+                .ok_or_else(|| format!("missing compiled residual program for terminal {}", entry.terminal))?;
+            if projection.runtime_expr_bytes().is_empty() {
+                return Err(format!("compiled residual program for terminal {} has no expression", entry.terminal));
+            }
+            let expression: Expr = bincode::deserialize(projection.runtime_expr_bytes())
+                .map_err(|err| format!("invalid compiled residual expression: {err}"))?;
+            if self.terminal_byte_support(entry.terminal) != Some(super::compile::expr_u8set(&expression)) {
+                return Err(format!("compiled residual terminal {} has inconsistent byte support", entry.terminal));
+            }
+            let runtime_index = u32::try_from(runtime_index)
+                .map_err(|_| "compiled residual runtime count exceeds u32".to_owned())?;
+            let runtime = Arc::new(
+                VirtualResidualRuntime::new_preserving_oracle_coordinate_from_oracle_bytes(
+                    &expression, projection.oracle_bytes(), runtime_index, entry.terminal,
+                    self.num_terminals, physical_state_count, entry.root_state,
+                    Arc::clone(&allocator), Arc::clone(&owners),
+                )
+                .ok_or_else(|| "compiled static residual runtime program is invalid".to_owned())?,
+            );
+            let mut expected_future = BitSet::new(self.num_terminals as usize);
+            if runtime.root_has_future() { expected_future.set(entry.terminal as usize); }
+            if self.state_futures(entry.root_state) != &expected_future {
+                return Err(format!("compiled residual root {} has inconsistent future metadata", entry.root_state));
+            }
+            if runtime.root_has_future() && !self.state_futures(start_state).contains(entry.terminal as usize) {
+                return Err(format!("compiled residual terminal {} is missing from reset-state futures", entry.terminal));
+            }
+            runtimes.push(runtime);
+        }
+        self.virtual_residuals = runtimes;
+        self.invalidate_derived_caches();
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_with_precompiled_static_residual_oracles(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        projections: &[VirtualResidualMaskProjectionArtifact],
+        allow_legacy_exact_dead_residual_roots: bool,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_with_virtual_runtime_metadata_impl(
+            exprs,
+            metadata,
+            allow_legacy_exact_dead_residual_roots,
+            true,
+            Some(projections),
+        )
+    }
+
+    fn restore_terminal_exprs_with_virtual_runtime_metadata_impl(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        allow_legacy_exact_dead_residual_roots: bool,
+        preserve_residual_oracle_coordinates: bool,
+        precompiled_static_residual_projections: Option<&[VirtualResidualMaskProjectionArtifact]>,
+    ) -> Result<(), String> {
         self.restore_terminal_exprs_only(exprs)?;
         self.virtual_unit_repeat = None;
         self.virtual_repeat_intersections.clear();
@@ -7399,34 +7657,39 @@ impl Tokenizer {
         let physical_state_count = self.num_states();
         let mut required_virtual_terminals = BTreeSet::<TerminalID>::new();
         let mut certified_bounded_code_terminals = BTreeSet::<TerminalID>::new();
+        let mut any_finalizer = BitSet::new(self.num_terminals as usize);
+        let mut any_future = BitSet::new(self.num_terminals as usize);
+        if precompiled_static_residual_projections.is_some() {
+            for state in 0..physical_state_count {
+                any_finalizer.union_with(self.state_finalizers(state));
+                any_future.union_with(self.state_futures(state));
+            }
+        }
         for (terminal, expression) in expressions.iter().enumerate() {
             let terminal = terminal as TerminalID;
             if super::compile::expression_contains_large_bounded_repeat(expression) {
                 required_virtual_terminals.insert(terminal);
                 continue;
             }
+            if let Some(projections) = precompiled_static_residual_projections {
+                if projections.iter().any(|projection| projection.terminal() == terminal) {
+                    certified_bounded_code_terminals.insert(terminal);
+                    if !any_finalizer.contains(terminal as usize) && any_future.contains(terminal as usize) {
+                        required_virtual_terminals.insert(terminal);
+                    }
+                }
+                continue;
+            }
             if !super::compile::expression_supports_bounded_code_residual_runtime(expression) {
                 continue;
             }
             certified_bounded_code_terminals.insert(terminal);
-
-            // Current below-threshold bounded-code residual artifacts carry a
-            // deliberately impossible physical proxy. The proxy's conservative
-            // future bit is serialized, but there is no physical accepting
-            // state for the terminal. That shape proves this particular
-            // artifact depends on an explicit residual owner. Older fully
-            // materialized artifacts have a physical finalizer and therefore
-            // remain loadable without metadata. A genuinely empty materialized
-            // terminal has neither a future nor a finalizer, so it also does not
-            // spuriously become metadata-dependent.
             let mut has_physical_finalizer = false;
             let mut has_physical_future = false;
             for state in 0..physical_state_count {
                 has_physical_finalizer |= self.state_finalizers(state).contains(terminal as usize);
                 has_physical_future |= self.state_futures(state).contains(terminal as usize);
-                if has_physical_finalizer && has_physical_future {
-                    break;
-                }
+                if has_physical_finalizer && has_physical_future { break; }
             }
             if !has_physical_finalizer && has_physical_future {
                 required_virtual_terminals.insert(terminal);
@@ -7585,12 +7848,37 @@ impl Tokenizer {
                         entry.terminal,
                     ));
                 }
-                let runtime = Arc::new(
+                let runtime_index = u32::try_from(runtime_index).map_err(|_| {
+                    "serialized residual runtime count exceeds u32".to_owned()
+                })?;
+                let runtime = if preserve_residual_oracle_coordinates {
+                    if let Some(projections) = precompiled_static_residual_projections {
+                        let projection = projections
+                            .iter()
+                            .find(|projection| projection.terminal() == entry.terminal)
+                            .ok_or_else(|| format!("missing precompiled residual oracle for terminal {}", entry.terminal))?;
+                        VirtualResidualRuntime::new_preserving_oracle_coordinate_from_oracle_bytes(
+                            expression,
+                            projection.oracle_bytes(),
+                            runtime_index,
+                            entry.terminal,
+                            self.num_terminals,
+                            physical_state_count,
+                            entry.root_state,
+                            Arc::clone(&allocator),
+                            Arc::clone(&owners),
+                        )
+                    } else {
+                        VirtualResidualRuntime::new_preserving_oracle_coordinate(
+                            expression, runtime_index, entry.terminal, self.num_terminals,
+                            physical_state_count, entry.root_state, Arc::clone(&allocator),
+                            Arc::clone(&owners),
+                        )
+                    }
+                } else {
                     VirtualResidualRuntime::new(
                         expression,
-                        u32::try_from(runtime_index).map_err(|_| {
-                            "serialized residual runtime count exceeds u32".to_owned()
-                        })?,
+                        runtime_index,
                         entry.terminal,
                         self.num_terminals,
                         physical_state_count,
@@ -7598,7 +7886,9 @@ impl Tokenizer {
                         Arc::clone(&allocator),
                         Arc::clone(&owners),
                     )
-                    .ok_or_else(|| "serialized residual runtime metadata is invalid".to_owned())?,
+                };
+                let runtime = Arc::new(
+                    runtime.ok_or_else(|| "serialized residual runtime metadata is invalid".to_owned())?,
                 );
                 let mut expected_future = BitSet::new(self.num_terminals as usize);
                 if runtime.root_has_future() {
@@ -7956,6 +8246,22 @@ impl Tokenizer {
         &mut self,
         components: Vec<(Expr, TerminalID)>,
     ) -> Option<()> {
+        self.install_virtual_residual_components_impl(components, false)
+    }
+
+    #[doc(hidden)]
+    pub fn install_virtual_residual_components_preserving_oracle_coordinates(
+        &mut self,
+        components: Vec<(Expr, TerminalID)>,
+    ) -> Option<()> {
+        self.install_virtual_residual_components_impl(components, true)
+    }
+
+    fn install_virtual_residual_components_impl(
+        &mut self,
+        components: Vec<(Expr, TerminalID)>,
+        preserve_oracle_coordinate: bool,
+    ) -> Option<()> {
         if self.virtual_unit_repeat.is_some()
             || !self.virtual_repeat_intersections.is_empty()
             || !self.virtual_residuals.is_empty()
@@ -7986,16 +8292,30 @@ impl Tokenizer {
         for (index, (expression, terminal)) in components.into_iter().enumerate() {
             let root_state = roots[index];
             let byte_support = super::compile::expr_u8set(&expression);
-            let runtime = Arc::new(VirtualResidualRuntime::new(
-                &expression,
-                u32::try_from(index).ok()?,
-                terminal,
-                self.num_terminals,
-                physical_state_count,
-                root_state,
-                Arc::clone(&allocator),
-                Arc::clone(&owners),
-            )?);
+            let runtime = if preserve_oracle_coordinate {
+                VirtualResidualRuntime::new_preserving_oracle_coordinate(
+                    &expression,
+                    u32::try_from(index).ok()?,
+                    terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    root_state,
+                    Arc::clone(&allocator),
+                    Arc::clone(&owners),
+                )?
+            } else {
+                VirtualResidualRuntime::new(
+                    &expression,
+                    u32::try_from(index).ok()?,
+                    terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    root_state,
+                    Arc::clone(&allocator),
+                    Arc::clone(&owners),
+                )?
+            };
+            let runtime = Arc::new(runtime);
             pending.push((terminal, root_state, byte_support, runtime));
         }
 
@@ -8102,6 +8422,159 @@ impl Tokenizer {
     }
 
     #[doc(hidden)]
+    pub fn restore_compiled_virtual_residual_mask_projections(
+        &self,
+        mask_tokenizer: &Tokenizer,
+        artifacts: Vec<VirtualResidualMaskProjectionArtifact>,
+    ) -> Result<Vec<VirtualResidualMaskProjection>, String> {
+        if artifacts.len() != self.virtual_residuals.len() {
+            return Err(format!(
+                "compiled virtual residual projection count mismatch: artifact={} runtime={}",
+                artifacts.len(), self.virtual_residuals.len(),
+            ));
+        }
+        if mask_tokenizer.num_terminals() != self.num_terminals || mask_tokenizer.has_any_virtual_runtime() {
+            return Err("compiled virtual residual mask tokenizer is incompatible".to_owned());
+        }
+        let mask_states = mask_tokenizer.num_states();
+        let offsets = artifacts.iter().map(VirtualResidualMaskProjectionArtifact::state_offset).collect::<Vec<_>>();
+        if offsets.windows(2).any(|pair| pair[0] >= pair[1])
+            || offsets.last().is_some_and(|&offset| offset >= mask_states)
+        {
+            return Err("compiled virtual residual projection offsets are invalid".to_owned());
+        }
+        let mut restored = Vec::with_capacity(artifacts.len());
+        for (index, (runtime, artifact)) in self.virtual_residuals.iter().zip(artifacts).enumerate() {
+            let start = offsets[index];
+            let end = offsets.get(index + 1).copied().unwrap_or(mask_states);
+            if end <= start {
+                return Err("compiled virtual residual projection component is empty".to_owned());
+            }
+            restored.push(runtime.restore_compiled_finite_mask_projection(end - start, artifact)?);
+        }
+        Ok(restored)
+    }
+
+    #[doc(hidden)]
+    pub fn restore_virtual_residual_mask_projections(
+        &self,
+        horizon: usize,
+        mask_tokenizer: &Tokenizer,
+        artifacts: Vec<VirtualResidualMaskProjectionArtifact>,
+    ) -> Result<Vec<VirtualResidualMaskProjection>, String> {
+        if artifacts.len() != self.virtual_residuals.len() {
+            return Err(format!(
+                "virtual residual projection count mismatch: artifact={} runtime={}",
+                artifacts.len(),
+                self.virtual_residuals.len(),
+            ));
+        }
+        if mask_tokenizer.num_terminals() != self.num_terminals {
+            return Err(format!(
+                "virtual residual mask tokenizer terminal mismatch: mask={} source={}",
+                mask_tokenizer.num_terminals(),
+                self.num_terminals,
+            ));
+        }
+        if mask_tokenizer.has_any_virtual_runtime() {
+            return Err("serialized virtual residual mask tokenizer must be finite".to_owned());
+        }
+        let mask_states = mask_tokenizer.num_states();
+        let offsets = artifacts
+            .iter()
+            .map(VirtualResidualMaskProjectionArtifact::state_offset)
+            .collect::<Vec<_>>();
+        if offsets.windows(2).any(|pair| pair[0] >= pair[1])
+            || offsets.last().is_some_and(|&offset| offset >= mask_states)
+        {
+            return Err("virtual residual projection offsets are invalid".to_owned());
+        }
+        let mut restored = Vec::with_capacity(artifacts.len());
+        for (index, (runtime, artifact)) in self
+            .virtual_residuals
+            .iter()
+            .zip(artifacts.into_iter())
+            .enumerate()
+        {
+            let start = offsets[index];
+            let end = offsets.get(index + 1).copied().unwrap_or(mask_states);
+            if end <= start {
+                return Err("virtual residual projection component is empty".to_owned());
+            }
+            restored.push(runtime.restore_finite_mask_projection(
+                horizon,
+                end - start,
+                artifact,
+            )?);
+        }
+        Ok(restored)
+    }
+
+    pub fn virtual_residuals_mask_tokenizer(
+        &self,
+        horizon: usize,
+    ) -> Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)> {
+        self.virtual_residuals_mask_tokenizer_with_vocab(horizon, None)
+    }
+
+    pub fn virtual_residuals_mask_tokenizer_with_vocab(
+        &self,
+        horizon: usize,
+        vocab: Option<&crate::Vocab>,
+    ) -> Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)> {
+        if self.virtual_residuals.is_empty() {
+            return None;
+        }
+        let mut mask = self.clone();
+        mask.virtual_unit_repeat = None;
+        mask.virtual_repeat_intersections.clear();
+        mask.virtual_residuals.clear();
+        let start = mask.start_state();
+        let repeat_horizons = super::compile::VocabularyRepeatHorizonCache::new();
+
+        // Residual components are independent symbolic languages. Build their
+        // finite one-token observation DFAs concurrently; append/rebase them
+        // deterministically afterward so state numbering remains stable.
+        let built = self
+            .virtual_residuals
+            .par_iter()
+            .map(|runtime| {
+                let built = if let Some(crossed_boundaries) = vocab
+                    .and_then(|vocab| runtime.vocabulary_repeat_boundary_horizon(vocab, &repeat_horizons))
+                {
+                    runtime.build_finite_mask_projection_for_crossed_boundaries(crossed_boundaries, 0)
+                } else {
+                    runtime.build_finite_mask_projection(horizon, 0)
+                }?;
+                let (component, local_root, projection) = built;
+                Some((Arc::clone(runtime), component, local_root, projection))
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut projections = Vec::with_capacity(built.len());
+        for (runtime, component, local_root, mut projection) in built {
+            let offset = u32::try_from(mask.dfa.num_states()).ok()?;
+            let proxy_root = runtime.root_state();
+            let root_eps = &mut mask.dfa.states_mut()[start as usize].epsilon_transitions;
+            let before = root_eps.len();
+            root_eps.retain(|&state| state != proxy_root);
+            if root_eps.len() == before {
+                return None;
+            }
+            let terminal = runtime.terminal() as usize;
+            let actual_offset = mask.dfa.append_rebased_component(component, &[terminal]);
+            if actual_offset != offset {
+                return None;
+            }
+            mask.dfa.add_epsilon_transition(start, offset.checked_add(local_root)?);
+            projection.set_state_offset(offset);
+            projections.push(projection);
+        }
+        mask.dfa.recompute_possible_futures();
+        mask.invalidate_derived_caches();
+        Some((mask, projections))
+    }
+
     pub fn virtual_binary_repeat_intersections_mask_tokenizer(
         &self,
         horizon: usize,
@@ -11935,6 +12408,206 @@ mod tests {
     }
 
     #[test]
+    fn virtual_residual_mask_projection_matches_one_token_observations() {
+        const HORIZON: usize = 4;
+        const MAX: usize = 40;
+        let body = Expr::U8Class(U8Set::from_bytes(b"ab"));
+        let envelope = Expr::Seq(vec![
+            bytes(b"\""),
+            Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(MAX),
+            },
+            bytes(b"\""),
+        ]);
+        let pattern = Expr::Seq(vec![
+            bytes(b"\"a"),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: None,
+            },
+            bytes(b"\""),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(envelope),
+            intersect: Box::new(pattern),
+        };
+        let mut exact = Tokenizer::from_parts(DFA::new(1), 1, None);
+        exact
+            .install_virtual_residual_components_preserving_oracle_coordinates(vec![(expression, 0)])
+            .expect("bounded-code residual runtime must install");
+        assert_eq!(exact.virtual_residual_bounded_code_liveness_oracle_count(), 1);
+        let (mask, projections) = exact
+            .virtual_residuals_mask_tokenizer(HORIZON)
+            .expect("bounded-code residual must admit a finite mask projection");
+        assert_eq!(projections.len(), 1);
+        assert!(mask.num_states() < 2_000, "small oracle should stay compact enough for the test");
+        let projection = &projections[0];
+        let root = exact
+            .epsilon_closure_states(&[exact.start_state()])
+            .into_iter()
+            .find(|&state| state != exact.start_state())
+            .unwrap();
+
+        // Every exact state reachable in this finite oracle must have a
+        // projection, not merely the hand-picked count samples below. This
+        // protects the symbolic source-root construction against dropping a
+        // valid deep token-boundary coordinate.
+        let mut seen = BTreeSet::from([root]);
+        let mut queue = VecDeque::from([root]);
+        while let Some(state) = queue.pop_front() {
+            assert!(
+                projection.project(state).is_some(),
+                "reachable exact residual state {state} has no finite projection",
+            );
+            for byte in 0u16..=255 {
+                let next = exact.get_transition(state, byte as u8);
+                if next != u32::MAX && seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        let mut starting_states = vec![root];
+        for count in [1usize, 2, 5, 12, 30, 35, 38, 39] {
+            let mut state = root;
+            state = exact.get_transition(state, b'\"');
+            assert_ne!(state, u32::MAX);
+            for index in 0..count {
+                state = exact.get_transition(state, if index == 0 { b'a' } else { b'b' });
+                assert_ne!(state, u32::MAX, "count={count} index={index}");
+            }
+            starting_states.push(state);
+        }
+
+        for full_start in starting_states {
+            let mask_start = projection
+                .project(full_start)
+                .expect("every certified exact residual must project");
+            assert_eq!(
+                exact.matched_terminal_bitset(full_start),
+                mask.matched_terminal_bitset(mask_start),
+                "source finalizers differ at exact state {full_start}",
+            );
+            assert_eq!(
+                exact.possible_future_terminals(full_start),
+                mask.possible_future_terminals(mask_start),
+                "source futures differ at exact state {full_start}",
+            );
+
+            enumerate_bytes(b"ab\"x", HORIZON, |suffix| {
+                let mut full = full_start;
+                let mut finite = mask_start;
+                for (offset, &byte) in suffix.iter().enumerate() {
+                    let full_next = exact.get_transition(full, byte);
+                    let finite_next = mask.get_transition(finite, byte);
+                    assert_eq!(
+                        full_next == u32::MAX,
+                        finite_next == u32::MAX,
+                        "liveness differs from exact state {full_start} on {suffix:?} at {offset}",
+                    );
+                    if full_next == u32::MAX {
+                        break;
+                    }
+                    assert_eq!(
+                        exact.matched_terminal_bitset(full_next),
+                        mask.matched_terminal_bitset(finite_next),
+                        "finalizers differ from exact state {full_start} on {suffix:?} at {offset}",
+                    );
+                    assert_eq!(
+                        exact.possible_future_terminals(full_next),
+                        mask.possible_future_terminals(finite_next),
+                        "futures differ from exact state {full_start} on {suffix:?} at {offset}",
+                    );
+                    // Runtime commit reprojects at token boundaries. The finite
+                    // byte-walk endpoint need not be the same raw mask state,
+                    // but it must carry the same observation as the independently
+                    // projected exact endpoint.
+                    let reprojected = projection.project(full_next).unwrap();
+                    assert_eq!(
+                        mask.matched_terminal_bitset(finite_next),
+                        mask.matched_terminal_bitset(reprojected),
+                    );
+                    assert_eq!(
+                        mask.possible_future_terminals(finite_next),
+                        mask.possible_future_terminals(reprojected),
+                    );
+                    full = full_next;
+                    finite = finite_next;
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn virtual_residual_mask_projection_accepts_full_bound_stencil() {
+        const HORIZON: usize = 4;
+        const MAX: usize = 3;
+        let body = Expr::U8Class(U8Set::from_bytes(b"ab"));
+        let envelope = Expr::Seq(vec![
+            bytes(b"\""),
+            Expr::Repeat {
+                expr: Box::new(body),
+                min: 0,
+                max: Some(MAX),
+            },
+            bytes(b"\""),
+        ]);
+        let pattern = Expr::Seq(vec![
+            bytes(b"\""),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: None,
+            },
+            bytes(b"\""),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(envelope),
+            intersect: Box::new(pattern),
+        };
+        let mut exact = Tokenizer::from_parts(DFA::new(1), 1, None);
+        exact
+            .install_virtual_residual_components_preserving_oracle_coordinates(vec![(expression, 0)])
+            .expect("bounded-code residual runtime must install");
+        let (mask, projections) = exact
+            .virtual_residuals_mask_tokenizer(HORIZON)
+            .expect("a cheap full-bound finite projection must remain available");
+        let projection = &projections[0];
+        let root = exact
+            .epsilon_closure_states(&[exact.start_state()])
+            .into_iter()
+            .find(|&state| state != exact.start_state())
+            .unwrap();
+
+        let mask_root = projection.project(root).unwrap();
+        enumerate_bytes(b"ab\"x", HORIZON, |suffix| {
+            let mut full = root;
+            let mut finite = mask_root;
+            for &byte in suffix {
+                let full_next = exact.get_transition(full, byte);
+                let finite_next = mask.get_transition(finite, byte);
+                assert_eq!(full_next == u32::MAX, finite_next == u32::MAX);
+                if full_next == u32::MAX {
+                    break;
+                }
+                assert_eq!(
+                    exact.matched_terminal_bitset(full_next),
+                    mask.matched_terminal_bitset(finite_next),
+                );
+                assert_eq!(
+                    exact.possible_future_terminals(full_next),
+                    mask.possible_future_terminals(finite_next),
+                );
+                full = full_next;
+                finite = finite_next;
+            }
+        });
+    }
+
+    #[test]
     fn residual_state_owner_index_dispatches_multiple_components_directly() {
         let repeated_suffix = |byte, suffix| {
             Expr::Seq(vec![
@@ -12466,57 +13139,17 @@ mod tests {
         let left = one_byte(b'a');
         let (half, _) = Tokenizer::disjoint_union_with_owned_parent(parent, 0, &[(&left, 1)]);
         let wire = artifact_serde::to_fast_bytes(&half);
-        let mut loaded = artifact_serde::from_fast_bytes(&wire).expect("fast tokenizer roundtrip");
+        let loaded = artifact_serde::from_fast_bytes(&wire).expect("fast tokenizer roundtrip");
         assert!(loaded.packed_runtime_transitions.is_some());
-
-        // Tiny tokenizers normally keep metadata in the DFA after TKF2 load,
-        // while large TKS3 artifacts use the packed metadata representation
-        // that originally exposed this bug. Install the equivalent packed
-        // metadata explicitly so this focused regression exercises the same
-        // precedence rules without constructing a 100k-state tokenizer.
-        let state_count = loaded.dfa.num_states();
-        assert!(state_count <= u8::MAX as usize);
-        let finalizer_rows = (0..state_count)
-            .map(|state| loaded.dfa.finalizers(state as u32).clone())
-            .collect::<Vec<_>>();
-        let finalizer_lists = finalizer_rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|terminal| terminal as TerminalID)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice()
-            })
-            .collect::<Vec<_>>();
-        let future_rows = (0..state_count)
-            .map(|state| loaded.dfa.possible_future_group_ids(state as u32).clone())
-            .collect::<Vec<_>>();
-        let mut epsilon_states = Vec::new();
-        let mut epsilon_offsets = vec![0u32];
-        let mut epsilon_targets = Vec::new();
-        for (state, row) in loaded.dfa.states().iter().enumerate() {
-            if row.epsilon_transitions.is_empty() {
-                continue;
-            }
-            epsilon_states.push(state as u32);
-            epsilon_targets.extend_from_slice(&row.epsilon_transitions);
-            epsilon_offsets.push(epsilon_targets.len() as u32);
-        }
-        loaded.packed_runtime_metadata = Some(Arc::new(PackedTokenizerMetadata {
-            state_count: state_count as u32,
-            finalizer_row_ids: PackedRowIds::U8(Arc::from(
-                (0..state_count as u8).collect::<Vec<_>>().into_boxed_slice(),
-            )),
-            finalizer_rows: Arc::from(finalizer_rows.into_boxed_slice()),
-            finalizer_lists: Arc::from(finalizer_lists.into_boxed_slice()),
-            future_row_ids: PackedRowIds::U8(Arc::from(
-                (0..state_count as u8).collect::<Vec<_>>().into_boxed_slice(),
-            )),
-            future_rows: Arc::from(future_rows.into_boxed_slice()),
-            epsilon_states: Arc::from(epsilon_states.into_boxed_slice()),
-            epsilon_offsets: Arc::from(epsilon_offsets.into_boxed_slice()),
-            epsilon_targets: Arc::from(epsilon_targets.into_boxed_slice()),
-        }));
+        assert!(
+            loaded.packed_runtime_metadata.is_some(),
+            "current fast loads keep observation metadata packed until structural mutation",
+        );
+        assert_eq!(
+            loaded.dfa.num_states(),
+            1,
+            "loaded structural DFA should remain a stub",
+        );
 
         let right = one_byte(b'b');
         let (nested, offsets) =

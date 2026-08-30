@@ -1292,6 +1292,69 @@ fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_pa
 }
 
 #[test]
+fn json_schema_value_pattern_literal_does_not_splice_partial_unicode_escape() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "string",
+        "pattern": "^ab$"
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#""ab""#));
+    assert!(schema_accepts_bytes(&schema, br#""\u0061b""#));
+    assert!(!schema_accepts_bytes(&schema, br#""\u006b""#));
+}
+
+#[test]
+fn json_schema_pattern_property_literal_accepts_complete_unicode_escape_spelling() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^ab$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"ab": "value"}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"\u0061b": "value"}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"\u006": "value"}"#,
+    ));
+}
+
+#[test]
+fn json_schema_pattern_property_literal_masks_partial_unicode_escape_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^ab$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        407,
+        br#"\u"#,
+    ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        408,
+        br#"\u0061b"#,
+    ));
+}
+
+#[test]
 fn llguidance_generic_json_object_rejects_partial_unicode_key_escape() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
@@ -2948,6 +3011,37 @@ fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
 }
 
 #[test]
+fn unbounded_email_array_with_max_length_reuses_one_item_terminal() {
+    let schema = json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 1024
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("unbounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["a@example.com", "b@example.com"]"#,
+    ));
+}
+
+#[test]
 fn costly_bounded_pattern_string_arrays_reuse_one_item_terminal() {
     let schema = json!({
         "type": "array",
@@ -3961,9 +4055,14 @@ fn shorter_word_pattern_preserves_max_length_above_product_budget() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
+    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
         panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
     };
+    assert!(
+        !matches!(expr.as_ref(), GrammarExpr::RawRegex(_)),
+        "high-cost fully anchored pattern should retain structural form inside the single terminal: {:?}",
+        expr
+    );
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
