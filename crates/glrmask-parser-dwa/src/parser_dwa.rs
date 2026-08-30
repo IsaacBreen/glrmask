@@ -725,7 +725,18 @@ pub fn prebuild_parser_bundle_cache_excluding_terminals(
             )
         };
     let built = if crate::templates::macro_parallelism_disabled() {
-        selected.iter().map(build_bundle).collect::<Vec<_>>()
+        let mut timings = Vec::with_capacity(selected.len());
+        let built = selected
+            .iter()
+            .map(|bundle| {
+                let started = Instant::now();
+                let built = build_bundle(bundle);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                built
+            })
+            .collect::<Vec<_>>();
+        crate::templates::report_macro_item_timings("parser_bundle_prebuild", &timings);
+        built
     } else {
         selected.par_iter().map(build_bundle).collect::<Vec<_>>()
     };
@@ -7352,6 +7363,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
         )
         .is_some()
             && allow_parallel
+            && !crate::templates::macro_parallelism_disabled()
             && rayon::current_num_threads() > 1
         {
             summaries
@@ -7410,6 +7422,13 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                 .map(build_bundle)
                 .collect::<Vec<_>>()
         };
+        crate::templates::report_macro_item_timings(
+            "parser_bundle_prebuild_all",
+            &built_with_timings
+                .iter()
+                .filter_map(|(built, ms)| built.as_ref().map(|_| *ms))
+                .collect::<Vec<_>>(),
+        );
         if profile_bundle_prebuild {
             let mut rows = built_with_timings
                 .iter()
@@ -7448,6 +7467,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
         "GLRMASK_EXPERIMENT_PARALLEL_FRAGMENT_ASSEMBLY",
     )
     .is_some()
+        && !crate::templates::macro_parallelism_disabled()
         && !compose_detail_enabled
         && !preserve_bundle_nondeterminism
         && hybrid_nondeterministic_min_terminals.is_none()

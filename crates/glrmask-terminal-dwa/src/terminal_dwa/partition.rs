@@ -763,6 +763,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     // L1-style builder over the same L2P terminal set.
     let branch_build_started_at = Instant::now();
     let (l1_result, l2p_result) = compile_profile_join(
+        "partition_l1_and_l2p_branches",
         || {
             if has_l1 {
                 let started_at = Instant::now();
@@ -914,6 +915,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
                 };
                 let ((boundary_result, boundary_ms), (single_result, single_ms)) = compile_profile_join(
+                    "l2p_boundary_and_single_l1",
                     || {
                         if split.boundary_tokens == 0 {
                             (None, 0.0)

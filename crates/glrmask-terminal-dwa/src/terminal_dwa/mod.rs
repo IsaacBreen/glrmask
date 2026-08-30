@@ -2156,6 +2156,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let did_global_merge = l1_pairs.len() > 1 || l2p_pairs.len() > 1;
     let family_merge_started_at = Instant::now();
     let (l1_family, l2p_family) = compile_profile_join(
+        "terminal_l1_and_l2p_family_merge",
         || {
             (!l1_pairs.is_empty()).then(|| {
                 let family = if l1_token_domains_proven_disjoint {

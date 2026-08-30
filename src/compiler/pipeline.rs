@@ -2718,6 +2718,7 @@ fn build_and_merge_parser_dwa_families(
     }
 
     let (l1_parser, l2p_parser) = macro_join(
+        "parser_family_builds",
         || {
             (!use_direct_l1_parts)
                 .then(|| {
@@ -2786,6 +2787,7 @@ fn build_and_merge_parser_dwa_families(
                 let left = parser_dwas.next().expect("two parser families have a left member");
                 let right = parser_dwas.next().expect("two parser families have a right member");
                 let (left, right) = macro_join(
+                    "parser_family_remap",
                     || left.remap_into_existing_common(final_id_map),
                     || right.remap_into_existing_common(final_id_map),
                 );
@@ -3173,6 +3175,7 @@ fn launch_parser_dag_if_ready<'scope>(
                 let parser_final_id_map_target =
                     parser_final_coordinate_merge.then_some(&parser_final_id_map);
                 let (parser_dwa, prebuilt_token_mask_caches) = macro_join(
+                    "parser_dwa_and_token_cache",
                     || {
                         build_and_merge_parser_dwa_families(
                             &terminal_dwas,
@@ -3612,6 +3615,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let (global_tokenizer_result, prepared_partition_local_tokenizers) =
                     if prebuild_partition_locals {
                         macro_join(
+                            "global_tokenizer_and_partition_locals",
                             build_global_tokenizer,
                             || {
                                 partition_local_synthesis_plan_ref.and_then(|plan| {
@@ -5095,6 +5099,7 @@ fn compile_dynamic_owned_impl(
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
         let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join(
+            "dynamic_tokenizer_and_table_vocab",
             || -> crate::Result<((Tokenizer, Option<(Tokenizer, Vec<u32>)>), f64)> {
                 let started_at = Instant::now();
                 let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
@@ -5177,6 +5182,7 @@ fn compile_dynamic_owned_impl(
                 Ok(((tokenizer, mask_tokenizer_quotient), elapsed_ms(started_at)))
             },
             || macro_join(
+                "dynamic_table_and_vocab",
                 || {
                     let started_at = Instant::now();
                     let table = if let Some(state_count) = direct_state_count {

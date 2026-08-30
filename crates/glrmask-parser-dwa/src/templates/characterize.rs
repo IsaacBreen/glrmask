@@ -1076,7 +1076,18 @@ pub fn characterize_selected_terminals_for_terminal_count(
         (terminals.clone(), characterization)
     };
     let characterized = if super::macro_parallelism_disabled() {
-        groups.iter().map(characterize_group).collect::<Vec<_>>()
+        let mut timings = Vec::with_capacity(groups.len());
+        let characterized = groups
+            .iter()
+            .map(|group| {
+                let started = Instant::now();
+                let result = characterize_group(group);
+                timings.push(elapsed_ms(started));
+                result
+            })
+            .collect::<Vec<_>>();
+        super::report_macro_item_timings("selected_terminal_characterization", &timings);
+        characterized
     } else {
         groups.par_iter().map(characterize_group).collect::<Vec<_>>()
     };
@@ -1190,12 +1201,20 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
             (terminal, characterize_terminal(table, &index, terminal))
         };
     let result = if super::macro_parallelism_disabled() {
-        action_states_by_terminal
+        let mut timings = Vec::new();
+        let result = action_states_by_terminal
             .iter()
             .enumerate()
             .filter(|(_, states)| !states.is_empty())
-            .map(characterize)
-            .collect::<BTreeMap<_, _>>()
+            .map(|item| {
+                let started = Instant::now();
+                let result = characterize(item);
+                timings.push(elapsed_ms(started));
+                result
+            })
+            .collect::<BTreeMap<_, _>>();
+        super::report_macro_item_timings("seeded_action_state_characterization", &timings);
+        result
     } else {
         action_states_by_terminal
             .par_iter()
@@ -1323,12 +1342,20 @@ pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
             (terminal, characterization)
         };
     if super::macro_parallelism_disabled() {
-        seeds_by_terminal
+        let mut timings = Vec::new();
+        let result = seeds_by_terminal
             .iter()
             .enumerate()
             .filter(|(_, seeds)| !seeds.is_empty())
-            .map(characterize)
-            .collect()
+            .map(|item| {
+                let started = Instant::now();
+                let result = characterize(item);
+                timings.push(elapsed_ms(started));
+                result
+            })
+            .collect();
+        super::report_macro_item_timings("seeded_nonterminal_characterization", &timings);
+        result
     } else {
         seeds_by_terminal
             .par_iter()
@@ -1432,7 +1459,18 @@ pub fn characterize_terminals_profiled(
         };
     let characterized_groups: Vec<(Vec<TerminalID>, TerminalCharacterization)> =
         if super::macro_parallelism_disabled() {
-            groups.iter().map(characterize_group).collect()
+            let mut timings = Vec::with_capacity(groups.len());
+            let result = groups
+                .iter()
+                .map(|group| {
+                    let started = Instant::now();
+                    let result = characterize_group(group);
+                    timings.push(elapsed_ms(started));
+                    result
+                })
+                .collect();
+            super::report_macro_item_timings("terminal_characterization_groups", &timings);
+            result
         } else {
             groups.par_iter().map(characterize_group).collect()
         };

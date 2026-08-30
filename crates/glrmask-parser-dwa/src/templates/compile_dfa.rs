@@ -935,6 +935,13 @@ impl Templates {
             } else {
                 groups.par_iter().map(build).collect()
             };
+        super::report_macro_item_timings(
+            "template_compile_characterizations",
+            &compiled
+                .iter()
+                .map(|(_, _, _, sample)| sample.total_ms())
+                .collect::<Vec<_>>(),
+        );
 
         let mut profile = TemplateCompileProfile {
             unique_characterizations: groups.len(),

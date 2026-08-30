@@ -91,7 +91,7 @@ use crate::runtime::{
     CompositionGrammarSummary, Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
 };
 use crate::Vocab;
-use super::{macro_join, macro_parallelism_disabled};
+use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
 
 mod structural_sharing;
 mod runtime_lexer_product;
@@ -2341,13 +2341,21 @@ fn build_commit_templates_from_raw_templates(
             let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
             try_split_commit_template_dfas(&commit_dfa)
                 .map(|split| (terminal, Arc::new(split)))
-        };
+    };
     let split_templates = if macro_parallelism_disabled() {
-        raw_templates
+        let mut timings = Vec::new();
+        let result = raw_templates
             .iter()
             .enumerate()
-            .filter_map(build)
-            .collect::<Vec<_>>()
+            .filter_map(|item| {
+                let started = Instant::now();
+                let result = build(item);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<Vec<_>>();
+        report_macro_item_timings("compose_commit_template_splits", &timings);
+        result
     } else {
         raw_templates
             .par_iter()
@@ -8273,7 +8281,8 @@ fn build_static_boundary_shard_work(
             })
         };
     if macro_parallelism_disabled() {
-        candidate_tokens_by_component
+        let mut timings = Vec::new();
+        let result = candidate_tokens_by_component
             .iter()
             .enumerate()
             .filter(|(component_index, tokens)| {
@@ -8281,8 +8290,15 @@ fn build_static_boundary_shard_work(
                     && static_boundary_components
                         .is_none_or(|selected| selected.contains(*component_index))
             })
-            .map(build)
-            .collect()
+            .map(|item| {
+                let started = Instant::now();
+                let result = build(item);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect();
+        report_macro_item_timings("compose_static_boundary_shards", &timings);
+        result
     } else {
         candidate_tokens_by_component
             .par_iter()
@@ -10084,9 +10100,19 @@ fn prepare_unmapped_component_parser_artifacts(
                 automaton,
                 possible_matches,
             })
-        };
+    };
     if macro_parallelism_disabled() {
-        (0..components.len()).map(build).collect()
+        let mut timings = Vec::with_capacity(components.len());
+        let result = (0..components.len())
+            .map(|index| {
+                let started = Instant::now();
+                let result = build(index);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect();
+        report_macro_item_timings("compose_component_parser_artifacts", &timings);
+        result
     } else {
         (0..components.len()).into_par_iter().map(build).collect()
     }
@@ -10112,9 +10138,19 @@ fn prepare_unmapped_component_parser_automata(
                 strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
             }
             Ok(automaton)
-        };
+    };
     if macro_parallelism_disabled() {
-        (0..components.len()).map(build).collect()
+        let mut timings = Vec::with_capacity(components.len());
+        let result = (0..components.len())
+            .map(|index| {
+                let started = Instant::now();
+                let result = build(index);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect();
+        report_macro_item_timings("compose_component_parser_automata", &timings);
+        result
     } else {
         (0..components.len()).into_par_iter().map(build).collect()
     }
@@ -10260,9 +10296,21 @@ impl<'a> DeferredComponentParserUnionView<'a> {
                     strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
                 }
                 Ok(automaton)
-            };
+        };
         if macro_parallelism_disabled() {
-            self.components.into_iter().map(build).collect()
+            let mut timings = Vec::with_capacity(self.components.len());
+            let result = self
+                .components
+                .into_iter()
+                .map(|component| {
+                    let started = Instant::now();
+                    let result = build(component);
+                    timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                    result
+                })
+                .collect();
+            report_macro_item_timings("compose_deferred_component_parser_materialize", &timings);
+            result
         } else {
             self.components.into_par_iter().map(build).collect()
         }
@@ -10302,9 +10350,19 @@ fn prepare_unmapped_component_possible_matches(
                 // dynamic component into a static quotient.
                 Ok(PossibleMatches::new())
             }
-        };
+    };
     if macro_parallelism_disabled() {
-        (0..components.len()).map(build).collect()
+        let mut timings = Vec::with_capacity(components.len());
+        let result = (0..components.len())
+            .map(|index| {
+                let started = Instant::now();
+                let result = build(index);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect();
+        report_macro_item_timings("compose_component_possible_matches", &timings);
+        result
     } else {
         (0..components.len()).into_par_iter().map(build).collect()
     }
@@ -10372,13 +10430,21 @@ fn prepare_deferred_component_artifacts(
             );
             drop(weights);
             Ok::<_, String>((maps, possible_matches))
-        };
+    };
     let prepared = if macro_parallelism_disabled() {
-        possible_matches_by_component
+        let mut timings = Vec::with_capacity(possible_matches_by_component.len());
+        let result = possible_matches_by_component
             .into_iter()
             .zip(component_maps)
-            .map(prepare)
-            .collect::<Result<Vec<_>, String>>()?
+            .map(|item| {
+                let started = Instant::now();
+                let result = prepare(item);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        report_macro_item_timings("compose_deferred_component_remap", &timings);
+        result
     } else {
         possible_matches_by_component
             .into_par_iter()
@@ -11005,13 +11071,21 @@ fn remap_unmapped_component_artifacts(
                 common_tsid_count,
             );
             Ok::<_, String>(pair)
-        };
+    };
     let remapped = if macro_parallelism_disabled() {
-        artifacts
+        let mut timings = Vec::with_capacity(artifacts.len());
+        let result = artifacts
             .into_iter()
             .zip(component_maps)
-            .map(remap)
-            .collect::<Result<Vec<_>, String>>()?
+            .map(|item| {
+                let started = Instant::now();
+                let result = remap(item);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        report_macro_item_timings("compose_component_artifact_remap", &timings);
+        result
     } else {
         artifacts
             .into_par_iter()
@@ -11157,11 +11231,20 @@ fn compose_component_parser_dwas_and_possible_matches(
                     .map(Vec::len)
                     .sum(),
             })
-        };
+    };
     let prepared = if macro_parallelism_disabled() {
-        jobs.into_iter()
-            .map(prepare)
-            .collect::<Result<Vec<_>, String>>()?
+        let mut timings = Vec::with_capacity(jobs.len());
+        let result = jobs
+            .into_iter()
+            .map(|item| {
+                let started = Instant::now();
+                let result = prepare(item);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        report_macro_item_timings("compose_component_parser_prepare", &timings);
+        result
     } else {
         jobs.into_par_iter()
             .map(prepare)
@@ -12066,9 +12149,20 @@ fn try_rebuild_cached_transported_component_templates(
                 let (dfa, nwa) =
                     transport_composition_template_dfa_with_skeleton(dfa, relation)?;
                 Some((terminal_offset + local_terminal as u32, dfa, nwa))
-            };
+        };
         let transported = if macro_parallelism_disabled() {
-            selected.iter().map(transport).collect::<Vec<_>>()
+            let mut timings = Vec::with_capacity(selected.len());
+            let result = selected
+                .iter()
+                .map(|item| {
+                    let started = Instant::now();
+                    let result = transport(item);
+                    timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                    result
+                })
+                .collect::<Vec<_>>();
+            report_macro_item_timings("compose_cached_template_transport", &timings);
+            result
         } else {
             selected.par_iter().map(transport).collect::<Vec<_>>()
         };
@@ -12260,13 +12354,21 @@ fn rebuild_transported_component_templates(
                         .and_then(|dfa| transport_composition_template_dfa(dfa, relation));
                     (local_terminal, transported)
                 })
-            };
+        };
         let cached_results = if macro_parallelism_disabled() {
-            selected
+            let mut timings = Vec::new();
+            let result = selected
                 .iter()
                 .enumerate()
-                .filter_map(transport_cached)
-                .collect::<Vec<_>>()
+                .filter_map(|item| {
+                    let started = Instant::now();
+                    let result = transport_cached(item);
+                    timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                    result
+                })
+                .collect::<Vec<_>>();
+            report_macro_item_timings("compose_cached_template_transport_selected", &timings);
+            result
         } else {
             selected
                 .par_iter()
@@ -13164,9 +13266,21 @@ fn build_composition_templates(
                 let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
                 try_split_commit_template_dfas(&commit_dfa)
                     .map(|split| (terminal, Arc::new(split)))
-            };
+        };
         let split_templates = if macro_parallelism_disabled() {
-            templates.by_terminal.iter().filter_map(split).collect::<Vec<_>>()
+            let mut timings = Vec::with_capacity(templates.by_terminal.len());
+            let result = templates
+                .by_terminal
+                .iter()
+                .filter_map(|item| {
+                    let started = Instant::now();
+                    let result = split(item);
+                    timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                    result
+                })
+                .collect::<Vec<_>>();
+            report_macro_item_timings("compose_template_commit_splits", &timings);
+            result
         } else {
             templates
                 .by_terminal
@@ -13483,13 +13597,21 @@ fn try_build_changed_parent_templates_for_terminal_count(
                 let delta = (!unweighted_dfa_language_is_empty(&delta))
                     .then(|| (old.clone(), delta));
                 Some((terminal, delta, false))
-            };
+        };
         if macro_parallelism_disabled() {
-            changed_parent
+            let mut timings = Vec::new();
+            let result = changed_parent
                 .iter()
                 .enumerate()
-                .filter_map(build_delta)
-                .collect::<Vec<_>>()
+                .filter_map(|item| {
+                    let started = Instant::now();
+                    let result = build_delta(item);
+                    timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                    result
+                })
+                .collect::<Vec<_>>();
+            report_macro_item_timings("compose_changed_parent_template_deltas", &timings);
+            result
         } else {
             changed_parent
                 .par_iter()
@@ -14659,7 +14781,18 @@ fn profile_direct_boundary_terminal_dwa_domain_dp(
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
         };
     let bundles = if macro_parallelism_disabled() {
-        terminal_sets.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+        let mut timings = Vec::with_capacity(terminal_sets.len());
+        let result = terminal_sets
+            .iter()
+            .filter_map(|terminals| {
+                let started = Instant::now();
+                let result = build_bundle(terminals);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<FxHashMap<_, _>>();
+        report_macro_item_timings("compose_direct_boundary_bundles", &timings);
+        result
     } else {
         terminal_sets
             .par_iter()
@@ -14926,9 +15059,20 @@ fn validate_lazy_boundary_terminal_dwa_preimages(
             let bundle = build_boolean_terminal_bundle_nwa(templates, terminals)
                 .expect("lazy validation bundle must build");
             (terminals.clone(), Arc::new(bundle))
-        };
+    };
     let bundles = if macro_parallelism_disabled() {
-        terminal_sets.iter().map(build_bundle).collect::<FxHashMap<_, _>>()
+        let mut timings = Vec::with_capacity(terminal_sets.len());
+        let result = terminal_sets
+            .iter()
+            .map(|terminals| {
+                let started = Instant::now();
+                let result = build_bundle(terminals);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<FxHashMap<_, _>>();
+        report_macro_item_timings("compose_lazy_validation_bundles", &timings);
+        result
     } else {
         terminal_sets.par_iter().map(build_bundle).collect::<FxHashMap<_, _>>()
     };
@@ -15071,9 +15215,20 @@ fn build_boundary_parser_from_weighted_terminal_paths(
     let build_bundle = |&terminal: &u32| {
             build_boolean_terminal_bundle_nwa(templates, &[terminal])
                 .map(|bundle| (terminal, Arc::new(bundle)))
-        };
+    };
     let bundles = if macro_parallelism_disabled() {
-        terminals.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+        let mut timings = Vec::with_capacity(terminals.len());
+        let result = terminals
+            .iter()
+            .filter_map(|terminal| {
+                let started = Instant::now();
+                let result = build_bundle(terminal);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<FxHashMap<_, _>>();
+        report_macro_item_timings("compose_terminal_path_bundles", &timings);
+        result
     } else {
         terminals
             .par_iter()
@@ -15339,12 +15494,20 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
     let build_bundle = |terminals: &Vec<u32>| {
             build_boolean_terminal_bundle_nwa(templates, terminals)
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
-        };
+    };
     let bundles = if macro_parallelism_disabled() {
-        all_terminal_sets
+        let mut timings = Vec::with_capacity(all_terminal_sets.len());
+        let result = all_terminal_sets
             .iter()
-            .filter_map(build_bundle)
-            .collect::<FxHashMap<_, _>>()
+            .filter_map(|terminals| {
+                let started = Instant::now();
+                let result = build_bundle(terminals);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<FxHashMap<_, _>>();
+        report_macro_item_timings("compose_terminal_domain_bundles", &timings);
+        result
     } else {
         all_terminal_sets
             .par_iter()
@@ -15727,9 +15890,20 @@ fn build_full_boundary_lazy_direct_parser(
     let build_bundle = |terminals: &Vec<u32>| {
             build_boolean_terminal_bundle_nwa(templates, terminals)
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
-        };
+    };
     let prebuilt_bundles = if macro_parallelism_disabled() {
-        terminal_sets.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+        let mut timings = Vec::with_capacity(terminal_sets.len());
+        let result = terminal_sets
+            .iter()
+            .filter_map(|terminals| {
+                let started = Instant::now();
+                let result = build_bundle(terminals);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect::<FxHashMap<_, _>>();
+        report_macro_item_timings("compose_boundary_lazy_bundles", &timings);
+        result
     } else {
         terminal_sets
             .par_iter()
@@ -16044,6 +16218,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
         || std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_TERMINAL_DWA").is_some();
     let (discovery, discovery_ms, state_map_ms, component_state_map, terminal_artifact, terminal_ms) = if prebuild_terminal {
         let ((discovery, discovery_ms), (component_state_map, state_map_ms)) = macro_join(
+            "compose_pretable_discovery_and_state_map",
             || {
                 let phase = Instant::now();
                 let discovery = discover_boundary_token_paths(
@@ -16700,6 +16875,7 @@ fn build_boundary_repair(
             ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms), (early_posttable_terminal, early_posttable_terminal_ms)),
         ),
     ) = macro_join(
+        "compose_boundary_pretransport_and_eager_work",
         || {
             let started_at = Instant::now();
             let transported = pretransport_active.as_ref().and_then(|active| {
@@ -16746,6 +16922,7 @@ fn build_boundary_repair(
             )
         },
         || macro_join(
+            "compose_boundary_templates_and_discovery",
             || {
                 (
                     eager_all_templates.then(|| {
@@ -16768,6 +16945,7 @@ fn build_boundary_repair(
             },
             || {
                 let (boundary_result, seed_result) = macro_join(
+                    "compose_boundary_paths_and_seed_relations",
                     || {
                         let started_at = Instant::now();
                         let usable_precomputed = pre_table_base_discovery.filter(|precomputed| {
@@ -17426,6 +17604,7 @@ fn build_boundary_repair(
             )
         } else {
             let (template_result, terminal_result) = macro_join(
+                "compose_boundary_templates_and_terminal_dwa",
                 || {
                     let (templates, mut template_dfas_by_terminal, templates_ms) =
                         eager_templates.unwrap_or_else(|| {
@@ -19328,6 +19507,7 @@ pub(crate) fn compose_constraints(
         let fast_started_at = Instant::now();
         let ((tokenizer_result, tokenizer_ms), ((parser_artifacts, reuse_ms), static_dynamic_overlay)) =
             macro_join(
+                "compose_components_tokenizer_and_parser_metadata",
                 || {
                     let started_at = Instant::now();
                     let result = Tokenizer::disjoint_union_with_terminal_offsets(&tokenizer_inputs);
@@ -19335,6 +19515,7 @@ pub(crate) fn compose_constraints(
                 },
                 || {
                     macro_join(
+                        "compose_components_parser_and_overlay",
                         || {
                             let started_at = Instant::now();
                             let result = compose_component_parser_dwas_and_possible_matches(
@@ -19477,6 +19658,7 @@ pub(crate) fn compose_constraints(
             );
         }
         let ((parser_artifacts, reuse_ms), (boundary_repair, boundary_ms)) = macro_join(
+            "compose_component_parser_and_boundary_repair",
             || {
                 let started_at = Instant::now();
                 let result = compose_component_parser_dwas_and_possible_matches(
@@ -19525,6 +19707,7 @@ pub(crate) fn compose_constraints(
         // behavior concurrently.
         let ((tokenizer_result, tokenizer_ms), ((parser_artifacts, reuse_ms), (boundary_repair, boundary_ms))) =
             macro_join(
+                "compose_tokenizer_and_parser_boundary",
                 || {
                     let started_at = Instant::now();
                     let result =
@@ -19533,6 +19716,7 @@ pub(crate) fn compose_constraints(
                 },
                 || {
                     macro_join(
+                        "compose_parser_and_boundary_repair",
                         || {
                             let started_at = Instant::now();
                             let result = compose_component_parser_dwas_and_possible_matches(
@@ -19594,6 +19778,7 @@ pub(crate) fn compose_constraints(
     let boundary_repair = boundary_repair?;
     let union_started_at = Instant::now();
     let (parser_union_result, closure_prime_ms) = macro_join(
+        "compose_parser_union_and_tokenizer_closure_prime",
         || -> Result<_, String> {
             Ok(match boundary_repair {
                 Some(boundary) => {
@@ -20036,6 +20221,7 @@ fn compose_constraints_owned_parent_impl(
             || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
     let table_started_at = Instant::now();
     let (composed_table_result, mut pre_table_base_discovery) = macro_join(
+        "compose_table_and_pretable_boundary_discovery",
         || {
             if use_legacy_splice {
                 compose_subgrammar_tables_with_rules(
@@ -20301,6 +20487,7 @@ fn compose_constraints_owned_parent_impl(
     let preparation_started_at = Instant::now();
     let ((tokenizer_result, tokenizer_ms), (prepared_components_result, (boundary_result, boundary_ms))) =
         macro_join(
+            "compose_owned_tokenizer_and_component_boundary_prepare",
             || {
                 let started_at = Instant::now();
                 let parent_tokenizer = parent.tokenizer.clone();
@@ -20322,9 +20509,11 @@ fn compose_constraints_owned_parent_impl(
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
             || macro_join(
+                "compose_component_coordinates_and_boundary",
             || {
                 let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (possible_matches_result, possible_matches_extract_ms))) =
                     macro_join(
+                        "compose_component_state_and_token_pm_coordinates",
                         || {
                             let started_at = Instant::now();
                             let result = if let Some(precomputed) =
@@ -20384,6 +20573,7 @@ fn compose_constraints_owned_parent_impl(
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
                         || macro_join(
+                            "compose_component_token_and_possible_matches_coordinates",
                         || {
                             let started_at = Instant::now();
                             let result = build_direct_component_token_coordinates(
@@ -20831,6 +21021,7 @@ fn compose_constraints_owned_parent_impl(
         // constructing B's parser language.
         let segment_prepare_started_at = Instant::now();
         let (child_clone_result, boundary_positive_result) = macro_join(
+            "compose_child_preservation_and_boundary_positive",
             || {
                 let started_at = Instant::now();
                 let sources = if let Some(shared_children) = shared_children {
@@ -20997,6 +21188,7 @@ fn compose_constraints_owned_parent_impl(
             (boundary_runtime_result, segmented_result)
         } else {
             macro_join(
+                "compose_boundary_publish_and_segmented_metadata",
             || -> Result<Option<PublishedBoundaryRuntime>, String> {
                 if let Some(handle) = early_boundary_positive.take() {
                     let joined = handle
@@ -21349,12 +21541,20 @@ fn compose_constraints_owned_parent_impl(
                         &result.constraint.table,
                         id_num_tsids as usize,
                     )
-                };
+            };
             let published = if macro_parallelism_disabled() {
-                pending_static_boundary_shards
+                let mut timings = Vec::with_capacity(pending_static_boundary_shards.len());
+                let result = pending_static_boundary_shards
                     .into_iter()
-                    .map(publish)
-                    .collect::<Result<Vec<_>, String>>()?
+                    .map(|work| {
+                        let started = Instant::now();
+                        let result = publish(work);
+                        timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                        result
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                report_macro_item_timings("compose_static_boundary_shard_publish", &timings);
+                result
             } else {
                 pending_static_boundary_shards
                     .into_par_iter()
@@ -21709,6 +21909,7 @@ fn compose_constraints_owned_parent_impl(
         (Ok(DWA::new(id_num_tsids, id_max_internal_token)), 0.0)
     } else {
         macro_join(
+            "compose_parser_union_and_token_cache_prebuild",
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
             let component_materialize_started_at = Instant::now();
@@ -21726,9 +21927,21 @@ fn compose_constraints_owned_parent_impl(
                     );
                     drop(weights);
                     automaton
-                };
+            };
             let mut automata = if macro_parallelism_disabled() {
-                automata.into_iter().zip(automata_maps).map(remap).collect::<Vec<_>>()
+                let mut timings = Vec::with_capacity(automata.len());
+                let result = automata
+                    .into_iter()
+                    .zip(automata_maps)
+                    .map(|item| {
+                        let started = Instant::now();
+                        let result = remap(item);
+                        timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                        result
+                    })
+                    .collect::<Vec<_>>();
+                report_macro_item_timings("compose_component_parser_final_remap", &timings);
+                result
             } else {
                 automata
                     .into_par_iter()
@@ -27962,6 +28175,7 @@ table: &dispatch.table,
             }
             let ((mut hybrid_dfas, hybrid_transport_ms), (parent_templates, parent_characterize_ms, parent_template_ms)) =
                 macro_join(
+                    "compose_hybrid_template_transport_and_parent_templates",
                     || {
                         let started = Instant::now();
                         let result = rebuild_transported_component_templates(
@@ -28458,9 +28672,21 @@ table: &dispatch.table,
                     let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
                     try_split_commit_template_dfas(&commit_dfa)
                         .map(|split| (terminal, Arc::new(split)))
-                };
+            };
             let fast_commit_templates = if macro_parallelism_disabled() {
-                fast_templates.by_terminal.iter().filter_map(split).collect::<Vec<_>>()
+                let mut timings = Vec::with_capacity(fast_templates.by_terminal.len());
+                let result = fast_templates
+                    .by_terminal
+                    .iter()
+                    .filter_map(|item| {
+                        let started = Instant::now();
+                        let result = split(item);
+                        timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                        result
+                    })
+                    .collect::<Vec<_>>();
+                report_macro_item_timings("compose_fast_commit_template_splits", &timings);
+                result
             } else {
                 fast_templates
                     .by_terminal

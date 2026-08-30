@@ -22,7 +22,44 @@ pub(crate) fn macro_parallelism_disabled() -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn macro_join<A, B, Left, Right>(left: Left, right: Right) -> (A, B)
+pub(crate) fn macro_profile_enabled() -> bool {
+    macro_parallelism_disabled()
+        && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some())
+}
+
+pub(crate) fn report_macro_item_timings(label: &str, timings_ms: &[f64]) {
+    if !macro_profile_enabled() || timings_ms.is_empty() {
+        return;
+    }
+    let mut sorted = timings_ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let count = sorted.len();
+    let total_work_ms = sorted.iter().sum::<f64>();
+    let max_item_ms = sorted[count - 1];
+    let mean_ms = total_work_ms / count as f64;
+    let p50_ms = if count % 2 == 0 {
+        (sorted[count / 2 - 1] + sorted[count / 2]) * 0.5
+    } else {
+        sorted[count / 2]
+    };
+    let p90_ms = sorted[((count as f64 * 0.90).ceil() as usize).clamp(1, count) - 1];
+    let ideal_parallelism = if max_item_ms > 0.0 {
+        total_work_ms / max_item_ms
+    } else {
+        0.0
+    };
+    eprintln!(
+        "[glrmask/profile][macro_fanout] label={label} count={count} total_work_ms={total_work_ms:.3} max_item_ms={max_item_ms:.3} mean_ms={mean_ms:.3} p50_ms={p50_ms:.3} p90_ms={p90_ms:.3} ideal_parallelism={ideal_parallelism:.2}",
+    );
+}
+
+pub(crate) fn macro_join<A, B, Left, Right>(
+    label: &'static str,
+    left: Left,
+    right: Right,
+) -> (A, B)
 where
     A: Send,
     B: Send,
@@ -30,7 +67,14 @@ where
     Right: FnOnce() -> B + Send,
 {
     if macro_parallelism_disabled() {
-        (left(), right())
+        let left_started = std::time::Instant::now();
+        let left = left();
+        let left_ms = left_started.elapsed().as_secs_f64() * 1000.0;
+        let right_started = std::time::Instant::now();
+        let right = right();
+        let right_ms = right_started.elapsed().as_secs_f64() * 1000.0;
+        report_macro_item_timings(label, &[left_ms, right_ms]);
+        (left, right)
     } else {
         rayon::join(left, right)
     }

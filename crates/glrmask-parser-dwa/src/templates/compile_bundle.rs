@@ -419,7 +419,18 @@ impl Templates {
                 (terminals, Arc::new(merged))
             };
         let entries = if super::macro_parallelism_disabled() {
-            repeated.into_iter().map(build_entry).collect::<Vec<_>>()
+            let mut timings = Vec::with_capacity(repeated.len());
+            let entries = repeated
+                .into_iter()
+                .map(|terminals| {
+                    let started = Instant::now();
+                    let entry = build_entry(terminals);
+                    timings.push(elapsed_ms(started));
+                    entry
+                })
+                .collect::<Vec<_>>();
+            super::report_macro_item_timings("template_bundle_group_dfa_cache", &timings);
+            entries
         } else {
             repeated.into_par_iter().map(build_entry).collect::<Vec<_>>()
         };
