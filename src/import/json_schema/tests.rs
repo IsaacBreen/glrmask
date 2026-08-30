@@ -1292,6 +1292,55 @@ fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_pa
 }
 
 #[test]
+fn json_schema_pattern_property_literal_accepts_complete_unicode_escape_spelling() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^ab$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"ab": "value"}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"\u0061b": "value"}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"\u006": "value"}"#,
+    ));
+}
+
+#[test]
+fn json_schema_pattern_property_literal_masks_partial_unicode_escape_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^ab$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        407,
+        br#"\u"#,
+    ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        408,
+        br#"\u0061b"#,
+    ));
+}
+
+#[test]
 fn llguidance_generic_json_object_rejects_partial_unicode_key_escape() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
