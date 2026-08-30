@@ -1367,14 +1367,20 @@ impl PointwiseRegionInterner {
             ));
         };
 
-        let left_id = *cache
-            .region_ids_by_ptr
-            .get(&(Arc::as_ptr(left) as usize))
-            .expect("interned pointwise region must have a compact ID");
-        let right_id = *cache
-            .region_ids_by_ptr
-            .get(&(Arc::as_ptr(right) as usize))
-            .expect("interned pointwise region must have a compact ID");
+        // Some callers merge externally constructed profile regions rather
+        // than regions produced by this interner. They have no local compact
+        // ID, so simply use the ordinary exact overlay path for that operation.
+        // The hot minimizer path interns its regions first and still gets the
+        // direct-cache fast path.
+        let (Some(&left_id), Some(&right_id)) = (
+            cache.region_ids_by_ptr.get(&(Arc::as_ptr(left) as usize)),
+            cache.region_ids_by_ptr.get(&(Arc::as_ptr(right) as usize)),
+        ) else {
+            return self.intern(overlay_compatible_token_behavior_ranges(
+                left.as_ref(),
+                right.as_ref(),
+            ));
+        };
         let (low, high) = if left_id <= right_id {
             (left_id, right_id)
         } else {
@@ -2354,10 +2360,11 @@ fn try_build_and_color_pointwise(
     pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
     monotone_pointwise: bool,
+    direct_overlay_slots: usize,
 ) -> Option<HybridColoring> {
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
-    let mut regions = PointwiseRegionInterner::default();
+    let mut regions = PointwiseRegionInterner::with_direct_overlay_slots(direct_overlay_slots);
     let mut region_build_cache = PointwiseRegionBuildCache::default();
     let profile_started_at = Instant::now();
     let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
@@ -2573,6 +2580,7 @@ fn try_build_and_color_pointwise_ranges(
             pointwise_class_order,
             profile_enabled,
             monotone_pointwise,
+            0,
         )
         .map(|result| result.coloring);
     }
@@ -3202,9 +3210,46 @@ fn build_and_color_hybrid(
     monotone_pointwise: bool,
 ) -> HybridColoring {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
-    if candidates.len() <= 64
-        && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_none()
+    // Pairwise clique checks are excellent for genuinely sparse small buckets,
+    // but become much more expensive than the pointwise representation once
+    // every state is live over a moderately broad TSID domain. The old hard
+    // <=64 cutoff sent exactly those broad-domain buckets down an O(n^2)-ish
+    // path. Counting the finite TSID projection directly from compressed
+    // weight ranges is cheap and lets us retain pairwise for the sparse shape
+    // it was intended for.
+    const SMALL_PAIRWISE_ALWAYS_CANDIDATES: usize = 16;
+    const SMALL_PAIRWISE_MAX_CANDIDATES: usize = 64;
+    const SMALL_PAIRWISE_MAX_AVG_TSID_COVERAGE: usize = 8;
+    let small_pairwise_disabled =
+        std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_some();
+    let small_pairwise_sparse = if candidates.len() <= SMALL_PAIRWISE_ALWAYS_CANDIDATES
+        && !small_pairwise_disabled
     {
+        true
+    } else if candidates.len() <= SMALL_PAIRWISE_MAX_CANDIDATES
+        && !small_pairwise_disabled
+    {
+        let max_total = candidates
+            .len()
+            .saturating_mul(SMALL_PAIRWISE_MAX_AVG_TSID_COVERAGE);
+        let mut total = 0usize;
+        let mut sparse = true;
+        for &candidate in candidates {
+            let Some(coverage) = needed[candidate].tsid_coverage_len() else {
+                sparse = false;
+                break;
+            };
+            total = total.saturating_add(coverage);
+            if total > max_total {
+                sparse = false;
+                break;
+            }
+        }
+        sparse
+    } else {
+        false
+    };
+    if small_pairwise_sparse {
         return HybridColoring::ordinary(build_and_color_pairwise_greedy(
             dwa,
             candidates,
@@ -3213,6 +3258,8 @@ fn build_and_color_hybrid(
             productive_transitions,
         ));
     }
+    let broad_small_bucket = candidates.len() <= SMALL_PAIRWISE_MAX_CANDIDATES
+        && !small_pairwise_disabled;
     let total_started_at = Instant::now();
 
     // Step 1: Partition refinement to get fine-grained classes.
@@ -3320,6 +3367,15 @@ fn build_and_color_hybrid(
         )
         .map(HybridColoring::ordinary)
     } else {
+        let requested_overlay_slots = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(if broad_small_bucket { 256 } else { 0 });
+        let direct_overlay_slots = if requested_overlay_slots == 0 {
+            0
+        } else {
+            requested_overlay_slots.next_power_of_two()
+        };
         try_build_and_color_pointwise(
             candidates,
             &class_coloring,
@@ -3328,6 +3384,7 @@ fn build_and_color_hybrid(
             pointwise_class_order,
             profile_enabled,
             monotone_pointwise,
+            direct_overlay_slots,
         )
     };
     if profile_enabled && prefer_overlap_indexed_merge {
