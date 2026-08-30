@@ -47,7 +47,8 @@ use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use types::{
-    compile_profile_enabled, compile_profile_uses_serial_partition_schedule,
+    compile_profile_enabled, compile_profile_join, compile_profile_uses_serial_partition_schedule,
+    macro_parallelism_disabled,
     LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaFamilies, TerminalDwaPhaseProfile,
 };
 
@@ -2154,7 +2155,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
 
     let did_global_merge = l1_pairs.len() > 1 || l2p_pairs.len() > 1;
     let family_merge_started_at = Instant::now();
-    let (l1_family, l2p_family) = rayon::join(
+    let (l1_family, l2p_family) = compile_profile_join(
         || {
             (!l1_pairs.is_empty()).then(|| {
                 let family = if l1_token_domains_proven_disjoint {
@@ -2282,7 +2283,13 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         );
         eprintln!(
             "[glrmask/profile][split_terminal_dwa_wall] scheduler={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} family_merge_wall_ms={:.3} global_merge_ms={:.3} post_ti_ignore_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
-            if serial_profile_partition_schedule { "serial_profile_1t" } else { "rayon" },
+            if macro_parallelism_disabled() {
+                "serial_macro"
+            } else if serial_profile_partition_schedule {
+                "serial_profile_1t"
+            } else {
+                "rayon"
+            },
             stage_setup_ms,
             partition_vocab_ms,
             shared_cache_setup_ms,

@@ -410,17 +410,19 @@ impl Templates {
             .into_iter()
             .filter_map(|(terminals, count)| (count > 1).then_some(terminals))
             .collect::<Vec<_>>();
-        let entries = repeated
-            .into_par_iter()
-            .map(|terminals| {
+        let build_entry = |terminals: Vec<TerminalID>| {
                 let merged = union_unweighted_dfas(
                     terminals
                         .iter()
                         .filter_map(|terminal| self.by_terminal.get(terminal)),
                 );
                 (terminals, Arc::new(merged))
-            })
-            .collect::<Vec<_>>();
+            };
+        let entries = if super::macro_parallelism_disabled() {
+            repeated.into_iter().map(build_entry).collect::<Vec<_>>()
+        } else {
+            repeated.into_par_iter().map(build_entry).collect::<Vec<_>>()
+        };
         BundleGroupDfaCache {
             multi_terminal_groups: entries.into_iter().collect(),
         }

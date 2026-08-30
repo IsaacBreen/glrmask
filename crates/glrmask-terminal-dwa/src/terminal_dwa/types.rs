@@ -159,11 +159,27 @@ pub fn compile_profile_enabled() -> bool {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
+/// Disable only coarse-grained compiler fan-out while leaving Rayon available
+/// to the algorithms inside each coarse unit of work.
+///
+/// This is intentionally different from setting `RAYON_NUM_THREADS=1`: callers
+/// use it to profile one partition/branch/template family at a time while still
+/// allowing that individual operation to use the full worker pool.
+pub fn macro_parallelism_disabled() -> bool {
+    std::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
 /// Nested Rayon joins can execute sibling outer tasks while an inner task is
 /// pending. With one worker that makes a partition wall timer include unrelated
 /// partitions. Use a serial outer schedule only for this profiling case.
 pub fn compile_profile_uses_serial_partition_schedule() -> bool {
-    compile_profile_enabled() && rayon::current_num_threads() == 1
+    macro_parallelism_disabled()
+        || (compile_profile_enabled() && rayon::current_num_threads() == 1)
 }
 
 /// Preserve the normal Rayon join except in a one-worker compile profile.

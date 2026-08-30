@@ -107,6 +107,35 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn macro_parallelism_disabled() -> bool {
+    env_flag_enabled("GLRMASK_DISABLE_MACRO_PARALLELISM")
+}
+
+fn macro_join<A, B, Left, Right>(left: Left, right: Right) -> (A, B)
+where
+    A: Send,
+    B: Send,
+    Left: FnOnce() -> A + Send,
+    Right: FnOnce() -> B + Send,
+{
+    if macro_parallelism_disabled() {
+        (left(), right())
+    } else {
+        rayon::join(left, right)
+    }
+}
+
+fn macro_scope_spawn<'scope, Body>(scope: &rayon::Scope<'scope>, body: Body)
+where
+    Body: FnOnce(&rayon::Scope<'scope>) + Send + 'scope,
+{
+    if macro_parallelism_disabled() {
+        body(scope);
+    } else {
+        scope.spawn(body);
+    }
+}
+
 fn lexer_adaptive_enabled() -> bool {
     if std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some() {
         env_flag_enabled("GLRMASK_LEXER_ADAPTIVE")
@@ -2705,7 +2734,7 @@ fn build_and_merge_parser_dwa_families(
         );
     }
 
-    let (l1_parser, l2p_parser) = rayon::join(
+    let (l1_parser, l2p_parser) = macro_join(
         || {
             (!use_direct_l1_parts)
                 .then(|| {
@@ -2773,7 +2802,7 @@ fn build_and_merge_parser_dwa_families(
                 let mut parser_dwas = parser_dwas.into_iter();
                 let left = parser_dwas.next().expect("two parser families have a left member");
                 let right = parser_dwas.next().expect("two parser families have a right member");
-                let (left, right) = rayon::join(
+                let (left, right) = macro_join(
                     || left.remap_into_existing_common(final_id_map),
                     || right.remap_into_existing_common(final_id_map),
                 );
@@ -3092,7 +3121,7 @@ fn launch_parser_dag_if_ready<'scope>(
         return;
     };
 
-    scope.spawn(move |_| {
+    macro_scope_spawn(scope, move |_| {
         let TerminalDagResult {
             tokenizer,
             analysis,
@@ -3160,7 +3189,7 @@ fn launch_parser_dag_if_ready<'scope>(
                     && tokenizer.tokenizer.num_states() <= parser_final_coordinate_merge_max_states;
                 let parser_final_id_map_target =
                     parser_final_coordinate_merge.then_some(&parser_final_id_map);
-                let (parser_dwa, prebuilt_token_mask_caches) = rayon::join(
+                let (parser_dwa, prebuilt_token_mask_caches) = macro_join(
                     || {
                         build_and_merge_parser_dwa_families(
                             &terminal_dwas,
@@ -3299,7 +3328,7 @@ fn launch_terminal_dag_if_ready<'scope>(
         return;
     };
 
-    scope.spawn(move |scope| {
+    macro_scope_spawn(scope, move |scope| {
         let ColoringDagLane { terminal_coloring, terminal_coloring_ms } = coloring.unwrap_or_else(|| {
             ColoringDagLane {
                 terminal_coloring: TerminalColoring::identity(analysis.analyzed_grammar.num_terminals as usize),
@@ -3394,7 +3423,7 @@ fn launch_classify_dag_if_ready<'scope>(
         return;
     };
 
-    scope.spawn(move |scope| {
+    macro_scope_spawn(scope, move |scope| {
         let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
             &analysis.disallowed_follows,
             prepared_grammar.ignore_terminal,
@@ -3546,7 +3575,7 @@ fn compile_prepared_with_profile_and_table_construction(
             let compile_started_for_tokenizer = compile_started_at.clone();
             let lexer_adaptive_override = lexer_adaptive_override;
 
-            scope.spawn(move |scope| {
+            macro_scope_spawn(scope, move |scope| {
                 let tok_started = Instant::now();
                 let build_global_tokenizer = || {
                     if let Some(plan) = synthetic_tokenizer_plan_ref {
@@ -3599,7 +3628,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     && crate::compiler::stages::id_map_and_terminal_dwa::prebuild_partition_local_synthesis_enabled();
                 let (global_tokenizer_result, prepared_partition_local_tokenizers) =
                     if prebuild_partition_locals {
-                        rayon::join(
+                        macro_join(
                             build_global_tokenizer,
                             || {
                                 partition_local_synthesis_plan_ref.and_then(|plan| {
@@ -3716,7 +3745,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     // targets. Keep the environment override for diagnostics.
                     let default_start_delay_ms =
                         deferred_runtime_tokenizer.default_start_delay_ms();
-                    scope.spawn(move |_| {
+                    macro_scope_spawn(scope, move |_| {
                         let start_delay_ms = std::env::var(
                             "GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS",
                         )
@@ -3780,7 +3809,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 if !eager_possible_matches {
                     let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                     let compile_started_for_cpm = compile_started_for_tokenizer.clone();
-                    scope.spawn(move |_| {
+                    macro_scope_spawn(scope, move |_| {
                         let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
                         let result = cpm::compute_constraint_possible_matches_for_vocab(
                             &possible_matches_tokenizer,
@@ -3808,7 +3837,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let flat_global_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                 let flat_global_initial_state_map = tokenizer_lane.initial_state_map.clone();
                 let compile_started_for_terminal = compile_started_for_tokenizer.clone();
-                scope.spawn(move |scope| {
+                macro_scope_spawn(scope, move |scope| {
                     let flat_global_started_ms = elapsed_ms(compile_started_for_terminal.clone());
                     let flat_trans_started_at = Instant::now();
                     if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
@@ -3836,7 +3865,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         let possible_matches_flat_trans = Arc::clone(&flat_trans);
                         let possible_matches_transition_cache = Arc::clone(&shared_transition_cache);
                         let compile_started_for_cpm = compile_started_for_terminal.clone();
-                        scope.spawn(move |_| {
+                        macro_scope_spawn(scope, move |_| {
                             let possible_matches_started_ms =
                                 elapsed_ms(compile_started_for_cpm.clone());
                             let raw_byte_to_class = possible_matches_transition_cache
@@ -3953,7 +3982,7 @@ fn compile_prepared_with_profile_and_table_construction(
             let compile_started_for_analysis = compile_started_at.clone();
             let table_construction = default_table_construction.clone();
 
-            scope.spawn(move |scope| {
+            macro_scope_spawn(scope, move |scope| {
                 let analyze_grammar_started_at = Instant::now();
                 let analyzed_grammar = Arc::new(match protected_shift_terminals.as_deref() {
                     Some(protected) => AnalyzedGrammar::from_grammar_def_with_protected_shift_terminals(
@@ -3970,7 +3999,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let glr_analyzed_grammar = Arc::clone(&analyzed_grammar);
                 let analysis_started_for_glr = analysis_started_for_analysis.clone();
                 let compile_started_for_glr = compile_started_for_analysis.clone();
-                scope.spawn(move |scope| {
+                macro_scope_spawn(scope, move |scope| {
                     let table_started_at = Instant::now();
                     let table = Arc::new(GLRTable::build_with_default_construction(
                         &glr_analyzed_grammar,
@@ -3996,7 +4025,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             protected_terminal_ids.dedup();
                         }
                         let compile_started_for_coloring = compile_started_for_glr.clone();
-                        scope.spawn(move |scope| {
+                        macro_scope_spawn(scope, move |scope| {
                             let terminal_coloring_started_at = Instant::now();
                             let mut terminal_coloring = compute_terminal_coloring(&coloring_table);
                             terminal_coloring
@@ -4026,7 +4055,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     let templates_table = Arc::clone(&table);
                     let templates_analyzed_grammar = Arc::clone(&glr_analyzed_grammar);
                     let compile_started_for_templates = compile_started_for_glr;
-                    scope.spawn(move |scope| {
+                    macro_scope_spawn(scope, move |scope| {
                         let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
                         let (
                             templates,
@@ -5082,7 +5111,7 @@ fn compile_dynamic_owned_impl(
             .map(|automaton| automaton.states.len());
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
+        let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join(
             || -> crate::Result<((Tokenizer, Option<(Tokenizer, Vec<u32>)>), f64)> {
                 let started_at = Instant::now();
                 let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
@@ -5164,7 +5193,7 @@ fn compile_dynamic_owned_impl(
                 }
                 Ok(((tokenizer, mask_tokenizer_quotient), elapsed_ms(started_at)))
             },
-            || rayon::join(
+            || macro_join(
                 || {
                     let started_at = Instant::now();
                     let table = if let Some(state_count) = direct_state_count {

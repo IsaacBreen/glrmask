@@ -5,6 +5,10 @@ fn env_flag(name: &str) -> Option<bool> {
     })
 }
 
+pub(crate) fn macro_parallelism_disabled() -> bool {
+    env_flag("GLRMASK_DISABLE_MACRO_PARALLELISM").unwrap_or(false)
+}
+
 /// Commit-template automata remain an explicit experimental opt-in. They must
 /// not change ordinary static compilation unless the caller requests them.
 /// The disable flag wins so an operator always has an unambiguous rollback

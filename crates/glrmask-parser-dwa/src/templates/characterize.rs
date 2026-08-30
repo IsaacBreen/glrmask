@@ -1071,13 +1071,15 @@ pub fn characterize_selected_terminals_for_terminal_count(
     let groups = groups_by_signature.into_values().collect::<Vec<_>>();
     let signature_ms = signature_started.map_or(0.0, elapsed_ms);
     let characterize_started = profile.then(Instant::now);
-    let characterized = groups
-        .par_iter()
-        .map(|terminals| {
-            let characterization = characterize_terminal(table, &index, terminals[0]);
-            (terminals.clone(), characterization)
-        })
-        .collect::<Vec<_>>();
+    let characterize_group = |terminals: &Vec<TerminalID>| {
+        let characterization = characterize_terminal(table, &index, terminals[0]);
+        (terminals.clone(), characterization)
+    };
+    let characterized = if super::macro_parallelism_disabled() {
+        groups.iter().map(characterize_group).collect::<Vec<_>>()
+    } else {
+        groups.par_iter().map(characterize_group).collect::<Vec<_>>()
+    };
     let characterize_ms = characterize_started.map_or(0.0, elapsed_ms);
 
     let fanout_started = profile.then(Instant::now);
@@ -1183,33 +1185,53 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
         index.action_states_by_terminal = action_states_by_terminal.to_vec();
         index
     };
-    let result = action_states_by_terminal
-        .par_iter()
-        .enumerate()
-        .filter(|(_, states)| !states.is_empty())
-        .map(|(terminal, _)| {
+    let characterize = |(terminal, _): (usize, &Vec<u32>)| {
             let terminal = terminal as TerminalID;
             (terminal, characterize_terminal(table, &index, terminal))
-        })
-        .collect::<BTreeMap<_, _>>();
+        };
+    let result = if super::macro_parallelism_disabled() {
+        action_states_by_terminal
+            .iter()
+            .enumerate()
+            .filter(|(_, states)| !states.is_empty())
+            .map(characterize)
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        action_states_by_terminal
+            .par_iter()
+            .enumerate()
+            .filter(|(_, states)| !states.is_empty())
+            .map(characterize)
+            .collect::<BTreeMap<_, _>>()
+    };
     if sparse_seeded
         && std::env::var_os("GLRMASK_VALIDATE_SPARSE_SEEDED_CHARACTERIZATION_INDEX").is_some()
     {
         let mut reference_index =
             build_characterization_index_for_terminal_count(table, num_terminals);
         reference_index.action_states_by_terminal = action_states_by_terminal.to_vec();
-        let reference = action_states_by_terminal
-            .par_iter()
-            .enumerate()
-            .filter(|(_, states)| !states.is_empty())
-            .map(|(terminal, _)| {
+        let characterize_reference = |(terminal, _): (usize, &Vec<u32>)| {
                 let terminal = terminal as TerminalID;
                 (
                     terminal,
                     characterize_terminal(table, &reference_index, terminal),
                 )
-            })
-            .collect::<BTreeMap<_, _>>();
+            };
+        let reference = if super::macro_parallelism_disabled() {
+            action_states_by_terminal
+                .iter()
+                .enumerate()
+                .filter(|(_, states)| !states.is_empty())
+                .map(characterize_reference)
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            action_states_by_terminal
+                .par_iter()
+                .enumerate()
+                .filter(|(_, states)| !states.is_empty())
+                .map(characterize_reference)
+                .collect::<BTreeMap<_, _>>()
+        };
         assert_eq!(
             result, reference,
             "sparse seeded characterization index differs from full index",
@@ -1256,11 +1278,7 @@ pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
         "seeded template relation must cover the merged terminal domain",
     );
 
-    seeds_by_terminal
-        .par_iter()
-        .enumerate()
-        .filter(|(_, seeds)| !seeds.is_empty())
-        .map(|(terminal, seeds)| {
+    let characterize = |(terminal, seeds): (usize, &Vec<(u32, u32, NonterminalID, bool)>)| {
             let terminal = terminal as TerminalID;
             let mut output = CharacterizationOutput::default();
             for &(top_state, revealed_state, source_nonterminal, goto_replace) in seeds {
@@ -1303,8 +1321,22 @@ pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
                 );
             }
             (terminal, characterization)
-        })
-        .collect()
+        };
+    if super::macro_parallelism_disabled() {
+        seeds_by_terminal
+            .iter()
+            .enumerate()
+            .filter(|(_, seeds)| !seeds.is_empty())
+            .map(characterize)
+            .collect()
+    } else {
+        seeds_by_terminal
+            .par_iter()
+            .enumerate()
+            .filter(|(_, seeds)| !seeds.is_empty())
+            .map(characterize)
+            .collect()
+    }
 }
 
 fn characterize_terminals_unquotiented(
@@ -1391,16 +1423,19 @@ pub fn characterize_terminals_profiled(
     let max_action_signature_multiplicity = groups.iter().map(Vec::len).max().unwrap_or(0);
 
     let characterize_started_at = Instant::now();
-    let characterized_groups: Vec<(Vec<TerminalID>, TerminalCharacterization)> = groups
-        .par_iter()
-        .map(|terminals| {
+    let characterize_group = |terminals: &Vec<TerminalID>| {
             let representative = terminals[0];
             (
                 terminals.clone(),
                 characterize_terminal(table, &index, representative),
             )
-        })
-        .collect();
+        };
+    let characterized_groups: Vec<(Vec<TerminalID>, TerminalCharacterization)> =
+        if super::macro_parallelism_disabled() {
+            groups.iter().map(characterize_group).collect()
+        } else {
+            groups.par_iter().map(characterize_group).collect()
+        };
     let characterize_ms = elapsed_ms(characterize_started_at);
 
     let fanout_started_at = Instant::now();

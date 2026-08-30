@@ -718,15 +718,17 @@ pub fn prebuild_parser_bundle_cache_excluding_terminals(
         })
         .collect::<Vec<_>>();
     let repeated_group_cache = templates.build_bundle_group_dfa_cache(&selected);
-    let built = selected
-        .par_iter()
-        .map(|bundle| {
+    let build_bundle = |bundle: &&BTreeMap<TerminalID, Weight>| {
             (
                 bundle_signature(bundle),
                 Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache)),
             )
-        })
-        .collect::<Vec<_>>();
+        };
+    let built = if crate::templates::macro_parallelism_disabled() {
+        selected.iter().map(build_bundle).collect::<Vec<_>>()
+    } else {
+        selected.par_iter().map(build_bundle).collect::<Vec<_>>()
+    };
     PrebuiltParserBundleCache {
         by_signature: built.into_iter().collect(),
     }
@@ -7391,7 +7393,9 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
             let ms = elapsed_ms(started);
             (Some(built), ms)
         };
-        let built_with_timings = if allow_parallel {
+        let built_with_timings = if allow_parallel
+            && !crate::templates::macro_parallelism_disabled()
+        {
             summaries
                 .unique_bundles
                 .par_iter()

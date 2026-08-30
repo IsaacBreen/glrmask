@@ -924,14 +924,17 @@ impl Templates {
         }
         let groups: Vec<(&TerminalCharacterization, Vec<TerminalID>)> = grouped.into_iter().collect();
 
-        let compiled: Vec<(Vec<TerminalID>, UnweightedDfa, NWA, TemplateCompilationSample)> = groups
-            .par_iter()
-            .map(|(characterization, terminals)| {
-                let (dfa, skeleton, sample) =
-                    compile_template_with_profile_and_minimize(*characterization, skip_minimize);
-                (terminals.clone(), dfa, skeleton, sample)
-            })
-            .collect();
+        let build = |(characterization, terminals): &(&TerminalCharacterization, Vec<TerminalID>)| {
+            let (dfa, skeleton, sample) =
+                compile_template_with_profile_and_minimize(*characterization, skip_minimize);
+            (terminals.clone(), dfa, skeleton, sample)
+        };
+        let compiled: Vec<(Vec<TerminalID>, UnweightedDfa, NWA, TemplateCompilationSample)> =
+            if super::macro_parallelism_disabled() {
+                groups.iter().map(build).collect()
+            } else {
+                groups.par_iter().map(build).collect()
+            };
 
         let mut profile = TemplateCompileProfile {
             unique_characterizations: groups.len(),
