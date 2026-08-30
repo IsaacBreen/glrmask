@@ -2662,12 +2662,25 @@ impl VirtualResidualRuntime {
         max_token_len: usize,
         state_offset: u32,
     ) -> Option<(DFA, u32, VirtualResidualMaskProjection)> {
-        let store = self.store.lock().unwrap();
-        let oracle = store.liveness_oracle.as_ref()?;
-        let minimum_body_width = oracle.body.min_match_byte_len()?.max(1);
+        let minimum_body_width = {
+            let store = self.store.lock().unwrap();
+            store.liveness_oracle.as_ref()?.body.min_match_byte_len()?.max(1)
+        };
+        // A token that begins in the middle of one body copy can complete at
+        // most ceil(token_bytes / minimum_body_width) copies.
         let crossed_boundaries = max_token_len
             .div_ceil(minimum_body_width)
             .saturating_add(1);
+        self.build_finite_mask_projection_for_crossed_boundaries(crossed_boundaries, state_offset)
+    }
+
+    pub(super) fn build_finite_mask_projection_for_crossed_boundaries(
+        self: &Arc<Self>,
+        crossed_boundaries: usize,
+        state_offset: u32,
+    ) -> Option<(DFA, u32, VirtualResidualMaskProjection)> {
+        let store = self.store.lock().unwrap();
+        let oracle = store.liveness_oracle.as_ref()?;
         // Keep the first accepting layer plus a full upper-bound token stencil.
         // Large lower minima need their own lower-bound abstraction; decline
         // rather than making this first exact lane scale with minLength.
