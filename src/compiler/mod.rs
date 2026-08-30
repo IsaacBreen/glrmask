@@ -13,6 +13,29 @@ pub mod stages;
 
 pub(crate) use compile::compile_owned;
 
+pub(crate) fn macro_parallelism_disabled() -> bool {
+    std::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn macro_join<A, B, Left, Right>(left: Left, right: Right) -> (A, B)
+where
+    A: Send,
+    B: Send,
+    Left: FnOnce() -> A + Send,
+    Right: FnOnce() -> B + Send,
+{
+    if macro_parallelism_disabled() {
+        (left(), right())
+    } else {
+        rayon::join(left, right)
+    }
+}
+
 /// Exact bounded-terminal synthesis is enabled by default. Runtime always keeps
 /// the full exact lexer, while terminal/parser DWA construction may use a
 /// certified smaller representative lexer. Retain an explicit opt-out only for

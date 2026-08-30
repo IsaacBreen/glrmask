@@ -91,6 +91,7 @@ use crate::runtime::{
     CompositionGrammarSummary, Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
 };
 use crate::Vocab;
+use super::{macro_join, macro_parallelism_disabled};
 
 mod structural_sharing;
 mod runtime_lexer_product;
@@ -2335,16 +2336,25 @@ struct BoundaryShardWork {
 fn build_commit_templates_from_raw_templates(
     raw_templates: &[Option<UnweightedDfa>],
 ) -> Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>> {
-    let split_templates = raw_templates
-        .par_iter()
-        .enumerate()
-        .filter_map(|(terminal, dfa)| {
+    let build = |(terminal, dfa): (usize, &Option<UnweightedDfa>)| {
             let dfa = dfa.as_ref()?;
             let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
             try_split_commit_template_dfas(&commit_dfa)
                 .map(|split| (terminal, Arc::new(split)))
-        })
-        .collect::<Vec<_>>();
+        };
+    let split_templates = if macro_parallelism_disabled() {
+        raw_templates
+            .iter()
+            .enumerate()
+            .filter_map(build)
+            .collect::<Vec<_>>()
+    } else {
+        raw_templates
+            .par_iter()
+            .enumerate()
+            .filter_map(build)
+            .collect::<Vec<_>>()
+    };
     let mut result = vec![None; raw_templates.len()];
     for (terminal, split) in split_templates {
         result[terminal] = Some(split);
@@ -8231,15 +8241,7 @@ fn build_static_boundary_shard_work(
     templates: &Templates,
     parser_table_override: Option<Arc<crate::compiler::glr::table::GLRTable>>,
 ) -> Result<Vec<BoundaryShardWork>, String> {
-    candidate_tokens_by_component
-        .par_iter()
-        .enumerate()
-        .filter(|(component_index, tokens)| {
-            !tokens.is_empty()
-                && static_boundary_components
-                    .is_none_or(|selected| selected.contains(*component_index))
-        })
-        .map(|(component_index, tokens)| {
+    let build = |(component_index, tokens): (usize, &Vec<u32>)| {
             let artifact = direct_boundary_terminal_automaton(
                 merged_tokenizer_state_count,
                 Some(component_state_map),
@@ -8269,8 +8271,30 @@ fn build_static_boundary_shard_work(
                     parser_table_override: parser_table_override.clone(),
                 },
             })
-        })
-        .collect()
+        };
+    if macro_parallelism_disabled() {
+        candidate_tokens_by_component
+            .iter()
+            .enumerate()
+            .filter(|(component_index, tokens)| {
+                !tokens.is_empty()
+                    && static_boundary_components
+                        .is_none_or(|selected| selected.contains(*component_index))
+            })
+            .map(build)
+            .collect()
+    } else {
+        candidate_tokens_by_component
+            .par_iter()
+            .enumerate()
+            .filter(|(component_index, tokens)| {
+                !tokens.is_empty()
+                    && static_boundary_components
+                        .is_none_or(|selected| selected.contains(*component_index))
+            })
+            .map(build)
+            .collect()
+    }
 }
 
 fn add_control_loops_to_terminal_artifact(
@@ -10043,12 +10067,10 @@ fn prepare_unmapped_component_parser_artifacts(
     if components.len() != terminal_offsets.len() || components.len() != default_domains.len() {
         return Err("component/parser terminal-offset/default-domain count mismatch".into());
     }
-    components
-        .par_iter()
-        .copied()
-        .zip(terminal_offsets.par_iter().copied())
-        .zip(default_domains.par_iter())
-        .map(|((component, terminal_offset), default_domain)| {
+    let build = |index: usize| {
+            let component = components[index];
+            let terminal_offset = terminal_offsets[index];
+            let default_domain = &default_domains[index];
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
             let mut automaton = component_parser_nwa(&component, default_domain.as_ref())?;
             if strip_scoped_ignore_identity {
@@ -10062,8 +10084,12 @@ fn prepare_unmapped_component_parser_artifacts(
                 automaton,
                 possible_matches,
             })
-        })
-        .collect()
+        };
+    if macro_parallelism_disabled() {
+        (0..components.len()).map(build).collect()
+    } else {
+        (0..components.len()).into_par_iter().map(build).collect()
+    }
 }
 
 fn prepare_unmapped_component_parser_automata(
@@ -10074,11 +10100,9 @@ fn prepare_unmapped_component_parser_automata(
     if components.len() != default_domains.len() {
         return Err("component/parser default-domain count mismatch".into());
     }
-    components
-        .par_iter()
-        .copied()
-        .zip(default_domains.par_iter())
-        .map(|(component, default_domain)| {
+    let build = |index: usize| {
+            let component = components[index];
+            let default_domain = &default_domains[index];
             let mut automaton = component_parser_nwa(&component, default_domain.as_ref())?;
             if strip_scoped_ignore_identity {
                 let ignore_weight = component
@@ -10088,8 +10112,12 @@ fn prepare_unmapped_component_parser_automata(
                 strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
             }
             Ok(automaton)
-        })
-        .collect()
+        };
+    if macro_parallelism_disabled() {
+        (0..components.len()).map(build).collect()
+    } else {
+        (0..components.len()).into_par_iter().map(build).collect()
+    }
 }
 
 /// Exact deferred union of already-compiled component parser DWAs.
@@ -10213,9 +10241,7 @@ impl<'a> DeferredComponentParserUnionView<'a> {
 
     fn materialize_automata(self) -> Result<Vec<NWA>, String> {
         let strip_scoped_ignore_identity = self.strip_scoped_ignore_identity;
-        self.components
-            .into_par_iter()
-            .map(|component| {
+        let build = |component: DeferredComponentParserUnionComponent<'a>| {
                 let relation = component.parser_state_relation.materialize();
                 let parser_component = ParserDwaComponent {
                     constraint: component.constraint,
@@ -10234,8 +10260,12 @@ impl<'a> DeferredComponentParserUnionView<'a> {
                     strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
                 }
                 Ok(automaton)
-            })
-            .collect()
+            };
+        if macro_parallelism_disabled() {
+            self.components.into_iter().map(build).collect()
+        } else {
+            self.components.into_par_iter().map(build).collect()
+        }
     }
 
     fn component_count(&self) -> usize {
@@ -10257,11 +10287,9 @@ fn prepare_unmapped_component_possible_matches(
     if components.len() != terminal_offsets.len() {
         return Err("component/parser terminal-offset count mismatch".into());
     }
-    components
-        .par_iter()
-        .copied()
-        .zip(terminal_offsets.par_iter().copied())
-        .map(|(component, terminal_offset)| {
+    let build = |index: usize| {
+            let component = components[index];
+            let terminal_offset = terminal_offsets[index];
             if component.constraint.possible_matches_complete {
                 component_possible_matches(&component, terminal_offset)
             } else {
@@ -10274,8 +10302,12 @@ fn prepare_unmapped_component_possible_matches(
                 // dynamic component into a static quotient.
                 Ok(PossibleMatches::new())
             }
-        })
-        .collect()
+        };
+    if macro_parallelism_disabled() {
+        (0..components.len()).map(build).collect()
+    } else {
+        (0..components.len()).into_par_iter().map(build).collect()
+    }
 }
 
 #[derive(Debug)]
@@ -10323,10 +10355,10 @@ fn prepare_deferred_component_artifacts(
         return Err("component artifact/map count mismatch".into());
     }
     let started_at = Instant::now();
-    let prepared = possible_matches_by_component
-        .into_par_iter()
-        .zip(component_maps.into_par_iter())
-        .map(|(mut possible_matches, mut maps)| {
+    let prepare = |(mut possible_matches, mut maps): (
+        PossibleMatches,
+        DirectComponentCoordinateMaps,
+    )| {
             if let Some(base_to_common) = base_to_common_tokens {
                 maps.local_to_global_tokens =
                     compose_local_id_map(&maps.local_to_global_tokens, base_to_common);
@@ -10340,8 +10372,20 @@ fn prepare_deferred_component_artifacts(
             );
             drop(weights);
             Ok::<_, String>((maps, possible_matches))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        };
+    let prepared = if macro_parallelism_disabled() {
+        possible_matches_by_component
+            .into_iter()
+            .zip(component_maps)
+            .map(prepare)
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        possible_matches_by_component
+            .into_par_iter()
+            .zip(component_maps.into_par_iter())
+            .map(prepare)
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let mut maps = Vec::with_capacity(prepared.len());
     let mut possible_matches = PossibleMatches::new();
     for (map, component_possible_matches) in prepared {
@@ -10935,10 +10979,10 @@ fn remap_unmapped_component_artifacts(
         return Err("component artifact/map count mismatch".into());
     }
     let started_at = Instant::now();
-    let remapped = artifacts
-        .into_par_iter()
-        .zip(component_maps.into_par_iter())
-        .map(|(artifact, maps)| {
+    let remap = |(artifact, maps): (
+        UnmappedComponentParserArtifact,
+        DirectComponentCoordinateMaps,
+    )| {
             let token_map = base_to_common_tokens.map_or(
                 maps.local_to_global_tokens.clone(),
                 |base_to_common| {
@@ -10961,8 +11005,20 @@ fn remap_unmapped_component_artifacts(
                 common_tsid_count,
             );
             Ok::<_, String>(pair)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        };
+    let remapped = if macro_parallelism_disabled() {
+        artifacts
+            .into_iter()
+            .zip(component_maps)
+            .map(remap)
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        artifacts
+            .into_par_iter()
+            .zip(component_maps.into_par_iter())
+            .map(remap)
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let mut automata = Vec::with_capacity(remapped.len());
     let mut possible_matches = PossibleMatches::new();
     for (automaton, component_possible_matches) in remapped {
@@ -11042,14 +11098,18 @@ fn compose_component_parser_dwas_and_possible_matches(
         local_tokens: usize,
         token_fanout: usize,
     }
-    let prepared = components
-        .par_iter()
+    let jobs = components
+        .iter()
         .copied()
-        .zip(terminal_offsets.par_iter().copied())
-        .zip(default_domains.par_iter())
-        .zip(component_maps.into_par_iter())
+        .zip(terminal_offsets.iter().copied())
+        .zip(default_domains.iter())
+        .zip(component_maps)
         .enumerate()
-        .map(|(component_index, (((component, terminal_offset), default_domain), coordinate_maps))| {
+        .collect::<Vec<_>>();
+    let prepare = |(component_index, (((component, terminal_offset), default_domain), coordinate_maps)): (
+        usize,
+        (((ParserDwaComponent<'_>, u32), &Option<ParserDefaultDomain>), DirectComponentCoordinateMaps),
+    )| {
             let started_at = Instant::now();
             let mut parser_nwa = component_parser_nwa(&component, default_domain.as_ref())?;
             let parser_nwa_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -11097,8 +11157,16 @@ fn compose_component_parser_dwas_and_possible_matches(
                     .map(Vec::len)
                     .sum(),
             })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        };
+    let prepared = if macro_parallelism_disabled() {
+        jobs.into_iter()
+            .map(prepare)
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        jobs.into_par_iter()
+            .map(prepare)
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let parser_nwa_ms = prepared
         .iter()
         .map(|prepared| prepared.parser_nwa_ms)
@@ -11989,9 +12057,7 @@ fn try_rebuild_cached_transported_component_templates(
                     .then_some(local_terminal)
             })
             .collect::<Vec<_>>();
-        let transported = selected
-            .par_iter()
-            .map(|&local_terminal| {
+        let transport = |&local_terminal: &usize| {
                 let dfa = component
                     .composition_parser_templates_by_terminal
                     .get(local_terminal)
@@ -12000,8 +12066,12 @@ fn try_rebuild_cached_transported_component_templates(
                 let (dfa, nwa) =
                     transport_composition_template_dfa_with_skeleton(dfa, relation)?;
                 Some((terminal_offset + local_terminal as u32, dfa, nwa))
-            })
-            .collect::<Vec<_>>();
+            };
+        let transported = if macro_parallelism_disabled() {
+            selected.iter().map(transport).collect::<Vec<_>>()
+        } else {
+            selected.par_iter().map(transport).collect::<Vec<_>>()
+        };
         if transported.iter().any(Option::is_none) {
             return None;
         }
@@ -12180,10 +12250,7 @@ fn rebuild_transported_component_templates(
         let mut missing = vec![false; selected.len()];
         let relation = &composed_table.state_relations[component_index];
         let cached_started = Instant::now();
-        let cached_results = selected
-            .par_iter()
-            .enumerate()
-            .filter_map(|(local_terminal, &is_selected)| {
+        let transport_cached = |(local_terminal, &is_selected): (usize, &bool)| {
                 is_selected.then(|| {
                     let transported = component
                         .composition_parser_templates_by_terminal
@@ -12193,8 +12260,20 @@ fn rebuild_transported_component_templates(
                         .and_then(|dfa| transport_composition_template_dfa(dfa, relation));
                     (local_terminal, transported)
                 })
-            })
-            .collect::<Vec<_>>();
+            };
+        let cached_results = if macro_parallelism_disabled() {
+            selected
+                .iter()
+                .enumerate()
+                .filter_map(transport_cached)
+                .collect::<Vec<_>>()
+        } else {
+            selected
+                .par_iter()
+                .enumerate()
+                .filter_map(transport_cached)
+                .collect::<Vec<_>>()
+        };
         let cached_ms = cached_started.elapsed().as_secs_f64() * 1000.0;
         let insert_started = Instant::now();
         let mut cache_hits = 0usize;
@@ -13081,15 +13160,20 @@ fn build_composition_templates(
     let commit_started_at = Instant::now();
     let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
     if !defer_boundary_commit_templates() {
-        let split_templates = templates
-            .by_terminal
-            .par_iter()
-            .filter_map(|(&terminal, dfa)| {
+        let split = |(&terminal, dfa): (&u32, &UnweightedDfa)| {
                 let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
                 try_split_commit_template_dfas(&commit_dfa)
                     .map(|split| (terminal, Arc::new(split)))
-            })
-            .collect::<Vec<_>>();
+            };
+        let split_templates = if macro_parallelism_disabled() {
+            templates.by_terminal.iter().filter_map(split).collect::<Vec<_>>()
+        } else {
+            templates
+                .by_terminal
+                .par_iter()
+                .filter_map(split)
+                .collect::<Vec<_>>()
+        };
         for (terminal, split) in split_templates {
             if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
                 *slot = Some(split);
@@ -13378,10 +13462,7 @@ fn try_build_changed_parent_templates_for_terminal_count(
     // tokens are known.
     let delta_started_at = Instant::now();
     let delta_results = if need_concrete_delta {
-        changed_parent
-            .par_iter()
-            .enumerate()
-            .filter_map(|(terminal, &changed)| {
+        let build_delta = |(terminal, &changed): (usize, &bool)| {
                 if !changed {
                     return None;
                 }
@@ -13402,8 +13483,20 @@ fn try_build_changed_parent_templates_for_terminal_count(
                 let delta = (!unweighted_dfa_language_is_empty(&delta))
                     .then(|| (old.clone(), delta));
                 Some((terminal, delta, false))
-            })
-            .collect::<Vec<_>>()
+            };
+        if macro_parallelism_disabled() {
+            changed_parent
+                .iter()
+                .enumerate()
+                .filter_map(build_delta)
+                .collect::<Vec<_>>()
+        } else {
+            changed_parent
+                .par_iter()
+                .enumerate()
+                .filter_map(build_delta)
+                .collect::<Vec<_>>()
+        }
     } else {
         Vec::new()
     };
@@ -14561,13 +14654,18 @@ fn profile_direct_boundary_terminal_dwa_domain_dp(
         groups_by_state.push(groups);
     }
     let bundle_started_at = Instant::now();
-    let bundles = terminal_sets
-        .par_iter()
-        .filter_map(|terminals| {
+    let build_bundle = |terminals: &Vec<u32>| {
             build_boolean_terminal_bundle_nwa(templates, terminals)
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
-        })
-        .collect::<FxHashMap<_, _>>();
+        };
+    let bundles = if macro_parallelism_disabled() {
+        terminal_sets.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+    } else {
+        terminal_sets
+            .par_iter()
+            .filter_map(build_bundle)
+            .collect::<FxHashMap<_, _>>()
+    };
     let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
     if bundles.len() != terminal_sets.len() {
         eprintln!(
@@ -14824,14 +14922,16 @@ fn validate_lazy_boundary_terminal_dwa_preimages(
             .collect::<Vec<_>>();
         groups_by_state.push(groups);
     }
-    let bundles = terminal_sets
-        .par_iter()
-        .map(|terminals| {
+    let build_bundle = |terminals: &Vec<u32>| {
             let bundle = build_boolean_terminal_bundle_nwa(templates, terminals)
                 .expect("lazy validation bundle must build");
             (terminals.clone(), Arc::new(bundle))
-        })
-        .collect::<FxHashMap<_, _>>();
+        };
+    let bundles = if macro_parallelism_disabled() {
+        terminal_sets.iter().map(build_bundle).collect::<FxHashMap<_, _>>()
+    } else {
+        terminal_sets.par_iter().map(build_bundle).collect::<FxHashMap<_, _>>()
+    };
 
     let mut arena = LazyBooleanParserDomains::new();
     let mut domains = vec![BTreeMap::<u32, Weight>::new(); n];
@@ -14968,13 +15068,18 @@ fn build_boundary_parser_from_weighted_terminal_paths(
         .keys()
         .flat_map(|sequence| sequence.iter().copied())
         .collect::<BTreeSet<_>>();
-    let bundles = terminals
-        .par_iter()
-        .filter_map(|&terminal| {
+    let build_bundle = |&terminal: &u32| {
             build_boolean_terminal_bundle_nwa(templates, &[terminal])
                 .map(|bundle| (terminal, Arc::new(bundle)))
-        })
-        .collect::<FxHashMap<_, _>>();
+        };
+    let bundles = if macro_parallelism_disabled() {
+        terminals.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+    } else {
+        terminals
+            .par_iter()
+            .filter_map(build_bundle)
+            .collect::<FxHashMap<_, _>>()
+    };
     if bundles.len() != terminals.len() {
         return None;
     }
@@ -15231,13 +15336,21 @@ fn build_boundary_parser_from_weighted_terminal_dwa(
     let groups_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let bundle_started_at = Instant::now();
-    let bundles = all_terminal_sets
-        .par_iter()
-        .filter_map(|terminals| {
+    let build_bundle = |terminals: &Vec<u32>| {
             build_boolean_terminal_bundle_nwa(templates, terminals)
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
-        })
-        .collect::<FxHashMap<_, _>>();
+        };
+    let bundles = if macro_parallelism_disabled() {
+        all_terminal_sets
+            .iter()
+            .filter_map(build_bundle)
+            .collect::<FxHashMap<_, _>>()
+    } else {
+        all_terminal_sets
+            .par_iter()
+            .filter_map(build_bundle)
+            .collect::<FxHashMap<_, _>>()
+    };
     let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
     if bundles.len() != all_terminal_sets.len() {
         eprintln!(
@@ -15611,13 +15724,18 @@ fn build_full_boundary_lazy_direct_parser(
         }
     }
     let bundle_started_at = Instant::now();
-    let prebuilt_bundles = terminal_sets
-        .par_iter()
-        .filter_map(|terminals| {
+    let build_bundle = |terminals: &Vec<u32>| {
             build_boolean_terminal_bundle_nwa(templates, terminals)
                 .map(|bundle| (terminals.clone(), Arc::new(bundle)))
-        })
-        .collect::<FxHashMap<_, _>>();
+        };
+    let prebuilt_bundles = if macro_parallelism_disabled() {
+        terminal_sets.iter().filter_map(build_bundle).collect::<FxHashMap<_, _>>()
+    } else {
+        terminal_sets
+            .par_iter()
+            .filter_map(build_bundle)
+            .collect::<FxHashMap<_, _>>()
+    };
     let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!("[glrmask/profile][constraint_boundary_lazy_phase] phase=bundles terminal_sets={} built={} ms={bundle_ms:.3}", terminal_sets.len(), prebuilt_bundles.len());
@@ -15925,7 +16043,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
     let prebuild_terminal = authoritative_dynamic_boundary
         || std::env::var_os("GLRMASK_EXPERIMENT_PRETABLE_TERMINAL_DWA").is_some();
     let (discovery, discovery_ms, state_map_ms, component_state_map, terminal_artifact, terminal_ms) = if prebuild_terminal {
-        let ((discovery, discovery_ms), (component_state_map, state_map_ms)) = rayon::join(
+        let ((discovery, discovery_ms), (component_state_map, state_map_ms)) = macro_join(
             || {
                 let phase = Instant::now();
                 let discovery = discover_boundary_token_paths(
@@ -16581,7 +16699,7 @@ fn build_boundary_repair(
             (eager_templates, eager_changed_parent),
             ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms), (early_posttable_terminal, early_posttable_terminal_ms)),
         ),
-    ) = rayon::join(
+    ) = macro_join(
         || {
             let started_at = Instant::now();
             let transported = pretransport_active.as_ref().and_then(|active| {
@@ -16627,7 +16745,7 @@ fn build_boundary_repair(
                 started_at.elapsed().as_secs_f64() * 1000.0,
             )
         },
-        || rayon::join(
+        || macro_join(
             || {
                 (
                     eager_all_templates.then(|| {
@@ -16649,7 +16767,7 @@ fn build_boundary_repair(
                 )
             },
             || {
-                let (boundary_result, seed_result) = rayon::join(
+                let (boundary_result, seed_result) = macro_join(
                     || {
                         let started_at = Instant::now();
                         let usable_precomputed = pre_table_base_discovery.filter(|precomputed| {
@@ -17307,7 +17425,7 @@ fn build_boundary_repair(
                 Some(plan),
             )
         } else {
-            let (template_result, terminal_result) = rayon::join(
+            let (template_result, terminal_result) = macro_join(
                 || {
                     let (templates, mut template_dfas_by_terminal, templates_ms) =
                         eager_templates.unwrap_or_else(|| {
@@ -19209,14 +19327,14 @@ pub(crate) fn compose_constraints(
     if std::env::var_os("GLRMASK_EXPERIMENT_COMPOSE_COMPONENTS_ONLY_STATIC").is_some() {
         let fast_started_at = Instant::now();
         let ((tokenizer_result, tokenizer_ms), ((parser_artifacts, reuse_ms), static_dynamic_overlay)) =
-            rayon::join(
+            macro_join(
                 || {
                     let started_at = Instant::now();
                     let result = Tokenizer::disjoint_union_with_terminal_offsets(&tokenizer_inputs);
                     (result, started_at.elapsed().as_secs_f64() * 1000.0)
                 },
                 || {
-                    rayon::join(
+                    macro_join(
                         || {
                             let started_at = Instant::now();
                             let result = compose_component_parser_dwas_and_possible_matches(
@@ -19358,7 +19476,7 @@ pub(crate) fn compose_constraints(
                 if expanded_exact { "expanded" } else { "dispatcher" },
             );
         }
-        let ((parser_artifacts, reuse_ms), (boundary_repair, boundary_ms)) = rayon::join(
+        let ((parser_artifacts, reuse_ms), (boundary_repair, boundary_ms)) = macro_join(
             || {
                 let started_at = Instant::now();
                 let result = compose_component_parser_dwas_and_possible_matches(
@@ -19406,7 +19524,7 @@ pub(crate) fn compose_constraints(
         // transport the component parser artifacts, and compile cross-boundary
         // behavior concurrently.
         let ((tokenizer_result, tokenizer_ms), ((parser_artifacts, reuse_ms), (boundary_repair, boundary_ms))) =
-            rayon::join(
+            macro_join(
                 || {
                     let started_at = Instant::now();
                     let result =
@@ -19414,7 +19532,7 @@ pub(crate) fn compose_constraints(
                     (result, started_at.elapsed().as_secs_f64() * 1000.0)
                 },
                 || {
-                    rayon::join(
+                    macro_join(
                         || {
                             let started_at = Instant::now();
                             let result = compose_component_parser_dwas_and_possible_matches(
@@ -19475,7 +19593,7 @@ pub(crate) fn compose_constraints(
     let (parser_artifacts, _component_top_accept) = parser_artifacts?;
     let boundary_repair = boundary_repair?;
     let union_started_at = Instant::now();
-    let (parser_union_result, closure_prime_ms) = rayon::join(
+    let (parser_union_result, closure_prime_ms) = macro_join(
         || -> Result<_, String> {
             Ok(match boundary_repair {
                 Some(boundary) => {
@@ -19917,7 +20035,7 @@ fn compose_constraints_owned_parent_impl(
         && (all_children_nonnullable
             || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
     let table_started_at = Instant::now();
-    let (composed_table_result, mut pre_table_base_discovery) = rayon::join(
+    let (composed_table_result, mut pre_table_base_discovery) = macro_join(
         || {
             if use_legacy_splice {
                 compose_subgrammar_tables_with_rules(
@@ -20182,7 +20300,7 @@ fn compose_constraints_owned_parent_impl(
         std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
     let ((tokenizer_result, tokenizer_ms), (prepared_components_result, (boundary_result, boundary_ms))) =
-        rayon::join(
+        macro_join(
             || {
                 let started_at = Instant::now();
                 let parent_tokenizer = parent.tokenizer.clone();
@@ -20203,10 +20321,10 @@ fn compose_constraints_owned_parent_impl(
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
-            || rayon::join(
+            || macro_join(
             || {
                 let ((state_result, component_state_ms), ((token_coordinate_result, token_coordinate_ms), (possible_matches_result, possible_matches_extract_ms))) =
-                    rayon::join(
+                    macro_join(
                         || {
                             let started_at = Instant::now();
                             let result = if let Some(precomputed) =
@@ -20265,7 +20383,7 @@ fn compose_constraints_owned_parent_impl(
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
-                        || rayon::join(
+                        || macro_join(
                         || {
                             let started_at = Instant::now();
                             let result = build_direct_component_token_coordinates(
@@ -20485,6 +20603,7 @@ fn compose_constraints_owned_parent_impl(
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_positive = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
+        && !macro_parallelism_disabled()
         && !partitioned_static_boundary_complete
         && early_boundary_positive_requested
         && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
@@ -20649,6 +20768,7 @@ fn compose_constraints_owned_parent_impl(
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_publish = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
+        && !macro_parallelism_disabled()
         && !partitioned_static_boundary_complete
         && early_boundary_publish_requested
         && let Some(work) = boundary_work.take()
@@ -20710,7 +20830,7 @@ fn compose_constraints_owned_parent_impl(
         // determinization is a publication/final-union concern, not part of
         // constructing B's parser language.
         let segment_prepare_started_at = Instant::now();
-        let (child_clone_result, boundary_positive_result) = rayon::join(
+        let (child_clone_result, boundary_positive_result) = macro_join(
             || {
                 let started_at = Instant::now();
                 let sources = if let Some(shared_children) = shared_children {
@@ -20876,7 +20996,7 @@ fn compose_constraints_owned_parent_impl(
             }
             (boundary_runtime_result, segmented_result)
         } else {
-            rayon::join(
+            macro_join(
             || -> Result<Option<PublishedBoundaryRuntime>, String> {
                 if let Some(handle) = early_boundary_positive.take() {
                     let joined = handle
@@ -21223,16 +21343,24 @@ fn compose_constraints_owned_parent_impl(
                     .set_parser_table_override(Arc::clone(&recursive_table))?;
             }
             let static_shard_publish_started_at = Instant::now();
-            let published = pending_static_boundary_shards
-                .into_par_iter()
-                .map(|work| {
+            let publish = |work| {
                     publish_static_boundary_shard_work(
                         work,
                         &result.constraint.table,
                         id_num_tsids as usize,
                     )
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+                };
+            let published = if macro_parallelism_disabled() {
+                pending_static_boundary_shards
+                    .into_iter()
+                    .map(publish)
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                pending_static_boundary_shards
+                    .into_par_iter()
+                    .map(publish)
+                    .collect::<Result<Vec<_>, String>>()?
+            };
             let static_shard_publish_ms =
                 static_shard_publish_started_at.elapsed().as_secs_f64() * 1000.0;
             if compose_profile_enabled() {
@@ -21580,7 +21708,7 @@ fn compose_constraints_owned_parent_impl(
         }
         (Ok(DWA::new(id_num_tsids, id_max_internal_token)), 0.0)
     } else {
-        rayon::join(
+        macro_join(
         || -> Result<DWA, String> {
             let final_build_started_at = Instant::now();
             let component_materialize_started_at = Instant::now();
@@ -21588,10 +21716,7 @@ fn compose_constraints_owned_parent_impl(
             let component_materialize_ms =
                 component_materialize_started_at.elapsed().as_secs_f64() * 1000.0;
             let deferred_remap_started_at = Instant::now();
-            let mut automata = automata
-                .into_par_iter()
-                .zip(automata_maps.into_par_iter())
-                .map(|(mut automaton, maps)| {
+            let remap = |(mut automaton, maps): (NWA, DirectComponentCoordinateMaps)| {
                     let mut weights = automaton.weight_refs_mut();
                     remap_weights_with_maps(
                         &mut weights,
@@ -21601,8 +21726,16 @@ fn compose_constraints_owned_parent_impl(
                     );
                     drop(weights);
                     automaton
-                })
-                .collect::<Vec<_>>();
+                };
+            let mut automata = if macro_parallelism_disabled() {
+                automata.into_iter().zip(automata_maps).map(remap).collect::<Vec<_>>()
+            } else {
+                automata
+                    .into_par_iter()
+                    .zip(automata_maps.into_par_iter())
+                    .map(remap)
+                    .collect::<Vec<_>>()
+            };
             let deferred_component_remap_ms =
                 deferred_remap_started_at.elapsed().as_secs_f64() * 1000.0;
             match boundary_work {
@@ -27828,7 +27961,7 @@ table: &dispatch.table,
                 child_selected[terminal] = false;
             }
             let ((mut hybrid_dfas, hybrid_transport_ms), (parent_templates, parent_characterize_ms, parent_template_ms)) =
-                rayon::join(
+                macro_join(
                     || {
                         let started = Instant::now();
                         let result = rebuild_transported_component_templates(
@@ -28321,15 +28454,20 @@ table: &dispatch.table,
             let fast_templates = Templates::from_terminal_dfas(fast_dfas);
             let fast_skeleton_ms = fast_skeleton_started.elapsed().as_secs_f64() * 1000.0;
             let fast_commit_started = Instant::now();
-            let fast_commit_templates = fast_templates
-                .by_terminal
-                .par_iter()
-                .filter_map(|(&terminal, dfa)| {
+            let split = |(&terminal, dfa): (&u32, &UnweightedDfa)| {
                     let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
                     try_split_commit_template_dfas(&commit_dfa)
                         .map(|split| (terminal, Arc::new(split)))
-                })
-                .collect::<Vec<_>>();
+                };
+            let fast_commit_templates = if macro_parallelism_disabled() {
+                fast_templates.by_terminal.iter().filter_map(split).collect::<Vec<_>>()
+            } else {
+                fast_templates
+                    .by_terminal
+                    .par_iter()
+                    .filter_map(split)
+                    .collect::<Vec<_>>()
+            };
             let fast_commit_ms = fast_commit_started.elapsed().as_secs_f64() * 1000.0;
             let fast_validate_started = Instant::now();
             let mut fast_template_mismatches = Vec::new();

@@ -15,7 +15,7 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | Variable | Valid values | Default |
 |---|---|---|
 | `GLRMASK_COMPILE_THREADS` | positive integer (`usize > 0`) | auto (available parallelism capped at 6 on Windows, 10 elsewhere) |
-| `GLRMASK_DISABLE_MACRO_PARALLELISM` | truthy bool | off; serializes coarse compiler fan-out (compiler DAG lanes, terminal partitions and L1/L2P siblings, template/characterization items, parser-family/bundle siblings) while preserving parallelism inside each individual operation |
+| `GLRMASK_DISABLE_MACRO_PARALLELISM` | truthy bool | off; serializes coarse compiler/composition fan-out (compiler DAG lanes, terminal partitions and L1/L2P siblings, template/characterization items, parser-family/bundle siblings, composition table/boundary/parser lanes, and per-component/template/shard work) while preserving parallelism inside each individual operation |
 | `GLRMASK_PROFILE_COMPILE` | truthy bool | off |
 | `GLRMASK_PROFILE_COMPILE_SUMMARY` | truthy bool | off |
 | `GLRMASK_DISABLE_TERMINAL_COLORING` | truthy bool | off |

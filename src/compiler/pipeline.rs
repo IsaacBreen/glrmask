@@ -88,6 +88,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::{Constraint, SpecialTokenTerminal};
 use crate::DynamicConstraint;
+use super::{macro_join, macro_parallelism_disabled};
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -105,24 +106,6 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(true)
-}
-
-fn macro_parallelism_disabled() -> bool {
-    env_flag_enabled("GLRMASK_DISABLE_MACRO_PARALLELISM")
-}
-
-fn macro_join<A, B, Left, Right>(left: Left, right: Right) -> (A, B)
-where
-    A: Send,
-    B: Send,
-    Left: FnOnce() -> A + Send,
-    Right: FnOnce() -> B + Send,
-{
-    if macro_parallelism_disabled() {
-        (left(), right())
-    } else {
-        rayon::join(left, right)
-    }
 }
 
 fn macro_scope_spawn<'scope, Body>(scope: &rayon::Scope<'scope>, body: Body)
