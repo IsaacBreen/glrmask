@@ -148,7 +148,7 @@ impl FlatActionScratch {
 }
 // Keep a bounded reserve large enough for repeated handoffs between persistent
 // GSS states and the allocation-free flat frontier.  One object reserves a
-// 64-entry linear stack, so 256 spares cost about 65â€“75 KiB per active
+// 64-entry linear stack, so 256 spares cost about 65Ã¢â‚¬â€œ75 KiB per active
 // constraint state while avoiding allocator cliffs on multi-thousand-token
 // JSON examples. The bound remains fixed; unsupported larger frontiers still
 // fall back to the general persistent-GSS path.
@@ -232,6 +232,19 @@ impl Default for FlatFrontierScratch {
 }
 
 impl FlatFrontierScratch {
+    pub(crate) fn for_mask_shadow() -> Self {
+        Self {
+            branches: std::array::from_fn(|_| FlatBranchScratch::default()),
+            len: 0,
+            action: FlatActionScratch::default(),
+            continuation_cache: [FlatContinuationDecision::default();
+                FLAT_CONTINUATION_CACHE_CAPACITY],
+            continuation_cache_len: 0,
+            gss_pool: SmallVec::new(),
+            retired_gss: SmallVec::new(),
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.len = 0;
         self.action.clear();
@@ -1233,7 +1246,7 @@ fn expand_runtime_product_states(constraint: &Constraint, state: &mut ParserStat
 /// parser alternatives.
 ///
 /// For source subset `S` and alternatives `G`, the exact relation is then the
-/// Cartesian product `S Ã— G`, which duplicate entries under one product key
+/// Cartesian product `S Ãƒâ€” G`, which duplicate entries under one product key
 /// represent without loss. Grouping independently by GSS is insufficient:
 /// distinct source groups can transition to the same product state while
 /// carrying different alternative sets, erasing provenance on the next step.
@@ -1257,7 +1270,7 @@ fn coalesce_uniform_runtime_source_states(
     // Product states are a boundary-only representation. The whole source
     // frontier may therefore collapse exactly when every source key carries
     // the same multiset of existing parser alternatives: the relation is
-    // `S Ã— G`. Keep the representative GSS objects themselves so their
+    // `S Ãƒâ€” G`. Keep the representative GSS objects themselves so their
     // allocation-free in-place capacities and flat decomposition are retained.
     if old.is_empty() || old.iter().any(|(key, _)| *key < source_offset) {
         state.entries = old;
@@ -7814,7 +7827,7 @@ fn commit_bytes_impl_inner(
             }
         }
 
-        // Fast path failed â€” build scan data from already-computed exec_result
+        // Fast path failed Ã¢â‚¬â€ build scan data from already-computed exec_result
         bufs.clear_all();
         bufs.exec_results.insert(tokenizer_state, exec_result);
     } else {
@@ -7982,7 +7995,7 @@ impl<'a> ConstraintState<'a> {
     /// `token_id` must either exist in the vocabulary the constraint was built
     /// with or be declared by a special-token terminal in the grammar.
     /// Committing a token that is grammatically invalid (not in the current
-    /// mask) drives the constraint into a fail state â€” this is normal and
+    /// mask) drives the constraint into a fail state Ã¢â‚¬â€ this is normal and
     /// observable via an all-zero mask.
     ///
     /// # Errors

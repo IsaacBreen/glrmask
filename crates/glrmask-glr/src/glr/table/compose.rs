@@ -1457,6 +1457,156 @@ pub fn compose_subgrammar_tables_explicit(
     )
 }
 
+/// Build only the semantic grammar/terminal shell for an explicit subgrammar
+/// composition.
+///
+/// Recursive provider-native runtimes do not execute a flattened composed LR
+/// table: they retain the intact component tables and explicit CALL/RETURN
+/// links.  Building/copying every child LR row solely to discard it after the
+/// recursive layout has been published is therefore avoidable.  This helper
+/// performs the exact rule/nonterminal/terminal rewriting of the explicit
+/// compositor while deliberately leaving parser-state machinery empty.
+///
+/// Callers must not use the returned table as an executable parser.  Its
+/// `state_relations` are intentionally empty component placeholders.
+pub fn compose_subgrammar_table_shell_explicit_with_rules(
+    parent: &GLRTable,
+    parent_rules: &[Rule],
+    parent_scoped_ignore_terminal: Option<TerminalID>,
+    children: &[SubgrammarTableInput<'_>],
+    child_rules: &[&[Rule]],
+) -> Result<ComposedTable, String> {
+    if children.len() != child_rules.len() {
+        return Err("child table/rule override count mismatch".to_owned());
+    }
+
+    let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
+    terminal_offsets.push(0);
+    let mut next_terminal = parent.num_terminals;
+    for child in children {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal
+            .checked_add(child.table.num_terminals)
+            .ok_or_else(|| "merged terminal ID overflow".to_string())?;
+    }
+
+    let parent_nonterminals = parent.nonterminal_display_names.len() as u32;
+    let mut nonterminal_offsets = Vec::with_capacity(children.len());
+    let mut next_nonterminal = parent_nonterminals;
+    for child in children {
+        nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal = next_nonterminal
+            .checked_add(child.table.nonterminal_display_names.len() as u32)
+            .ok_or_else(|| "merged nonterminal ID overflow".to_string())?;
+    }
+
+    let parent_root = child_root_nonterminal_from_rules(parent_rules)?;
+    let mut rules = parent_rules.to_vec();
+    if parent.embedded_start_nullable() {
+        ensure_epsilon_rule(&mut rules, parent_root);
+    }
+    let parent_rule_count = rules.len();
+    let mut nonterminal_display_names = parent.nonterminal_display_names.clone();
+    let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
+    let mut control_terminals = parent.control_terminals.clone();
+    let mut skip_terminals = parent.skip_terminals.clone();
+    if let Some(ignore) = parent_scoped_ignore_terminal {
+        skip_terminals.insert(ignore);
+    }
+
+    for (child_index, child_input) in children.iter().enumerate() {
+        let child = child_input.table;
+        let child_rules = child_rules[child_index];
+        let terminal_offset = terminal_offsets[child_index + 1];
+        let nonterminal_offset = nonterminal_offsets[child_index];
+        let child_root_local = child_root_nonterminal_from_rules(child_rules)?;
+        let child_root = child_root_local + nonterminal_offset;
+        boundary_nonterminals.insert(child_root);
+        let controls = child_input.placeholder_terminals().collect::<Vec<_>>();
+        control_terminals.extend(controls.iter().copied());
+        control_terminals.extend(
+            child
+                .control_terminals
+                .iter()
+                .map(|terminal| terminal + terminal_offset),
+        );
+        skip_terminals.extend(
+            child
+                .skip_terminals
+                .iter()
+                .map(|terminal| terminal + terminal_offset),
+        );
+        if let Some(ignore) = child_input.ignore_terminal {
+            skip_terminals.insert(ignore + terminal_offset);
+        }
+
+        for rule in &mut rules[..parent_rule_count] {
+            for symbol in &mut rule.rhs {
+                if controls
+                    .iter()
+                    .any(|&control| *symbol == Symbol::Terminal(control))
+                {
+                    *symbol = Symbol::Nonterminal(child_root);
+                }
+            }
+        }
+        for rule in child_rules {
+            rules.push(remap_rule(rule, terminal_offset, nonterminal_offset));
+        }
+        if child_input.start_nullable {
+            ensure_epsilon_rule(&mut rules, child_root);
+        }
+        let child_name_prefix = format!("child{child_index}::");
+        nonterminal_display_names.extend(child.nonterminal_display_names.iter().map(|name| {
+            let mut display_name = String::with_capacity(child_name_prefix.len() + name.len());
+            display_name.push_str(&child_name_prefix);
+            display_name.push_str(name);
+            display_name
+        }));
+    }
+
+    let result_start_nullable = rules_make_start_nullable(&rules, parent_root);
+    let mut table = GLRTable {
+        action: Vec::new(),
+        goto: Vec::new(),
+        num_states: 0,
+        num_terminals: next_terminal,
+        num_rules: rules.len() as u32,
+        rules,
+        nonterminal_display_names,
+        construction: GlrTableConstruction::Lalr,
+        admission_policy: AdmissionPolicy::ExactSimulation,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: Default::default(),
+        control_terminals: control_terminals.clone(),
+        skip_terminals,
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    table.set_embedded_start_nullable(result_start_nullable);
+
+    Ok(ComposedTable {
+        table,
+        terminal_offsets,
+        placeholder_terminals: children
+            .iter()
+            .flat_map(SubgrammarTableInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(child_index, child)| {
+                child.placeholder_terminals().map(move |_| child_index + 1)
+            })
+            .collect(),
+        state_relations: (0..=children.len()).map(|_| Vec::new()).collect(),
+        boundary_nonterminals,
+        control_terminals,
+        appended_parent_action_terminals: BTreeSet::new(),
+    })
+}
+
 pub fn compose_subgrammar_tables_explicit_with_rules(
     parent: &GLRTable,
     parent_rules: &[Rule],

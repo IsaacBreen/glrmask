@@ -4854,8 +4854,6 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// remain until the partitioned boundary wire format is versioned.
     #[serde(skip, default)]
     pub(crate) segmented_boundary_parser: Option<Arc<SegmentedBoundaryParser>>,
-    #[serde(skip, default)]
-    pub(crate) segmented_boundary_terminal_trie: Option<Arc<SegmentedBoundaryTerminalTrie>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4880,7 +4878,6 @@ pub(crate) struct SegmentedBoundaryShard {
 #[derive(Debug, Clone)]
 pub(crate) enum SegmentedBoundaryShardBackend {
     StaticParser(Arc<SegmentedBoundaryParser>),
-    DynamicTerminalTrie(Arc<SegmentedBoundaryTerminalTrie>),
     /// Exact dynamic crossing fallback with no composition-specific boundary
     /// automaton. Recursive runtimes validate the component-owned candidate
     /// token domain by exact scoped commits; legacy/materialized runtimes keep
@@ -4943,49 +4940,10 @@ impl ParserComponentTableSource for SegmentedParserComponentTables<'_> {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalTrieNode {
-    pub(crate) children: Vec<(u32, u32)>,
-    /// Legacy v21 representation: private boundary token classes accepted at
-    /// this node after expanding the TSID dimension during construction.
-    pub(crate) outputs: Vec<u32>,
-}
+// Boundary terminal-tree/trie backends are intentionally unsupported.
+// Boundary handling must not defer terminal-language walks to runtime: compile
+// static boundary behavior into a parser boundary, or use DynamicDirect.
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwaTransition {
-    pub(crate) terminal: u32,
-    pub(crate) target: u32,
-    pub(crate) weight: Weight,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwaNode {
-    pub(crate) final_weight: Option<Weight>,
-    pub(crate) transitions: Vec<BoundaryTerminalNwaTransition>,
-    pub(crate) epsilons: Vec<(u32, Weight)>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwa {
-    pub(crate) nodes: Vec<BoundaryTerminalNwaNode>,
-    pub(crate) start_states: Vec<u32>,
-    /// A topological order of `nodes`, validated when the artifact is loaded.
-    /// Runtime evaluation uses it to coalesce equal token domains at converged
-    /// NWA states without materializing the exponentially large prefix trie.
-    pub(crate) topological_order: Vec<u32>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SegmentedBoundaryTerminalTrie {
-    pub(crate) nodes: Vec<BoundaryTerminalTrieNode>,
-    pub(crate) root_by_tsid: Vec<u32>,
-    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
-    pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
-    /// Current representation. The legacy v21 serde shape above is retained so
-    /// old artifacts still decode; v22 persists this DAG explicitly.
-    #[serde(skip, default)]
-    pub(crate) symbolic_nwa: Option<BoundaryTerminalNwa>,
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentedBoundaryParser {
@@ -5003,6 +4961,18 @@ pub(crate) struct SegmentedBoundaryParser {
     /// on their materialized runtime when loaded.
     #[serde(skip, default)]
     pub(crate) recursive_parser_dwa: Option<DWA>,
+    /// In-memory compact equivalent of `recursive_parser_dwa` when one shard's
+    /// composed TSID behavior quotients to at most 16 classes and its boundary
+    /// token domain fits in 64 bits. The generic recursive DWA remains the
+    /// serialized/reference authority while this accelerator is being rolled
+    /// out and differentially validated.
+    #[serde(skip, default)]
+    pub(crate) recursive_compact_parser_dwa:
+        Option<crate::compiler::stages::parser_dwa::SmallBoundaryDwa>,
+    /// Composed constraint TSID -> compact shard TSID. Empty unless the
+    /// recursive compact parser above is present.
+    #[serde(skip, default)]
+    pub(crate) recursive_compact_tsid_map: Vec<u32>,
     /// New static boundary shards are compiled directly in the authoritative
     /// composed constraint TSID coordinate. They therefore need no private
     /// raw-tokenizer-state map; runtime reads `Constraint::state_to_internal_tsid`

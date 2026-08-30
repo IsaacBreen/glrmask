@@ -41,8 +41,8 @@ type StateSubset = SmallVec<[u32; 2]>;
 // Runtime predecessors are always kept sorted and deduplicated. Most parser
 // states have at most a couple of predecessors, so an inline vector avoids
 // the per-state tree allocation and pointer chasing of BTreeSet.
-type PredecessorSet = SmallVec<[u32; 2]>;
-type RuntimePredecessors = Vec<PredecessorSet>;
+pub(crate) type PredecessorSet = SmallVec<[u32; 2]>;
+pub(crate) type RuntimePredecessors = Vec<PredecessorSet>;
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
@@ -528,6 +528,12 @@ fn control_elimination_has_known_tops(
 }
 
 impl GLRTable {
+    pub(crate) fn exact_control_predecessors_for_rewrite_source(
+        &self,
+    ) -> Result<RuntimePredecessors, String> {
+        build_control_elimination_predecessors(self)
+    }
+
     pub(super) fn canonicalize_stack_shift_predecessors(&mut self) {
         let protected = BitSet::new(self.num_terminals as usize);
         self.canonicalize_stack_shift_predecessors_except(&protected);
@@ -1847,6 +1853,26 @@ impl GLRTable {
     pub fn eliminate_control_terminals_exact(
         &mut self,
     ) -> Result<ControlEliminationReport, String> {
+        self.eliminate_control_terminals_exact_impl(None)
+    }
+
+    pub(crate) fn eliminate_control_terminals_exact_with_predecessors(
+        &mut self,
+        predecessors: RuntimePredecessors,
+    ) -> Result<ControlEliminationReport, String> {
+        if predecessors.len() != self.num_states as usize {
+            return Err(format!(
+                "supplied control predecessor relation has {} rows for {} parser states",
+                predecessors.len(), self.num_states,
+            ));
+        }
+        self.eliminate_control_terminals_exact_impl(Some(predecessors))
+    }
+
+    fn eliminate_control_terminals_exact_impl(
+        &mut self,
+        supplied_predecessors: Option<RuntimePredecessors>,
+    ) -> Result<ControlEliminationReport, String> {
         if self.control_terminals.is_empty() {
             return Ok(ControlEliminationReport {
                 states: self.num_states as usize,
@@ -1863,8 +1889,11 @@ impl GLRTable {
         let source = self.clone();
         let controls = source.control_terminals.clone();
         let predecessor_started_at = std::time::Instant::now();
-        let predecessor_free = control_elimination_has_known_tops(&source, &controls);
-        let predecessors = if predecessor_free {
+        let predecessor_free = supplied_predecessors.is_none()
+            && control_elimination_has_known_tops(&source, &controls);
+        let predecessors = if let Some(predecessors) = supplied_predecessors {
+            predecessors
+        } else if predecessor_free {
             Vec::new()
         } else if std::env::var_os("GLRMASK_DISABLE_CONTROL_PREDECESSOR_DEMAND").is_none() {
             let origins = (0..source.num_states)
@@ -4954,6 +4983,206 @@ fn build_control_elimination_predecessors_demand(
     ))
 }
 
+/// Monotone predecessor equations extracted from parser stack rewrites.
+///
+/// Keeping this builder independent of `GLRTable` lets provider-native
+/// composition feed intact component rewrites directly, without first encoding
+/// them as synthetic action rows only for the predecessor solver to decode them
+/// again. `finish` is the same SCC/dense fixed-point solver used by ordinary
+/// table control elimination.
+pub(crate) struct ControlPredecessorEquationBuilder {
+    state_count: u32,
+    predecessors: Vec<PredecessorSet>,
+    pop_one_destinations: Vec<PredecessorSet>,
+    deep_rules: Vec<(u32, u32, u32)>,
+    rewrite_count: usize,
+    direct_edge_count: usize,
+    started_at: std::time::Instant,
+}
+
+impl ControlPredecessorEquationBuilder {
+    pub(crate) fn new(state_count: u32) -> Self {
+        Self {
+            state_count,
+            predecessors: vec![PredecessorSet::new(); state_count as usize],
+            pop_one_destinations: vec![PredecessorSet::new(); state_count as usize],
+            deep_rules: Vec::new(),
+            rewrite_count: 0,
+            direct_edge_count: 0,
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn record_rewrite(&mut self, source: u32, pop: u32, pushes: &[u32]) {
+        debug_assert!(source < self.state_count);
+        self.rewrite_count += 1;
+        if pushes.is_empty() {
+            return;
+        }
+        debug_assert!(pushes.iter().all(|&state| state < self.state_count));
+        for pair in pushes.windows(2) {
+            self.predecessors[pair[1] as usize].push(pair[0]);
+            self.direct_edge_count += 1;
+        }
+        let destination = pushes[0];
+        if pop == 0 {
+            self.predecessors[destination as usize].push(source);
+            self.direct_edge_count += 1;
+        } else if pop == 1 {
+            self.pop_one_destinations[source as usize].push(destination);
+        } else {
+            self.deep_rules.push((source, pop, destination));
+        }
+    }
+
+    pub(crate) fn finish(self) -> Result<RuntimePredecessors, String> {
+        let Self {
+            state_count,
+            mut predecessors,
+            mut pop_one_destinations,
+            mut deep_rules,
+            rewrite_count,
+            direct_edge_count,
+            started_at,
+        } = self;
+        let extraction_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+        for row in &mut predecessors {
+            row.sort_unstable();
+            row.dedup();
+        }
+        for row in &mut pop_one_destinations {
+            row.sort_unstable();
+            row.dedup();
+        }
+        deep_rules.sort_unstable();
+        deep_rules.dedup();
+        let normalized_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let scc_started_at = std::time::Instant::now();
+        let (state_to_component, component_edges, topological_order) =
+            condense_pop_one_predecessor_graph(&pop_one_destinations);
+        let component_count = topological_order.len();
+        let scc_ms = scc_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let matrix_started_at = std::time::Instant::now();
+        let mut component_predecessors =
+            DensePredecessorMatrix::new(component_count, state_count as usize);
+        let mut dirty_components = vec![false; component_count];
+        for (state, row) in predecessors.iter().enumerate() {
+            let component = state_to_component[state];
+            for &predecessor in row {
+                if component_predecessors.set(component, predecessor) {
+                    dirty_components[component as usize] = true;
+                }
+            }
+        }
+        let initial_changed_component_edges = propagate_component_predecessors(
+            &mut component_predecessors,
+            &component_edges,
+            &topological_order,
+            &mut dirty_components,
+        );
+        let initial_propagation_ms = matrix_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        for (source, _, destination) in &mut deep_rules {
+            *source = state_to_component[*source as usize];
+            *destination = state_to_component[*destination as usize];
+        }
+        deep_rules.sort_unstable();
+        deep_rules.dedup();
+        let pass_limit = (state_count as usize)
+            .saturating_mul(state_count as usize)
+            .saturating_add(2);
+
+        let mut deep_rounds = 0usize;
+        let mut changed_deep_rules_total = 0usize;
+        let mut changed_component_edges_total = initial_changed_component_edges;
+        let mut component_marks = vec![0u32; component_count];
+        let mut mark_generation = 0u32;
+        for _ in 0..pass_limit {
+            deep_rounds += 1;
+            let mut changed_deep_rules = 0usize;
+            let mut depth_cache = FxHashMap::<(u32, u32), Vec<u64>>::default();
+            for &(source_component, pop, destination_component) in &deep_rules {
+                let key = (source_component, pop);
+                if !depth_cache.contains_key(&key) {
+                    let bases = dense_predecessor_states_at_depth(
+                        &component_predecessors,
+                        &state_to_component,
+                        source_component,
+                        pop,
+                        &mut component_marks,
+                        &mut mark_generation,
+                    );
+                    depth_cache.insert(key, bases);
+                }
+                let bases = depth_cache.get(&key).expect("depth cache was populated");
+                if component_predecessors.union_words_into(destination_component, bases) {
+                    changed_deep_rules += 1;
+                    dirty_components[destination_component as usize] = true;
+                }
+            }
+
+            if changed_deep_rules == 0 {
+                let materialize_started_at = std::time::Instant::now();
+                let mut result = Vec::with_capacity(state_count as usize);
+                let mut predecessor_edges = 0usize;
+                let mut max_predecessors = 0usize;
+                for state in 0..state_count as usize {
+                    let mut row = PredecessorSet::new();
+                    for_each_set_bit(
+                        component_predecessors.row_words(state_to_component[state]),
+                        state_count as usize,
+                        |predecessor| row.push(predecessor),
+                    );
+                    predecessor_edges += row.len();
+                    max_predecessors = max_predecessors.max(row.len());
+                    result.push(row);
+                }
+                let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+                if std::env::var_os("GLRMASK_PROFILE_CONTROL_ELIMINATION").is_some() {
+                    let pop_one_rules =
+                        pop_one_destinations.iter().map(|row| row.len()).sum::<usize>();
+                    let component_edge_count =
+                        component_edges.iter().map(|row| row.len()).sum::<usize>();
+                    eprintln!(
+                        "[glrmask/profile][control_predecessors_direct] states={} components={} rewrites={} direct_edges={} pop_one_rules={} component_edges={} deep_rules={} deep_rounds={} changed_component_edges={} changed_deep_rules={} predecessor_edges={} max_predecessors={} matrix_mib={:.3} extraction_ms={extraction_ms:.3} normalize_ms={:.3} scc_ms={scc_ms:.3} initial_propagation_ms={initial_propagation_ms:.3} materialize_ms={materialize_ms:.3} total_ms={:.3}",
+                        state_count,
+                        component_count,
+                        rewrite_count,
+                        direct_edge_count,
+                        pop_one_rules,
+                        component_edge_count,
+                        deep_rules.len(),
+                        deep_rounds,
+                        changed_component_edges_total,
+                        changed_deep_rules_total,
+                        predecessor_edges,
+                        max_predecessors,
+                        component_predecessors.words.len() as f64 * 8.0 / (1024.0 * 1024.0),
+                        normalized_ms - extraction_ms,
+                        started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Ok(result);
+            }
+            changed_deep_rules_total += changed_deep_rules;
+            changed_component_edges_total += propagate_component_predecessors(
+                &mut component_predecessors,
+                &component_edges,
+                &topological_order,
+                &mut dirty_components,
+            );
+        }
+
+        Err(format!(
+            "control-elimination predecessor propagation did not converge: states={state_count}",
+        ))
+    }
+}
+
 /// Conservative-exact predecessor support for arbitrary stack rewrites.
 /// Extra predecessor candidates are harmless because generated guarded effects
 /// test the concrete stack state before applying; missing candidates would be
@@ -6890,6 +7119,26 @@ mod tests {
             let actual = build_control_elimination_predecessors(&table)
                 .unwrap_or_else(|error| panic!("optimized failed for case {case}: {error}"));
             assert_eq!(actual, expected, "case {case}");
+
+            let mut direct = ControlPredecessorEquationBuilder::new(table.num_states);
+            for source in 0..table.num_states {
+                for action in table.action[source as usize].values() {
+                    for_each_action_stack_rewrite(action, |pop, pushes| {
+                        direct.record_rewrite(source, pop, pushes);
+                    });
+                }
+                for &(target, replace) in table.goto[source as usize].values() {
+                    direct.record_rewrite(
+                        source,
+                        u32::from(replace),
+                        std::slice::from_ref(&target),
+                    );
+                }
+            }
+            let direct = direct
+                .finish()
+                .unwrap_or_else(|error| panic!("direct equation solver failed for case {case}: {error}"));
+            assert_eq!(direct, expected, "direct equation builder case {case}");
 
             let mut origins = (0..nstates as u32)
                 .filter(|_| next(&mut seed) & 3 == 0)

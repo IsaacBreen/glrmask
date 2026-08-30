@@ -955,7 +955,7 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
 /// only states where both inputs remain simultaneously live. This is the same
 /// weighted subset construction as the generic NWA determinizer, specialized to
 /// the invariant that a subset contains at most one state from each input.
-fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
+pub fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     type PairKey = (u32, u32, Weight, Weight);
 
     fn intern_pair(

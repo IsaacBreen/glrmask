@@ -1,4 +1,4 @@
-﻿pub(crate) mod profile;
+pub(crate) mod profile;
 pub(crate) mod queue;
 
 use crate::automata::lexer::Lexer;
@@ -21,7 +21,8 @@ use crate::runtime::constraint::{
     Constraint, DenseToBufProfileStats, RuntimeTokenSetRef, RuntimeWeightRef,
 };
 use crate::runtime::state::{
-    CommitBuffers, ConstraintState, MaskCacheData, MaskScratch, ParserStateMap,
+    CommitBuffers, ConstraintState, LazyCommitBuffers, MaskCacheData, MaskScratch, ParserStateMap,
+    RecursiveDynamicBoundaryCacheKey,
 };
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -2609,6 +2610,39 @@ fn enqueue_parser_state_transition(
 
 impl<'a> ConstraintState<'a> {
     fn or_segmented_component_mask(&self, output: &mut [u32], component_mask: &[u32]) {
+        // The ordinary model-token universe is already cached as a dense output
+        // mask. Intersect whole words with it instead of re-validating every set
+        // token through `token_bytes_for_id`: permissive components (notably the
+        // JS parent) can admit most of a 128k vocabulary, making the old
+        // per-set-bit lookup several milliseconds by itself.
+        //
+        // Special-token terminals are not necessarily represented by
+        // `all_tokens_buf_mask`, so merge those few IDs separately. Late-grammar
+        // placeholders are harmless here; the authoritative outer mask clears
+        // them immediately after segmented A/B evaluation.
+        let universe = self.constraint.all_tokens_buf_mask.as_ref();
+        if universe.len() == output.len() {
+            for ((target_word, &source_word), &allowed_word) in output
+                .iter_mut()
+                .zip(component_mask.iter())
+                .zip(universe.iter())
+            {
+                *target_word |= source_word & allowed_word;
+            }
+            for special in &self.constraint.special_token_terminals {
+                let word = special.token_id as usize / 32;
+                if word >= output.len() || word >= component_mask.len() {
+                    continue;
+                }
+                let bit = special.token_id % 32;
+                let mask = 1u32 << bit;
+                if component_mask[word] & mask != 0 {
+                    output[word] |= mask;
+                }
+            }
+            return;
+        }
+
         // Retained components can carry private linker sentinel IDs (and other
         // component-local specials) that are deliberately absent from the
         // finished outer constraint.  Their masks are expressed in original
@@ -2629,6 +2663,49 @@ impl<'a> ConstraintState<'a> {
                 }
                 remaining &= remaining - 1;
             }
+        }
+    }
+
+    /// Filter a component mask already written into the caller-visible output
+    /// buffer down to the outer constraint's token universe.  This is the
+    /// single-active-component analogue of `or_segmented_component_mask`: it
+    /// avoids a second full-vocabulary scratch buffer and OR pass while still
+    /// removing component-private linker/sentinel IDs exactly.
+    fn filter_segmented_component_mask_in_place(&self, output: &mut [u32]) {
+        let universe = self.constraint.all_tokens_buf_mask.as_ref();
+        if universe.len() == output.len() {
+            let mut special_bits = SmallVec::<[(usize, u32); 4]>::new();
+            for special in &self.constraint.special_token_terminals {
+                let word = special.token_id as usize / 32;
+                if word >= output.len() {
+                    continue;
+                }
+                let mask = 1u32 << (special.token_id % 32);
+                if output[word] & mask != 0 {
+                    special_bits.push((word, mask));
+                }
+            }
+            for (target_word, &allowed_word) in output.iter_mut().zip(universe.iter()) {
+                *target_word &= allowed_word;
+            }
+            for (word, mask) in special_bits {
+                output[word] |= mask;
+            }
+            return;
+        }
+
+        for (word_index, word) in output.iter_mut().enumerate() {
+            let mut remaining = *word;
+            let mut kept = 0u32;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros();
+                let token_id = word_index as u32 * 32 + bit;
+                if self.knows_token_id(token_id) {
+                    kept |= 1u32 << bit;
+                }
+                remaining &= remaining - 1;
+            }
+            *word = kept;
         }
     }
 
@@ -3034,12 +3111,144 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
+        // Fastest exact recursive case: one tokenizer lane and one concrete
+        // parser stack.  Scoped parser-state ownership tells us the component
+        // immediately, so do not allocate an 11-component projection vector or
+        // merge a temporary GSS map just to rediscover that fact.  Project the
+        // maximal owned top suffix directly into the retained component and
+        // write its model-token mask straight into the caller's buffer.
+        if self.constraint.uses_compact_segmented_parser_runtime()
+            && !overlay.segmented_static_baseline
+            && self.state.len() == 1
+        {
+            let (&global_tokenizer_state, gss) = self.state.iter().next().unwrap();
+            let mut top_first = SmallVec::<[u32; 64]>::new();
+            if let Some(acc) = gss.single_path_top_first_and_acc(&mut top_first)
+                && let Some(&global_top) = top_first.first()
+                && let Some((component_index, _)) =
+                    self.constraint.compact_segmented_parser_component(global_top)
+                && let Some(component) = overlay.segmented_parser_components.get(component_index)
+                && component.constraint.mask_len() <= buf.len()
+            {
+                let local_tokenizer_states = self.segmented_local_tokenizer_states(
+                    component_index,
+                    component,
+                    global_tokenizer_state,
+                );
+                if local_tokenizer_states.len() == 1 {
+                    let mut local_top_first = SmallVec::<[u32; 64]>::new();
+                    for &global_parser_state in &top_first {
+                        let Some(local) = self.segmented_local_parser_state(
+                            component_index,
+                            component,
+                            global_parser_state,
+                        ) else {
+                            break;
+                        };
+                        local_top_first.push(local);
+                    }
+                    if !local_top_first.is_empty() {
+                        let local_disallowed =
+                            self.segmented_local_disallowed(component_index, component, &acc);
+                        let component_mask_scratch = {
+                            let scratch = self.mask_scratch.lock().unwrap();
+                            scratch
+                                .segmented_component_scratch
+                                .get(component_index)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    Arc::new(Mutex::new(MaskScratch::for_constraint(
+                                        component.constraint.as_ref(),
+                                    )))
+                                })
+                        };
+                        let direct_shadow = ConstraintState {
+                            constraint: component.constraint.as_ref(),
+                            state: ParserStateMap::default(),
+                            buffers: LazyCommitBuffers::mask_only(),
+                            generation: self.generation,
+                            mask_cache: Mutex::new(None),
+                            mask_scratch: Arc::clone(&component_mask_scratch),
+                        };
+                        if direct_shadow.try_fill_mask_preprojected_single_path_direct(
+                            local_tokenizer_states[0],
+                            &local_disallowed,
+                            local_top_first.as_slice(),
+                            buf,
+                        ) {
+                            if std::env::var_os(
+                                "GLRMASK_VALIDATE_PREPROJECTED_COMPONENT_MASK",
+                            )
+                            .is_some()
+                            {
+                                let mut reference_stack = local_top_first.clone();
+                                reference_stack.reverse();
+                                let reference_state = ParserStateMap::singleton(
+                                    local_tokenizer_states[0],
+                                    ParserGSS::from_single_stack(
+                                        reference_stack.into_vec(),
+                                        local_disallowed.clone(),
+                                    ),
+                                );
+                                let reference_shadow = ConstraintState {
+                                    constraint: component.constraint.as_ref(),
+                                    state: reference_state,
+                                    buffers: LazyCommitBuffers::mask_only(),
+                                    generation: self.generation,
+                                    mask_cache: Mutex::new(None),
+                                    mask_scratch: Arc::clone(&component_mask_scratch),
+                                };
+                                let mut reference = vec![0u32; buf.len()];
+                                reference_shadow.fill_mask(&mut reference);
+                                assert_eq!(
+                                    reference, buf,
+                                    "preprojected component mask differs from projected-GSS reference for component {component_index}",
+                                );
+                            }
+                            self.filter_segmented_component_mask_in_place(buf);
+                            if !self.or_segmented_boundary_shards_mask(overlay, buf) {
+                                return false;
+                            }
+                            return true;
+                        }
+
+                        // The borrowed-stack kernel deliberately declines a few
+                        // uncommon shapes. Preserve the established exact path
+                        // by materializing the component GSS only then.
+                        local_top_first.reverse();
+                        let state = ParserStateMap::singleton(
+                            local_tokenizer_states[0],
+                            ParserGSS::from_single_stack(
+                                local_top_first.into_vec(),
+                                local_disallowed,
+                            ),
+                        );
+                        let shadow = ConstraintState {
+                            constraint: component.constraint.as_ref(),
+                            state,
+                            buffers: LazyCommitBuffers::mask_only(),
+                            generation: self.generation,
+                            mask_cache: Mutex::new(None),
+                            mask_scratch: component_mask_scratch,
+                        };
+                        shadow.fill_mask(buf);
+                        self.filter_segmented_component_mask_in_place(buf);
+                        if !self.or_segmented_boundary_shards_mask(overlay, buf) {
+                            return false;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
         let mut projected_states = SmallVec::<[ParserStateMap; 4]>::new();
         projected_states.resize_with(
             overlay.segmented_parser_components.len(),
             ParserStateMap::default,
         );
 
+        let projection_started_at = profile.then(Instant::now);
         for (&global_tokenizer_state, gss) in self.state.iter() {
             let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
                 // The old materialized segmented union had one synthetic root
@@ -3137,13 +3346,74 @@ impl<'a> ConstraintState<'a> {
                 return false;
             }
         }
+        let projection_ns = projection_started_at.map_or(0, elapsed_ns);
 
         if overlay.segmented_static_baseline {
             self.fill_mask_uncached(buf);
         } else {
             buf.fill(0);
         }
-        let mut component_times = SmallVec::<[u64; 4]>::new();
+
+        // Recursive composition normally has one live parser component: the
+        // owner of the current scoped stack top.  In that case the component
+        // mask is already expressed in caller-visible original token IDs, so
+        // writing it to a second 128k-vocabulary buffer only to scan/OR that
+        // buffer back is pure memory traffic.  Write directly into `buf`, then
+        // filter component-private linker/sentinel IDs against the outer token
+        // universe before adding B.  Keep the established scratch+OR path for
+        // genuine component ambiguity or a pre-existing static baseline.
+        if !overlay.segmented_static_baseline {
+            let mut active = projected_states
+                .iter()
+                .enumerate()
+                .filter(|(_, state)| !state.is_empty())
+                .map(|(index, _)| index);
+            if let Some(component_index) = active.next()
+                && active.next().is_none()
+            {
+                let component = &overlay.segmented_parser_components[component_index];
+                if component.constraint.mask_len() <= buf.len() {
+                    let state = std::mem::take(&mut projected_states[component_index]);
+                    let shadow = ConstraintState {
+                        constraint: component.constraint.as_ref(),
+                        state,
+                        buffers: LazyCommitBuffers::mask_only(),
+                        generation: self.generation,
+                        mask_cache: Mutex::new(None),
+                        mask_scratch: {
+                            let scratch = self.mask_scratch.lock().unwrap();
+                            scratch
+                                .segmented_component_scratch
+                                .get(component_index)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    Arc::new(Mutex::new(MaskScratch::for_constraint(
+                                        component.constraint.as_ref(),
+                                    )))
+                                })
+                        },
+                    };
+                    shadow.fill_mask(buf);
+                    self.filter_segmented_component_mask_in_place(buf);
+                    let boundary_started_at = profile.then(Instant::now);
+                    if !self.or_segmented_boundary_shards_mask(overlay, buf) {
+                        return false;
+                    }
+                    let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
+                    if let Some(started_at) = total_started_at {
+                        eprintln!(
+                            "[glrmask/profile][deterministic_two_dwa_mask_direct] component={} projection_ns={} boundary_ns={} total_ns={}",
+                            component_index,
+                            projection_ns,
+                            boundary_ns,
+                            elapsed_ns(started_at),
+                        );
+                    }
+                    return true;
+                }
+            }
+        }
+        let mut component_times = SmallVec::<[(u64, u64, u64, u64); 4]>::new();
         let required_component_mask_len = overlay
             .segmented_parser_components
             .iter()
@@ -3169,7 +3439,7 @@ impl<'a> ConstraintState<'a> {
             .enumerate()
         {
             if state.is_empty() {
-                component_times.push(0);
+                component_times.push((0, 0, 0, 0));
                 continue;
             }
             let component_buf = component_buf
@@ -3177,10 +3447,11 @@ impl<'a> ConstraintState<'a> {
                 .expect("active segmented component requires a mask buffer");
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
+            let shadow_started_at = profile.then(Instant::now);
             let shadow = ConstraintState {
                 constraint: component.constraint.as_ref(),
                 state,
-                buffers: Default::default(),
+                buffers: LazyCommitBuffers::mask_only(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: {
@@ -3196,13 +3467,23 @@ impl<'a> ConstraintState<'a> {
                         })
                 },
             };
+            let shadow_ns = shadow_started_at.map_or(0, elapsed_ns);
             // Dispatch through the retained component itself. Static source
             // constraints therefore keep their parser DWA and precomputed mask
             // artifacts, while dynamic sources keep their parser/lexer walker.
             // A nested hybrid component recursively retains the same split.
+            let fill_started_at = profile.then(Instant::now);
             shadow.fill_mask(component_buf);
+            let fill_ns = fill_started_at.map_or(0, elapsed_ns);
+            let or_started_at = profile.then(Instant::now);
             self.or_segmented_component_mask(buf, &component_buf);
-            component_times.push(component_started_at.map_or(0, elapsed_ns));
+            let or_ns = or_started_at.map_or(0, elapsed_ns);
+            component_times.push((
+                shadow_ns,
+                fill_ns,
+                or_ns,
+                component_started_at.map_or(0, elapsed_ns),
+            ));
         }
 
         let boundary_started_at = profile.then(Instant::now);
@@ -3212,8 +3493,9 @@ impl<'a> ConstraintState<'a> {
         let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
         if let Some(started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][deterministic_two_dwa_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
+                "[glrmask/profile][deterministic_two_dwa_mask] components={} projection_ns={} component_ns=(shadow,fill,or,total){component_times:?} boundary_ns={} total_ns={}",
                 overlay.segmented_parser_components.len(),
+                projection_ns,
                 boundary_ns,
                 elapsed_ns(started_at),
             );
@@ -3389,7 +3671,7 @@ impl<'a> ConstraintState<'a> {
             let shadow = ConstraintState {
                 constraint: component.constraint.as_ref(),
                 state,
-                buffers: Default::default(),
+                buffers: LazyCommitBuffers::mask_only(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: {
@@ -3455,8 +3737,63 @@ impl<'a> ConstraintState<'a> {
             .iter()
             .any(|component| component.boundary.is_some())
         {
+            // Recursive parser states carry their immediate wrapper/component
+            // ownership in the state interval itself. Hoist that exact shard
+            // gate once per mask instead of entering every boundary backend and
+            // rediscovering that ten of eleven shards cannot own the current
+            // stack top. Ambiguous GSSes simply set multiple bits. If bounded
+            // stack enumeration or ownership lookup cannot prove the set, fall
+            // back to the established per-shard checks below.
+            let active_recursive_components = if self.constraint.uses_compact_segmented_parser_runtime()
+                && overlay.segmented_parser_components.len() <= 128
+            {
+                let mut bits = 0u128;
+                let mut has_empty_stack = false;
+                let mut exact = true;
+                for gss in self.state.values() {
+                    let complete = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
+                        match top_first.first().copied() {
+                            Some(top) => {
+                                let Some((owner, _)) =
+                                    self.constraint.compact_segmented_parser_component(top)
+                                else {
+                                    exact = false;
+                                    return;
+                                };
+                                if owner >= 128 {
+                                    exact = false;
+                                    return;
+                                }
+                                bits |= 1u128 << owner;
+                            }
+                            None => has_empty_stack = true,
+                        }
+                    });
+                    if !complete || !exact {
+                        exact = false;
+                        break;
+                    }
+                }
+                exact.then_some((bits, has_empty_stack))
+            } else {
+                None
+            };
             let mut needs_direct_dynamic = false;
-            let mut direct_candidates = vec![0u32; self.constraint.mask_len()];
+            let recursive_segmented_runtime =
+                self.constraint.uses_compact_segmented_parser_runtime();
+            let mut direct_candidates = if recursive_segmented_runtime {
+                Vec::new()
+            } else {
+                vec![0u32; self.constraint.mask_len()]
+            };
+            let mut direct_candidate_ids = Vec::<u32>::new();
+            let validate_recursive_direct_gate = recursive_segmented_runtime
+                && std::env::var_os(
+                    "GLRMASK_VALIDATE_RECURSIVE_DYNAMIC_DIRECT_GATE",
+                )
+                .is_some();
+            let mut rejected_direct_candidate_ids = Vec::<u32>::new();
+            let mut recursive_direct_dense_used = false;
             let mut direct_candidates_complete = true;
             for (component_index, component) in
                 overlay.segmented_parser_components.iter().enumerate()
@@ -3465,20 +3802,18 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 };
                 debug_assert_eq!(shard.start_component as usize, component_index);
+                if let Some((active, has_empty_stack)) = active_recursive_components {
+                    let owns_nonempty = active & (1u128 << component_index) != 0;
+                    if !owns_nonempty && !(has_empty_stack && shard.accepts_empty_stack) {
+                        continue;
+                    }
+                }
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
                             &boundary,
                             Some(&shard.start_parser_states),
                             Some(shard.start_component),
-                            shard.accepts_empty_stack,
-                            buf,
-                        )
-                    }
-                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
-                        self.or_segmented_boundary_terminal_trie_mask(
-                            &boundary,
-                            Some(&shard.start_parser_states),
                             shard.accepts_empty_stack,
                             buf,
                         )
@@ -3497,8 +3832,44 @@ impl<'a> ConstraintState<'a> {
                             // domain, so a missing trigger must not broaden B
                             // to the whole composed mask (which is unsound for
                             // scoped ignores).
+                            // Exact recursive DynamicDirect candidate filtering is
+                            // part of the compact segmented runtime, not an optional
+                            // experiment. The rejection validator compares every
+                            // removed token against authoritative recursive commit.
+                            let lexical_gate =
+                                self.constraint.uses_compact_segmented_parser_runtime();
+                            let local_projection = lexical_gate.then(|| {
+                                self.recursive_dynamic_direct_local_lexer_states(
+                                    component_index,
+                                    component,
+                                    shard,
+                                )
+                            });
                             for &token in tokens {
-                                set_original_mask_bit(&mut direct_candidates, token);
+                                let keep = match local_projection.as_ref() {
+                                    Some(Some((local_states, local_parser_tops)))
+                                        if !local_states.is_empty() => {
+                                        Self::recursive_dynamic_direct_token_has_internal_lexeme(
+                                            component,
+                                            local_states,
+                                            local_parser_tops,
+                                            token,
+                                        )
+                                    }
+                                    // Missing/incomplete local projection or an
+                                    // unexpected empty local set: conservative
+                                    // fallback to the established candidate.
+                                    _ => true,
+                                };
+                                if keep {
+                                    if recursive_segmented_runtime {
+                                        direct_candidate_ids.push(token);
+                                    } else {
+                                        set_original_mask_bit(&mut direct_candidates, token);
+                                    }
+                                } else if validate_recursive_direct_gate {
+                                    rejected_direct_candidate_ids.push(token);
+                                }
                             }
                             continue;
                         }
@@ -3506,10 +3877,18 @@ impl<'a> ConstraintState<'a> {
                         match trigger {
                             crate::runtime::BoundaryTrigger::Tokens(tokens) => {
                                 for &token in tokens.iter() {
-                                    set_original_mask_bit(&mut direct_candidates, token);
+                                    if recursive_segmented_runtime {
+                                        direct_candidate_ids.push(token);
+                                    } else {
+                                        set_original_mask_bit(&mut direct_candidates, token);
+                                    }
                                 }
                             }
                             crate::runtime::BoundaryTrigger::Exact(dwa) => {
+                                if recursive_segmented_runtime && direct_candidates.is_empty() {
+                                    direct_candidates.resize(self.constraint.mask_len(), 0);
+                                }
+                                recursive_direct_dense_used |= recursive_segmented_runtime;
                                 if !self.or_exact_component_trigger_candidates(
                                     component,
                                     shard,
@@ -3532,10 +3911,44 @@ impl<'a> ConstraintState<'a> {
                 }
             }
             if needs_direct_dynamic {
-                if self.constraint.uses_compact_segmented_parser_runtime() {
+                if recursive_segmented_runtime {
+                    direct_candidate_ids.sort_unstable();
+                    direct_candidate_ids.dedup();
+                    if validate_recursive_direct_gate
+                        && direct_candidates_complete
+                        && !recursive_direct_dense_used
+                        && !rejected_direct_candidate_ids.is_empty()
+                    {
+                        rejected_direct_candidate_ids.sort_unstable();
+                        rejected_direct_candidate_ids.dedup();
+                        let mut validation_buffers = CommitBuffers::default();
+                        for token in rejected_direct_candidate_ids {
+                            // A rejection is relevant only when no other active
+                            // shard retained this token and retained component A
+                            // did not already admit it. In that case the
+                            // authoritative scoped commit must also reject it.
+                            if direct_candidate_ids.binary_search(&token).is_ok()
+                                || original_mask_contains(buf, token)
+                            {
+                                continue;
+                            }
+                            assert!(
+                                !crate::runtime::commit::token_admissible_from_state_exact(
+                                    self.constraint,
+                                    &self.state,
+                                    &mut validation_buffers,
+                                    token,
+                                ),
+                                "recursive DynamicDirect gate rejected an exact boundary candidate: token_id={token}",
+                            );
+                        }
+                    }
                     self.or_recursive_dynamic_boundary_candidates_exact(
                         buf,
-                        direct_candidates_complete.then_some(&direct_candidates),
+                        (direct_candidates_complete && recursive_direct_dense_used)
+                            .then_some(&direct_candidates),
+                        (direct_candidates_complete && !recursive_direct_dense_used)
+                            .then_some(direct_candidate_ids.as_slice()),
                     );
                 } else if direct_candidates_complete {
                     // Legacy/materialized coordinate: retain the optimized
@@ -3563,11 +3976,6 @@ impl<'a> ConstraintState<'a> {
         {
             return false;
         }
-        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref()
-            && !self.or_segmented_boundary_terminal_trie_mask(boundary, None, true, buf)
-        {
-            return false;
-        }
         true
     }
 
@@ -3583,9 +3991,75 @@ impl<'a> ConstraintState<'a> {
     fn or_recursive_dynamic_boundary_candidates_exact(
         &self,
         buf: &mut [u32],
-        candidates: Option<&[u32]>,
+        dense_candidates: Option<&[u32]>,
+        candidate_ids: Option<&[u32]>,
     ) {
-        let mut buffers = CommitBuffers::default();
+        let profile = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+        let started_at = profile.then(Instant::now);
+        let input_candidate_count = candidate_ids.map_or_else(
+            || {
+                dense_candidates.map_or(usize::MAX, |words| {
+                    words.iter().map(|word| word.count_ones() as usize).sum()
+                })
+            },
+            <[u32]>::len,
+        );
+        let mut exact_cache_key = None::<RecursiveDynamicBoundaryCacheKey>;
+        if dense_candidates.is_none()
+            && let Some(candidate_ids) = candidate_ids
+            && candidate_ids.len() >= 8
+        {
+            let cached = {
+                let mut scratch = self.mask_scratch.lock().unwrap();
+                // Keep the on-demand cache bounded. Clearing the semantic
+                // interner together with the result table is mandatory because
+                // its compact integer IDs are meaningful only within one
+                // interner generation.
+                if scratch.recursive_dynamic_boundary_exact_cache.len() >= 512 {
+                    scratch.recursive_dynamic_boundary_exact_cache.clear();
+                    if let Some(interner) = scratch
+                        .recursive_dynamic_boundary_semantic_keys
+                        .as_mut()
+                    {
+                        interner.clear();
+                    }
+                }
+                let mut frontier = SmallVec::<[(u32, u32); 4]>::new();
+                for (tokenizer_state, gss) in self.state.iter() {
+                    let semantic = scratch
+                        .recursive_dynamic_boundary_semantic_keys
+                        .get_or_insert_with(|| {
+                            crate::ds::leveled_gss::GssSemanticKeyInterner::with_capacity(256)
+                        })
+                        .key(gss);
+                    frontier.push((*tokenizer_state, semantic));
+                }
+                let key = (
+                    frontier,
+                    SmallVec::<[u32; 8]>::from_iter(candidate_ids.iter().copied()),
+                );
+                let cached = scratch
+                    .recursive_dynamic_boundary_exact_cache
+                    .get(&key)
+                    .cloned();
+                exact_cache_key = Some(key);
+                cached
+            };
+            if let Some(cached) = cached {
+                for &token_id in cached.iter() {
+                    set_original_mask_bit(buf, token_id);
+                }
+                if let Some(started_at) = started_at {
+                    eprintln!(
+                        "[glrmask/profile][recursive_dynamic_boundary_exact_cache_hit] input_candidates={} admitted={} total_ns={}",
+                        input_candidate_count,
+                        cached.len(),
+                        elapsed_ns(started_at),
+                    );
+                }
+                return;
+            }
+        }
         let mut byte_candidates = Vec::<(u32, &[u8])>::new();
         let mut pointwise_candidates = Vec::<u32>::new();
         let mut collect = |token_id: u32| {
@@ -3604,7 +4078,11 @@ impl<'a> ConstraintState<'a> {
             }
         };
 
-        if let Some(candidates) = candidates {
+        if let Some(candidate_ids) = candidate_ids {
+            for &token_id in candidate_ids {
+                collect(token_id);
+            }
+        } else if let Some(candidates) = dense_candidates {
             for (word_index, &candidate_word) in candidates.iter().enumerate() {
                 let already = buf.get(word_index).copied().unwrap_or(0);
                 let mut remaining = candidate_word & !already;
@@ -3631,6 +4109,28 @@ impl<'a> ConstraintState<'a> {
             }
         }
 
+        // The overwhelmingly common DynamicDirect call has no surviving B
+        // candidate after component-A subtraction / trigger pruning. Commit
+        // scratch is intentionally large; do not materialize it merely to
+        // discover that there is no exact probe to run.
+        if byte_candidates.is_empty() && pointwise_candidates.is_empty() {
+            if let Some(started_at) = started_at {
+                eprintln!(
+                    "[glrmask/profile][recursive_dynamic_boundary_exact] input_candidates={} byte_candidates=0 pointwise_candidates=0 admitted_byte=0 total_ns={}",
+                    input_candidate_count,
+                    elapsed_ns(started_at),
+                );
+            }
+            return;
+        }
+        let mut buffers = {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            scratch
+                .recursive_dynamic_boundary_commit_buffers
+                .take()
+                .unwrap_or_else(|| Box::new(CommitBuffers::default()))
+        };
+
         // Byte-backed candidates share the same exact commit state along their
         // common prefixes. Evaluate that radix tree once instead of replaying
         // the complete model-token spelling independently for every candidate.
@@ -3642,14 +4142,21 @@ impl<'a> ConstraintState<'a> {
             &mut byte_candidates,
             &mut admitted,
         );
-        for token_id in admitted {
+        let byte_candidate_count = byte_candidates.len();
+        let admitted_count = admitted.len();
+        let mut cache_additions = exact_cache_key.as_ref().map(|_| Vec::<u32>::new());
+        for &token_id in &admitted {
             set_original_mask_bit(buf, token_id);
+            if let Some(additions) = cache_additions.as_mut() {
+                additions.push(token_id);
+            }
         }
 
         // Special-token semantics can add a parser path independent of the
         // token's byte spelling, so those ids deliberately stay pointwise.
         pointwise_candidates.sort_unstable();
         pointwise_candidates.dedup();
+        let pointwise_candidate_count = pointwise_candidates.len();
         for token_id in pointwise_candidates {
             if original_mask_contains(buf, token_id) {
                 continue;
@@ -3661,7 +4168,34 @@ impl<'a> ConstraintState<'a> {
                 token_id,
             ) {
                 set_original_mask_bit(buf, token_id);
+                if let Some(additions) = cache_additions.as_mut() {
+                    additions.push(token_id);
+                }
             }
+        }
+        if let Some(key) = exact_cache_key {
+            let mut additions = cache_additions.unwrap_or_default();
+            additions.sort_unstable();
+            additions.dedup();
+            self.mask_scratch
+                .lock()
+                .unwrap()
+                .recursive_dynamic_boundary_exact_cache
+                .insert(key, Arc::from(additions.into_boxed_slice()));
+        }
+        self.mask_scratch
+            .lock()
+            .unwrap()
+            .recursive_dynamic_boundary_commit_buffers = Some(buffers);
+        if let Some(started_at) = started_at {
+            eprintln!(
+                "[glrmask/profile][recursive_dynamic_boundary_exact] input_candidates={} byte_candidates={} pointwise_candidates={} admitted_byte={} total_ns={}",
+                input_candidate_count,
+                byte_candidate_count,
+                pointwise_candidate_count,
+                admitted_count,
+                elapsed_ns(started_at),
+            );
         }
     }
 
@@ -3704,293 +4238,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn or_segmented_boundary_terminal_trie_mask(
-        &self,
-        boundary: &crate::runtime::SegmentedBoundaryTerminalTrie,
-        start_parser_states: Option<&crate::ds::bitset::BitSet>,
-        accepts_empty_stack: bool,
-        buf: &mut [u32],
-    ) -> bool {
-        const MAX_NWA_PRODUCT_ENTRIES: usize = 4096;
-
-        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
-            let word = token as usize / 64;
-            let bit = token % 64;
-            acc.0.iter().any(|(_, dense)| {
-                dense.get(word)
-                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
-            })
-        }
-
-        #[derive(Clone)]
-        enum BoundaryTokenDomain {
-            Full,
-            Set(Arc<RangeSetBlaze<u32>>),
-        }
-
-        fn same_domain(left: &BoundaryTokenDomain, right: &BoundaryTokenDomain) -> bool {
-            match (left, right) {
-                (BoundaryTokenDomain::Full, BoundaryTokenDomain::Full) => true,
-                (BoundaryTokenDomain::Set(left), BoundaryTokenDomain::Set(right)) => {
-                    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
-                }
-                _ => false,
-            }
-        }
-
-        fn intersect_domain(
-            current: &BoundaryTokenDomain,
-            edge: &Weight,
-            tsid: u32,
-        ) -> Option<BoundaryTokenDomain> {
-            if edge.is_empty() {
-                return None;
-            }
-            if edge.is_full() {
-                return Some(current.clone());
-            }
-            let edge_tokens = edge.token_set_for_tsid_ref(tsid)?;
-            match current {
-                BoundaryTokenDomain::Full => {
-                    Some(BoundaryTokenDomain::Set(Arc::clone(edge_tokens)))
-                }
-                BoundaryTokenDomain::Set(current_tokens) => {
-                    if Arc::ptr_eq(current_tokens, edge_tokens)
-                        || current_tokens.as_ref() == edge_tokens.as_ref()
-                    {
-                        return Some(current.clone());
-                    }
-                    if current_tokens.as_ref().is_disjoint(edge_tokens.as_ref()) {
-                        return None;
-                    }
-                    let overlap = current_tokens.as_ref() & edge_tokens.as_ref();
-                    (!overlap.is_empty())
-                        .then(|| BoundaryTokenDomain::Set(Arc::new(overlap)))
-                }
-            }
-        }
-
-        type ProductBucket = SmallVec<[(BoundaryTokenDomain, ParserGSS); 4]>;
-
-        fn push_product(
-            bucket: &mut ProductBucket,
-            domain: BoundaryTokenDomain,
-            parser: ParserGSS,
-        ) {
-            if let Some((_, existing_parser)) = bucket
-                .iter_mut()
-                .find(|(existing_domain, _)| same_domain(existing_domain, &domain))
-            {
-                *existing_parser = existing_parser.merge(&parser);
-            } else {
-                bucket.push((domain, parser));
-            }
-        }
-
-        for (&global_tokenizer_state, gss) in self.state.iter() {
-            let tsid = boundary
-                .tokenizer_state_to_tsid
-                .get(global_tokenizer_state as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            if tsid == u32::MAX {
-                continue;
-            }
-
-            let mut complete = true;
-            let single_path = gss.is_single_path();
-            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                if let Some(start_parser_states) = start_parser_states {
-                    match top_first.first().copied() {
-                        Some(top) if !start_parser_states.contains(top as usize) => return,
-                        None if !accepts_empty_stack => return,
-                        _ => {}
-                    }
-                }
-                let Some(allowed) =
-                    self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
-                else {
-                    complete = false;
-                    return;
-                };
-                let parser = if single_path {
-                    gss.clone()
-                } else {
-                    let mut stack = SmallVec::<[u32; 64]>::from_slice(top_first);
-                    stack.reverse();
-                    ParserGSS::from_single_stack(stack.into_vec(), acc.clone())
-                };
-
-                let mut admit_internal_token = |internal_token: u32| -> bool {
-                    let Some(originals) = boundary
-                        .internal_token_to_originals
-                        .get(internal_token as usize)
-                    else {
-                        return false;
-                    };
-                    for &original in originals {
-                        let outer_internal = self
-                            .constraint
-                            .original_token_internal_at(original)
-                            .unwrap_or(u32::MAX);
-                        let outer_allowed = outer_internal != u32::MAX
-                            && dense_contains(&allowed, outer_internal);
-                        if outer_allowed {
-                            set_original_mask_bit(buf, original);
-                        }
-                    }
-                    true
-                };
-
-                if let Some(nwa) = boundary.symbolic_nwa.as_ref() {
-                    let mut buckets = SmallVec::<[ProductBucket; 16]>::new();
-                    buckets.resize_with(nwa.nodes.len(), ProductBucket::new);
-                    for &start in &nwa.start_states {
-                        let Some(bucket) = buckets.get_mut(start as usize) else {
-                            complete = false;
-                            return;
-                        };
-                        push_product(bucket, BoundaryTokenDomain::Full, parser.clone());
-                    }
-
-                    let mut product_entries = 0usize;
-                    for &state_id in &nwa.topological_order {
-                        let Some(bucket) = buckets.get_mut(state_id as usize) else {
-                            complete = false;
-                            return;
-                        };
-                        let entries = std::mem::take(bucket);
-                        if entries.is_empty() {
-                            continue;
-                        }
-                        product_entries = product_entries.saturating_add(entries.len());
-                        if product_entries > MAX_NWA_PRODUCT_ENTRIES {
-                            complete = false;
-                            return;
-                        }
-                        let Some(node) = nwa.nodes.get(state_id as usize) else {
-                            complete = false;
-                            return;
-                        };
-                        for (domain, parser) in entries {
-                            if let Some(final_weight) = node.final_weight.as_ref()
-                                && let Some(output_domain) =
-                                    intersect_domain(&domain, final_weight, tsid)
-                            {
-                                match output_domain {
-                                    BoundaryTokenDomain::Full => {
-                                        for internal_token in
-                                            0..boundary.internal_token_to_originals.len() as u32
-                                        {
-                                            if !admit_internal_token(internal_token) {
-                                                complete = false;
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    BoundaryTokenDomain::Set(tokens) => {
-                                        for range in tokens.ranges() {
-                                            for internal_token in range {
-                                                if !admit_internal_token(internal_token) {
-                                                    complete = false;
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            for (target, edge_weight) in &node.epsilons {
-                                let Some(next_domain) =
-                                    intersect_domain(&domain, edge_weight, tsid)
-                                else {
-                                    continue;
-                                };
-                                let Some(target_bucket) = buckets.get_mut(*target as usize) else {
-                                    complete = false;
-                                    return;
-                                };
-                                push_product(target_bucket, next_domain, parser.clone());
-                            }
-                            for transition in &node.transitions {
-                                let Some(next_domain) =
-                                    intersect_domain(&domain, &transition.weight, tsid)
-                                else {
-                                    continue;
-                                };
-                                let advanced = super::commit::advance_parser_stacks_table_exact(
-                                    self.constraint,
-                                    &parser,
-                                    transition.terminal,
-                                );
-                                let Some(advanced) = advanced else {
-                                    continue;
-                                };
-                                if advanced.is_empty() {
-                                    continue;
-                                }
-                                let Some(target_bucket) =
-                                    buckets.get_mut(transition.target as usize)
-                                else {
-                                    complete = false;
-                                    return;
-                                };
-                                push_product(target_bucket, next_domain, advanced);
-                            }
-                        }
-                    }
-                    return;
-                }
-
-                // Legacy v21 artifacts carry an explicitly expanded trie. Keep
-                // that evaluator unchanged for backwards compatibility.
-                let root = boundary
-                    .root_by_tsid
-                    .get(tsid as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if root == u32::MAX {
-                    return;
-                }
-                let mut pending = Vec::<(u32, ParserGSS)>::new();
-                pending.push((root, parser));
-                let mut visits = 0usize;
-                while let Some((node_id, parser)) = pending.pop() {
-                    visits += 1;
-                    if visits > boundary.nodes.len().saturating_mul(2).max(32) {
-                        complete = false;
-                        return;
-                    }
-                    let Some(node) = boundary.nodes.get(node_id as usize) else {
-                        complete = false;
-                        return;
-                    };
-                    for &internal_token in &node.outputs {
-                        if !admit_internal_token(internal_token) {
-                            complete = false;
-                            return;
-                        }
-                    }
-                    for &(terminal, child) in &node.children {
-                        if let Some(advanced) = super::commit::advance_parser_stacks_table_exact(
-                            self.constraint,
-                            &parser,
-                            terminal,
-                        ) && !advanced.is_empty()
-                        {
-                            pending.push((child, advanced));
-                        }
-                    }
-                }
-            });
-            if !traversal_complete || !complete {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Conservatively test whether this shard can own at least one current
     /// composed parser-stack top. Incomplete bounded GSS inspection returns
     /// true so trigger acceleration can never create a false negative.
@@ -4025,6 +4272,127 @@ impl<'a> ConstraintState<'a> {
                 return true;
             }
             if active {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Exact-on-the-lexer-side zero-build-cost gate for recursive
+    /// `DynamicDirect` boundary candidates.
+    ///
+    /// A model token can cross from the currently active component only if a
+    /// proper prefix can complete at least one local lexeme. Parser readiness
+    /// may prune this set further, but cannot make a token with no internal
+    /// local lexer event cross a component boundary. The boundary-discovery
+    /// candidate set remains the semantic outer domain; this helper only
+    /// removes candidates that are impossible from the *current* raw local
+    /// tokenizer state(s).
+    ///
+    /// `None` means the recursive/local coordinate could not be established
+    /// exactly, in which case the caller must retain the whole candidate set.
+    fn recursive_dynamic_direct_local_lexer_states(
+        &self,
+        component_index: usize,
+        component: &crate::runtime::SegmentedParserComponent,
+        shard: &crate::runtime::SegmentedBoundaryShard,
+    ) -> Option<(SmallVec<[u32; 4]>, SmallVec<[u32; 4]>)> {
+        let mut locals = SmallVec::<[u32; 4]>::new();
+        let mut parser_tops = SmallVec::<[u32; 4]>::new();
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let mut owned = false;
+            let complete = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
+                let path_owned = match top_first.first().copied() {
+                    Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
+                        if let Some((owner, local)) =
+                            self.constraint.compact_segmented_parser_component(top)
+                            && owner == component_index
+                        {
+                            if !parser_tops.contains(&local) {
+                                parser_tops.push(local);
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Some(top) => shard.start_parser_states.contains(top as usize),
+                    None => shard.accepts_empty_stack,
+                };
+                owned |= path_owned;
+            });
+            if !complete {
+                return None;
+            }
+            if !owned {
+                continue;
+            }
+            let local_states = self.segmented_local_tokenizer_states(
+                component_index,
+                component,
+                global_tokenizer_state,
+            );
+            if local_states.is_empty() {
+                return None;
+            }
+            for local in local_states {
+                if !locals.contains(&local) {
+                    locals.push(local);
+                }
+            }
+        }
+        Some((locals, parser_tops))
+    }
+
+    #[inline]
+    fn recursive_dynamic_direct_token_has_internal_lexeme(
+        component: &crate::runtime::SegmentedParserComponent,
+        local_tokenizer_states: &[u32],
+        local_parser_tops: &[u32],
+        token_id: u32,
+    ) -> bool {
+        let Some(bytes) = component.constraint.token_bytes_for_id(token_id) else {
+            // Special/non-byte tokens stay conservative. Exact scoped commit
+            // remains authoritative for them.
+            return true;
+        };
+        if bytes.len() < 2 {
+            // There is no byte-internal split to prove impossible here. Keep
+            // the token rather than relying on assumptions about zero-width
+            // parser/link closure at token start.
+            return true;
+        }
+        let row_admission_exact = component.constraint.table.control_terminals.is_empty()
+            && component.constraint.table.admission_policy
+                == crate::compiler::glr::table::AdmissionPolicy::RowPresenceExact
+            && !local_parser_tops.is_empty();
+        let terminal_admitted = |terminal: TerminalID| {
+            !row_admission_exact
+                || component.constraint.ignore_terminal == Some(terminal)
+                || local_parser_tops.iter().copied().any(|top| {
+                    component.constraint.table.advance_row_allows(top, terminal)
+                })
+        };
+        for &local_start in local_tokenizer_states {
+            // Mirror the tokenizer observation used by commit: one longest
+            // match per terminal over the bytes consumed from this residual
+            // state.  Only a match ending at a *proper* model-token prefix can
+            // trigger an internal lexer reset and therefore cross a component
+            // boundary during this token.  A full-width match is handled at
+            // the next model-token boundary and belongs to retained component A.
+            //
+            // This is intentionally stronger than walking every intermediate
+            // accepting lexer state.  The live commit engine also discards a
+            // shorter match when the same terminal matches again later, so
+            // treating the shorter accepting state as a possible reset would
+            // retain false-positive DynamicDirect candidates.
+            let (_, matches) = component
+                .constraint
+                .tokenizer
+                .execute_summary_from_state(bytes, local_start);
+            if matches.into_iter().any(|(terminal, width)| {
+                width < bytes.len() && terminal_admitted(terminal)
+            }) {
                 return true;
             }
         }
@@ -4177,11 +4545,12 @@ impl<'a> ConstraintState<'a> {
         fn accepted_for_stack(
             dwa: &crate::automata::weighted_u32::dwa::DWA,
             top_first: &[u32],
-        ) -> Weight {
+        ) -> (Weight, usize) {
             let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
             let mut state_id = dwa.start_state();
             let mut path_weight = Weight::all();
             let mut accepted = Weight::empty();
+            let mut labels_walked = 0usize;
             let accumulate_final = |state_id: u32,
                                     path_weight: &Weight,
                                     accepted: &mut Weight,
@@ -4211,6 +4580,7 @@ impl<'a> ConstraintState<'a> {
                 else {
                     break;
                 };
+                labels_walked += 1;
                 path_weight = ops.intersection(&path_weight, edge_weight);
                 if path_weight.is_empty() {
                     break;
@@ -4218,7 +4588,7 @@ impl<'a> ConstraintState<'a> {
                 state_id = *target;
                 accumulate_final(state_id, &path_weight, &mut accepted, &mut ops);
             }
-            accepted
+            (accepted, labels_walked)
         }
 
         fn accepted_mask_for_stack(
@@ -4246,16 +4616,18 @@ impl<'a> ConstraintState<'a> {
                 let Some(state) = dwa.states.get(state_id as usize) else {
                     break;
                 };
-                let edge = state
-                    .transitions
-                    .iter()
-                    .find(|(edge_label, _, _)| *edge_label == label)
-                    .or_else(|| {
-                        state
-                            .transitions
-                            .iter()
-                            .find(|(edge_label, _, _)| *edge_label == DEFAULT_LABEL)
-                    });
+                let transitions = &state.transitions;
+                let lookup = |needle: i32| {
+                    if transitions.len() >= 8 {
+                        transitions
+                            .binary_search_by_key(&needle, |(edge_label, _, _)| *edge_label)
+                            .ok()
+                            .map(|index| &transitions[index])
+                    } else {
+                        transitions.iter().find(|(edge_label, _, _)| *edge_label == needle)
+                    }
+                };
+                let edge = lookup(label).or_else(|| lookup(DEFAULT_LABEL));
                 let Some(&(_, target, weight)) = edge else {
                     break;
                 };
@@ -4276,6 +4648,52 @@ impl<'a> ConstraintState<'a> {
                 dense.get(word)
                     .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
             })
+        }
+
+        #[inline]
+        fn weight_has_support_for_any_tsid(weight: &Weight, tsids: &[u32]) -> bool {
+            if weight.is_full() {
+                return !tsids.is_empty();
+            }
+            tsids.iter().any(|&tsid| {
+                weight
+                    .token_set_for_tsid_ref(tsid)
+                    .is_some_and(|tokens| !tokens.is_empty())
+            })
+        }
+
+        // Exact cheap rejection for the overwhelmingly common interior case.
+        // Path weights only become smaller as the parser stack is consumed.
+        // Therefore, when neither the root final nor the first parser-state
+        // edge carries any support for the current TSID(s), no buried caller
+        // suffix can ever make this boundary shard accept a token.
+        #[inline]
+        fn first_step_can_contribute(
+            dwa: &crate::automata::weighted_u32::dwa::DWA,
+            boundary_tsids: &[u32],
+            top_first: &[u32],
+        ) -> bool {
+            let Some(start) = dwa.states().get(dwa.start_state() as usize) else {
+                return false;
+            };
+            if start
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| weight_has_support_for_any_tsid(weight, boundary_tsids))
+            {
+                return true;
+            }
+            let Some(&top) = top_first.first() else {
+                return false;
+            };
+            let label = encode_positive_label(top);
+            start
+                .transitions
+                .get(&label)
+                .or_else(|| start.transitions.get(&DEFAULT_LABEL))
+                .is_some_and(|(_, weight)| {
+                    weight_has_support_for_any_tsid(weight, boundary_tsids)
+                })
         }
 
         let recursive_parser = self.constraint.uses_compact_segmented_parser_runtime();
@@ -4355,7 +4773,94 @@ impl<'a> ConstraintState<'a> {
                     complete = false;
                     return;
                 };
-                if !recursive_parser
+                if recursive_parser
+                    && let Some(compact) = boundary.recursive_compact_parser_dwa.as_ref()
+                {
+                    let mut accepted = 0u64;
+                    let mut compact_tsids = SmallVec::<[u32; 4]>::new();
+                    for &composed_tsid in &boundary_tsids {
+                        let Some(&compact_tsid) = boundary
+                            .recursive_compact_tsid_map
+                            .get(composed_tsid as usize)
+                        else {
+                            complete = false;
+                            return;
+                        };
+                        if compact_tsid >= compact.tsid_count as u32 {
+                            complete = false;
+                            return;
+                        }
+                        if !compact_tsids.contains(&compact_tsid) {
+                            compact_tsids.push(compact_tsid);
+                            accepted |= accepted_mask_for_stack(compact, compact_tsid, top_first);
+                        }
+                    }
+
+                    if std::env::var_os(
+                        "GLRMASK_VALIDATE_RECURSIVE_COMPACT_BOUNDARY_RUNTIME_DWA",
+                    )
+                    .is_some()
+                    {
+                        let (reference, _) = accepted_for_stack(parser_dwa, top_first);
+                        let mut reference_mask = 0u64;
+                        for &boundary_tsid in &boundary_tsids {
+                            if let Some(tokens) = reference.token_set_for_tsid_ref(boundary_tsid) {
+                                for range in tokens.ranges() {
+                                    for internal_token in range {
+                                        assert!(internal_token < 64);
+                                        reference_mask |= 1u64 << internal_token;
+                                    }
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            accepted, reference_mask,
+                            "recursive compact boundary runtime differs from generic reference: start_component={start_component:?} top_first={top_first:?} boundary_tsids={boundary_tsids:?} compact_tsids={compact_tsids:?}",
+                        );
+                    }
+
+                    if debug_boundary {
+                        let internal = (0..compact.token_count as u32)
+                            .filter(|&token| accepted & (1u64 << token) != 0)
+                            .collect::<Vec<_>>();
+                        let originals = internal
+                            .iter()
+                            .flat_map(|&token| boundary.internal_token_to_originals.get(token as usize).into_iter().flatten().copied())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "[glrmask/debug][segmented_boundary_stack] top_first={:?} composed_tsids={:?} compact_tsids={:?} accepted_internal={:?} accepted_originals={:?} recursive_compact=true",
+                            top_first,
+                            boundary_tsids,
+                            compact_tsids,
+                            internal,
+                            originals,
+                        );
+                    }
+                    while accepted != 0 {
+                        let internal_token = accepted.trailing_zeros();
+                        accepted &= accepted - 1;
+                        let Some(originals) = boundary
+                            .internal_token_to_originals
+                            .get(internal_token as usize)
+                        else {
+                            complete = false;
+                            return;
+                        };
+                        for &original in originals {
+                            let outer_internal = self
+                                .constraint
+                                .original_token_internal_at(original)
+                                .unwrap_or(u32::MAX);
+                            if outer_internal != u32::MAX && dense_contains(&allowed, outer_internal) {
+                                set_original_mask_bit(buf, original);
+                            }
+                        }
+                    }
+                } else if recursive_parser
+                    && !first_step_can_contribute(parser_dwa, &boundary_tsids, top_first)
+                {
+                    return;
+                } else if !recursive_parser
                     && let Some(compact) = boundary.compact_parser_dwa.as_ref()
                 {
                     let boundary_tsid = boundary_tsids[0];
@@ -4397,7 +4902,7 @@ impl<'a> ConstraintState<'a> {
                         }
                     }
                 } else {
-                    let accepted = accepted_for_stack(parser_dwa, top_first);
+                    let (accepted, _) = accepted_for_stack(parser_dwa, top_first);
                     let mut debug_internal = Vec::new();
                     let mut debug_originals = Vec::new();
                     for &boundary_tsid in &boundary_tsids {
@@ -4628,6 +5133,217 @@ impl<'a> ConstraintState<'a> {
                 missing_pairs,
             );
         }
+    }
+
+    /// Evaluate the ordinary static single-path mask kernel from an already
+    /// materialized top-first stack.  Recursive composition uses this after it
+    /// has projected the authoritative scoped stack into one retained
+    /// component.  This deliberately skips mask-cache publication: the caller
+    /// owns the persistent state/cache, while this is only a borrowed view of
+    /// one component path.  Returning false is conservative and lets the
+    /// established projected-GSS path handle uncommon shapes.
+    fn try_fill_mask_preprojected_single_path_direct(
+        &self,
+        original_tokenizer_state: u32,
+        terminals_disallowed: &TerminalsDisallowed,
+        stack: &[u32],
+        buf: &mut [u32],
+    ) -> bool {
+        if self
+            .constraint
+            .internal_tsids_for_state(original_tokenizer_state)
+            .len()
+            != 1
+            || self.constraint.runtime_parser_dwa_state_count() == 0
+        {
+            return false;
+        }
+
+        buf.fill(0);
+        let precomputed = &self.constraint.weight_token_dense_masks;
+        let dense_words = self.constraint.internal_token_dense_words;
+        let (mut merged, mut output_scratch, mut single_path_aux, mut single_path_acc) = {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            (
+                std::mem::take(&mut scratch.merged_dense),
+                std::mem::take(&mut scratch.output_buf),
+                std::mem::take(&mut scratch.single_path_aux_dense),
+                std::mem::take(&mut scratch.single_path_acc_dense),
+            )
+        };
+        merged.clear();
+        merged.resize(dense_words, 0);
+        let mut used_direct_final = false;
+        let mut direct_buf_dirty = false;
+
+        let internal_tsid = self
+            .constraint
+            .internal_tsid_for_state(original_tokenizer_state);
+        let seed_base = &self.constraint.seed_universe_dense;
+        let mut dense_is_seed = terminals_disallowed.is_empty();
+        if dense_is_seed {
+            if seed_base.is_empty() {
+                let mut scratch = self.mask_scratch.lock().unwrap();
+                scratch.merged_dense = merged;
+                scratch.output_buf = output_scratch;
+                scratch.single_path_aux_dense = single_path_aux;
+                scratch.single_path_acc_dense = single_path_acc;
+                return false;
+            }
+        } else if !self.fill_single_path_seed_dense(
+            terminals_disallowed,
+            &mut single_path_aux,
+            &mut single_path_acc,
+        ) {
+            let mut scratch = self.mask_scratch.lock().unwrap();
+            scratch.merged_dense = merged;
+            scratch.output_buf = output_scratch;
+            scratch.single_path_aux_dense = single_path_aux;
+            scratch.single_path_acc_dense = single_path_acc;
+            return false;
+        }
+
+        let mut dwa_state_id = self.constraint.runtime_parser_dwa_start_state();
+        let mut stack_idx = 0usize;
+        loop {
+            if let Some(final_weight) = self.constraint.runtime_parser_dwa_final_weight(dwa_state_id)
+            {
+                used_direct_final = true;
+                let dense = if dense_is_seed {
+                    seed_base.as_ref()
+                } else {
+                    single_path_acc.as_slice()
+                };
+                self.merge_single_path_final_weight_to_internal(
+                    final_weight,
+                    internal_tsid,
+                    dense,
+                    precomputed,
+                    &mut merged,
+                    Some(&mut *buf),
+                    &mut direct_buf_dirty,
+                );
+            }
+
+            let Some(&parser_state) = stack.get(stack_idx) else {
+                break;
+            };
+            stack_idx += 1;
+
+            let positive_label = encode_positive_label(parser_state);
+            if stack_idx == 1 {
+                let dense = if dense_is_seed {
+                    seed_base.as_ref()
+                } else {
+                    single_path_acc.as_slice()
+                };
+                let mut used_equivalent_wide_summary = false;
+                if let Some(summary) = self
+                    .constraint
+                    .direct_regular_wide_acceptance_for_parser_state(parser_state)
+                    && let Some(accepted) = summary.dense_by_tsid.get(internal_tsid)
+                {
+                    let n = dense.len().min(accepted.len()).min(merged.len());
+                    for word in 0..n {
+                        merged[word] |= dense[word] & accepted[word];
+                    }
+                    used_direct_final = true;
+                    used_equivalent_wide_summary = true;
+                }
+                if !used_equivalent_wide_summary {
+                    if let Some(accept_weight) = self.constraint.runtime_parser_top_accept(positive_label)
+                    {
+                        used_direct_final = true;
+                        self.merge_single_path_final_weight_to_internal(
+                            accept_weight,
+                            internal_tsid,
+                            dense,
+                            precomputed,
+                            &mut merged,
+                            Some(&mut *buf),
+                            &mut direct_buf_dirty,
+                        );
+                    }
+                    for accept_weight in self.constraint.runtime_parser_top_accept_parts(positive_label)
+                    {
+                        used_direct_final = true;
+                        self.merge_single_path_final_weight_to_internal(
+                            accept_weight,
+                            internal_tsid,
+                            dense,
+                            precomputed,
+                            &mut merged,
+                            Some(&mut *buf),
+                            &mut direct_buf_dirty,
+                        );
+                    }
+                    let used_l1 = self.constraint.for_each_direct_regular_l1_acceptance(
+                        parser_state,
+                        |accept_weight| {
+                            self.merge_single_path_final_weight_to_internal(
+                                accept_weight,
+                                internal_tsid,
+                                dense,
+                                precomputed,
+                                &mut merged,
+                                Some(&mut *buf),
+                                &mut direct_buf_dirty,
+                            );
+                        },
+                    );
+                    used_direct_final |= used_l1;
+                }
+            }
+
+            let Some((target, weight)) = self
+                .constraint
+                .runtime_parser_dwa_transition(dwa_state_id, parser_state)
+            else {
+                break;
+            };
+            if dense_is_seed {
+                if !weight.is_full() {
+                    if !materialize_single_path_seed_intersection(
+                        seed_base,
+                        &mut single_path_acc,
+                        internal_tsid,
+                        weight,
+                        self.constraint,
+                    ) {
+                        break;
+                    }
+                    dense_is_seed = false;
+                }
+            } else if !Self::intersect_single_path_dense_with_weight_in_place(
+                &mut single_path_acc,
+                &mut single_path_aux,
+                internal_tsid,
+                weight,
+                self.constraint,
+            ) {
+                break;
+            }
+            dwa_state_id = target;
+        }
+
+        let success = used_direct_final;
+        if success && merged.iter().any(|&word| word != 0) {
+            let buf_zeroed = !direct_buf_dirty;
+            self.constraint.or_internal_dense_to_buf_fast_with_scratch(
+                &merged,
+                buf,
+                buf_zeroed,
+                &mut output_scratch,
+            );
+        }
+
+        let mut scratch = self.mask_scratch.lock().unwrap();
+        scratch.merged_dense = merged;
+        scratch.chain_merged_dense.clear();
+        scratch.output_buf = output_scratch;
+        scratch.single_path_aux_dense = single_path_aux;
+        scratch.single_path_acc_dense = single_path_acc;
+        success
     }
 
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
@@ -6810,9 +7526,57 @@ impl<'a> ConstraintState<'a> {
                         || overlay.segmented_static_baseline)
             });
         if authoritative_segmented {
+            let profile_segmented = std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
+            let total_started_at = profile_segmented.then(Instant::now);
+            let segmented_started_at = profile_segmented.then(Instant::now);
             if self.try_fill_mask_segmented_single_paths(mask) {
+                let segmented_ns = segmented_started_at.map_or(0, elapsed_ns);
+                let special_started_at = profile_segmented.then(Instant::now);
                 self.update_control_special_token_mask(mask);
+                let special_ns = special_started_at.map_or(0, elapsed_ns);
+                let clear_started_at = profile_segmented.then(Instant::now);
                 self.clear_late_grammar_placeholder_mask(mask);
+                let clear_ns = clear_started_at.map_or(0, elapsed_ns);                if std::env::var_os("GLRMASK_VALIDATE_RECURSIVE_SEGMENTED_MASK_EXACT").is_some() {
+                    let mut reference = vec![0u32; mask.len()];
+                    self.fill_recursive_mask_by_exact_commits(&mut reference);
+                    self.update_control_special_token_mask(&mut reference);
+                    self.clear_late_grammar_placeholder_mask(&mut reference);
+                    if reference != mask {
+                        let reference_only = (0..mask.len() * 32)
+                            .filter(|&token| {
+                                let word = token / 32;
+                                let bit = token % 32;
+                                ((reference[word] >> bit) & 1) != 0
+                                    && ((mask[word] >> bit) & 1) == 0
+                            })
+                            .take(32)
+                            .collect::<Vec<_>>();
+                        let segmented_only = (0..mask.len() * 32)
+                            .filter(|&token| {
+                                let word = token / 32;
+                                let bit = token % 32;
+                                ((reference[word] >> bit) & 1) == 0
+                                    && ((mask[word] >> bit) & 1) != 0
+                            })
+                            .take(32)
+                            .collect::<Vec<_>>();
+                        panic!(
+                            "recursive segmented mask differs from exact commits; reference_only={reference_only:?} segmented_only={segmented_only:?}"
+                        );
+                    }
+                }
+                if let Some(total_started_at) = total_started_at {
+                    eprintln!(
+                        "[glrmask/profile][recursive_authoritative_mask_tail] segmented_ns={} special_ns={} clear_ns={} specials={} controls={} mask_words={} total_ns={}",
+                        segmented_ns,
+                        special_ns,
+                        clear_ns,
+                        self.constraint.special_token_terminals.len(),
+                        self.constraint.table.control_terminals.len(),
+                        mask.len(),
+                        elapsed_ns(total_started_at),
+                    );
+                }
                 return;
             }
             // Segmented projection is the common authoritative A/B path. A

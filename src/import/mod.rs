@@ -215,7 +215,7 @@ fn compile_from_source(
     Ok(constraint)
 }
 
-fn compile_from_named_grammar(
+pub(crate) fn compile_from_named_grammar(
     named: ast::NamedGrammar,
     vocab: &crate::Vocab,
     source_kind: &str,

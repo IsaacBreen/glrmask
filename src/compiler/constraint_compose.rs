@@ -35,6 +35,11 @@ use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
     negative_to_positive_label,
 };
+use crate::compiler::glr::parser::{
+    DisjointComponentActionProvider, ParserActionProvider, ParserComponentTableSource, ScopedParserSymbol,
+    ScopedSubgrammarLink, materialize_preselected_control_eliminated_scoped_provider_table,
+    materialize_scoped_provider_symbol_as_ordinary_table,
+};
 use crate::compiler::stages::equiv_types::{
     InternalIdMap, ManyToOneIdMap, MappedArtifact,
 };
@@ -42,20 +47,30 @@ use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_ma
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::vocab_tokens_with_adjacent_pairs;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::compute_ever_allowed_follows;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
+#[cfg(feature = "internal-api")]
+use crate::compiler::stages::parser_dwa::normalize_parser_stack_domain_nwa_for_parser_state_count;
 use crate::compiler::stages::parser_dwa::{
     LazyBooleanParserDomains, SharedBooleanParserDomains, build_boolean_terminal_bundle_nwa,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache,
+    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_admission,
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles,
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
+    build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled,
     build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled,
-    prebuild_parser_bundle_cache_excluding_terminals, PrebuiltParserBundleCache,
+    prebuild_parser_bundle_cache_excluding_terminals, ParserTerminalAdmissionRows,
+    prebuild_parser_bundle_cache_for_terminal_automata,
+    prebuild_parser_bundle_group_cache_for_terminal_automata,
+    PrebuiltParserBundleCache,
     build_terminal_bundle_preimage_domain_nwa,
     universal_parser_stack_domain_dwa,
     normalize_parser_stack_domain_nwa_preserving_explicit,
     normalize_weighted_parser_stack_nwa,
+    normalize_weighted_parser_stack_nwa_preserving_explicit_for_parser_state_count,
+    normalize_weighted_parser_stack_nwa_for_parser_state_count,
+    normalize_weighted_parser_stack_nwa_for_parser_state_count_and_first_label_range,
     normalize_weighted_parser_stack_nwa_small_boundary,
     normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count,
     normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count,
@@ -69,7 +84,7 @@ use crate::compiler::stages::templates::characterize::{
     characterize_finish_probe, characterize_selected_terminals,
     characterize_selected_terminals_for_terminal_count,
     characterize_terminal_action_state_seeds_for_terminal_count,
-    characterize_terminal_nt_predecessor_seeds_for_terminal_count,
+    characterize_terminal_nt_predecessor_seeds_for_terminal_count, TerminalCharacterization,
 };
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -80,7 +95,8 @@ use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
-    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput,
+    Action, ComposedTable, ControlEliminationReport, GLRTable, SubgrammarTableInput,
+    compose_subgrammar_table_shell_explicit_with_rules,
     compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
 };
 use crate::grammar::flat::Symbol;
@@ -499,6 +515,70 @@ fn build_segmented_parser_links(
     }
     Ok(links)
 }
+fn static_child_return_suffix_flat_shape_supported(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+) -> Result<bool, String> {
+    if components.len() < 2 || composed_table.placeholder_terminals.is_empty() {
+        return Ok(false);
+    }
+    // This derivation currently proves one flat parent -> leaf-child layer.
+    // A component that is itself recursive introduces nested CALL/RETURN
+    // contexts and must stay on the established full boundary-shard path.
+    for component in components {
+        if component.recursive_parser_layout_for_pending_root()?.is_some() {
+            return Ok(false);
+        }
+    }
+    for child in components.iter().skip(1) {
+        if child.composition_start_nullable()? {
+            return Ok(false);
+        }
+        // The RETURN nonterminal delta used by the exact pair factorization is
+        // the child's single root wrapper. More general roots decline.
+        if !matches!(child.table.rules.first().map(|rule| rule.rhs.as_slice()), Some([Symbol::Nonterminal(_)])) {
+            return Ok(false);
+        }
+    }
+
+    let parent = components[0];
+    let slots = composed_table
+        .placeholder_terminals
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for &slot_terminal in &slots {
+        let mut continuation_states = Vec::<u32>::new();
+        for row in &parent.table.action {
+            if let Some(action) = row.get(&slot_terminal) {
+                match action {
+                    Action::Shift(target, _) if action.reduce_count() == 0 => {
+                        continuation_states.push(*target);
+                    }
+                    Action::Split { shift: Some((target, _)), accept: false, .. }
+                        if action.reduce_count() == 0 =>
+                    {
+                        continuation_states.push(*target);
+                    }
+                    _ => return Ok(false),
+                }
+            }
+        }
+        continuation_states.sort_unstable();
+        continuation_states.dedup();
+        // If RETURN can expose another slot immediately, one-link isolation is
+        // incomplete: two controls can compose without an ordinary terminal.
+        for continuation in continuation_states {
+            if slots
+                .iter()
+                .any(|&other_slot| parent.table.action(continuation, other_slot).is_some())
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
 
 pub(crate) struct ConstraintComposition {
     pub(crate) constraint: Constraint,
@@ -537,56 +617,82 @@ fn build_recursive_tokenizer_internal_tsid_relation(
     }
 
     let mut relation = Vec::with_capacity(layout.total_tokenizer_states as usize);
-    for scoped_state in 0..layout.total_tokenizer_states {
-        let (leaf_index, _) = constraint
-            .recursive_tokenizer_leaf_state(scoped_state)
-            .ok_or_else(|| format!("recursive tokenizer state {scoped_state} has no leaf"))?;
-        let leaf = layout
-            .leaves
-            .get(leaf_index)
-            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} is missing"))?;
-        let owner = *leaf
+    for (leaf_index, leaf) in layout.leaves.iter().enumerate() {
+        let (&owner_u32, descendant_path) = leaf
             .component_path
-            .first()
-            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has empty path"))?
-            as usize;
+            .split_first()
+            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has empty path"))?;
+        let owner = owner_u32 as usize;
         let component = overlay
             .segmented_parser_components
             .get(owner)
             .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has invalid owner {owner}"))?;
-        let component_state = constraint
-            .recursive_tokenizer_state_for_component(owner, scoped_state)
-            .ok_or_else(|| {
-                format!(
-                    "recursive tokenizer state {scoped_state} does not project to owner component {owner}"
-                )
-            })?;
-        let local_tsids = component
-            .constraint
-            .runtime_internal_tsids_for_tokenizer_state(component_state)
-            .ok_or_else(|| {
-                format!(
-                    "recursive tokenizer state {scoped_state} projects to component {owner} state {component_state} without a TSID image"
-                )
-            })?;
+        let leaf_start = *layout
+            .leaf_tokenizer_state_offsets
+            .get(leaf_index)
+            .ok_or_else(|| format!("recursive tokenizer leaf {leaf_index} has no tokenizer offset"))?;
+        let leaf_end = layout
+            .leaf_tokenizer_state_offsets
+            .get(leaf_index + 1)
+            .copied()
+            .unwrap_or(layout.total_tokenizer_states);
+        let leaf_state_count = leaf_end
+            .checked_sub(leaf_start)
+            .ok_or_else(|| "recursive tokenizer leaf offsets are not monotone".to_owned())?;
+
+        // Resolve the immediate-component coordinate once per leaf, not once
+        // per tokenizer state. The old pointwise path repeatedly partitioned
+        // the outer layout and linearly searched the nested child's leaves for
+        // every state, which becomes material for large recursively composed
+        // tokenizers.
+        let component_state_base = if component.constraint.uses_compact_segmented_parser_runtime() {
+            let component_layout = component
+                .constraint
+                .recursive_parser_layout_for_pending_root()?
+                .ok_or_else(|| format!("recursive component {owner} has no parser layout"))?;
+            let component_leaf_index = component_layout
+                .leaves
+                .iter()
+                .position(|candidate| candidate.component_path.as_slice() == descendant_path)
+                .ok_or_else(|| {
+                    format!(
+                        "recursive tokenizer leaf {leaf_index} path {descendant_path:?} does not resolve inside component {owner}"
+                    )
+                })?;
+            *component_layout.leaf_tokenizer_state_offsets.get(component_leaf_index).ok_or_else(|| {
+                format!("recursive component {owner} leaf {component_leaf_index} has no tokenizer offset")
+            })?
+        } else {
+            if !descendant_path.is_empty() {
+                return Err(format!("intact component {owner} unexpectedly owns nested tokenizer path {descendant_path:?}"));
+            }
+            0
+        };
+
         let map = &component_maps[owner].local_to_global_tsids;
-        let mut global_tsids = Vec::new();
-        for local_tsid in local_tsids {
-            let targets = map.get(local_tsid as usize).ok_or_else(|| {
-                format!(
-                    "component {owner} TSID {local_tsid} lies outside its composition map"
-                )
+        for local_state in 0..leaf_state_count {
+            let scoped_state = leaf_start + local_state;
+            let component_state = component_state_base.checked_add(local_state).ok_or_else(|| "recursive component tokenizer-state overflow".to_owned())?;
+            let local_tsids = component.constraint.runtime_internal_tsids_for_tokenizer_state(component_state).ok_or_else(|| {
+                format!("recursive tokenizer state {scoped_state} projects to component {owner} state {component_state} without a TSID image")
             })?;
-            global_tsids.extend_from_slice(targets);
+            let mut global_tsids = Vec::new();
+            for local_tsid in local_tsids {
+                let targets = map.get(local_tsid as usize).ok_or_else(|| {
+                    format!("component {owner} TSID {local_tsid} lies outside its composition map")
+                })?;
+                global_tsids.extend_from_slice(targets);
+            }
+            global_tsids.sort_unstable();
+            global_tsids.dedup();
+            if global_tsids.is_empty() {
+                return Err(format!("recursive tokenizer state {scoped_state} has empty composed TSID image"));
+            }
+            relation.push(global_tsids);
         }
-        global_tsids.sort_unstable();
-        global_tsids.dedup();
-        if global_tsids.is_empty() {
-            return Err(format!(
-                "recursive tokenizer state {scoped_state} has empty composed TSID image"
-            ));
-        }
-        relation.push(global_tsids);
+    }
+    if relation.len() != layout.total_tokenizer_states as usize {
+        return Err(format!("recursive tokenizer relation produced {} states for expected {}", relation.len(), layout.total_tokenizer_states));
     }
     Ok(relation)
 }
@@ -789,6 +895,7 @@ fn build_segmented_runtime_metadata(
     id_num_tsids: u32,
     canonical_terminal: Option<u32>,
     terminal_aliases: &[u32],
+    allow_detached_nonfunctional_projection: bool,
 ) -> Result<(Vec<crate::runtime::SegmentedParserComponent>, Option<Vec<u32>>, f64), String> {
     let started_at = Instant::now();
     let global_terminal_count = source_constraints
@@ -801,7 +908,10 @@ fn build_segmented_runtime_metadata(
         .unwrap_or(0);
     let mut segmented_components = Vec::with_capacity(source_constraints.len());
     for (component_index, (source, root_disallowed_terminal)) in source_constraints.into_iter().enumerate() {
-        let excluded_local_state = if component_index == 0 {
+        let excluded_local_state = if component_index == 0
+            || (allow_detached_nonfunctional_projection
+                && source.uses_compact_segmented_parser_runtime())
+        {
             None
         } else {
             Some(standalone_eof_accept_state(source.as_ref()).ok_or_else(|| {
@@ -814,7 +924,26 @@ fn build_segmented_runtime_metadata(
             &parser_state_relations[component_index],
             global_state_count,
             excluded_local_state,
-        ).ok_or_else(|| format!("segmented parser component {component_index} has a non-functional LR-state relation"))?;
+        );
+        let global_to_local_parser_state = match global_to_local_parser_state {
+            Some(projection) => projection,
+            None if allow_detached_nonfunctional_projection => {
+                // Explicit recursive-boundary compositions finish by deriving
+                // the provider-native recursive leaf layout and then discard
+                // these historical materialized-table projections entirely.
+                // Requiring a functional flat projection here therefore rejects
+                // valid GLR children even though no live recursive consumer will
+                // read it. Keep an empty transitional projection until the
+                // recursive layout is installed and the legacy fields are
+                // cleared below.
+                Vec::new()
+            }
+            None => {
+                return Err(format!(
+                    "segmented parser component {component_index} has a non-functional LR-state relation"
+                ));
+            }
+        };
         let terminal_offset = terminal_offsets[component_index];
         let mut global_terminal_aliases = Vec::new();
         if let Some(canonical) = canonical_terminal {
@@ -1146,6 +1275,94 @@ fn build_direct_component_state_coordinates_from_constraints(
 
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
     for (component_index, &(constraint, tokenizer_state_offset)) in components.iter().enumerate() {
+        if constraint.uses_compact_segmented_parser_runtime() {
+            // A recursive child already owns the exact virtual leaf-state ->
+            // TSID relation needed by another DynamicDirect wrapper. Consume
+            // that relation directly instead of reconstructing a physical flat
+            // tokenizer merely to recover the same coordinate.
+            let local_state_count = constraint
+                .recursive_parser_layout()?
+                .ok_or_else(|| format!("recursive component {component_index} has no tokenizer layout"))?
+                .total_tokenizer_states;
+            let local_tsid_count = constraint.internal_tsid_count();
+            if local_state_count == 0 || local_tsid_count == 0 {
+                return Err(format!("recursive component {component_index} has an empty tokenizer/TSID coordinate"));
+            }
+            let mut local_map = vec![Vec::<u32>::new(); local_tsid_count];
+            // Persisted recursive rows are already sorted/deduplicated. Almost all
+            // states are singleton rows, so keep those on an allocation-free dense
+            // map and hash only the genuinely multi-TSID signatures.
+            let mut singleton_class = vec![u32::MAX; local_tsid_count];
+            let mut multi_class = FxHashMap::<Vec<u32>, u32>::default();
+            for local_state in 0..local_state_count {
+                let signature = constraint
+                    .recursive_internal_tsids_for_tokenizer_state(local_state)
+                    .ok_or_else(|| format!("recursive component {component_index} state {local_state} has no TSID image"))?;
+                if signature.is_empty() {
+                    return Err(format!("recursive component {component_index} state {local_state} has an empty TSID image"));
+                }
+                if let Some(&bad) = signature.iter().find(|&&tsid| tsid as usize >= local_tsid_count) {
+                    return Err(format!("recursive component {component_index} state {local_state} references out-of-range TSID {bad}/{local_tsid_count}"));
+                }
+                let merged_state = tokenizer_state_offset
+                    .checked_add(local_state)
+                    .ok_or_else(|| "component tokenizer-state offset overflow".to_owned())?;
+                if merged_state as usize >= merged_tokenizer_state_count {
+                    return Err(format!("recursive component {component_index} state {local_state} maps outside merged tokenizer coordinate"));
+                }
+                if merged_state == 0 {
+                    continue;
+                }
+                let global_tsid = if signature.len() == 1 {
+                    let local_tsid = signature[0] as usize;
+                    if singleton_class[local_tsid] == u32::MAX {
+                        let created = global_to_states.len() as u32;
+                        singleton_class[local_tsid] = created;
+                        state_representatives.push(merged_state);
+                        global_to_states.push(Vec::new());
+                        local_map[local_tsid].push(created);
+                        created
+                    } else {
+                        singleton_class[local_tsid]
+                    }
+                } else if let Some(&existing) = multi_class.get(signature) {
+                    existing
+                } else {
+                    let created = global_to_states.len() as u32;
+                    multi_class.insert(signature.to_vec(), created);
+                    state_representatives.push(merged_state);
+                    global_to_states.push(Vec::new());
+                    for &local_tsid in signature {
+                        local_map[local_tsid as usize].push(created);
+                    }
+                    created
+                };
+                let slot = state_to_global.get_mut(merged_state as usize).ok_or_else(|| {
+                    format!("recursive component {component_index} state {merged_state} lies outside merged tokenizer")
+                })?;
+                if *slot != u32::MAX {
+                    return Err(format!("merged tokenizer state {merged_state} belongs to more than one recursive TSID class"));
+                }
+                *slot = global_tsid;
+                global_to_states[global_tsid as usize].push(merged_state);
+            }
+            let local_start = constraint.runtime_commit_initial_state();
+            let start_signature = constraint
+                .recursive_internal_tsids_for_tokenizer_state(local_start)
+                .ok_or_else(|| format!("recursive component {component_index} start state has no TSID image"))?;
+            for &local_tsid in start_signature {
+                let targets = local_map.get_mut(local_tsid as usize).ok_or_else(|| {
+                    format!("recursive component {component_index} start TSID {local_tsid} is out of range")
+                })?;
+                targets.push(0);
+            }
+            for targets in &mut local_map {
+                targets.sort_unstable();
+                targets.dedup();
+            }
+            local_to_global_tsids.push(local_map);
+            continue;
+        }
         // Dynamic constraints deliberately omit the static parser-DWA TSID
         // quotient. Preserve that backend and use the exact raw tokenizer
         // coordinate as this component's private TSID coordinate instead of
@@ -2309,7 +2526,7 @@ fn strip_unscoped_ignore_identity(
 type PossibleMatches = BTreeMap<u32, Weight>;
 
 struct BoundaryRepair {
-    parser: BoundaryParserWork,
+    parser: Option<BoundaryParserWork>,
     /// Complete exact static partition of B by the component in which model-
     /// token execution starts. `Some` means the partition is authoritative;
     /// `None` means this compiler path did not construct one and runtime must
@@ -2324,10 +2541,55 @@ struct BoundaryRepair {
     /// from the same exact boundary witness discovery used to build B; they
     /// are accelerator metadata only and are never required for correctness.
     boundary_tokens_by_start_component: Option<Vec<Vec<u32>>>,
+    /// Diagnostic-only exact suffix aliases used to validate static parent-shard
+    /// reuse. Empty in normal builds; populated only when the validator is enabled.
+    suffix_delegations: Option<Vec<BoundarySuffixDelegation>>,
+    return_suffix_delegations: Option<Vec<BoundaryReturnSuffixDelegation>>,
+    derive_child_return_suffix_supported: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundarySuffixDelegation {
+    parent_token: u32,
+    child_component: u32,
+    suffix_token: u32,
+    prefix_identity: bool,
+    /// One ordinary parent-local terminal consumed before CALL, if any.
+    /// `None` means the prefix is parser identity (only erased/ignore input).
+    prefix_local_terminal: Option<u32>,
+    // Exact raw tokenizer start state for this parent-token/child-suffix
+    // relation. Attribution is derived with the same start-component semantics
+    // as the authoritative direct boundary terminal automaton; translation to
+    // composed TSID is intentionally deferred so boundary discovery never has
+    // to wait for coordinate construction.
+    start_state: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundaryReturnSuffixDelegation {
+    fused_token: u32,
+    child_component: u32,
+    /// Child-local parser-visible terminals consumed before the first return
+    /// to the parent. Scoped ignore/erased terminals are omitted because their
+    /// parser effect is identity.
+    prefix_local_terminals: Vec<u32>,
+    parent_suffix_token: u32,
+    /// Exact parent-local terminal sequence from the child->parent crossing
+    /// through an accepting boundary-witness path. Parser-identity terminals
+    /// (including parent IGNORE) are retained so the semantic relation is the
+    /// literal scoped-provider sequence witnessed by the lexer.
+    parent_suffix_local_terminals: Vec<u32>,
+    /// Byte offset of the first child->parent lexical crossing in the fused token.
+    crossing_offset: usize,
+    /// First parent-local terminal on the boundary witness suffix.
+    first_parent_local_terminal: u32,
+    /// Exact raw merged-tokenizer start state for this child-start relation.
+    start_state: u32,
 }
 
 struct BoundaryShardWork {
     start_component: u32,
+    first_foreign_component: Option<u32>,
     candidate_tokens: Arc<[u32]>,
     parser: BoundaryParserWork,
 }
@@ -2371,7 +2633,12 @@ enum BoundaryParserWork {
         terminal_automaton: TerminalAutomaton,
         id_map: InternalIdMap,
         num_terminals: u32,
-        templates: Templates,
+        templates: Arc<Templates>,
+        /// Exact terminal subset whose parser stack effects are needed by this
+        /// boundary artifact. Keep this separate from templates so provider-native
+        /// composition can defer characterization until the recursive parser
+        /// coordinate exists.
+        selected_terminals: Vec<bool>,
         prebuilt_bundle_cache: Option<PrebuiltParserBundleCache>,
         /// Optional exact parser-table view used only to compile this static
         /// boundary accelerator.  Authoritative compositions keep linker
@@ -2379,6 +2646,7 @@ enum BoundaryParserWork {
         /// exact control-eliminated clone without changing the runtime parser
         /// coordinate or semantics.
         parser_table_override: Option<Arc<crate::compiler::glr::table::GLRTable>>,
+        future_admission_rows: Option<Arc<ParserTerminalAdmissionRows>>,
     },
 }
 
@@ -2388,21 +2656,9 @@ enum PositiveBoundaryParser {
 }
 
 
-struct BoundaryTerminalTrieWork {
-    nodes: Vec<crate::runtime::BoundaryTerminalTrieNode>,
-    root_by_tsid: Vec<u32>,
-    symbolic_nwa: Option<crate::runtime::BoundaryTerminalNwa>,
-}
-
 enum BoundaryRuntimeCandidate {
     Parser {
         positive: PositiveBoundaryParser,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        build_ms: f64,
-    },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
         id_map: InternalIdMap,
         template_cache: Option<Vec<Option<UnweightedDfa>>>,
         build_ms: f64,
@@ -2426,18 +2682,3973 @@ enum PublishedBoundaryRuntime {
         normalize_ms: f64,
         tsid_quotient: Option<Vec<u32>>,
     },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        build_ms: f64,
-    },
 }
 
 struct PublishedStaticBoundaryShard {
     start_component: u32,
+    first_foreign_component: Option<u32>,
     candidate_tokens: Arc<[u32]>,
     boundary: Arc<crate::runtime::SegmentedBoundaryParser>,
+}
+
+#[cfg(feature = "internal-api")]
+fn remap_boundary_parser_tokens_collapse_tsids(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    token_outputs: &BTreeMap<u32, BTreeSet<u32>>,
+) -> DWA {
+    let all_outputs = token_outputs
+        .values()
+        .flat_map(|tokens| tokens.iter().copied())
+        .collect::<RangeSetBlaze<_>>();
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() || all_outputs.is_empty() {
+            return Weight::empty();
+        }
+        if weight.is_full() {
+            return Weight::from_token_set_for_tsid(0, all_outputs.clone());
+        }
+        let mut outputs = RangeSetBlaze::<u32>::new();
+        for (_, internal_tokens) in weight.raw_range_values() {
+            for range in internal_tokens.ranges() {
+                for internal_token in range {
+                    let Some(originals) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    for original in originals {
+                        if let Some(mapped) = token_outputs.get(original) {
+                            outputs |= mapped.iter().copied().collect::<RangeSetBlaze<_>>();
+                        }
+                    }
+                }
+            }
+        }
+        Weight::from_token_set_for_tsid(0, outputs)
+    };
+
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            *weight = remap_weight(weight);
+            !weight.is_empty()
+        });
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .map(remap_weight)
+            .filter(|weight| !weight.is_empty());
+    }
+    result
+}
+
+#[cfg(feature = "internal-api")]
+fn remap_boundary_parser_tokens_preserve_tsids(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    selected_originals: &BTreeSet<u32>,
+    tsid_count: u32,
+) -> DWA {
+    let selected_all = selected_originals.iter().copied().collect::<RangeSetBlaze<_>>();
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() || selected_all.is_empty() {
+            return Weight::empty();
+        }
+        if weight.is_full() {
+            return if tsid_count == 0 {
+                Weight::empty()
+            } else {
+                Weight::from_uniform(0..=tsid_count - 1, selected_all.clone())
+            };
+        }
+        let mut runs = Vec::<(u32, u32, SharedTokenSet)>::new();
+        for (range, internal_tokens) in weight.raw_range_values() {
+            let mut originals = RangeSetBlaze::<u32>::new();
+            for internal_range in internal_tokens.ranges() {
+                for internal_token in internal_range {
+                    let Some(mapped) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    originals.extend(
+                        mapped
+                            .iter()
+                            .copied()
+                            .filter(|token| selected_originals.contains(token)),
+                    );
+                }
+            }
+            if !originals.is_empty() {
+                runs.push((*range.start(), *range.end(), Arc::new(originals)));
+            }
+        }
+        Weight::from_tsid_ranges_shared(runs)
+    };
+    let mut cache = FxHashMap::<usize, Weight>::default();
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            let key = weight.ptr_key();
+            let mapped = cache
+                .entry(key)
+                .or_insert_with(|| remap_weight(weight))
+                .clone();
+            *weight = mapped;
+            !weight.is_empty()
+        });
+        if let Some(weight) = state.final_weight.as_mut() {
+            let key = weight.ptr_key();
+            let mapped = cache
+                .entry(key)
+                .or_insert_with(|| remap_weight(weight))
+                .clone();
+            *weight = mapped;
+            if weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+    }
+    result
+}
+
+fn diagnostic_compact_boundary_id_map(
+    tsid_count: u32,
+    originals: &[u32],
+) -> (BTreeMap<u32, u32>, InternalIdMap) {
+    let mut originals = originals.to_vec();
+    originals.sort_unstable();
+    originals.dedup();
+    let token_to_internal = originals
+        .iter()
+        .enumerate()
+        .map(|(internal, &original)| (original, internal as u32))
+        .collect::<BTreeMap<_, _>>();
+    let max_original = originals.last().copied().unwrap_or(0);
+    let mut original_to_internal = vec![u32::MAX; max_original as usize + 1];
+    for (&original, &internal) in &token_to_internal {
+        original_to_internal[original as usize] = internal;
+    }
+    let tsids = (0..tsid_count).collect::<Vec<_>>();
+    let id_map = InternalIdMap {
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: tsids.clone(),
+            internal_to_originals: tsids.iter().map(|&tsid| vec![tsid]).collect(),
+            representative_original_ids: tsids,
+        },
+        vocab_tokens: ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals: originals.iter().map(|&token| vec![token]).collect(),
+            representative_original_ids: originals,
+        },
+        deferred_vocab_singleton_original_ids: None,
+    };
+    (token_to_internal, id_map)
+}
+
+fn remap_boundary_parser_tokens_to_compact_preserve_tsids(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    token_to_internal: &BTreeMap<u32, u32>,
+    tsid_count: u32,
+) -> DWA {
+    let all_outputs = internal_token_to_originals.iter().flatten().filter_map(|original| token_to_internal.get(original).copied()).collect::<RangeSetBlaze<_>>();
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() || all_outputs.is_empty() {
+            return Weight::empty();
+        }
+        if weight.is_full() {
+            return if tsid_count == 0 {
+                Weight::empty()
+            } else {
+                Weight::from_uniform(0..=tsid_count - 1, all_outputs.clone())
+            };
+        }
+        let mut runs = Vec::<(u32, u32, SharedTokenSet)>::new();
+        for (range, internal_tokens) in weight.raw_range_values() {
+            let mut outputs = RangeSetBlaze::<u32>::new();
+            for internal_range in internal_tokens.ranges() {
+                for internal_token in internal_range {
+                    let Some(originals) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    outputs.extend(originals.iter().filter_map(|original| token_to_internal.get(original).copied()));
+                }
+            }
+            if !outputs.is_empty() {
+                runs.push((*range.start(), *range.end(), Arc::new(outputs)));
+            }
+        }
+        Weight::from_tsid_ranges_shared(runs)
+    };
+    let mut cache = FxHashMap::<usize, Weight>::default();
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            !weight.is_empty()
+        });
+        if let Some(weight) = state.final_weight.as_mut() {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            if weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+    }
+    result
+}
+
+fn remap_original_boundary_parser_tokens_to_compact_preserve_tsids(
+    source: &DWA,
+    token_to_internal: &BTreeMap<u32, u32>,
+) -> DWA {
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() {
+            return Weight::empty();
+        }
+        let mut runs = Vec::<(u32, u32, SharedTokenSet)>::new();
+        for (range, originals) in weight.raw_range_values() {
+            let mut internal = RangeSetBlaze::<u32>::new();
+            for original_range in originals.ranges() {
+                for original in original_range {
+                    if let Some(&mapped) = token_to_internal.get(&original) {
+                        internal.insert(mapped);
+                    }
+                }
+            }
+            if !internal.is_empty() {
+                runs.push((*range.start(), *range.end(), Arc::new(internal)));
+            }
+        }
+        Weight::from_tsid_ranges_shared(runs)
+    };
+    let mut cache = FxHashMap::<usize, Weight>::default();
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            !weight.is_empty()
+        });
+        if let Some(weight) = state.final_weight.as_mut() {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            if weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+    }
+    result
+}
+#[cfg(feature = "internal-api")]
+fn remap_child_reset_tokens_to_compact_parent_support(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    suffix_to_parents: &BTreeMap<u32, BTreeSet<u32>>,
+    parent_support: &BTreeMap<u32, RangeSetBlaze<u32>>,
+    parent_token_to_internal: &BTreeMap<u32, u32>,
+) -> DWA {
+    let all_suffixes = suffix_to_parents.keys().copied().collect::<BTreeSet<_>>();
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() {
+            return Weight::empty();
+        }
+        let mut present_suffixes = BTreeSet::<u32>::new();
+        if weight.is_full() {
+            present_suffixes.extend(all_suffixes.iter().copied());
+        } else if let Some(internal_tokens) = weight.token_set_for_tsid_ref(0) {
+            for internal_range in internal_tokens.ranges() {
+                for internal_token in internal_range {
+                    let Some(originals) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    present_suffixes.extend(originals.iter().copied().filter(|token| all_suffixes.contains(token)));
+                }
+            }
+        }
+        let mut tokens_by_tsid = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+        for suffix in present_suffixes {
+            let Some(parents) = suffix_to_parents.get(&suffix) else { continue; };
+            for &parent_token in parents {
+                let Some(&compact) = parent_token_to_internal.get(&parent_token) else { continue; };
+                let Some(tsids) = parent_support.get(&parent_token) else { continue; };
+                for range in tsids.ranges() {
+                    for tsid in range {
+                        tokens_by_tsid.entry(tsid).or_default().insert(compact);
+                    }
+                }
+            }
+        }
+        Weight::from_per_tsid_token_sets(tokens_by_tsid)
+    };
+    let mut cache = FxHashMap::<usize, Weight>::default();
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            !weight.is_empty()
+        });
+        if let Some(weight) = state.final_weight.as_mut() {
+            let key = weight.ptr_key();
+            *weight = cache.entry(key).or_insert_with(|| remap_weight(weight)).clone();
+            if weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+    }
+    result
+}
+#[cfg(feature = "internal-api")]
+fn collect_original_token_tsid_support(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    selected_originals: &BTreeSet<u32>,
+    tsid_count: u32,
+) -> BTreeMap<u32, RangeSetBlaze<u32>> {
+    let mut support = selected_originals
+        .iter()
+        .copied()
+        .map(|token| (token, RangeSetBlaze::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = FxHashSet::<usize>::default();
+    let mut visit = |weight: &Weight| {
+        if weight.is_empty() || !seen.insert(weight.ptr_key()) {
+            return;
+        }
+        if weight.is_full() {
+            if tsid_count != 0 {
+                for tsids in support.values_mut() {
+                    *tsids |= RangeSetBlaze::from_iter([0..=tsid_count - 1]);
+                }
+            }
+            return;
+        }
+        for (range, internal_tokens) in weight.raw_range_values() {
+            let mut originals = BTreeSet::<u32>::new();
+            for internal_range in internal_tokens.ranges() {
+                for internal_token in internal_range {
+                    let Some(mapped) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    originals.extend(
+                        mapped
+                            .iter()
+                            .copied()
+                            .filter(|token| selected_originals.contains(token)),
+                    );
+                }
+            }
+            for original in originals {
+                if let Some(tsids) = support.get_mut(&original) {
+                    *tsids |= RangeSetBlaze::from_iter([*range.start()..=*range.end()]);
+                }
+            }
+        }
+    };
+    for state in source.states() {
+        for (_, weight) in state.transitions.values() {
+            visit(weight);
+        }
+        if let Some(weight) = state.final_weight.as_ref() {
+            visit(weight);
+        }
+    }
+    support
+}
+
+#[cfg(feature = "internal-api")]
+fn remap_child_reset_tokens_to_parent_support(
+    source: &DWA,
+    internal_token_to_originals: &[Vec<u32>],
+    suffix_to_parents: &BTreeMap<u32, BTreeSet<u32>>,
+    parent_support: &BTreeMap<u32, RangeSetBlaze<u32>>,
+) -> DWA {
+    let all_suffixes = suffix_to_parents.keys().copied().collect::<BTreeSet<_>>();
+    let remap_weight = |weight: &Weight| -> Weight {
+        if weight.is_empty() {
+            return Weight::empty();
+        }
+        let mut present_suffixes = BTreeSet::<u32>::new();
+        if weight.is_full() {
+            present_suffixes.extend(all_suffixes.iter().copied());
+        } else if let Some(internal_tokens) = weight.token_set_for_tsid_ref(0) {
+            for internal_range in internal_tokens.ranges() {
+                for internal_token in internal_range {
+                    let Some(originals) = internal_token_to_originals.get(internal_token as usize) else {
+                        continue;
+                    };
+                    present_suffixes.extend(
+                        originals
+                            .iter()
+                            .copied()
+                            .filter(|token| all_suffixes.contains(token)),
+                    );
+                }
+            }
+        }
+        if present_suffixes.is_empty() {
+            return Weight::empty();
+        }
+        let mut tokens_by_tsid = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+        for suffix in present_suffixes {
+            let Some(parents) = suffix_to_parents.get(&suffix) else {
+                continue;
+            };
+            for &parent_token in parents {
+                let Some(tsids) = parent_support.get(&parent_token) else {
+                    continue;
+                };
+                for range in tsids.ranges() {
+                    for tsid in range {
+                        tokens_by_tsid
+                            .entry(tsid)
+                            .or_default()
+                            .ranges_insert(parent_token..=parent_token);
+                    }
+                }
+            }
+        }
+        Weight::from_per_tsid_token_sets(tokens_by_tsid)
+    };
+    let mut cache = FxHashMap::<usize, Weight>::default();
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| {
+            let key = weight.ptr_key();
+            let mapped = cache
+                .entry(key)
+                .or_insert_with(|| remap_weight(weight))
+                .clone();
+            *weight = mapped;
+            !weight.is_empty()
+        });
+        if let Some(weight) = state.final_weight.as_mut() {
+            let key = weight.ptr_key();
+            let mapped = cache
+                .entry(key)
+                .or_insert_with(|| remap_weight(weight))
+                .clone();
+            *weight = mapped;
+            if weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+    }
+    result
+}
+fn boundary_dwa_advance_with_default(
+    dwa: &DWA,
+    state: u32,
+    path_weight: &Weight,
+    label: i32,
+) -> Option<(u32, Weight)> {
+    let row = dwa.states().get(state as usize)?;
+    let edge = row.transitions.get(&label).or_else(|| {
+        (label >= 0 && label != DEFAULT_LABEL)
+            .then(|| row.transitions.get(&DEFAULT_LABEL))
+            .flatten()
+    })?;
+    let weight = path_weight.intersection(&edge.1);
+    (!weight.is_empty()).then_some((edge.0, weight))
+}
+
+fn clone_boundary_dwa_with_state_offset(source: &DWA, offset: u32) -> Vec<DWAState> {
+    source
+        .states()
+        .iter()
+        .cloned()
+        .map(|mut state| {
+            for (_, (target, _)) in state.transitions.iter_mut() {
+                *target += offset;
+            }
+            state
+        })
+        .collect()
+}
+
+fn restrict_boundary_dwa_first_component(
+    source: &DWA,
+    first_labels: std::ops::Range<u32>,
+) -> DWA {
+    let mut states = Vec::with_capacity(source.states().len() + 1);
+    states.push(DWAState::default());
+    states.extend(clone_boundary_dwa_with_state_offset(source, 1));
+    let mut transitions = BTreeMap::new();
+    for parser_state in first_labels {
+        let label = encode_positive_label(parser_state);
+        if let Some((target, weight)) = boundary_dwa_advance_with_default(
+            source,
+            source.start_state(),
+            &Weight::all(),
+            label,
+        ) {
+            transitions.insert(label, (target + 1, weight));
+        }
+    }
+    states[0].transitions = transitions.into();
+    DWA::from_parts(states, 0)
+}
+
+fn call_image_frame_filter_dwa(
+    constraint: &Constraint,
+    component_offsets: &[u32],
+    link: &ScopedSubgrammarLink,
+) -> Result<DWA, String> {
+    let parent_component = link.parent_component as usize;
+    let child_component = link.child_component as usize;
+    let parent = constraint
+        .recursive_leaf_constraint(parent_component)
+        .ok_or_else(|| format!("CALL-frame parent component {parent_component} is not an intact leaf"))?;
+    let child = constraint
+        .recursive_leaf_constraint(child_component)
+        .ok_or_else(|| format!("CALL-frame child component {child_component} is not an intact leaf"))?;
+    let parent_offset = *component_offsets
+        .get(parent_component)
+        .ok_or_else(|| format!("CALL-frame missing parent offset {parent_component}"))?;
+    let child_offset = *component_offsets
+        .get(child_component)
+        .ok_or_else(|| format!("CALL-frame missing child offset {child_component}"))?;
+    let child_start = child_offset
+        .checked_add(link.child_start)
+        .ok_or_else(|| "CALL-frame child state overflow".to_owned())?;
+
+    // Record the exact visible frame introduced by a pure slot shift. For a
+    // non-replacing CALL the source parent state remains immediately below the
+    // continuation target; a replacing CALL removes it before pushing the
+    // target. Deeper caller-tail states are unconstrained once this frame has
+    // been witnessed.
+    let mut nonreplace_sources_by_target = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut replace_targets = BTreeSet::<u32>::new();
+    for local_state in 0..parent.table.num_states {
+        let Some(action) = parent
+            .table
+            .action
+            .get(local_state as usize)
+            .and_then(|row| row.get(&link.slot_terminal))
+        else {
+            continue;
+        };
+        let (target, replace) = match action {
+            Action::Shift(target, replace) if action.reduce_count() == 0 => (*target, *replace),
+            Action::Split {
+                shift: Some((target, replace)),
+                accept: false,
+                ..
+            } if action.reduce_count() == 0 => (*target, *replace),
+            _ => continue,
+        };
+        let source = parent_offset + local_state;
+        let target = parent_offset + target;
+        if replace {
+            replace_targets.insert(target);
+        } else {
+            nonreplace_sources_by_target
+                .entry(target)
+                .or_default()
+                .insert(source);
+        }
+    }
+    if nonreplace_sources_by_target.is_empty() && replace_targets.is_empty() {
+        return Err("CALL-frame filter found no pure slot-shift frames".to_owned());
+    }
+
+    // The child start state is not a persistent frame marker: ordinary child
+    // shifts can replace it.  The invariant that survives for the lifetime of
+    // the call is instead the component boundary itself: one or more
+    // child-owned states sit above the parent continuation target, followed by
+    // the source parent state as well for a non-replacing CALL.  The exact
+    // RETURN preimage constrains the child-owned prefix; this filter constrains
+    // only the caller frame beneath that prefix.
+    let mut states = vec![DWAState::default(), DWAState::default()];
+    const SCAN_CHILD: u32 = 0;
+    const MATCHED: u32 = 1;
+    states[MATCHED as usize].final_weight = Some(Weight::all());
+    states[MATCHED as usize]
+        .transitions
+        .insert(DEFAULT_LABEL, (MATCHED, Weight::all()));
+    for local in 0..child.table.num_states {
+        let global = child_offset + local;
+        states[SCAN_CHILD as usize].transitions.insert(
+            encode_positive_label(global),
+            (SCAN_CHILD, Weight::all()),
+        );
+    }
+
+    let targets = nonreplace_sources_by_target
+        .keys()
+        .copied()
+        .chain(replace_targets.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for target in targets {
+        if replace_targets.contains(&target) {
+            states[SCAN_CHILD as usize].transitions.insert(
+                encode_positive_label(target),
+                (MATCHED, Weight::all()),
+            );
+            continue;
+        }
+        let expect_source = states.len() as u32;
+        states.push(DWAState::default());
+        states[SCAN_CHILD as usize].transitions.insert(
+            encode_positive_label(target),
+            (expect_source, Weight::all()),
+        );
+        if let Some(sources) = nonreplace_sources_by_target.get(&target) {
+            for &source in sources {
+                states[expect_source as usize].transitions.insert(
+                    encode_positive_label(source),
+                    (MATCHED, Weight::all()),
+                );
+            }
+        }
+    }
+    Ok(DWA::from_parts(states, 0))
+}
+/// Finite-word language intersection only. Runtime boundary parser DWAs use prefix-final
+/// stack semantics: reaching a final accepts regardless of deeper caller-tail labels.
+/// Do not use this helper to restrict a production boundary shard unless both inputs
+/// have first been transformed to encode that prefix closure explicitly.
+fn intersect_boundary_dwa_finite_word_with_boolean_filter(
+    source: &DWA,
+    filter: &DWA,
+) -> DWA {
+    let mut states = vec![DWAState::default()];
+    let mut ids = FxHashMap::<(u32, u32), u32>::default();
+    let start = (source.start_state(), filter.start_state());
+    ids.insert(start, 0);
+    let mut queue = VecDeque::from([start]);
+
+    while let Some((source_state, filter_state)) = queue.pop_front() {
+        let output_state = ids[&(source_state, filter_state)];
+        let left = &source.states()[source_state as usize];
+        let right = &filter.states()[filter_state as usize];
+        let final_weight = match (&left.final_weight, &right.final_weight) {
+            (Some(left), Some(right)) => {
+                let weight = left.intersection(right);
+                (!weight.is_empty()).then_some(weight)
+            }
+            _ => None,
+        };
+        states[output_state as usize].final_weight = final_weight;
+
+        let mut labels = BTreeSet::<i32>::new();
+        labels.extend(left.transitions.keys().copied().filter(|&label| label != DEFAULT_LABEL));
+        labels.extend(right.transitions.keys().copied().filter(|&label| label != DEFAULT_LABEL));
+        let left_default = left.transitions.get(&DEFAULT_LABEL);
+        let right_default = right.transitions.get(&DEFAULT_LABEL);
+
+        let mut add_edge = |label: i32, left_edge: &(u32, Weight), right_edge: &(u32, Weight)| {
+            let weight = left_edge.1.intersection(&right_edge.1);
+            if weight.is_empty() {
+                return;
+            }
+            let pair = (left_edge.0, right_edge.0);
+            let target = if let Some(&existing) = ids.get(&pair) {
+                existing
+            } else {
+                let id = states.len() as u32;
+                states.push(DWAState::default());
+                ids.insert(pair, id);
+                queue.push_back(pair);
+                id
+            };
+            states[output_state as usize]
+                .transitions
+                .insert(label, (target, weight));
+        };
+
+        for label in labels {
+            let left_edge = left.transitions.get(&label).or(left_default);
+            let right_edge = right.transitions.get(&label).or(right_default);
+            if let (Some(left_edge), Some(right_edge)) = (left_edge, right_edge) {
+                add_edge(label, left_edge, right_edge);
+            }
+        }
+        if let (Some(left_edge), Some(right_edge)) = (left_default, right_default) {
+            add_edge(DEFAULT_LABEL, left_edge, right_edge);
+        }
+    }
+    DWA::from_parts(states, 0)
+}
+
+#[cfg(feature = "internal-api")]
+fn call_preimage_boundary_dwa(
+    source: &DWA,
+    constraint: &Constraint,
+    component_offsets: &[u32],
+    link: &ScopedSubgrammarLink,
+) -> Result<DWA, String> {
+    let parent_component = link.parent_component as usize;
+    let child_component = link.child_component as usize;
+    let parent = constraint
+        .recursive_leaf_constraint(parent_component)
+        .ok_or_else(|| format!("CALL-preimage parent component {parent_component} is not an intact leaf"))?;
+    let parent_offset = *component_offsets
+        .get(parent_component)
+        .ok_or_else(|| format!("CALL-preimage missing parent offset {parent_component}"))?;
+    let child_offset = *component_offsets
+        .get(child_component)
+        .ok_or_else(|| format!("CALL-preimage missing child offset {child_component}"))?;
+    let child_start = child_offset
+        .checked_add(link.child_start)
+        .ok_or_else(|| "CALL-preimage child state overflow".to_owned())?;
+
+    // Runtime parser-DWA evaluation accumulates final weights after every
+    // consumed stack label. CALL inserts labels which are invisible to the
+    // outer stack walk, so a preimage must preserve both (a) support that
+    // survives the whole hidden prefix and can continue into the caller tail,
+    // and (b) tokens already accepted at any intermediate hidden prefix.
+    // A private wrapper state per parent top encodes exactly that pair:
+    // root-edge support = continued | already-accepted, wrapper final = accepted,
+    // and wrapper outgoing edges are restricted to continued support.
+    let mut states = Vec::with_capacity(
+        source.states().len() + parent.table.num_states as usize + 1,
+    );
+    states.push(DWAState::default());
+    let source_offset = 1u32;
+    states.extend(clone_boundary_dwa_with_state_offset(source, source_offset));
+    let mut root = BTreeMap::<i32, (u32, Weight)>::new();
+
+    for local_state in 0..parent.table.num_states {
+        let Some(action) = parent
+            .table
+            .action
+            .get(local_state as usize)
+            .and_then(|row| row.get(&link.slot_terminal))
+        else {
+            continue;
+        };
+        let (parent_target, replace) = match action {
+            Action::Shift(target, replace) if action.reduce_count() == 0 => (*target, *replace),
+            Action::Split {
+                shift: Some((target, replace)),
+                accept: false,
+                ..
+            } if action.reduce_count() == 0 => (*target, *replace),
+            _ => continue,
+        };
+        let parent_state = parent_offset + local_state;
+        let parent_target = parent_offset + parent_target;
+        let mut residual = source.start_state();
+        let mut continued = Weight::all();
+        let mut accepted = source
+            .states()
+            .get(residual as usize)
+            .and_then(|state| state.final_weight.as_ref())
+            .cloned()
+            .unwrap_or_else(Weight::empty);
+        let mut hidden = SmallVec::<[u32; 3]>::new();
+        hidden.push(child_start);
+        hidden.push(parent_target);
+        if !replace {
+            hidden.push(parent_state);
+        }
+        for hidden_state in hidden {
+            let Some((next, next_support)) = boundary_dwa_advance_with_default(
+                source,
+                residual,
+                &continued,
+                encode_positive_label(hidden_state),
+            ) else {
+                continued = Weight::empty();
+                break;
+            };
+            residual = next;
+            continued = next_support;
+            if let Some(final_weight) = source
+                .states()
+                .get(residual as usize)
+                .and_then(|state| state.final_weight.as_ref())
+            {
+                let contribution = continued.intersection(final_weight);
+                if !contribution.is_empty() {
+                    accepted = accepted.union(&contribution);
+                }
+            }
+        }
+        if continued.is_empty() && accepted.is_empty() {
+            continue;
+        }
+
+        let wrapper_id = states.len() as u32;
+        let mut wrapper = DWAState {
+            transitions: Default::default(),
+            final_weight: (!accepted.is_empty()).then_some(accepted.clone()),
+        };
+        if !continued.is_empty() {
+            if let Some(residual_state) = source.states().get(residual as usize) {
+                let mut transitions = BTreeMap::new();
+                for (&label, (target, edge_weight)) in &residual_state.transitions {
+                    let restricted = continued.intersection(edge_weight);
+                    if !restricted.is_empty() {
+                        transitions.insert(label, (*target + source_offset, restricted));
+                    }
+                }
+                wrapper.transitions = transitions.into();
+            }
+        }
+        states.push(wrapper);
+        let root_support = accepted.union(&continued);
+        root.insert(
+            encode_positive_label(parent_state),
+            (wrapper_id, root_support),
+        );
+    }
+    states[0].transitions = root.into();
+    Ok(DWA::from_parts(states, 0))
+}
+#[cfg(feature = "internal-api")]
+fn terminal_shift_preimage_boundary_dwa(
+    source: &DWA,
+    constraint: &Constraint,
+    component_offsets: &[u32],
+    component_index: usize,
+    local_terminal: u32,
+) -> Result<DWA, String> {
+    let component = constraint
+        .recursive_leaf_constraint(component_index)
+        .ok_or_else(|| format!("terminal preimage component {component_index} is not an intact leaf"))?;
+    let component_offset = *component_offsets
+        .get(component_index)
+        .ok_or_else(|| format!("terminal preimage missing component offset {component_index}"))?;
+
+    // Exact preimage of a pure LR shift. Runtime stack-DWA input is top-first.
+    // A non-replacing shift maps [..., s, tail] -> [..., target, s, tail],
+    // while a replacing shift maps it to [..., target, tail]. As in CALL
+    // preimage, preserve acceptance reached at any hidden intermediate prefix.
+    let mut states = Vec::with_capacity(
+        source.states().len() + component.table.num_states as usize + 1,
+    );
+    states.push(DWAState::default());
+    let source_offset = 1u32;
+    states.extend(clone_boundary_dwa_with_state_offset(source, source_offset));
+    let mut root = BTreeMap::<i32, (u32, Weight)>::new();
+
+    for local_state in 0..component.table.num_states {
+        let Some(action) = component
+            .table
+            .action
+            .get(local_state as usize)
+            .and_then(|row| row.get(&local_terminal))
+        else {
+            continue;
+        };
+        let (target, replace) = match action {
+            Action::Shift(target, replace) if action.reduce_count() == 0 => (*target, *replace),
+            Action::Split {
+                shift: Some((target, replace)),
+                accept: false,
+                ..
+            } if action.reduce_count() == 0 => (*target, *replace),
+            _ => continue,
+        };
+        let input_state = component_offset + local_state;
+        let target = component_offset + target;
+        let mut residual = source.start_state();
+        let mut continued = Weight::all();
+        let mut accepted = source
+            .states()
+            .get(residual as usize)
+            .and_then(|state| state.final_weight.as_ref())
+            .cloned()
+            .unwrap_or_else(Weight::empty);
+        let mut hidden = SmallVec::<[u32; 2]>::new();
+        hidden.push(target);
+        if !replace {
+            hidden.push(input_state);
+        }
+        for hidden_state in hidden {
+            let Some((next, next_support)) = boundary_dwa_advance_with_default(
+                source,
+                residual,
+                &continued,
+                encode_positive_label(hidden_state),
+            ) else {
+                continued = Weight::empty();
+                break;
+            };
+            residual = next;
+            continued = next_support;
+            if let Some(final_weight) = source
+                .states()
+                .get(residual as usize)
+                .and_then(|state| state.final_weight.as_ref())
+            {
+                let contribution = continued.intersection(final_weight);
+                if !contribution.is_empty() {
+                    accepted = accepted.union(&contribution);
+                }
+            }
+        }
+        if continued.is_empty() && accepted.is_empty() {
+            continue;
+        }
+
+        let wrapper_id = states.len() as u32;
+        let mut wrapper = DWAState {
+            transitions: Default::default(),
+            final_weight: (!accepted.is_empty()).then_some(accepted.clone()),
+        };
+        if !continued.is_empty() {
+            if let Some(residual_state) = source.states().get(residual as usize) {
+                let mut transitions = BTreeMap::new();
+                for (&label, (next, edge_weight)) in &residual_state.transitions {
+                    let restricted = continued.intersection(edge_weight);
+                    if !restricted.is_empty() {
+                        transitions.insert(label, (*next + source_offset, restricted));
+                    }
+                }
+                wrapper.transitions = transitions.into();
+            }
+        }
+        states.push(wrapper);
+        let root_support = accepted.union(&continued);
+        root.insert(
+            encode_positive_label(input_state),
+            (wrapper_id, root_support),
+        );
+    }
+    states[0].transitions = root.into();
+    Ok(DWA::from_parts(states, 0))
+}
+
+fn scoped_component_token_boolean_domain_at_tokenizer_state(
+    component: &Constraint,
+    component_state_offset: u32,
+    original_token: u32,
+    tokenizer_state: u32,
+) -> Result<DWA, String> {
+    let internal_token = component
+        .original_token_internal_at(original_token)
+        .filter(|&token| token != u32::MAX)
+        .ok_or_else(|| format!("component token {original_token} has no internal token"))?;
+    let tsids = component
+        .runtime_internal_tsids_for_tokenizer_state(tokenizer_state)
+        .ok_or_else(|| format!("component tokenizer state {tokenizer_state} has no TSID image"))?;
+    if tsids.is_empty() {
+        return Err("component tokenizer state has empty TSID image".to_owned());
+    }
+    let admits = |weight: &Weight| {
+        weight.is_full()
+            || tsids.iter().any(|&tsid| {
+                weight
+                    .token_set_for_tsid_ref(tsid)
+                    .is_some_and(|tokens| tokens.contains(internal_token))
+            })
+    };
+
+    let mut states = component.parser_dwa.states().to_vec();
+    for state in &mut states {
+        let mut mapped = BTreeMap::<i32, (u32, Weight)>::new();
+        for (&label, &(target, ref weight)) in &state.transitions {
+            if !admits(weight) {
+                continue;
+            }
+            let mapped_label = if label == DEFAULT_LABEL {
+                DEFAULT_LABEL
+            } else if label >= 0 && (label as u32) < component.table.num_states {
+                encode_positive_label(component_state_offset + label as u32)
+            } else {
+                return Err(format!(
+                    "component parser DWA token domain has unsupported label {label}"
+                ));
+            };
+            mapped.insert(mapped_label, (target, Weight::all()));
+        }
+        state.transitions = mapped.into();
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| admits(weight))
+            .map(|_| Weight::all());
+    }
+    Ok(DWA::from_parts(states, component.parser_dwa.start_state()))
+}
+
+#[cfg(feature = "internal-api")]
+fn scoped_component_reset_token_boolean_domain(
+    component: &Constraint,
+    component_state_offset: u32,
+    original_token: u32,
+) -> Result<DWA, String> {
+    scoped_component_token_boolean_domain_at_tokenizer_state(
+        component,
+        component_state_offset,
+        original_token,
+        component.runtime_commit_initial_state(),
+    )
+}
+
+fn remap_pair_boolean_domain_to_recursive(
+    source: &DWA,
+    parent_state_count: u32,
+    child_state_count: u32,
+    parent_state_offset: u32,
+    child_state_offset: u32,
+) -> Result<DWA, String> {
+    let pair_state_count = parent_state_count
+        .checked_add(child_state_count)
+        .ok_or_else(|| "pair parser-state coordinate overflow".to_owned())?;
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::new();
+        for (&label, transition) in old.iter() {
+            let mapped_label = if label == DEFAULT_LABEL {
+                DEFAULT_LABEL
+            } else if label >= 0 {
+                let state = label as u32;
+                if state < parent_state_count {
+                    encode_positive_label(parent_state_offset + state)
+                } else if state < pair_state_count {
+                    encode_positive_label(child_state_offset + state - parent_state_count)
+                } else {
+                    return Err(format!("pair parser DWA label {label} lies outside pair state space"));
+                }
+            } else {
+                return Err(format!("pair parser DWA retains negative label {label}"));
+            };
+            mapped.insert(mapped_label, transition.clone());
+        }
+        state.transitions = mapped.into();
+    }
+    Ok(result)
+}
+
+fn validate_cached_component_terminal_template_against_provider<P: ParserActionProvider<Symbol = ScopedParserSymbol>>(
+    provider: &P,
+    symbol: ScopedParserSymbol,
+    component: &Constraint,
+    terminal: u32,
+    state_offset: u32,
+) -> Result<(), String> {
+    let cached = component
+        .composition_parser_templates_by_terminal
+        .get(terminal as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| format!("missing cached terminal template {terminal}"))?
+        .clone();
+    let (cached, _) = transport_recursive_template_dfa_by_state_offset_with_skeleton(
+        cached,
+        state_offset,
+    )
+    .ok_or_else(|| format!("could not transport cached terminal template {terminal}"))?;
+
+    let table = materialize_scoped_provider_symbol_as_ordinary_table(provider, symbol)?;
+    let selected = [true];
+    let characterizations =
+        characterize_selected_terminals_for_terminal_count(&table, 1, &selected);
+    let fresh_templates = Templates::from_characterizations(&characterizations);
+    let fresh = fresh_templates
+        .by_terminal
+        .get(&0)
+        .ok_or_else(|| format!("provider has no terminal template for {symbol:?}"))?;
+
+    let missing = unweighted_dfa_difference(fresh, &cached);
+    let extra = unweighted_dfa_difference(&cached, fresh);
+    let missing_nonempty = !unweighted_dfa_language_is_empty(&missing);
+    let extra_nonempty = !unweighted_dfa_language_is_empty(&extra);
+    if missing_nonempty || extra_nonempty {
+        return Err(format!(
+            "cached terminal template differs from exact provider relation: symbol={symbol:?} local_terminal={terminal} state_offset={state_offset} cached_states={} fresh_states={} missing_from_cached={} extra_in_cached={}",
+            cached.num_states(),
+            fresh.num_states(),
+            missing_nonempty,
+            extra_nonempty,
+        ));
+    }
+    Ok(())
+}
+fn cached_component_terminal_boolean_bundle_at_offset(
+    component: &Constraint,
+    terminal: u32,
+    state_offset: u32,
+) -> Option<NWA> {
+    let cached = component
+        .composition_parser_templates_by_terminal
+        .get(terminal as usize)
+        .and_then(Option::as_ref)?
+        .clone();
+    let (dfa, nwa) = transport_recursive_template_dfa_by_state_offset_with_skeleton(
+        cached,
+        state_offset,
+    )?;
+    let templates = Templates {
+        by_terminal: BTreeMap::from([(terminal, dfa)]),
+        by_terminal_nwa: BTreeMap::from([(terminal, nwa)]),
+    };
+    build_boolean_terminal_bundle_nwa(&templates, &[terminal])
+}
+fn remap_pair_parser_stack_nwa_to_recursive(
+    source: &NWA,
+    parent_state_count: u32,
+    child_state_count: u32,
+    parent_state_offset: u32,
+    child_state_offset: u32,
+) -> Result<NWA, String> {
+    let pair_state_count = parent_state_count
+        .checked_add(child_state_count)
+        .ok_or_else(|| "pair parser-state coordinate overflow".to_owned())?;
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::new();
+        for (label, transitions) in old {
+            let mapped_label = if label == DEFAULT_LABEL {
+                DEFAULT_LABEL
+            } else if label >= 0 {
+                let parser_state = label as u32;
+                if parser_state < parent_state_count {
+                    encode_positive_label(parent_state_offset + parser_state)
+                } else if parser_state < pair_state_count {
+                    encode_positive_label(
+                        child_state_offset + parser_state - parent_state_count,
+                    )
+                } else {
+                    return Err(format!(
+                        "pair parser NWA label {label} lies outside pair state space"
+                    ));
+                }
+            } else {
+                return Err(format!("pair parser NWA retains negative label {label}"));
+            };
+            mapped.entry(mapped_label).or_insert_with(Vec::new).extend(transitions);
+        }
+        state.transitions = mapped;
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "internal-api")]
+fn booleanize_boundary_dwa(source: &DWA) -> DWA {
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        state.transitions.retain(|_, (_, weight)| !weight.is_empty());
+        for (_, weight) in state.transitions.values_mut() {
+            *weight = Weight::all();
+        }
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .map(|_| Weight::all());
+    }
+    result
+}
+
+fn reweight_boolean_boundary_domain_with_support(source: &DWA, support: &Weight) -> DWA {
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        for (_, weight) in state.transitions.values_mut() {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if !weight.is_empty() {
+                *weight = support.clone();
+            }
+        }
+        if let Some(weight) = state.final_weight.as_mut() {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if !weight.is_empty() {
+                *weight = support.clone();
+            }
+        }
+    }
+    result
+}
+fn reweight_boolean_boundary_domain(
+    source: &DWA,
+    fused_token: u32,
+    tsids: &RangeSetBlaze<u32>,
+) -> DWA {
+    let token_set = RangeSetBlaze::from_iter([fused_token]);
+    let support = Weight::from_per_tsid_token_sets(
+        tsids.ranges().flat_map(|range| range.map(|tsid| (tsid, token_set.clone()))),
+    );
+    let mut result = source.clone();
+    for state in result.states_mut() {
+        for (_, weight) in state.transitions.values_mut() {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if !weight.is_empty() {
+                *weight = support.clone();
+            }
+        }
+        if let Some(weight) = state.final_weight.as_mut() {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                state.final_weight = None;
+            } else {
+                *weight = support.clone();
+            }
+        }
+    }
+    result
+}
+
+#[cfg(feature = "internal-api")]
+fn eval_boundary_dwa_with_default(dwa: &DWA, word: &[i32]) -> Weight {
+    let mut state = dwa.start_state();
+    let mut support = Weight::all();
+    let mut accepted = dwa
+        .states()
+        .get(state as usize)
+        .and_then(|state| state.final_weight.as_ref())
+        .cloned()
+        .unwrap_or_else(Weight::empty);
+    for &label in word {
+        let Some((next, next_support)) =
+            boundary_dwa_advance_with_default(dwa, state, &support, label)
+        else {
+            break;
+        };
+        state = next;
+        support = next_support;
+        if let Some(final_weight) = dwa
+            .states()
+            .get(state as usize)
+            .and_then(|state| state.final_weight.as_ref())
+        {
+            let contribution = support.intersection(final_weight);
+            if !contribution.is_empty() {
+                accepted = accepted.union(&contribution);
+            }
+        }
+    }
+    accepted
+}
+fn find_boundary_dwa_difference_with_default(
+    left: &DWA,
+    right: &DWA,
+) -> Result<Option<Vec<i32>>, String> {
+    #[derive(Clone, Eq, PartialEq, Hash)]
+    struct ProductState {
+        left_state: Option<u32>,
+        right_state: Option<u32>,
+        left_weight: Weight,
+        right_weight: Weight,
+        left_accepted: Weight,
+        right_accepted: Weight,
+    }
+    fn final_contribution(dwa: &DWA, state: Option<u32>, path: &Weight) -> Weight {
+        state
+            .and_then(|state| dwa.states().get(state as usize))
+            .and_then(|state| state.final_weight.as_ref())
+            .map(|final_weight| path.intersection(final_weight))
+            .unwrap_or_else(Weight::empty)
+    }
+    fn advance(
+        dwa: &DWA,
+        state: Option<u32>,
+        path: &Weight,
+        label: i32,
+    ) -> (Option<u32>, Weight) {
+        let Some(state_id) = state else {
+            return (None, Weight::empty());
+        };
+        match boundary_dwa_advance_with_default(dwa, state_id, path, label) {
+            Some((next, weight)) => (Some(next), weight),
+            None => (None, Weight::empty()),
+        }
+    }
+    if !left.is_acyclic() || !right.is_acyclic() {
+        return Err("CALL-delegation equivalence requires acyclic parser DWAs".to_owned());
+    }
+    let left_state = Some(left.start_state());
+    let right_state = Some(right.start_state());
+    let left_weight = Weight::all();
+    let right_weight = Weight::all();
+    let start = ProductState {
+        left_state,
+        right_state,
+        left_accepted: final_contribution(left, left_state, &left_weight),
+        right_accepted: final_contribution(right, right_state, &right_weight),
+        left_weight,
+        right_weight,
+    };
+    let mut seen = FxHashSet::default();
+    seen.insert(start.clone());
+    let mut queue = VecDeque::from([(start, Vec::<i32>::new())]);
+    while let Some((current, word)) = queue.pop_front() {
+        if current.left_accepted != current.right_accepted {
+            return Ok(Some(word));
+        }
+        let mut labels = BTreeSet::<i32>::new();
+        let mut has_default = false;
+        for (dwa, state) in [(left, current.left_state), (right, current.right_state)] {
+            let Some(row) = state.and_then(|state| dwa.states().get(state as usize)) else {
+                continue;
+            };
+            for &label in row.transitions.keys() {
+                if label == DEFAULT_LABEL {
+                    has_default = true;
+                } else {
+                    labels.insert(label);
+                }
+            }
+        }
+        if has_default {
+            labels.insert(DEFAULT_LABEL);
+        }
+        for label in labels {
+            let (left_state, left_weight) = advance(
+                left,
+                current.left_state,
+                &current.left_weight,
+                label,
+            );
+            let (right_state, right_weight) = advance(
+                right,
+                current.right_state,
+                &current.right_weight,
+                label,
+            );
+            if left_weight.is_empty() && right_weight.is_empty() {
+                continue;
+            }
+            let left_accepted = current.left_accepted.union(
+                &final_contribution(left, left_state, &left_weight),
+            );
+            let right_accepted = current.right_accepted.union(
+                &final_contribution(right, right_state, &right_weight),
+            );
+            let next = ProductState {
+                left_state,
+                right_state,
+                left_weight,
+                right_weight,
+                left_accepted,
+                right_accepted,
+            };
+            if seen.insert(next.clone()) {
+                let mut next_word = word.clone();
+                next_word.push(label);
+                queue.push_back((next, next_word));
+            }
+        }
+    }
+    Ok(None)
+}
+#[cfg(feature = "internal-api")]
+fn derive_static_parent_call_delegation_shard(
+    constraint: &Constraint,
+    mut shards: Vec<PublishedStaticBoundaryShard>,
+    delegations: &[BoundarySuffixDelegation],
+    parent_candidate_tokens: &[u32],
+) -> Result<Vec<PublishedStaticBoundaryShard>, String> {
+    let started_at = Instant::now();
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "derived static parent boundary requires recursive parser layout".to_owned())?;
+    let tsid_count = constraint.internal_tsid_count() as u32;
+    let (parent_token_to_internal, id_map) =
+        diagnostic_compact_boundary_id_map(tsid_count, parent_candidate_tokens);
+
+    let identity_tokens = delegations
+        .iter()
+        .filter(|d| d.prefix_identity)
+        .map(|d| d.parent_token)
+        .collect::<BTreeSet<_>>();
+    let derive_prefix_call_delegation = std::env::var_os(
+        "GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_PARENT_PREFIX_CALL_DELEGATION",
+    )
+    .is_some();
+    let mut delegated_tokens = identity_tokens.clone();
+    if derive_prefix_call_delegation {
+        delegated_tokens.extend(
+            delegations
+                .iter()
+                .filter(|relation| {
+                    !relation.prefix_identity
+                        && relation.prefix_local_terminal.is_some()
+                        && !identity_tokens.contains(&relation.parent_token)
+                })
+                .map(|relation| relation.parent_token),
+        );
+    }
+
+    let mut residuals = Vec::<PublishedStaticBoundaryShard>::new();
+    let mut retained = Vec::<PublishedStaticBoundaryShard>::with_capacity(shards.len());
+    for shard in shards.drain(..) {
+        if shard.start_component == 0 && shard.first_foreign_component.is_none() {
+            residuals.push(shard);
+        } else {
+            retained.push(shard);
+        }
+    }
+    shards = retained;
+    let residual_candidate_count = residuals
+        .iter()
+        .map(|shard| shard.candidate_tokens.len())
+        .sum::<usize>();
+    let residual_shard_count = residuals.len();
+
+    let mut pieces = Vec::<DWA>::new();
+    for residual in &residuals {
+        let parser = residual.boundary.recursive_parser_dwa.as_ref()
+            .ok_or_else(|| "derived static parent residual shard lacks recursive DWA".to_owned())?;
+        pieces.push(remap_boundary_parser_tokens_to_compact_preserve_tsids(
+            parser,
+            &residual.boundary.internal_token_to_originals,
+            &parent_token_to_internal,
+            tsid_count,
+        ));
+    }
+
+    let children = delegations
+        .iter()
+        .filter(|d| d.prefix_identity)
+        .map(|d| d.child_component)
+        .collect::<BTreeSet<_>>();
+    let mut derived_children = 0usize;
+    let derive_started_at = Instant::now();
+    for child in children {
+        let relations = delegations
+            .iter()
+            .filter(|d| d.prefix_identity && d.child_component == child)
+            .copied()
+            .collect::<Vec<_>>();
+        if relations.is_empty() {
+            continue;
+        }
+        // Starting-TSID support is a property of this exact parent->child
+        // delegation relation. Do not union support across children: different
+        // child crossings may be reachable from different parent lexical states.
+        let mut parent_support = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+        for relation in &relations {
+            let Some(&tsid) = constraint
+                .state_to_internal_tsid
+                .get(relation.start_state as usize)
+            else {
+                return Err(format!(
+                    "derived static parent witness start state {} lies outside composed TSID map",
+                    relation.start_state,
+                ));
+            };
+            if tsid == u32::MAX {
+                return Err(format!(
+                    "derived static parent witness start state {} has no composed TSID",
+                    relation.start_state,
+                ));
+            }
+            parent_support
+                .entry(relation.parent_token)
+                .or_default()
+                .insert(tsid);
+        }
+        let link = layout.links.iter()
+            .find(|link| link.parent_component == 0 && link.child_component == child)
+            .ok_or_else(|| format!("derived static parent has no unique parent->{child} link"))?;
+        let child_shard = shards
+            .iter()
+            .find(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+            .ok_or_else(|| format!("derived static parent missing child shard {child}"))?;
+        let child_parser = child_shard.boundary.recursive_parser_dwa.as_ref()
+            .ok_or_else(|| format!("derived static parent child shard {child} lacks recursive DWA"))?;
+        let suffix_to_parents = relations.iter().fold(
+            BTreeMap::<u32, BTreeSet<u32>>::new(),
+            |mut map, relation| {
+                map.entry(relation.suffix_token).or_default().insert(relation.parent_token);
+                map
+            },
+        );
+        let child_compact = remap_child_reset_tokens_to_compact_parent_support(
+            child_parser,
+            &child_shard.boundary.internal_token_to_originals,
+            &suffix_to_parents,
+            &parent_support,
+            &parent_token_to_internal,
+        );
+        pieces.push(call_preimage_boundary_dwa(
+            &child_compact,
+            constraint,
+            &layout.component_offsets,
+            link,
+        )?);
+        derived_children += 1;
+    }
+    let mut derived_prefix_pieces = 0usize;
+    if derive_prefix_call_delegation {
+        let prefix_relations = delegations
+            .iter()
+            .filter(|relation| {
+                !relation.prefix_identity
+                    && relation.prefix_local_terminal.is_some()
+                    && !identity_tokens.contains(&relation.parent_token)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let prefix_groups = prefix_relations
+            .iter()
+            .map(|relation| (relation.child_component, relation.prefix_local_terminal.unwrap()))
+            .collect::<BTreeSet<_>>();
+        for (child, prefix_terminal) in prefix_groups {
+            let relations = prefix_relations
+                .iter()
+                .filter(|relation| {
+                    relation.child_component == child
+                        && relation.prefix_local_terminal == Some(prefix_terminal)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            let mut parent_support = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+            for relation in &relations {
+                let Some(&tsid) = constraint.state_to_internal_tsid.get(relation.start_state as usize) else {
+                    return Err(format!(
+                        "derived PREFIX+CALL witness start state {} lies outside composed TSID map",
+                        relation.start_state,
+                    ));
+                };
+                if tsid == u32::MAX {
+                    return Err(format!(
+                        "derived PREFIX+CALL witness start state {} has no composed TSID",
+                        relation.start_state,
+                    ));
+                }
+                parent_support
+                    .entry(relation.parent_token)
+                    .or_default()
+                    .insert(tsid);
+            }
+            let link = layout.links.iter()
+                .find(|link| link.parent_component == 0 && link.child_component == child)
+                .ok_or_else(|| format!("derived PREFIX+CALL parent has no unique parent->{child} link"))?;
+            let child_shard = shards
+                .iter()
+                .find(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+                .ok_or_else(|| format!("derived PREFIX+CALL missing child shard {child}"))?;
+            let child_parser = child_shard.boundary.recursive_parser_dwa.as_ref()
+                .ok_or_else(|| format!("derived PREFIX+CALL child shard {child} lacks recursive DWA"))?;
+            let suffix_to_parents = relations.iter().fold(
+                BTreeMap::<u32, BTreeSet<u32>>::new(),
+                |mut map, relation| {
+                    map.entry(relation.suffix_token).or_default().insert(relation.parent_token);
+                    map
+                },
+            );
+            let child_compact = remap_child_reset_tokens_to_compact_parent_support(
+                child_parser,
+                &child_shard.boundary.internal_token_to_originals,
+                &suffix_to_parents,
+                &parent_support,
+                &parent_token_to_internal,
+            );
+            let call = call_preimage_boundary_dwa(
+                &child_compact,
+                constraint,
+                &layout.component_offsets,
+                link,
+            )?;
+            pieces.push(terminal_shift_preimage_boundary_dwa(
+                &call,
+                constraint,
+                &layout.component_offsets,
+                0,
+                prefix_terminal,
+            )?);
+            derived_prefix_pieces += 1;
+        }
+    }
+    let derive_ms = derive_started_at.elapsed().as_secs_f64() * 1000.0;
+    if pieces.is_empty() {
+        return Err("derived static parent produced no residual or delegated parser pieces".to_owned());
+    }
+    let union_started_at = Instant::now();
+    let mut iter = pieces.into_iter();
+    let mut parent_parser = iter.next().unwrap();
+    for piece in iter {
+        parent_parser = glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(
+            parent_parser,
+            piece,
+        );
+    }
+    let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
+    ensure_positive_runtime_parser_dwa(&parent_parser)?;
+    let parent = PublishedStaticBoundaryShard {
+        start_component: 0,
+        first_foreign_component: None,
+        candidate_tokens: Arc::<[u32]>::from(parent_candidate_tokens.to_vec()),
+        boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
+            parser_dwa: DWA::new(0, 0),
+            compact_parser_dwa: None,
+            recursive_parser_dwa: Some(parent_parser),
+            recursive_compact_parser_dwa: None,
+            recursive_compact_tsid_map: Vec::new(),
+            uses_composed_tsid_coordinate: true,
+            tokenizer_state_to_tsid: Vec::new(),
+            internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
+        }),
+    };
+    let states = parent.boundary.recursive_parser_dwa.as_ref().map_or(0, DWA::num_states);
+    let transitions = parent.boundary.recursive_parser_dwa.as_ref().map_or(0, DWA::num_transitions);
+    shards.push(parent);
+    shards.sort_by_key(|shard| shard.start_component);
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_static_parent_call_delegation] parent_candidates={} delegated_tokens={} residual_candidates={} residual_shards={} children={} prefix_pieces={} derive_ms={derive_ms:.3} union_ms={union_ms:.3} states={} transitions={} total_ms={:.3}",
+            parent_candidate_tokens.len(),
+            delegated_tokens.len(),
+            residual_candidate_count,
+            residual_shard_count,
+            derived_children,
+            derived_prefix_pieces,
+            states,
+            transitions,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(shards)
+}
+fn compact_existing_recursive_boundary_dwa(
+    source: &DWA,
+    source_tsid_count: u32,
+    token_count: usize,
+) -> Option<(SmallBoundaryDwa, Vec<u32>)> {
+    if token_count > 64 || source_tsid_count == 0 {
+        return None;
+    }
+    let source_tsid_count_usize = source_tsid_count as usize;
+    let (old_to_new, _) = if source_tsid_count_usize == 1 {
+        (vec![0], 0)
+    } else {
+        compute_boundary_dwa_tsid_behavior_quotient(
+            source,
+            source_tsid_count_usize,
+            token_count,
+        )?
+    };
+    let compact_tsid_count = old_to_new
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |class| class as usize + 1);
+    if compact_tsid_count == 0 || compact_tsid_count > 16 {
+        return None;
+    }
+    let all_token_mask = if token_count == 64 {
+        u64::MAX
+    } else {
+        (1u64 << token_count) - 1
+    };
+
+    let mut compact_weights = vec![[0u64; 16]];
+    let mut compact_weight_ids = FxHashMap::<[u64; 16], u32>::default();
+    compact_weight_ids.insert([0u64; 16], 0);
+    let mut source_weight_to_compact = FxHashMap::<usize, u32>::default();
+
+    let mut intern_weight = |weight: &Weight| -> Option<u32> {
+        if weight.is_empty() {
+            return Some(0);
+        }
+        let key = weight.ptr_key();
+        if let Some(&id) = source_weight_to_compact.get(&key) {
+            return Some(id);
+        }
+        let mut row = [0u64; 16];
+        if weight.is_full() {
+            row[..compact_tsid_count].fill(all_token_mask);
+        } else {
+            let mut class_seen = [false; 16];
+            for (start, end, tokens) in weight.range_entries() {
+                if start > end || end as usize >= source_tsid_count_usize {
+                    return None;
+                }
+                let mut mask = 0u64;
+                for range in tokens.ranges() {
+                    for token in range {
+                        if token as usize >= token_count {
+                            return None;
+                        }
+                        mask |= 1u64 << token;
+                    }
+                }
+                if mask == 0 {
+                    continue;
+                }
+                for old_tsid in start..=end {
+                    let class = old_to_new[old_tsid as usize] as usize;
+                    if class_seen[class] && row[class] != mask {
+                        return None;
+                    }
+                    row[class] = mask;
+                    class_seen[class] = true;
+                }
+            }
+        }
+        let id = if let Some(&id) = compact_weight_ids.get(&row) {
+            id
+        } else {
+            let id = compact_weights.len() as u32;
+            compact_weights.push(row);
+            compact_weight_ids.insert(row, id);
+            id
+        };
+        source_weight_to_compact.insert(key, id);
+        Some(id)
+    };
+
+    for state in source.states() {
+        if let Some(weight) = state.final_weight.as_ref() {
+            intern_weight(weight)?;
+        }
+        for (_, weight) in state.transitions.values() {
+            intern_weight(weight)?;
+        }
+    }
+
+    let start = source.start_state() as usize;
+    if start >= source.states().len() {
+        return None;
+    }
+    let mut old_to_state = vec![u32::MAX; source.states().len()];
+    old_to_state[start] = 0;
+    let mut next = 1u32;
+    for old in 0..source.states().len() {
+        if old == start {
+            continue;
+        }
+        old_to_state[old] = next;
+        next += 1;
+    }
+    let mut states = vec![
+        crate::compiler::stages::parser_dwa::SmallBoundaryDwaState::default();
+        source.states().len()
+    ];
+    for (old, state) in source.states().iter().enumerate() {
+        let new_id = old_to_state[old] as usize;
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .and_then(|weight| source_weight_to_compact.get(&weight.ptr_key()).copied())
+            .unwrap_or(0);
+        let mut transitions = Vec::with_capacity(state.transitions.len());
+        for (&label, &(target, ref weight)) in state.transitions.iter() {
+            let weight_id = *source_weight_to_compact.get(&weight.ptr_key())?;
+            if weight_id != 0 {
+                transitions.push((label, old_to_state[target as usize], weight_id));
+            }
+        }
+        transitions.sort_unstable_by_key(|(label, _, _)| *label);
+        states[new_id] = crate::compiler::stages::parser_dwa::SmallBoundaryDwaState {
+            transitions,
+            final_weight,
+        };
+    }
+    Some((
+        SmallBoundaryDwa {
+            states,
+            weights: compact_weights,
+            tsid_count: compact_tsid_count as u8,
+            token_count: token_count as u8,
+        },
+        old_to_new,
+    ))
+}
+fn derive_static_child_return_suffix_shards(
+    constraint: &Constraint,
+    mut shards: Vec<PublishedStaticBoundaryShard>,
+    delegations: &[BoundaryReturnSuffixDelegation],
+    full_candidates_by_component: &[Vec<u32>],
+) -> Result<Vec<PublishedStaticBoundaryShard>, String> {
+    let started_at = Instant::now();
+    let exact_by_child = build_static_child_return_suffix_exact(constraint, delegations)?;
+    let tsid_count = constraint.internal_tsid_count() as u32;
+    let mut derived_children = 0usize;
+    let mut residual_states = 0usize;
+    let mut derived_states = 0usize;
+    let mut combined_states = 0usize;
+
+    for (child, exact) in exact_by_child {
+        let residual_index = shards
+            .iter()
+            .position(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+            .ok_or_else(|| format!("derived RETURN child {child} has no residual shard"))?;
+        let residual = shards.remove(residual_index);
+        let residual_parser = residual
+            .boundary
+            .recursive_parser_dwa
+            .as_ref()
+            .ok_or_else(|| format!("derived RETURN child {child} residual lacks recursive parser"))?;
+        let full_candidates = full_candidates_by_component
+            .get(child as usize)
+            .ok_or_else(|| format!("derived RETURN child {child} has no full candidate set"))?;
+        let delegated = delegations
+            .iter()
+            .filter(|relation| relation.child_component == child)
+            .map(|relation| relation.fused_token)
+            .collect::<BTreeSet<_>>();
+        let residual_tokens = residual
+            .candidate_tokens
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let expected_residual = full_candidates
+            .iter()
+            .copied()
+            .filter(|token| !delegated.contains(token))
+            .collect::<BTreeSet<_>>();
+        if residual_tokens != expected_residual {
+            return Err(format!(
+                "derived RETURN child {child} residual token set differs: actual={residual_tokens:?} expected={expected_residual:?}"
+            ));
+        }
+
+        let (token_to_internal, id_map) =
+            diagnostic_compact_boundary_id_map(tsid_count, full_candidates);
+        let residual_compact = remap_boundary_parser_tokens_to_compact_preserve_tsids(
+            residual_parser,
+            &residual.boundary.internal_token_to_originals,
+            &token_to_internal,
+            tsid_count,
+        );
+        let derived_compact =
+            remap_original_boundary_parser_tokens_to_compact_preserve_tsids(
+                &exact,
+                &token_to_internal,
+            );
+        let combined_started_at = Instant::now();
+        let combined_raw = glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(
+            residual_compact,
+            derived_compact,
+        );
+        let raw_states = combined_raw.num_states() as usize;
+        let raw_transitions = combined_raw.num_transitions() as usize;
+        let minimize_started_at = Instant::now();
+        let combined = if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_CHILD_RETURN_MINIMIZE").is_some() {
+            minimize_owned(combined_raw)
+        } else {
+            // Exact suffix sharing only: merge structurally identical continuation
+            // subgraphs after residual + derived union. This preserves every edge
+            // and final weight while shrinking the runtime walker.
+            reverse_hashcons_owned(combined_raw)
+        };
+        let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+        ensure_positive_runtime_parser_dwa(&combined)?;
+        let compact_token_count = id_map.vocab_tokens.internal_to_originals.len();
+        let (recursive_compact_parser_dwa, recursive_compact_tsid_map) =
+            compact_existing_recursive_boundary_dwa(&combined, tsid_count, compact_token_count)
+                .map(|(compact, map)| (Some(compact), map))
+                .unwrap_or((None, Vec::new()));
+        if compose_profile_enabled() {
+            eprintln!("[glrmask/profile][constraint_static_child_return_union] child={} raw_states={} raw_transitions={} states={} transitions={} minimize_ms={minimize_ms:.3} total_ms={:.3}", child, raw_states, raw_transitions, combined.num_states(), combined.num_transitions(), combined_started_at.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        residual_states += residual_parser.num_states() as usize;
+        derived_states += exact.num_states() as usize;
+        combined_states += combined.num_states() as usize;
+        derived_children += 1;
+        shards.push(PublishedStaticBoundaryShard {
+            start_component: child,
+            first_foreign_component: None,
+            candidate_tokens: Arc::<[u32]>::from(full_candidates.clone()),
+            boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
+                parser_dwa: DWA::new(0, 0),
+                compact_parser_dwa: None,
+                recursive_parser_dwa: Some(combined),
+                recursive_compact_parser_dwa,
+                recursive_compact_tsid_map,
+                uses_composed_tsid_coordinate: true,
+                tokenizer_state_to_tsid: Vec::new(),
+                internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
+            }),
+        });
+    }
+    shards.sort_by_key(|shard| shard.start_component);
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_static_child_return_derived] children={} residual_states={} derived_states={} combined_states={} total_ms={:.3}",
+            derived_children,
+            residual_states,
+            derived_states,
+            combined_states,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(shards)
+}
+#[cfg(feature = "internal-api")]
+fn validate_static_shard_call_delegation(
+    constraint: &Constraint,
+    shards: &[PublishedStaticBoundaryShard],
+    delegations: &[BoundarySuffixDelegation],
+) -> Result<(), String> {
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "CALL-delegation validator requires recursive parser layout".to_owned())?;
+    let parent_start = *layout
+        .component_offsets
+        .first()
+        .ok_or_else(|| "CALL-delegation validator missing parent offset".to_owned())?;
+    let parent_end = layout
+        .component_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(layout.total_states);
+    let children = delegations
+        .iter()
+        .filter(|delegation| delegation.prefix_identity)
+        .map(|delegation| delegation.child_component)
+        .collect::<BTreeSet<_>>();
+    let mut validated = 0usize;
+    let selected_delegated_parent_tokens = delegations.iter().filter(|d| d.prefix_identity).map(|d| d.parent_token).collect::<BTreeSet<_>>();
+    let tsid_count = constraint.internal_tsid_count() as u32;
+    let (parent_token_to_compact, _diagnostic_id_map) = diagnostic_compact_boundary_id_map(tsid_count, &selected_delegated_parent_tokens.iter().copied().collect::<Vec<_>>());
+    let mut derived_compact_parts = Vec::<DWA>::new();
+    for child in children {
+        let relations = delegations
+            .iter()
+            .filter(|delegation| {
+                delegation.prefix_identity && delegation.child_component == child
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if relations.is_empty() {
+            continue;
+        }
+        let links = layout
+            .links
+            .iter()
+            .filter(|link| link.parent_component == 0 && link.child_component == child)
+            .collect::<Vec<_>>();
+        if links.len() != 1 {
+            eprintln!(
+                "[glrmask/validate][static_shard_call_delegation] child={} skipped=true reason=link_count links={}",
+                child,
+                links.len(),
+            );
+            continue;
+        }
+        let child_shard = shards
+            .iter()
+            .find(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+            .ok_or_else(|| format!("CALL-delegation validator missing child shard {child}"))?;
+        let reference_shard = shards
+            .iter()
+            .find(|shard| {
+                shard.start_component == 0 && shard.first_foreign_component == Some(child)
+            })
+            .ok_or_else(|| format!("CALL-delegation validator missing parent->{child} reference shard"))?;
+        let child_parser = child_shard
+            .boundary
+            .recursive_parser_dwa
+            .as_ref()
+            .ok_or_else(|| format!("CALL-delegation child shard {child} lacks recursive DWA"))?;
+        let reference_parser = reference_shard
+            .boundary
+            .recursive_parser_dwa
+            .as_ref()
+            .ok_or_else(|| format!("CALL-delegation parent->{child} shard lacks recursive DWA"))?;
+        let mut child_token_outputs = BTreeMap::<u32, BTreeSet<u32>>::new();
+        let mut reference_token_outputs = BTreeMap::<u32, BTreeSet<u32>>::new();
+        for relation in &relations {
+            child_token_outputs
+                .entry(relation.suffix_token)
+                .or_default()
+                .insert(relation.parent_token);
+            reference_token_outputs
+                .entry(relation.parent_token)
+                .or_default()
+                .insert(relation.parent_token);
+        }
+        let child_parser = remap_boundary_parser_tokens_collapse_tsids(
+            child_parser,
+            &child_shard.boundary.internal_token_to_originals,
+            &child_token_outputs,
+        );
+        let derived = call_preimage_boundary_dwa(
+            &child_parser,
+            constraint,
+            &layout.component_offsets,
+            links[0],
+        )?;
+        let reference = remap_boundary_parser_tokens_collapse_tsids(
+            reference_parser,
+            &reference_shard.boundary.internal_token_to_originals,
+            &reference_token_outputs,
+        );
+        let reference = restrict_boundary_dwa_first_component(
+            &reference,
+            parent_start..parent_end,
+        );
+        let forward = find_boundary_dwa_difference_with_default(&derived, &reference)?;
+        let reverse = find_boundary_dwa_difference_with_default(&reference, &derived)?;
+        let exact = forward.is_none() && reverse.is_none();
+
+        // Second-stage diagnostic: preserve the real composed TSID coordinate.
+        // First infer the fused parent token's lexical TSID support from the
+        // authoritative reference shard, then ask whether the child shard's
+        // reset-TSID parser language can be lifted onto exactly that support.
+        let selected_parent_tokens = reference_token_outputs
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let parent_support = collect_original_token_tsid_support(
+            reference_parser,
+            &reference_shard.boundary.internal_token_to_originals,
+            &selected_parent_tokens,
+            tsid_count,
+        );
+        let mut discovered_parent_support = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+        for relation in &relations {
+            let Some(&tsid) = constraint
+                .state_to_internal_tsid
+                .get(relation.start_state as usize)
+            else {
+                return Err(format!(
+                    "CALL-delegation witness start state {} lies outside composed TSID map",
+                    relation.start_state,
+                ));
+            };
+            if tsid == u32::MAX {
+                return Err(format!(
+                    "CALL-delegation witness start state {} has no composed TSID",
+                    relation.start_state,
+                ));
+            }
+            discovered_parent_support
+                .entry(relation.parent_token)
+                .or_default()
+                .insert(tsid);
+        }
+        if discovered_parent_support != parent_support {
+            let mismatches = selected_parent_tokens
+                .iter()
+                .copied()
+                .filter_map(|token| {
+                    let discovered = discovered_parent_support.get(&token).cloned().unwrap_or_default();
+                    let reference = parent_support.get(&token).cloned().unwrap_or_default();
+                    (discovered != reference).then_some((token, discovered, reference))
+                })
+                .take(8)
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/validate][static_shard_call_delegation_discovery_support] child={} exact=false mismatches={:?}",
+                child,
+                mismatches,
+            );
+            return Err(format!("static shard CALL delegation discovery support differs for child {child}"));
+        }
+        eprintln!(
+            "[glrmask/validate][static_shard_call_delegation_discovery_support] child={} exact=true tokens={}",
+            child,
+            discovered_parent_support.len(),
+        );
+        let suffix_to_parents = relations.iter().fold(
+            BTreeMap::<u32, BTreeSet<u32>>::new(),
+            |mut map, relation| {
+                map.entry(relation.suffix_token)
+                    .or_default()
+                    .insert(relation.parent_token);
+                map
+            },
+        );
+        let child_compact = remap_child_reset_tokens_to_compact_parent_support(
+            child_shard.boundary.recursive_parser_dwa.as_ref().expect("validated child shard has recursive DWA"),
+            &child_shard.boundary.internal_token_to_originals,
+            &suffix_to_parents,
+            &discovered_parent_support,
+            &parent_token_to_compact,
+        );
+        let derived_compact = call_preimage_boundary_dwa(
+            &child_compact,
+            constraint,
+            &layout.component_offsets,
+            links[0],
+        )?;
+        derived_compact_parts.push(derived_compact);
+        let child_real = remap_child_reset_tokens_to_parent_support(
+            child_shard
+                .boundary
+                .recursive_parser_dwa
+                .as_ref()
+                .expect("validated child shard has recursive DWA"),
+            &child_shard.boundary.internal_token_to_originals,
+            &suffix_to_parents,
+            &discovered_parent_support,
+        );
+        let derived_real = call_preimage_boundary_dwa(
+            &child_real,
+            constraint,
+            &layout.component_offsets,
+            links[0],
+        )?;
+        let reference_real = remap_boundary_parser_tokens_preserve_tsids(
+            reference_parser,
+            &reference_shard.boundary.internal_token_to_originals,
+            &selected_parent_tokens,
+            tsid_count,
+        );
+        let reference_real = restrict_boundary_dwa_first_component(
+            &reference_real,
+            parent_start..parent_end,
+        );
+        let real_forward = find_boundary_dwa_difference_with_default(
+            &derived_real,
+            &reference_real,
+        )?;
+        let real_reverse = find_boundary_dwa_difference_with_default(
+            &reference_real,
+            &derived_real,
+        )?;
+        let real_exact = real_forward.is_none() && real_reverse.is_none();
+        eprintln!(
+            "[glrmask/validate][static_shard_call_delegation_real_weights] child={} exact={} forward={:?} reverse={:?} support={:?}",
+            child,
+            real_exact,
+            real_forward,
+            real_reverse,
+            parent_support
+                .iter()
+                .map(|(&token, tsids)| (token, tsids.ranges().count()))
+                .collect::<Vec<_>>(),
+        );
+        if !real_exact {
+            return Err(format!("static shard CALL delegation real weights differ for child {child}"));
+        }
+
+        if !exact {
+            if let Some(word) = forward.as_ref().or(reverse.as_ref()) {
+                let derived_weight = eval_boundary_dwa_with_default(&derived, word);
+                let reference_weight = eval_boundary_dwa_with_default(&reference, word);
+                let derived_tokens = derived_weight.tokens_for_tsid(0);
+                let reference_tokens = reference_weight.tokens_for_tsid(0);
+                let mut transformed = Vec::<i32>::new();
+                let mut action_debug = None;
+                if let Some(&label) = word.first()
+                    && label >= 0
+                    && label != DEFAULT_LABEL
+                {
+                    let local_state = (label as u32).saturating_sub(parent_start);
+                    if let Some(parent) = constraint.recursive_leaf_constraint(0)
+                        && let Some(action) = parent
+                            .table
+                            .action
+                            .get(local_state as usize)
+                            .and_then(|row| row.get(&links[0].slot_terminal))
+                    {
+                        let shift = match action {
+                            Action::Shift(target, replace) if action.reduce_count() == 0 => {
+                                Some((*target, *replace))
+                            }
+                            Action::Split {
+                                shift: Some((target, replace)),
+                                accept: false,
+                                ..
+                            } if action.reduce_count() == 0 => Some((*target, *replace)),
+                            _ => None,
+                        };
+                        if let Some((target, replace)) = shift {
+                            let child_offset = layout.component_offsets[child as usize];
+                            transformed.push(encode_positive_label(child_offset + links[0].child_start));
+                            transformed.push(encode_positive_label(parent_start + target));
+                            if !replace {
+                                transformed.push(label);
+                            }
+                            action_debug = Some((local_state, target, replace));
+                        }
+                    }
+                }
+                let child_weight = eval_boundary_dwa_with_default(&child_parser, &transformed);
+                eprintln!(
+                    "[glrmask/validate][static_shard_call_delegation_mismatch] child={} word={:?} action={:?} transformed={:?} derived_tokens={:?} reference_tokens={:?} child_tokens={:?}",
+                    child,
+                    word,
+                    action_debug,
+                    transformed,
+                    derived_tokens,
+                    reference_tokens,
+                    child_weight.tokens_for_tsid(0),
+                );
+            }
+        }
+        eprintln!(
+            "[glrmask/validate][static_shard_call_delegation] child={} relations={} parent_tokens={} suffix_tokens={} derived_states={} reference_states={} exact={} forward={:?} reverse={:?}",
+            child,
+            relations.len(),
+            reference_token_outputs.len(),
+            child_token_outputs.len(),
+            derived.num_states(),
+            reference.num_states(),
+            exact,
+            forward,
+            reverse,
+        );
+        if !exact {
+            return Err(format!("static shard CALL delegation differs for child {child}"));
+        }
+        validated += 1;
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_CALL_DELEGATION_FULL_PARENT").is_some() {
+        let full_parent = shards
+            .iter()
+            .find(|shard| shard.start_component == 0 && shard.first_foreign_component.is_none())
+            .ok_or_else(|| "full-parent CALL-delegation validator missing ordinary parent shard".to_owned())?;
+        let full_parent_parser = full_parent.boundary.recursive_parser_dwa.as_ref()
+            .ok_or_else(|| "full-parent CALL-delegation validator parent shard lacks recursive DWA".to_owned())?;
+        let reference_compact = remap_boundary_parser_tokens_to_compact_preserve_tsids(
+            full_parent_parser,
+            &full_parent.boundary.internal_token_to_originals,
+            &parent_token_to_compact,
+            tsid_count,
+        );
+        let reference_compact = restrict_boundary_dwa_first_component(
+            &reference_compact,
+            parent_start..parent_end,
+        );
+        let merge_started_at = Instant::now();
+        let mut derived_iter = derived_compact_parts.into_iter();
+        let mut merged_dwa = derived_iter
+            .next()
+            .ok_or_else(|| "full-parent CALL-delegation validator has no derived parts".to_owned())?;
+        for part in derived_iter {
+            merged_dwa = glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(
+                merged_dwa,
+                part,
+            );
+        }
+        let forward = find_boundary_dwa_difference_with_default(&merged_dwa, &reference_compact)?;
+        let reverse = find_boundary_dwa_difference_with_default(&reference_compact, &merged_dwa)?;
+        let exact = forward.is_none() && reverse.is_none();
+        eprintln!(
+            "[glrmask/validate][static_shard_call_delegation_full_parent] exact={} parts=10 tokens={} merged_states={} reference_states={} merge_ms={:.3} forward={:?} reverse={:?}",
+            exact,
+            selected_delegated_parent_tokens.len(),
+            merged_dwa.num_states(),
+            reference_compact.num_states(),
+            merge_started_at.elapsed().as_secs_f64() * 1000.0,
+            forward,
+            reverse,
+        );
+        if !exact {
+            return Err("merged derived CALL-delegation parent differs from ordinary full parent shard".to_owned());
+        }
+    }    eprintln!(
+        "[glrmask/validate][static_shard_call_delegation_summary] children={} exact=true",
+        validated,
+    );
+    Ok(())
+}
+#[cfg(feature = "internal-api")]
+fn validate_static_shard_prefix_call_delegation(
+    constraint: &Constraint,
+    shards: &[PublishedStaticBoundaryShard],
+    delegations: &[BoundarySuffixDelegation],
+) -> Result<(), String> {
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "PREFIX+CALL validator requires recursive parser layout".to_owned())?;
+    let parent_start = *layout
+        .component_offsets
+        .first()
+        .ok_or_else(|| "PREFIX+CALL validator missing parent offset".to_owned())?;
+    let parent_end = layout
+        .component_offsets
+        .get(1)
+        .copied()
+        .unwrap_or(layout.total_states);
+    let tsid_count = constraint.internal_tsid_count() as u32;
+    let identity_tokens = delegations
+        .iter()
+        .filter(|relation| relation.prefix_identity)
+        .map(|relation| relation.parent_token)
+        .collect::<BTreeSet<_>>();
+    let prefix_relations = delegations
+        .iter()
+        .filter(|relation| {
+            !relation.prefix_identity
+                && relation.prefix_local_terminal.is_some()
+                && !identity_tokens.contains(&relation.parent_token)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let children = prefix_relations
+        .iter()
+        .map(|relation| relation.child_component)
+        .collect::<BTreeSet<_>>();
+    let mut validated = 0usize;
+
+    for child in children {
+        let relations = prefix_relations
+            .iter()
+            .filter(|relation| relation.child_component == child)
+            .copied()
+            .collect::<Vec<_>>();
+        if relations.is_empty() {
+            continue;
+        }
+        let link = layout
+            .links
+            .iter()
+            .find(|link| link.parent_component == 0 && link.child_component == child)
+            .ok_or_else(|| format!("PREFIX+CALL validator has no parent->{child} link"))?;
+        let child_shard = shards
+            .iter()
+            .find(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+            .ok_or_else(|| format!("PREFIX+CALL validator missing child shard {child}"))?;
+        let reference_shard = shards
+            .iter()
+            .find(|shard| shard.start_component == 0 && shard.first_foreign_component == Some(child))
+            .ok_or_else(|| format!("PREFIX+CALL validator missing parent->{child} reference shard"))?;
+        let child_parser = child_shard
+            .boundary
+            .recursive_parser_dwa
+            .as_ref()
+            .ok_or_else(|| format!("PREFIX+CALL child shard {child} lacks recursive DWA"))?;
+        let reference_parser = reference_shard
+            .boundary
+            .recursive_parser_dwa
+            .as_ref()
+            .ok_or_else(|| format!("PREFIX+CALL reference shard {child} lacks recursive DWA"))?;
+
+        let selected_parent_tokens = relations
+            .iter()
+            .map(|relation| relation.parent_token)
+            .collect::<BTreeSet<_>>();
+        let mut pieces = Vec::<DWA>::new();
+        let prefix_terminals = relations
+            .iter()
+            .filter_map(|relation| relation.prefix_local_terminal)
+            .collect::<BTreeSet<_>>();
+        for prefix_terminal in prefix_terminals {
+            let prefix_rows = relations
+                .iter()
+                .filter(|relation| relation.prefix_local_terminal == Some(prefix_terminal))
+                .copied()
+                .collect::<Vec<_>>();
+            let mut parent_support = BTreeMap::<u32, RangeSetBlaze<u32>>::new();
+            for relation in &prefix_rows {
+                let Some(&tsid) = constraint.state_to_internal_tsid.get(relation.start_state as usize) else {
+                    return Err(format!(
+                        "PREFIX+CALL witness start state {} lies outside composed TSID map",
+                        relation.start_state,
+                    ));
+                };
+                if tsid == u32::MAX {
+                    return Err(format!(
+                        "PREFIX+CALL witness start state {} has no composed TSID",
+                        relation.start_state,
+                    ));
+                }
+                parent_support
+                    .entry(relation.parent_token)
+                    .or_default()
+                    .insert(tsid);
+            }
+            let suffix_to_parents = prefix_rows.iter().fold(
+                BTreeMap::<u32, BTreeSet<u32>>::new(),
+                |mut map, relation| {
+                    map.entry(relation.suffix_token)
+                        .or_default()
+                        .insert(relation.parent_token);
+                    map
+                },
+            );
+            let child_real = remap_child_reset_tokens_to_parent_support(
+                child_parser,
+                &child_shard.boundary.internal_token_to_originals,
+                &suffix_to_parents,
+                &parent_support,
+            );
+            let call_real = call_preimage_boundary_dwa(
+                &child_real,
+                constraint,
+                &layout.component_offsets,
+                link,
+            )?;
+            pieces.push(terminal_shift_preimage_boundary_dwa(
+                &call_real,
+                constraint,
+                &layout.component_offsets,
+                0,
+                prefix_terminal,
+            )?);
+        }
+        let mut iter = pieces.into_iter();
+        let mut derived = iter
+            .next()
+            .ok_or_else(|| format!("PREFIX+CALL child {child} produced no derived pieces"))?;
+        for piece in iter {
+            derived = glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(
+                derived,
+                piece,
+            );
+        }
+        let reference = remap_boundary_parser_tokens_preserve_tsids(
+            reference_parser,
+            &reference_shard.boundary.internal_token_to_originals,
+            &selected_parent_tokens,
+            tsid_count,
+        );
+        let reference = restrict_boundary_dwa_first_component(
+            &reference,
+            parent_start..parent_end,
+        );
+        let forward = find_boundary_dwa_difference_with_default(&derived, &reference)?;
+        let reverse = find_boundary_dwa_difference_with_default(&reference, &derived)?;
+        let exact = forward.is_none() && reverse.is_none();
+        eprintln!(
+            "[glrmask/validate][static_shard_prefix_call_delegation] child={} relations={} parent_tokens={:?} prefix_terminals={:?} derived_states={} reference_states={} exact={} forward={:?} reverse={:?}",
+            child,
+            relations.len(),
+            selected_parent_tokens,
+            relations.iter().filter_map(|relation| relation.prefix_local_terminal).collect::<BTreeSet<_>>(),
+            derived.num_states(),
+            reference.num_states(),
+            exact,
+            forward,
+            reverse,
+        );
+        if !exact {
+            return Err(format!("static shard PREFIX+CALL delegation differs for child {child}"));
+        }
+        validated += 1;
+    }
+    eprintln!(
+        "[glrmask/validate][static_shard_prefix_call_delegation_summary] children={} exact=true",
+        validated,
+    );
+    Ok(())
+}
+
+fn return_parent_seeded_delta_template(
+    table: &GLRTable,
+    parent: &Constraint,
+    child: &Constraint,
+    is_parent_ignore: bool,
+) -> Result<UnweightedDfa, String> {
+    let mut action_seeds = vec![Vec::<u32>::new(); 1];
+    for state in parent.table.num_states..table.num_states {
+        if table.action(state, 0).is_some() {
+            action_seeds[0].push(state);
+        }
+    }
+    let action = characterize_terminal_action_state_seeds_for_terminal_count(
+        table,
+        1,
+        &action_seeds,
+    );
+
+    let child_root = match child.table.rules.first().map(|rule| rule.rhs.as_slice()) {
+        Some([Symbol::Nonterminal(root)]) => *root,
+        _ => return Err("RETURN seeded parent delta requires a single child-root nonterminal".to_owned()),
+    };
+    let boundary_nonterminal = (parent.table.nonterminal_display_names.len() as u32)
+        .checked_add(child_root)
+        .ok_or_else(|| "RETURN seeded parent delta nonterminal overflow".to_owned())?;
+    let mut nt_seeds = vec![Vec::<(u32, u32, u32, bool)>::new(); 1];
+    for (revealed_state, row) in table.goto.iter().enumerate() {
+        let Some(&(top_state, goto_replace)) = row.get(&boundary_nonterminal) else {
+            continue;
+        };
+        if table.action(top_state, 0).is_some() {
+            nt_seeds[0].push((
+                top_state,
+                revealed_state as u32,
+                boundary_nonterminal,
+                goto_replace,
+            ));
+        }
+    }
+    nt_seeds[0].sort_unstable();
+    nt_seeds[0].dedup();
+    let nt = characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+        table,
+        1,
+        &nt_seeds,
+    );
+
+    let mut delta = TerminalCharacterization {
+        escapes: Vec::new(),
+        reduces: Vec::new(),
+        nt_escapes: Vec::new(),
+        nt_rereduces: Vec::new(),
+        all_nts: BTreeSet::new(),
+    };
+    for part in [action.get(&0), nt.get(&0)].into_iter().flatten() {
+        delta.escapes.extend(part.escapes.iter().cloned());
+        delta.reduces.extend(part.reduces.iter().cloned());
+        delta.nt_escapes.extend(part.nt_escapes.iter().cloned());
+        delta.nt_rereduces.extend(part.nt_rereduces.iter().cloned());
+        delta.all_nts.extend(part.all_nts.iter().copied());
+    }
+    if is_parent_ignore {
+        delta.escapes.extend((0..parent.table.num_states).map(|state| {
+            crate::compiler::stages::templates::characterize::InitialEscape {
+                pop: vec![crate::compiler::stages::templates::characterize::StackMatcher::State(state)],
+                pushes: vec![state],
+            }
+        }));
+    }
+    delta.escapes.sort();
+    delta.escapes.dedup();
+    delta.reduces.sort();
+    delta.reduces.dedup();
+    delta.nt_escapes.sort();
+    delta.nt_escapes.dedup();
+    delta.nt_rereduces.sort();
+    delta.nt_rereduces.dedup();
+
+    let templates = Templates::from_characterizations(&BTreeMap::from([(0, delta)]));
+    templates
+        .by_terminal
+        .get(&0)
+        .cloned()
+        .ok_or_else(|| "RETURN seeded parent delta did not compile a template".to_owned())
+}
+fn build_static_child_return_suffix_exact(
+    constraint: &Constraint,
+    delegations: &[BoundaryReturnSuffixDelegation],
+) -> Result<BTreeMap<u32, DWA>, String> {
+    let total_started_at = Instant::now();
+    let log_builder = compose_profile_enabled()
+        || std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_SHARED_ALL").is_some();
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "shared RETURN-suffix validator requires recursive parser layout".to_owned())?;
+    if layout.component_offsets.len() <= 1 {
+        return Err("shared RETURN-suffix validator requires parent plus child components".to_owned());
+    }
+    let parent = constraint
+        .recursive_leaf_constraint(0)
+        .ok_or_else(|| "shared RETURN-suffix validator parent is not an intact leaf".to_owned())?;
+
+    let mut total_signatures = 0usize;
+    let mut total_declined = 0usize;
+    let mut total_weighted_roots = 0usize;
+    let mut total_domain_nodes = 0usize;
+    let mut total_pair_nwa_states = 0usize;
+    let mut total_pair_nwa_transitions = 0usize;
+    let mut total_output_states = 0usize;
+    let mut total_output_transitions = 0usize;
+    let mut exact_by_child = BTreeMap::<u32, DWA>::new();
+    let share_parent_suffix = true;
+    let mut shared_arena = SharedBooleanParserDomains::new();
+    let mut shared_parent_suffix_roots = BTreeMap::<Vec<u32>, u32>::new();
+    let mut shared_parent_bundle_cache = FxHashMap::<u32, Arc<NWA>>::default();
+    let mut shared_parent_template_cache = BTreeMap::<u32, UnweightedDfa>::new();
+    let mut shared_parent_preimage_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
+    if share_parent_suffix {
+        let parent_started_at = Instant::now();
+        let parent_bundle_started_at = Instant::now();        let representative_child = (1..layout.component_offsets.len())
+            .find_map(|child_index| {
+                layout.links.iter()
+                    .find(|link| link.parent_component == 0 && link.child_component == child_index as u32)
+                    .map(|link| (child_index as u32, link))
+            })
+            .ok_or_else(|| "shared parent RETURN suffix has no linked child".to_owned())?;
+        let representative_child_constraint = constraint
+            .recursive_leaf_constraint(representative_child.0 as usize)
+            .ok_or_else(|| "shared parent RETURN suffix representative child is not an intact leaf".to_owned())?;
+        let representative_pair = RecursivePairParserTables {
+            parent,
+            child: representative_child_constraint,
+        };
+        let representative_link = ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: representative_child.1.slot_terminal,
+            child_component: 1,
+            child_start: representative_child.1.child_start,
+            return_pop: representative_child.1.return_pop,
+            child_start_nullable: representative_child.1.child_start_nullable,
+        };
+        let parent_provider = DisjointComponentActionProvider::new(
+            &representative_pair,
+            std::slice::from_ref(&representative_link),
+        )?;
+        let suffixes = delegations
+            .iter()
+            .map(|relation| relation.parent_suffix_local_terminals.clone())
+            .collect::<BTreeSet<_>>();
+        let terminals = suffixes
+            .iter()
+            .flat_map(|suffix| suffix.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let parent_bundle_entries = terminals
+            .par_iter()
+            .map(|&terminal| -> Result<(u32, UnweightedDfa, NWA), String> {
+                let symbol = ScopedParserSymbol::Terminal {
+                    component: 0,
+                    terminal,
+                };
+                let table = materialize_scoped_provider_symbol_as_ordinary_table(
+                    &parent_provider,
+                    symbol,
+                )?;
+                let selected = [true];
+                let characterizations = characterize_selected_terminals_for_terminal_count(
+                    &table,
+                    1,
+                    &selected,
+                );
+                let templates = Templates::from_characterizations(&characterizations);                if terminal == 11 && std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_PARENT_SEEDED_DELTA").is_some() {
+                    let delta = return_parent_seeded_delta_template(&table, parent, representative_child_constraint, parent.ignore_terminal == Some(terminal))?;
+                    let fresh = templates.by_terminal.get(&0).ok_or_else(|| "missing fresh linked parent terminal template".to_owned())?;
+                    let delta_only = unweighted_dfa_difference(&delta, fresh);
+                    let fresh_only = unweighted_dfa_difference(fresh, &delta);
+                    eprintln!("[glrmask/validate][static_shard_return_parent_seeded_delta] terminal={} delta_states={} fresh_states={} delta_only={:?} fresh_only={:?}", terminal, delta.num_states(), fresh.num_states(), unweighted_dfa_shortest_word(&delta_only), unweighted_dfa_shortest_word(&fresh_only));
+                }
+                let template = templates
+                    .by_terminal
+                    .get(&0)
+                    .ok_or_else(|| format!("shared parent RETURN suffix lost template for terminal {terminal}"))?
+                    .clone();
+                let bundle = build_boolean_terminal_bundle_nwa(&templates, &[0])
+                    .ok_or_else(|| format!(
+                        "shared parent RETURN suffix has no exact bundle for terminal {terminal}"
+                    ))?;
+                Ok((terminal, template, bundle))
+            })
+            .collect::<Vec<_>>();
+        for entry in parent_bundle_entries {
+            let (terminal, template, bundle) = entry?;
+            shared_parent_template_cache.insert(terminal, template);
+            shared_parent_bundle_cache.insert(terminal, Arc::new(bundle));
+        }        let parent_bundle_ms = parent_bundle_started_at.elapsed().as_secs_f64() * 1000.0;
+        let parent_dp_started_at = Instant::now();
+        for suffix in suffixes {
+            let mut root = SharedBooleanParserDomains::UNIVERSAL;
+            let mut declined = false;
+            for &terminal in suffix.iter().rev() {
+                let cache_key = (terminal, root);
+                let next = if let Some(cached) = shared_parent_preimage_cache.get(&cache_key) {
+                    *cached
+                } else {
+                    let bundle = shared_parent_bundle_cache
+                        .get(&terminal)
+                        .ok_or_else(|| format!(
+                            "shared parent RETURN suffix lost bundle for terminal {terminal}"
+                        ))?;
+                    let call_nodes_before = shared_arena.node_count();
+                    let call_started_at = Instant::now();
+                    let computed = shared_arena.preimage_bundle(bundle, root);
+                    if std::env::var_os("GLRMASK_PROFILE_STATIC_SHARD_RETURN_PARENT_PREIMAGE_CALLS").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][static_shard_return_parent_preimage_call] terminal={} target_root={} result={:?} bundle_states={} bundle_transitions={} nodes_added={} ms={:.3}",
+                            terminal,
+                            root,
+                            computed,
+                            bundle.states().len(),
+                            bundle.num_transitions(),
+                            shared_arena.node_count().saturating_sub(call_nodes_before),
+                            call_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    shared_parent_preimage_cache.insert(cache_key, computed);
+                    computed
+                };
+                let Some(next) = next else {
+                    declined = true;
+                    break;
+                };
+                root = next;
+                if root == SharedBooleanParserDomains::EMPTY {
+                    break;
+                }
+            }
+            if declined {
+                return Err(format!(
+                    "shared parent RETURN suffix preimage declined for suffix {suffix:?}"
+                ));
+            }
+            shared_parent_suffix_roots.insert(suffix, root);
+        }
+    }
+    struct ReturnPostJob {
+        child: u32,
+        signatures: usize,
+        declined: usize,
+        bundles: usize,
+        cached_terminal_bundles: usize,
+        characterized_bundles: usize,
+        preimage_cache: usize,
+        arena_nodes: usize,
+        weighted_roots: usize,
+        pair_nwa_states: usize,
+        pair_nwa_transitions: usize,
+        dp_ms: f64,
+        export_ms: f64,
+        remap_ms: f64,
+        pre_ms: f64,
+        recursive_nwa: NWA,
+        child_start: u32,
+        child_end: u32,
+    }
+    let parallel_post = true;
+    if parallel_post
+        && std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_PARENT_TOKEN_DOMAIN").is_some()
+    {
+        return Err("parallel RETURN postprocess is incompatible with the rejected parent-token-domain validator".to_owned());
+    }
+    let mut return_post_jobs = Vec::<ReturnPostJob>::new();
+    for child in 1..layout.component_offsets.len() {
+        let child = child as u32;
+        let child_constraint = constraint
+            .recursive_leaf_constraint(child as usize)
+            .ok_or_else(|| format!(
+                "shared RETURN-suffix validator child {child} is not an intact leaf"
+            ))?;
+        let Some(link) = layout
+            .links
+            .iter()
+            .find(|link| link.parent_component == 0 && link.child_component == child)
+        else {
+            continue;
+        };
+
+        // Exact semantic signature -> exact lexical support. A support point is
+        // the composed (starting TSID, fused model token) pair witnessed by B.
+        // No support is ever unioned across children here.
+        let mut signatures = BTreeMap::<
+            (Vec<u32>, Vec<u32>),
+            BTreeMap<u32, BTreeSet<u32>>,
+        >::new();
+        let mut token_signatures = BTreeMap::<
+            (Vec<u32>, u32),
+            BTreeMap<u32, BTreeSet<u32>>,
+        >::new();
+        for relation in delegations.iter().filter(|relation| relation.child_component == child) {
+            let Some(&tsid) = constraint
+                .state_to_internal_tsid
+                .get(relation.start_state as usize)
+            else {
+                return Err(format!(
+                    "shared RETURN-suffix witness start state {} lies outside composed TSID map",
+                    relation.start_state,
+                ));
+            };
+            if tsid == u32::MAX {
+                return Err(format!(
+                    "shared RETURN-suffix witness start state {} has no composed TSID",
+                    relation.start_state,
+                ));
+            }
+            signatures
+                .entry((
+                    relation.prefix_local_terminals.clone(),
+                    relation.parent_suffix_local_terminals.clone(),
+                ))
+                .or_default()
+                .entry(tsid)
+                .or_default()
+                .insert(relation.fused_token);
+            token_signatures
+                .entry((
+                    relation.prefix_local_terminals.clone(),
+                    relation.parent_suffix_token,
+                ))
+                .or_default()
+                .entry(tsid)
+                .or_default()
+                .insert(relation.fused_token);
+        }
+        if signatures.is_empty() {
+            continue;
+        }
+        total_signatures += signatures.len();
+
+        // Build the exact two-component semantic relation for this child. The
+        // local pair coordinate is parent=0, selected child=1; it is remapped to
+        // the global recursive coordinate only after all roots are assembled.
+        let pair = RecursivePairParserTables {
+            parent,
+            child: child_constraint,
+        };
+        let local_link = ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: link.slot_terminal,
+            child_component: 1,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        };
+        let provider = DisjointComponentActionProvider::new(
+            &pair,
+            std::slice::from_ref(&local_link),
+        )?;
+        if share_parent_suffix
+            && std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SHARED_PARENT_TERMINALS").is_some()
+        {
+            for (&terminal, representative) in &shared_parent_template_cache {
+                let symbol = ScopedParserSymbol::Terminal { component: 0, terminal };
+                let table = materialize_scoped_provider_symbol_as_ordinary_table(&provider, symbol)?;
+                let selected = [true];
+                let characterizations = characterize_selected_terminals_for_terminal_count(&table, 1, &selected);
+                let templates = Templates::from_characterizations(&characterizations);
+                let fresh = templates.by_terminal.get(&0).ok_or_else(|| format!(
+                    "RETURN shared-parent validation has no fresh template for child {child} terminal {terminal}"
+                ))?;
+                let representative_minus_fresh = unweighted_dfa_difference(representative, fresh);
+                let fresh_minus_representative = unweighted_dfa_difference(fresh, representative);
+                if !unweighted_dfa_language_is_empty(&representative_minus_fresh)
+                    || !unweighted_dfa_language_is_empty(&fresh_minus_representative)
+                {
+                    return Err(format!(
+                        "RETURN parent terminal relation depends on child: child={child} terminal={terminal} representative_minus_fresh={:?} fresh_minus_representative={:?}",
+                        unweighted_dfa_shortest_word(&representative_minus_fresh),
+                        unweighted_dfa_shortest_word(&fresh_minus_representative),
+                    ));
+                }
+            }
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_shared_parent_terminals] child={} terminals={} exact=true",
+                child,
+                shared_parent_template_cache.len(),
+            );
+        }
+        let pair_state_count = parent
+            .table
+            .num_states
+            .checked_add(child_constraint.table.num_states)
+            .ok_or_else(|| "shared RETURN-suffix pair state count overflow".to_owned())?;
+
+        if !share_parent_suffix {
+            shared_arena = SharedBooleanParserDomains::new();
+        }
+        let arena = &mut shared_arena;
+        let arena_nodes_before = arena.node_count();
+        let mut bundle_cache = FxHashMap::<ScopedParserSymbol, Arc<NWA>>::default();
+        let mut preimage_cache = FxHashMap::<(ScopedParserSymbol, u32), Option<u32>>::default();
+        let mut support_by_root = BTreeMap::<u32, BTreeMap<u32, BTreeSet<u32>>>::new();
+        let mut declined = 0usize;
+        let mut cached_terminal_bundles = 0usize;
+        let mut characterized_bundles = 0usize;
+        let child_started_at = Instant::now();
+
+        let dp_started_at = Instant::now();
+        for ((prefix, suffix), support) in signatures.iter() {
+            // Forward semantics are:
+            //   child prefix ; FINISH(child)/RETURN ; exact parent suffix.
+            // Relational preimage therefore composes those operations in the
+            // reverse order below, starting from the universal postcondition.
+            let mut reverse_symbols = Vec::<ScopedParserSymbol>::with_capacity(
+                prefix.len() + if share_parent_suffix { 1 } else { suffix.len() + 1 },
+            );
+            if !share_parent_suffix {
+                reverse_symbols.extend(suffix.iter().rev().copied().map(|terminal| {
+                    ScopedParserSymbol::Terminal {
+                        component: 0,
+                        terminal,
+                    }
+                }));
+            }
+            reverse_symbols.push(ScopedParserSymbol::Finish { component: 1 });
+            reverse_symbols.extend(prefix.iter().rev().copied().map(|terminal| {
+                ScopedParserSymbol::Terminal {
+                    component: 1,
+                    terminal,
+                }
+            }));
+
+            let mut root = if share_parent_suffix {
+                *shared_parent_suffix_roots.get(suffix).ok_or_else(|| format!(
+                    "shared parent RETURN suffix root missing for {suffix:?}"
+                ))?
+            } else {
+                SharedBooleanParserDomains::UNIVERSAL
+            };
+            let mut signature_declined = false;
+            for symbol in reverse_symbols {
+                let cache_key = (symbol, root);
+                let next = if let Some(cached) = preimage_cache.get(&cache_key) {
+                    *cached
+                } else {
+                    let bundle = if let Some(bundle) = bundle_cache.get(&symbol) {
+                        Some(Arc::clone(bundle))
+                    } else if let ScopedParserSymbol::Terminal {
+                        component: 0,
+                        terminal,
+                    } = symbol
+                    {
+                        if let Some(bundle) = shared_parent_bundle_cache.get(&terminal) {
+                            let bundle = Arc::clone(bundle);
+                            bundle_cache.insert(symbol, Arc::clone(&bundle));
+                            Some(bundle)
+                        } else {
+                            characterized_bundles += 1;
+                            let table = materialize_scoped_provider_symbol_as_ordinary_table(
+                                &provider,
+                                symbol,
+                            )?;
+                            let selected = [true];
+                            let characterizations = characterize_selected_terminals_for_terminal_count(
+                                &table,
+                                1,
+                                &selected,
+                            );
+                            let templates = Templates::from_characterizations(&characterizations);
+                            build_boolean_terminal_bundle_nwa(&templates, &[0]).map(|bundle| {
+                                let bundle = Arc::new(bundle);
+                                shared_parent_bundle_cache.insert(terminal, Arc::clone(&bundle));
+                                bundle_cache.insert(symbol, Arc::clone(&bundle));
+                                bundle
+                            })
+                        }
+                    } else {
+                        let cached = match symbol {
+                            ScopedParserSymbol::Terminal {
+                                component: 1,
+                                terminal,
+                            } => cached_component_terminal_boolean_bundle_at_offset(
+                                child_constraint,
+                                terminal,
+                                parent.table.num_states,
+                            ),
+                            _ => None,
+                        };
+                        if std::env::var_os(
+                            "GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_CACHED_TERMINALS",
+                        )
+                        .is_some()
+                        {
+                            match symbol {
+                                ScopedParserSymbol::Terminal {
+                                    component: 1,
+                                    terminal,
+                                } => validate_cached_component_terminal_template_against_provider(
+                                    &provider,
+                                    symbol,
+                                    child_constraint,
+                                    terminal,
+                                    parent.table.num_states,
+                                )?,
+                                _ => {}
+                            }
+                        }
+                        let built = if let Some(bundle) = cached {
+                            cached_terminal_bundles += 1;
+                            Some(bundle)
+                        } else {
+                            characterized_bundles += 1;
+                            let table = materialize_scoped_provider_symbol_as_ordinary_table(
+                                &provider,
+                                symbol,
+                            )?;
+                            let selected = [true];
+                            let characterizations = characterize_selected_terminals_for_terminal_count(
+                                &table,
+                                1,
+                                &selected,
+                            );
+                            let templates = Templates::from_characterizations(&characterizations);
+                            build_boolean_terminal_bundle_nwa(&templates, &[0])
+                        };
+                        built.map(|bundle| {
+                            let bundle = Arc::new(bundle);
+                            bundle_cache.insert(symbol, Arc::clone(&bundle));
+                            bundle
+                        })
+                    };
+                    let computed = bundle
+                        .as_deref()
+                        .and_then(|bundle| arena.preimage_bundle(bundle, root));
+                    preimage_cache.insert(cache_key, computed);
+                    computed
+                };
+                let Some(next) = next else {
+                    signature_declined = true;
+                    break;
+                };
+                root = next;
+                if root == SharedBooleanParserDomains::EMPTY {
+                    break;
+                }
+            }
+            if signature_declined {
+                declined += 1;
+                continue;
+            }
+            root = arena.finalize_prefix_domain(root);
+            if root == SharedBooleanParserDomains::EMPTY {
+                continue;
+            }
+            let root_support = support_by_root.entry(root).or_default();
+            for (&tsid, tokens) in support {
+                root_support
+                    .entry(tsid)
+                    .or_default()
+                    .extend(tokens.iter().copied());
+            }
+        }
+
+        let dp_ms = dp_started_at.elapsed().as_secs_f64() * 1000.0;
+        let weighted_roots = support_by_root
+            .into_iter()
+            .filter_map(|(root, by_tsid)| {
+                let weight = Weight::from_per_tsid_token_sets(by_tsid.into_iter().map(
+                    |(tsid, tokens)| {
+                        (
+                            tsid,
+                            tokens.into_iter().collect::<RangeSetBlaze<u32>>(),
+                        )
+                    },
+                ));
+                (!weight.is_empty()).then_some((root, weight))
+            })
+            .collect::<Vec<_>>();
+
+        let export_started_at = Instant::now();
+        let pair_nwa = arena.to_weighted_nwa(&weighted_roots);
+        let export_ms = export_started_at.elapsed().as_secs_f64() * 1000.0;
+        let remap_started_at = Instant::now();
+        let recursive_nwa = remap_pair_parser_stack_nwa_to_recursive(
+            &pair_nwa,
+            parent.table.num_states,
+            child_constraint.table.num_states,
+            layout.component_offsets[0],
+            layout.component_offsets[child as usize],
+        )?;
+        let remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;        if parallel_post {
+            let child_start = layout.component_offsets[child as usize];
+            let child_end = layout
+                .component_offsets
+                .get(child as usize + 1)
+                .copied()
+                .unwrap_or(layout.total_states);
+            total_declined += declined;
+            total_weighted_roots += weighted_roots.len();
+            total_domain_nodes += arena.node_count().saturating_sub(arena_nodes_before);
+            total_pair_nwa_states += pair_nwa.states().len();
+            total_pair_nwa_transitions += pair_nwa.num_transitions();
+            return_post_jobs.push(ReturnPostJob {
+                child,
+                signatures: signatures.len(),
+                declined,
+                bundles: bundle_cache.len(),
+                cached_terminal_bundles,
+                characterized_bundles,
+                preimage_cache: preimage_cache.len(),
+                arena_nodes: arena.node_count(),
+                weighted_roots: weighted_roots.len(),
+                pair_nwa_states: pair_nwa.states().len(),
+                pair_nwa_transitions: pair_nwa.num_transitions(),
+                dp_ms,
+                export_ms,
+                remap_ms,
+                pre_ms: child_started_at.elapsed().as_secs_f64() * 1000.0,
+                recursive_nwa,
+                child_start,
+                child_end,
+            });
+            continue;
+        }
+        let normalize_started_at = Instant::now();
+        let exact = normalize_weighted_parser_stack_nwa_preserving_explicit_for_parser_state_count(
+            layout.total_states,
+            &recursive_nwa,
+        );
+        let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        let restrict_started_at = Instant::now();
+        let child_start = layout.component_offsets[child as usize];
+        let child_end = layout
+            .component_offsets
+            .get(child as usize + 1)
+            .copied()
+            .unwrap_or(layout.total_states);
+        let exact = restrict_boundary_dwa_first_component(&exact, child_start..child_end);
+
+        let restrict_ms = restrict_started_at.elapsed().as_secs_f64() * 1000.0;
+        let has_language = exact.states().iter().any(|state| {
+            state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+                || state
+                    .transitions
+                    .values()
+                    .any(|(_, weight)| !weight.is_empty())
+        });
+        if !weighted_roots.is_empty() && !has_language {
+            return Err(format!(
+                "shared RETURN-suffix child {child} lost all exact weighted roots after child-component restriction"
+            ));
+        }
+
+        if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_PARENT_TOKEN_DOMAIN")
+            .is_some()
+        {
+            let token_started_at = Instant::now();
+            let pair_state_count = parent
+                .table
+                .num_states
+                .checked_add(child_constraint.table.num_states)
+                .ok_or_else(|| "RETURN token-domain pair state count overflow".to_owned())?;
+            let finish_symbol = ScopedParserSymbol::Finish { component: 1 };
+            let finish_bundle = bundle_cache
+                .get(&finish_symbol)
+                .ok_or_else(|| "RETURN token-domain path lost FINISH bundle".to_owned())?;
+            let mut parent_domains = BTreeMap::<u32, DWA>::new();
+            let mut after_finish_domains = BTreeMap::<u32, DWA>::new();
+            let mut token_candidate = None::<DWA>;
+            let mut parent_domain_ms = 0.0f64;
+            let mut finish_preimage_ms = 0.0f64;
+            let mut child_preimage_ms = 0.0f64;
+            let mut pieces = 0usize;
+
+            for ((prefix, suffix_token), support) in &token_signatures {
+                if !parent_domains.contains_key(suffix_token) {
+                    let started = Instant::now();
+                    let domain = scoped_component_token_boolean_domain_at_tokenizer_state(
+                        parent,
+                        0,
+                        *suffix_token,
+                        parent.tokenizer.start_state(),
+                    )?;
+                    parent_domain_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    parent_domains.insert(*suffix_token, domain);
+                }
+                if !after_finish_domains.contains_key(suffix_token) {
+                    let started = Instant::now();
+                    let target = parent_domains
+                        .get(suffix_token)
+                        .expect("parent suffix domain was inserted");
+                    let (next, _) =
+                        build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+                            pair_state_count,
+                            finish_bundle,
+                            target,
+                        );
+                    finish_preimage_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    let next = next.ok_or_else(|| format!(
+                        "RETURN token-domain FINISH preimage declined for child {child} suffix token {suffix_token}"
+                    ))?;
+                    after_finish_domains.insert(*suffix_token, next);
+                }
+                let mut target = after_finish_domains
+                    .get(suffix_token)
+                    .expect("FINISH preimage domain was inserted")
+                    .clone();
+                for &local_terminal in prefix.iter().rev() {
+                    let symbol = ScopedParserSymbol::Terminal {
+                        component: 1,
+                        terminal: local_terminal,
+                    };
+                    let bundle = bundle_cache.get(&symbol).ok_or_else(|| format!(
+                        "RETURN token-domain path lost child terminal bundle {local_terminal}"
+                    ))?;
+                    let started = Instant::now();
+                    let (next, _) =
+                        build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+                            pair_state_count,
+                            bundle,
+                            &target,
+                        );
+                    child_preimage_ms += started.elapsed().as_secs_f64() * 1000.0;
+                    target = next.ok_or_else(|| format!(
+                        "RETURN token-domain child preimage declined for child {child} terminal {local_terminal} suffix token {suffix_token}"
+                    ))?;
+                }
+                let target = restrict_boundary_dwa_first_component(
+                    &target,
+                    parent.table.num_states..pair_state_count,
+                );
+                let target = remap_pair_boolean_domain_to_recursive(
+                    &target,
+                    parent.table.num_states,
+                    child_constraint.table.num_states,
+                    layout.component_offsets[0],
+                    layout.component_offsets[child as usize],
+                )?;
+                let target = target;
+                let support_weight = Weight::from_per_tsid_token_sets(
+                    support.iter().map(|(&tsid, tokens)| {
+                        (
+                            tsid,
+                            tokens.iter().copied().collect::<RangeSetBlaze<u32>>(),
+                        )
+                    }),
+                );
+                if support_weight.is_empty() {
+                    continue;
+                }
+                let piece = reweight_boolean_boundary_domain_with_support(&target, &support_weight);
+                token_candidate = Some(match token_candidate.take() {
+                    None => piece,
+                    Some(existing) => glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(
+                        existing,
+                        piece,
+                    ),
+                });
+                pieces += 1;
+            }
+            let token_candidate = token_candidate.unwrap_or_else(|| DWA::new(0, 0));
+            let forward = find_boundary_dwa_difference_with_default(&token_candidate, &exact)?;
+            let reverse = find_boundary_dwa_difference_with_default(&exact, &token_candidate)?;
+            let token_exact = forward.is_none() && reverse.is_none();
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_parent_token_domain] child={} rows={} token_signatures={} suffix_tokens={} pieces={} candidate_states={} candidate_transitions={} exact={} parent_domain_ms={:.3} finish_preimage_ms={:.3} child_preimage_ms={:.3} total_ms={:.3} forward={:?} reverse={:?}",
+                child,
+                delegations.iter().filter(|relation| relation.child_component == child).count(),
+                token_signatures.len(),
+                parent_domains.len(),
+                pieces,
+                token_candidate.num_states(),
+                token_candidate.num_transitions(),
+                token_exact,
+                parent_domain_ms,
+                finish_preimage_ms,
+                child_preimage_ms,
+                token_started_at.elapsed().as_secs_f64() * 1000.0,
+                forward,
+                reverse,
+            );
+            if !token_exact {
+                return Err(format!(
+                    "RETURN parent-token-domain construction differs for child {child}"
+                ));
+            }
+        }
+        total_declined += declined;
+        total_weighted_roots += weighted_roots.len();
+        total_domain_nodes += arena.node_count().saturating_sub(arena_nodes_before);
+        total_pair_nwa_states += pair_nwa.states().len();
+        total_pair_nwa_transitions += pair_nwa.num_transitions();
+        total_output_states += exact.states().len();
+        total_output_transitions += exact.num_transitions();
+        if log_builder {
+            eprintln!("[glrmask/profile][static_child_return_exact_child] child={} signatures={} declined={} bundles={} cached_bundles={} characterized_bundles={} preimage_cache={} domain_nodes={} weighted_roots={} pair_states={} pair_transitions={} exact_states={} exact_transitions={} dp_ms={:.3} export_ms={:.3} remap_ms={:.3} normalize_ms={:.3} restrict_ms={:.3}", child, signatures.len(), declined, bundle_cache.len(), cached_terminal_bundles, characterized_bundles, preimage_cache.len(), arena.node_count(), weighted_roots.len(), pair_nwa.states().len(), pair_nwa.num_transitions(), exact.states().len(), exact.num_transitions(), dp_ms, export_ms, remap_ms, normalize_ms, restrict_ms);
+        }
+        exact_by_child.insert(child, exact);
+    }
+
+    if parallel_post {
+        let total_states = layout.total_states;
+        let post_results = return_post_jobs
+            .into_par_iter()
+            .map(|job| -> Result<(ReturnPostJob, DWA, usize, usize, f64, f64), String> {
+                let normalize_started_at = Instant::now();
+                let exact = normalize_weighted_parser_stack_nwa_preserving_explicit_for_parser_state_count(
+                    total_states,
+                    &job.recursive_nwa,
+                );
+                let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                let restrict_started_at = Instant::now();
+                let exact = restrict_boundary_dwa_first_component(
+                    &exact,
+                    job.child_start..job.child_end,
+                );
+                // Runtime segmented shards are evaluated only on parser-reachable GSS stacks. A child-owned reachable stack is already in the image of its CALL; no second finite-word frame intersection is needed here. The RETURN DWA uses prefix-final stack semantics, under which a conventional language intersection with a deeper frame is unsound.
+                let exact = exact;
+                let restrict_ms = restrict_started_at.elapsed().as_secs_f64() * 1000.0;
+                let has_language = exact.states().iter().any(|state| {
+                    state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+                        || state
+                            .transitions
+                            .values()
+                            .any(|(_, weight)| !weight.is_empty())
+                });
+                if job.weighted_roots != 0 && !has_language {
+                    return Err(format!(
+                        "parallel shared RETURN-suffix child {} lost all exact weighted roots after child-component restriction",
+                        job.child,
+                    ));
+                }
+                let exact_states = exact.states().len();
+                let exact_transitions = exact.num_transitions();
+                Ok((job, exact, exact_states, exact_transitions, normalize_ms, restrict_ms))
+            })
+            .collect::<Vec<_>>();
+        for result in post_results {
+            let (job, exact, exact_states, exact_transitions, normalize_ms, restrict_ms) = result?;
+            total_output_states += exact_states;
+            total_output_transitions += exact_transitions;
+            if log_builder {
+                eprintln!("[glrmask/profile][static_child_return_exact_child] child={} signatures={} declined={} bundles={} cached_bundles={} characterized_bundles={} preimage_cache={} domain_nodes={} weighted_roots={} pair_states={} pair_transitions={} exact_states={} exact_transitions={} dp_ms={:.3} export_ms={:.3} remap_ms={:.3} normalize_ms={:.3} restrict_ms={:.3} pre_ms={:.3}", job.child, job.signatures, job.declined, job.bundles, job.cached_terminal_bundles, job.characterized_bundles, job.preimage_cache, job.arena_nodes, job.weighted_roots, job.pair_nwa_states, job.pair_nwa_transitions, exact_states, exact_transitions, job.dp_ms, job.export_ms, job.remap_ms, normalize_ms, restrict_ms, job.pre_ms);
+            }
+            exact_by_child.insert(job.child, exact);
+        }
+    }
+    if log_builder {
+        eprintln!("[glrmask/profile][static_child_return_exact] rows={} signatures={} declined={} weighted_roots={} domain_nodes={} pair_states={} pair_transitions={} exact_states={} exact_transitions={} total_ms={:.3}", delegations.len(), total_signatures, total_declined, total_weighted_roots, total_domain_nodes, total_pair_nwa_states, total_pair_nwa_transitions, total_output_states, total_output_transitions, total_started_at.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(exact_by_child)
+}
+#[cfg(feature = "internal-api")]
+fn validate_static_shard_return_suffix_delegation(
+    constraint: &Constraint,
+    shards: &[PublishedStaticBoundaryShard],
+    delegations: &[BoundaryReturnSuffixDelegation],
+    _terminal_offsets: &[u32],
+    vocab: &Vocab,
+) -> Result<(), String> {
+    let layout = constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "RETURN-suffix validator requires recursive parser layout".to_owned())?;
+    if _terminal_offsets.len() <= 1 || layout.component_offsets.len() <= 1 {
+        return Err("RETURN-suffix validator requires parent plus child components".to_owned());
+    }
+    let tsid_count = constraint.internal_tsid_count() as u32;
+
+    // Start with one deterministic proof cell. Once this semantic factorization
+    // is established, the same construction can be grouped over all relations.
+    let seed = delegations
+        .iter()
+        .find(|relation| relation.child_component == 1 && !relation.prefix_local_terminals.is_empty())
+        .or_else(|| delegations.iter().find(|relation| !relation.prefix_local_terminals.is_empty()))
+        .ok_or_else(|| "RETURN-suffix validator found no nonempty child prefix relation".to_owned())?;
+    let child = seed.child_component;
+    let fused_token = seed.fused_token;
+    let prefix = seed.prefix_local_terminals.clone();
+    let rows = delegations
+        .iter()
+        .filter(|relation| {
+            relation.child_component == child
+                && relation.fused_token == fused_token
+                && relation.prefix_local_terminals == prefix
+        })
+        .collect::<Vec<_>>();
+    let suffix_tokens = rows
+        .iter()
+        .map(|relation| relation.parent_suffix_token)
+        .collect::<BTreeSet<_>>();
+    let mut support = RangeSetBlaze::<u32>::new();
+    for relation in &rows {
+        let Some(&tsid) = constraint.state_to_internal_tsid.get(relation.start_state as usize) else {
+            return Err(format!(
+                "RETURN-suffix witness start state {} lies outside composed TSID map",
+                relation.start_state,
+            ));
+        };
+        if tsid == u32::MAX {
+            return Err(format!(
+                "RETURN-suffix witness start state {} has no composed TSID",
+                relation.start_state,
+            ));
+        }
+        support.insert(tsid);
+    }
+    if support.is_empty() {
+        return Err("RETURN-suffix validator derived empty start support".to_owned());
+    }
+
+    let parent = constraint
+        .recursive_leaf_constraint(0)
+        .ok_or_else(|| "RETURN-suffix validator parent is not an intact leaf".to_owned())?;
+    if let Some(&suffix_token) = suffix_tokens.iter().next() {
+        if let Some(suffix_bytes) = vocab.get(suffix_token) {
+            let (end_states, matches) = parent
+                .tokenizer
+                .execute_summary_from_state(suffix_bytes, parent.tokenizer.start_state());
+            let futures = end_states
+                .iter()
+                .flat_map(|&state| parent.tokenizer.possible_future_terminals_iter(state))
+                .collect::<BTreeSet<_>>();
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_lexical] fused_token={} suffix_token={} suffix_len={} boundary_first_parent_terminals={:?} parent_reset_matches={:?} parent_reset_future_terminals={:?}",
+                fused_token,
+                suffix_token,
+                suffix_bytes.len(),
+                rows.iter().map(|relation| relation.first_parent_local_terminal).collect::<BTreeSet<_>>(),
+                matches,
+                futures,
+            );
+        }
+    }
+    let child_constraint = constraint
+        .recursive_leaf_constraint(child as usize)
+        .ok_or_else(|| format!("RETURN-suffix validator child {child} is not an intact leaf"))?;
+    let link = layout
+        .links
+        .iter()
+        .find(|link| link.parent_component == 0 && link.child_component == child)
+        .ok_or_else(|| format!("RETURN-suffix validator has no parent->{child} link"))?;
+
+    // Work in the tiny two-component parser coordinate. The parent suffix DWA
+    // is already parent-local, and the pair provider bakes exact FINISH/RETURN
+    // closure into each ordinary child-terminal action.
+    eprintln!("[glrmask/validate][static_shard_return_suffix_resets] parent_tokenizer_start={} parent_runtime_commit_start={}", parent.tokenizer.start_state(), parent.runtime_commit_initial_state());
+    let mut raw_survivors_t16 = Vec::new();
+    let mut raw_survivors_t20 = Vec::new();
+    let mut raw_survivors_t11 = Vec::new();
+    let mut raw_accepting_rows = Vec::new();
+    {
+        use crate::compiler::glr::accumulator::TerminalsDisallowed;
+        use crate::compiler::glr::parser::{ParserGSS, advance_stacks};
+        for below in 0..parent.table.num_states {
+            let mut parser = ParserGSS::from_stacks(&[(vec![0, below, 535], TerminalsDisallowed::new())]);
+            if parent.ignore_terminal != Some(16) {
+                parser = advance_stacks(&parent.table, &parser, 16);
+            }
+            let s16 = parser.to_stacks(16).unwrap_or_default();
+            if !s16.is_empty() {
+                raw_survivors_t16.push(below);
+                let mut parser20 = parser.clone();
+                if parent.ignore_terminal != Some(20) {
+                    parser20 = advance_stacks(&parent.table, &parser20, 20);
+                }
+                let s20 = parser20.to_stacks(16).unwrap_or_default();
+                if !s20.is_empty() {
+                    raw_survivors_t20.push(below);
+                    let mut parser11 = parser20.clone();
+                    if parent.ignore_terminal != Some(11) {
+                        parser11 = advance_stacks(&parent.table, &parser11, 11);
+                    }
+                    let s11 = parser11.to_stacks(16).unwrap_or_default();
+                    if !s11.is_empty() {
+                        raw_survivors_t11.push(below);
+                        raw_accepting_rows.push((below, s11));
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/validate][static_shard_return_suffix_parent_direct] total_parent_states={} state535_t16={:?} t16_survivors_count={} t16_survivors={:?} t20_survivors_count={} t20_survivors={:?} t11_survivors_count={} t11_survivors={:?} accepting_rows={:?}",
+            parent.table.num_states,
+            parent.table.action(535, 16),
+            raw_survivors_t16.len(),
+            raw_survivors_t16,
+            raw_survivors_t20.len(),
+            raw_survivors_t20,
+            raw_survivors_t11.len(),
+            raw_survivors_t11,
+            raw_accepting_rows,
+        );
+        let mut incoming_216_actions = Vec::<(u32, u32, String)>::new();
+        for (source, row) in parent.table.action.iter().enumerate() {
+            for (terminal, action) in row {
+                let hits = match action {
+                    Action::Shift(target, _) => *target == 216,
+                    Action::Split { shift: Some((target, _)), .. } => *target == 216,
+                    _ => false,
+                };
+                if hits {
+                    incoming_216_actions.push((source as u32, terminal, format!("{action:?}")));
+                }
+            }
+        }
+        let mut incoming_216_gotos = Vec::<(u32, u32, bool)>::new();
+        for (source, row) in parent.table.goto.iter().enumerate() {
+            for (&nonterminal, &(target_state, replace)) in row {
+                if target_state == 216 {
+                    incoming_216_gotos.push((source as u32, nonterminal, replace));
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/validate][static_shard_return_suffix_incoming_216] actions={:?} gotos={:?}",
+            incoming_216_actions, incoming_216_gotos,
+        );
+    }
+    let mut target_domains = suffix_tokens
+        .iter()
+        .filter_map(|&suffix_token| {
+            scoped_component_token_boolean_domain_at_tokenizer_state(
+                parent,
+                0,
+                suffix_token,
+                parent.tokenizer.start_state(),
+            )
+                .ok()
+                .filter(|domain| {
+                    domain
+                        .states()
+                        .iter()
+                        .any(|state| state.final_weight.is_some() || !state.transitions.is_empty())
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut target = target_domains
+        .drain(..)
+        .next()
+        .ok_or_else(|| format!("RETURN-suffix token {fused_token} has no reusable parent suffix domain"))?;
+    for domain in target_domains {
+        target = glrmask_parser_dwa::__private::merge::union_two_parser_dwas_direct(target, domain);
+    }
+    let parent_suffix_domain = target.clone();
+
+    let pair = RecursivePairParserTables { parent, child: child_constraint };
+    let local_link = ScopedSubgrammarLink {
+        parent_component: 0,
+        slot_terminal: link.slot_terminal,
+        child_component: 1,
+        child_start: link.child_start,
+        return_pop: link.return_pop,
+        child_start_nullable: link.child_start_nullable,
+    };
+    let provider = DisjointComponentActionProvider::new(&pair, std::slice::from_ref(&local_link))?;
+    let pair_state_count = parent.table.num_states + child_constraint.table.num_states;
+
+    // Materialize FINISH itself as one synthetic ordinary terminal. Repeated EOF
+    // reductions look up that same symbol after goto; the eventual RETURN is
+    // therefore part of this one exact stack-effect relation, with no Entry/CALL
+    // or other control closure mixed in.
+    let mut preimage_ms = 0.0f64;
+    let finish_table = materialize_scoped_provider_symbol_as_ordinary_table(
+        &provider,
+        ScopedParserSymbol::Finish { component: 1 },
+    )?;
+    let finish_selected = [true];
+    let finish_characterizations = characterize_selected_terminals_for_terminal_count(
+        &finish_table,
+        1,
+        &finish_selected,
+    );
+    let finish_templates = Templates::from_characterizations(&finish_characterizations);
+    let finish_bundle = build_boolean_terminal_bundle_nwa(&finish_templates, &[0])
+        .ok_or_else(|| "RETURN-suffix has no exact FINISH bundle".to_owned())?;
+    let (after_finish, finish_profile) =
+        build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+            pair_state_count,
+            &finish_bundle,
+            &target,
+        );
+    preimage_ms += finish_profile.total_ms;
+    target = after_finish.ok_or_else(|| "RETURN-suffix exact FINISH preimage declined".to_owned())?;
+    let after_finish_domain = target.clone();
+
+    // Now prepend the parser-visible child terminals themselves. These are also
+    // materialized as isolated provider operations: no leading FINISH/ENTRY
+    // closure can contaminate the lexical child prefix.
+    for &local_terminal in prefix.iter().rev() {
+        let terminal_table = materialize_scoped_provider_symbol_as_ordinary_table(
+            &provider,
+            ScopedParserSymbol::Terminal {
+                component: 1,
+                terminal: local_terminal,
+            },
+        )?;
+        let terminal_selected = [true];
+        let characterizations = characterize_selected_terminals_for_terminal_count(
+            &terminal_table,
+            1,
+            &terminal_selected,
+        );
+        let templates = Templates::from_characterizations(&characterizations);
+        let bundle = build_boolean_terminal_bundle_nwa(&templates, &[0])
+            .ok_or_else(|| format!(
+                "RETURN-suffix has no exact bundle for child terminal {local_terminal}"
+            ))?;
+        let (next, profile) =
+            build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+                pair_state_count,
+                &bundle,
+                &target,
+            );
+        preimage_ms += profile.total_ms;
+        target = next.ok_or_else(|| {
+            format!("RETURN-suffix preimage declined for child terminal {local_terminal}")
+        })?;
+    }
+    let before_frame_domain = target.clone();
+
+    let parent_pair_states = parent.table.num_states;
+    let target = restrict_boundary_dwa_first_component(&target, parent_pair_states..pair_state_count);
+    let after_child_first_restriction_domain = target.clone();
+    let child_start = layout.component_offsets[child as usize];
+    let child_end = layout
+        .component_offsets
+        .get(child as usize + 1)
+        .copied()
+        .unwrap_or(layout.total_states);
+    let target = remap_pair_boolean_domain_to_recursive(
+        &target,
+        parent.table.num_states,
+        child_constraint.table.num_states,
+        layout.component_offsets[0],
+        child_start,
+    )?;
+    let after_pair_remap_domain = target.clone();
+    let call_frame = call_image_frame_filter_dwa(
+        constraint,
+        &layout.component_offsets,
+        link,
+    )?;
+    let target = intersect_boundary_dwa_finite_word_with_boolean_filter(&target, &call_frame);
+    let after_call_frame_domain = target.clone();
+    let derived_boolean = target.clone();
+    let derived = reweight_boolean_boundary_domain(&derived_boolean, fused_token, &support);
+
+    let reference_shard = shards
+        .iter()
+        .find(|shard| shard.start_component == child && shard.first_foreign_component.is_none())
+        .ok_or_else(|| format!("RETURN-suffix validator missing child shard {child}"))?;
+    let reference_parser = reference_shard
+        .boundary
+        .recursive_parser_dwa
+        .as_ref()
+        .ok_or_else(|| format!("RETURN-suffix child shard {child} lacks recursive DWA"))?;
+    let reference = remap_boundary_parser_tokens_preserve_tsids(
+        reference_parser,
+        &reference_shard.boundary.internal_token_to_originals,
+        &BTreeSet::from([fused_token]),
+        tsid_count,
+    );
+    let reference = restrict_boundary_dwa_first_component(&reference, child_start..child_end);
+    // Child-start shards are only observed on stacks introduced by this CALL.
+    // Compare on that exact visible frame language rather than on impossible
+    // arbitrary parent tails accepted by the authoritative repair DWA.
+    let reference = intersect_boundary_dwa_finite_word_with_boolean_filter(&reference, &call_frame);
+    let reference_boolean = booleanize_boundary_dwa(&reference);
+    let boolean_forward = find_boundary_dwa_difference_with_default(&derived_boolean, &reference_boolean)?;
+    let boolean_reverse = find_boundary_dwa_difference_with_default(&reference_boolean, &derived_boolean)?;
+
+    let forward = find_boundary_dwa_difference_with_default(&derived, &reference)?;
+    let reverse = find_boundary_dwa_difference_with_default(&reference, &derived)?;
+    let exact = forward.is_none() && reverse.is_none();
+    if let Some(word) = forward.as_ref().or(reverse.as_ref()) {
+        let derived_weight = eval_boundary_dwa_with_default(&derived, word);
+        let reference_weight = eval_boundary_dwa_with_default(&reference, word);
+        let first_parent = word.iter().position(|&label| {
+            label >= 0 && (label as u32) < child_start
+        });
+        let parent_suffix_weight = first_parent
+            .map(|index| eval_boundary_dwa_with_default(&parent_suffix_domain, &word[index..]));
+        let pair_word = word
+            .iter()
+            .map(|&label| {
+                if label == DEFAULT_LABEL {
+                    label
+                } else if label >= child_start as i32 && label < child_end as i32 {
+                    label - child_start as i32 + parent.table.num_states as i32
+                } else {
+                    label
+                }
+            })
+            .collect::<Vec<_>>();
+        let after_finish_weight = eval_boundary_dwa_with_default(&after_finish_domain, &pair_word);
+        let before_frame_weight = eval_boundary_dwa_with_default(&before_frame_domain, &pair_word);
+        eprintln!(
+            "[glrmask/validate][static_shard_return_suffix_weight_witness] word={:?} pair_word={:?} first_parent={:?} parent_suffix_weight={:?} after_finish_weight={:?} before_frame_weight={:?} derived_weight={:?} reference_weight={:?}",
+            word, pair_word, first_parent, parent_suffix_weight, after_finish_weight, before_frame_weight, derived_weight, reference_weight,
+        );
+        if word.contains(&DEFAULT_LABEL) {
+            let mut concrete_examples = Vec::new();
+            for concrete_label in 0..layout.total_states {
+                let concrete_word = word
+                    .iter()
+                    .map(|&label| if label == DEFAULT_LABEL { concrete_label as i32 } else { label })
+                    .collect::<Vec<_>>();
+                let concrete_derived = eval_boundary_dwa_with_default(&derived, &concrete_word);
+                let concrete_reference = eval_boundary_dwa_with_default(&reference, &concrete_word);
+                if concrete_derived != concrete_reference {
+                    let owner = layout
+                        .component_offsets
+                        .partition_point(|&offset| offset <= concrete_label)
+                        .saturating_sub(1);
+                    concrete_examples.push((concrete_label, owner, concrete_derived, concrete_reference));
+                    if concrete_examples.len() >= 12 { break; }
+                }
+            }
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_concrete_default] examples={:?}",
+                concrete_examples,
+            );
+        }
+    }
+    {
+        let pair_940 = 940 - child_start as i32 + parent.table.num_states as i32;
+        let pair_939 = 939 - child_start as i32 + parent.table.num_states as i32;
+
+        // Direct operational check for the current deeper-tail mismatch. This
+        // avoids guessing the stack seen between the child terminal and FINISH.
+        if 554 < parent.table.num_states {
+            use crate::compiler::glr::accumulator::TerminalsDisallowed;
+            use crate::compiler::glr::parser::{ParserGSS, advance_stacks, advance_stacks_with_provider};
+            let direct_source = ParserGSS::from_stacks(&[(
+                vec![554, 21, 535, pair_939 as u32, pair_940 as u32],
+                TerminalsDisallowed::new(),
+            )]);
+            let direct_after_child = advance_stacks_with_provider(
+                &provider,
+                direct_source,
+                ScopedParserSymbol::Terminal { component: 1, terminal: prefix[0] },
+            );
+            let direct_after_child_stacks = direct_after_child.to_stacks(64).unwrap_or_default();
+            let direct_after_finish = advance_stacks_with_provider(
+                &provider,
+                direct_after_child,
+                ScopedParserSymbol::Finish { component: 1 },
+            );
+            let direct_after_finish_stacks = direct_after_finish.to_stacks(64).unwrap_or_default();
+            let finish_suffix_weights = direct_after_finish_stacks
+                .iter()
+                .map(|(stack, _)| {
+                    let top_first = stack.iter().rev().map(|&state| state as i32).collect::<Vec<_>>();
+                    (stack.clone(), eval_boundary_dwa_with_default(&parent_suffix_domain, &top_first))
+                })
+                .collect::<Vec<_>>();
+            let after_child_finish_preimage_weights = direct_after_child_stacks
+                .iter()
+                .map(|(stack, _)| {
+                    let top_first = stack.iter().rev().map(|&state| state as i32).collect::<Vec<_>>();
+                    (stack.clone(), eval_boundary_dwa_with_default(&after_finish_domain, &top_first))
+                })
+                .collect::<Vec<_>>();
+            let source_top_first = [pair_940, pair_939, 535, 21, 554];
+            let source_child_preimage_weight =
+                eval_boundary_dwa_with_default(&before_frame_domain, &source_top_first);
+
+            let terminal_table = materialize_scoped_provider_symbol_as_ordinary_table(
+                &provider,
+                ScopedParserSymbol::Terminal { component: 1, terminal: prefix[0] },
+            )?;
+            let operational_source = ParserGSS::from_stacks(&[(
+                vec![554, 21, 535, pair_939 as u32, pair_940 as u32],
+                TerminalsDisallowed::new(),
+            )]);
+            let materialized_after_child = advance_stacks(&terminal_table, &operational_source, 0);
+            let materialized_after_child_stacks = materialized_after_child.to_stacks(64).unwrap_or_default();
+            let materialized_after_child_weights = materialized_after_child_stacks.iter().map(|(stack, _)| {
+                let top_first = stack.iter().rev().map(|&state| state as i32).collect::<Vec<_>>();
+                (stack.clone(), eval_boundary_dwa_with_default(&after_finish_domain, &top_first))
+            }).collect::<Vec<_>>();
+            let selected = [true];
+            let characterizations = characterize_selected_terminals_for_terminal_count(&terminal_table, 1, &selected);
+            let templates = Templates::from_characterizations(&characterizations);
+            let generic_preimage_nwa = build_terminal_bundle_preimage_domain_nwa(
+                &terminal_table, &templates, &[0], &after_finish_domain.to_nwa(),
+            );
+            let generic_preimage_weight = generic_preimage_nwa.as_ref().map(|nwa| {
+                let generic = normalize_parser_stack_domain_nwa_for_parser_state_count(pair_state_count, nwa);
+                eval_boundary_dwa_with_default(&generic, &source_top_first)
+            });
+            let generic_accept_path = generic_preimage_nwa.as_ref().and_then(|nwa| {
+                use std::collections::VecDeque;
+                let word = source_top_first.as_slice();
+                type Key = (u32, usize);
+                let mut queue = VecDeque::<Key>::new();
+                let mut pred = FxHashMap::<Key, Option<(Key, String)>>::default();
+                for &start in nwa.start_states() {
+                    let key = (start, 0usize);
+                    if pred.insert(key, None).is_none() {
+                        queue.push_back(key);
+                    }
+                }
+                let mut found = None;
+                while let Some((state_id, index)) = queue.pop_front() {
+                    let state = &nwa.states()[state_id as usize];
+                    if state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()) {
+                        found = Some((state_id, index));
+                        break;
+                    }
+                    for (target, weight) in &state.epsilons {
+                        if weight.is_empty() { continue; }
+                        let next = (*target, index);
+                        if !pred.contains_key(&next) {
+                            pred.insert(next, Some(((state_id, index), format!("eps->{target}"))));
+                            queue.push_back(next);
+                        }
+                    }
+                    if index < word.len() {
+                        let actual = word[index];
+                        for label in [actual, DEFAULT_LABEL] {
+                            if label == DEFAULT_LABEL && actual == DEFAULT_LABEL { continue; }
+                            let Some(targets) = state.transitions.get(&label) else { continue; };
+                            for (target, weight) in targets {
+                                if weight.is_empty() { continue; }
+                                let next = (*target, index + 1);
+                                if !pred.contains_key(&next) {
+                                    pred.insert(next, Some(((state_id, index), format!("read {actual} via {label}->{target}"))));
+                                    queue.push_back(next);
+                                }
+                            }
+                        }
+                    }
+                }
+                found.map(|mut key| {
+                    let mut steps = Vec::<String>::new();
+                    steps.push(format!("FINAL state={} index={}", key.0, key.1));
+                    while let Some(Some((previous, edge))) = pred.get(&key).cloned() {
+                        steps.push(format!("state={} index={} {edge}", previous.0, previous.1));
+                        key = previous;
+                    }
+                    steps.reverse();
+                    steps
+                })
+            });
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_generic_accept_path] {:?}",
+                generic_accept_path,
+            );
+            let local_state = pair_940 as u32 - parent.table.num_states;
+            let child_forwarded = child_constraint.table.forwarded_shifts.contains(&(local_state, prefix[0]));
+
+            // Independent negative-free denotational oracle for this exact
+            // semantic sequence: child terminal 10; FINISH(child); parent
+            // terminals 16,20,11. Start from the universal postcondition and
+            // take exact relational preimages right-to-left.
+            let mut shared = SharedBooleanParserDomains::new();
+            let mut shared_root = SharedBooleanParserDomains::UNIVERSAL;
+            let suffix_paths = rows
+                .iter()
+                .map(|relation| relation.parent_suffix_local_terminals.clone())
+                .collect::<BTreeSet<_>>();
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_exact_paths] child={} fused_token={} prefix={:?} suffix_paths={:?}",
+                child, fused_token, prefix, suffix_paths,
+            );
+            let seed_suffix = seed.parent_suffix_local_terminals.clone();
+            let mut semantic_symbols = Vec::<ScopedParserSymbol>::new();
+            semantic_symbols.extend(seed_suffix.iter().rev().copied().map(|terminal| {
+                ScopedParserSymbol::Terminal { component: 0, terminal }
+            }));
+            semantic_symbols.push(ScopedParserSymbol::Finish { component: child });
+            semantic_symbols.extend(prefix.iter().rev().copied().map(|terminal| {
+                ScopedParserSymbol::Terminal { component: child, terminal }
+            }));
+            let mut shared_declined = false;
+            for symbol in semantic_symbols {
+                let table = materialize_scoped_provider_symbol_as_ordinary_table(&provider, symbol)?;
+                let selected = [true];
+                let chars = characterize_selected_terminals_for_terminal_count(&table, 1, &selected);
+                let templates = Templates::from_characterizations(&chars);
+                let Some(bundle) = build_boolean_terminal_bundle_nwa(&templates, &[0]) else {
+                    shared_declined = true;
+                    break;
+                };
+                let Some(next) = shared.preimage_bundle(&bundle, shared_root) else {
+                    shared_declined = true;
+                    break;
+                };
+                shared_root = next;
+            }
+            let shared_raw_dwa = shared.to_dwa(shared_root);
+            let shared_invalid_weight = eval_boundary_dwa_with_default(&shared_raw_dwa, &source_top_first);
+            let valid_source_top_first = [pair_940, pair_939, 535, 21, 0];
+            let shared_valid_weight = eval_boundary_dwa_with_default(&shared_raw_dwa, &valid_source_top_first);
+            let shared_final_root = shared.finalize_prefix_domain(shared_root);
+            let shared_final_dwa = shared.to_dwa(shared_final_root);
+            let shared_final_invalid_weight = eval_boundary_dwa_with_default(&shared_final_dwa, &source_top_first);
+            let shared_final_valid_weight = eval_boundary_dwa_with_default(&shared_final_dwa, &valid_source_top_first);
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_shared_oracle] declined={} nodes={} raw_invalid={:?} raw_valid={:?} finalized_invalid={:?} finalized_valid={:?}",
+                shared_declined, shared.node_count(), shared_invalid_weight, shared_valid_weight,
+                shared_final_invalid_weight, shared_final_valid_weight,
+            );
+            let mut semantic_forward = Vec::<ScopedParserSymbol>::new();
+            semantic_forward.extend(prefix.iter().copied().map(|terminal| {
+                ScopedParserSymbol::Terminal { component: child, terminal }
+            }));
+            semantic_forward.push(ScopedParserSymbol::Finish { component: child });
+            semantic_forward.extend(seed_suffix.iter().copied().map(|terminal| {
+                ScopedParserSymbol::Terminal { component: 0, terminal }
+            }));
+            let mut operational_mismatches = Vec::<(u32, u32, bool, bool)>::new();
+            let exhaustive_started = Instant::now();
+            for tail in [0u32, 554u32] {
+                if tail >= parent.table.num_states { continue; }
+                for below in 0..parent.table.num_states {
+                    let mut operational = ParserGSS::from_stacks(&[(
+                        vec![tail, below, 535, pair_939 as u32, pair_940 as u32],
+                        TerminalsDisallowed::new(),
+                    )]);
+                    for &symbol in &semantic_forward {
+                        operational = advance_stacks_with_provider(&provider, operational, symbol);
+                    }
+                    let provider_accepts = operational.to_stacks(1).map_or(true, |stacks| !stacks.is_empty());
+                    let top_first = [pair_940, pair_939, 535, below as i32, tail as i32];
+                    let shared_accepts = !eval_boundary_dwa_with_default(&shared_final_dwa, &top_first).is_empty();
+                    if provider_accepts != shared_accepts {
+                        operational_mismatches.push((below, tail, provider_accepts, shared_accepts));
+                        if operational_mismatches.len() >= 16 { break; }
+                    }
+                }
+                if operational_mismatches.len() >= 16 { break; }
+            }
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_shared_operational_scan] checked={} mismatches={:?} ms={:.3}",
+                parent.table.num_states as usize * 2, operational_mismatches, exhaustive_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_child_terminal_crosscheck] materialized_after_child={:?} materialized_after_child_weights={:?} generic_preimage_weight={:?} direct_preimage_weight={:?} child_local_state={} child_forwarded={}",
+                materialized_after_child_stacks, materialized_after_child_weights, generic_preimage_weight,
+                source_child_preimage_weight, local_state, child_forwarded,
+            );
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_provider_direct_554] source_bottom_first={:?} after_child={:?} after_finish={:?} parent_suffix_weights={:?} after_child_finish_preimage_weights={:?} source_child_preimage_weight={:?}",
+                vec![554u32, 21, 535, pair_939 as u32, pair_940 as u32],
+                direct_after_child_stacks,
+                direct_after_finish_stacks,
+                finish_suffix_weights,
+                after_child_finish_preimage_weights,
+                source_child_preimage_weight,
+            );
+        }
+
+        let mut parent_suffix_accepting_x = Vec::new();
+        let mut derived_accepting_x = Vec::new();
+        let mut reference_accepting_x = Vec::new();
+        for x in 0..parent.table.num_states {
+            let parent_word = [535, x as i32, 0];
+            let composed_word = [940, 939, 535, x as i32, 0];
+            let p_w = eval_boundary_dwa_with_default(&parent_suffix_domain, &parent_word);
+            if !p_w.is_empty() {
+                parent_suffix_accepting_x.push(x);
+            }
+            let d_w = eval_boundary_dwa_with_default(&derived, &composed_word);
+            if !d_w.is_empty() {
+                derived_accepting_x.push(x);
+            }
+            let r_w = eval_boundary_dwa_with_default(&reference, &composed_word);
+            if !r_w.is_empty() {
+                reference_accepting_x.push(x);
+            }
+        }
+        eprintln!(
+            "[glrmask/validate][static_shard_return_suffix_full_scan] raw_lr_accepting={:?} parent_suffix_accepting={:?} derived_accepting={:?} reference_accepting_count={} reference_accepting_sample={:?}",
+            raw_survivors_t11,
+            parent_suffix_accepting_x,
+            derived_accepting_x,
+            reference_accepting_x.len(),
+            &reference_accepting_x[..reference_accepting_x.len().min(10)],
+        );
+
+        let mut test_xs = raw_survivors_t11.clone();
+        for &x in &parent_suffix_accepting_x {
+            if !test_xs.contains(&x) {
+                test_xs.push(x);
+            }
+        }
+        for &x in &derived_accepting_x {
+            if !test_xs.contains(&x) {
+                test_xs.push(x);
+            }
+        }
+        // Include a few representative rejecting X states
+        for x in [0, 1, 2, 3, 4, 10, 20, 22, 100, 535, parent.table.num_states - 1] {
+            if x < parent.table.num_states && !test_xs.contains(&x) {
+                test_xs.push(x);
+            }
+        }
+        test_xs.sort_unstable();
+        for &x in &test_xs {
+            let raw_lr = raw_survivors_t11.contains(&x);
+            let parent_word = [535, x as i32, 0];
+            let pair_finish_word = [pair_939, 535, x as i32, 0];
+            let pair_word = [pair_940, pair_939, 535, x as i32, 0];
+            let composed_word = [940, 939, 535, x as i32, 0];
+            let parent_suffix_w = eval_boundary_dwa_with_default(&parent_suffix_domain, &parent_word);
+            let after_finish_w = eval_boundary_dwa_with_default(&after_finish_domain, &pair_finish_word);
+            let before_frame_w = eval_boundary_dwa_with_default(&before_frame_domain, &pair_word);
+            let after_restrict_w = eval_boundary_dwa_with_default(&after_child_first_restriction_domain, &pair_word);
+            let after_remap_w = eval_boundary_dwa_with_default(&after_pair_remap_domain, &composed_word);
+            let after_frame_w = eval_boundary_dwa_with_default(&after_call_frame_domain, &composed_word);
+            let derived_bool_w = eval_boundary_dwa_with_default(&derived_boolean, &composed_word);
+            let derived_w = eval_boundary_dwa_with_default(&derived, &composed_word);
+            let reference_w = eval_boundary_dwa_with_default(&reference, &composed_word);
+            let reference_bool_w = eval_boundary_dwa_with_default(&reference_boolean, &composed_word);
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_witness_eval] X={} raw_lr={} parent_suffix={:?} after_finish={:?} before_frame={:?} after_restrict={:?} after_remap={:?} after_frame={:?} derived_bool={:?} derived={:?} reference={:?} reference_bool={:?}",
+                x, raw_lr, parent_suffix_w, after_finish_w, before_frame_w, after_restrict_w, after_remap_w, after_frame_w, derived_bool_w, derived_w, reference_w, reference_bool_w
+            );
+        }
+    }
+    eprintln!(
+        "[glrmask/validate][static_shard_return_suffix_delegation] child={} fused_token={} prefix={:?} suffix_tokens={:?} support_tsids={} derived_states={} reference_states={} preimage_ms={:.3} boolean_exact={} boolean_forward={:?} boolean_reverse={:?} exact={} forward={:?} reverse={:?}",
+        child,
+        fused_token,
+        prefix,
+        suffix_tokens,
+        support.len(),
+        derived.num_states(),
+        reference.num_states(),
+        preimage_ms,
+        boolean_forward.is_none() && boolean_reverse.is_none(),
+        boolean_forward,
+        boolean_reverse,
+        exact,
+        forward,
+        reverse,
+    );
+    if !exact {
+        return Err(format!(
+            "static shard RETURN-suffix delegation differs for child {child} token {fused_token}"
+        ));
+    }
+    Ok(())
 }
 
 fn publish_static_boundary_shard_work(
@@ -2462,6 +6673,7 @@ fn publish_static_boundary_shard_work(
     ensure_positive_runtime_parser_dwa(&parser_dwa)?;
     Ok(PublishedStaticBoundaryShard {
         start_component: work.start_component,
+        first_foreign_component: work.first_foreign_component,
         candidate_tokens: work.candidate_tokens,
         boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
             // Provider-native v25 static shards are compiled directly in the
@@ -2470,6 +6682,8 @@ fn publish_static_boundary_shard_work(
             parser_dwa: DWA::new(0, 0),
             compact_parser_dwa: None,
             recursive_parser_dwa: Some(parser_dwa),
+            recursive_compact_parser_dwa: None,
+            recursive_compact_tsid_map: Vec::new(),
             uses_composed_tsid_coordinate: true,
             tokenizer_state_to_tsid: Vec::new(),
             internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
@@ -2477,6 +6691,236 @@ fn publish_static_boundary_shard_work(
     })
 }
 
+
+fn publish_static_boundary_shard_work_without_table(
+    work: BoundaryShardWork,
+    num_parser_states: u32,
+    composed_tsid_count: usize,
+    first_label_range: Option<std::ops::Range<u32>>,
+) -> Result<PublishedStaticBoundaryShard, String> {
+    let BoundaryShardWork {
+        start_component,
+        first_foreign_component,
+        candidate_tokens,
+        parser,
+    } = work;
+    let shard_started_at = Instant::now();
+    let candidate = parser.materialize_positive_parser_without_table(false, num_parser_states, false)?;
+    let BoundaryRuntimeCandidate::Parser {
+        positive,
+        id_map,
+        template_cache: _,
+        build_ms: positive_build_ms,
+    } = candidate;
+    positive.ensure_positive()?;
+    if id_map.num_tsids() as usize != composed_tsid_count {
+        return Err(format!(
+            "static boundary shard {start_component} TSID coordinate differs from composed constraint: shard={} composed={composed_tsid_count}",
+            id_map.num_tsids(),
+        ));
+    }
+    let normalize_started_at = Instant::now();
+    let mut recursive_compact_parser_dwa = None::<SmallBoundaryDwa>;
+    let mut recursive_compact_tsid_map = Vec::<u32>::new();
+    let parser_dwa = match positive {
+        PositiveBoundaryParser::Dwa(dwa) => dwa,
+        PositiveBoundaryParser::Nwa(nwa) => {
+            let normalize_generic = || {
+                if let Some(range) = first_label_range.clone() {
+                    normalize_weighted_parser_stack_nwa_for_parser_state_count_and_first_label_range(
+                        num_parser_states,
+                        &nwa,
+                        range,
+                    )
+                } else {
+                    normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                        num_parser_states,
+                        &nwa,
+                    )
+                }
+            };
+            let use_quotient = std::env::var_os(
+                "GLRMASK_EXPERIMENT_STATIC_SHARD_SMALL_TSID_DETERMINIZER",
+            )
+            .is_some();
+            if first_label_range.is_some() {
+                normalize_generic()
+            } else if use_quotient {
+                let token_classes = id_map.num_internal_tokens() as usize;
+                if let Some((old_to_new, _)) = compute_boundary_tsid_behavior_quotient(
+                    &nwa,
+                    composed_tsid_count,
+                    token_classes,
+                ) {
+                    let quotient_tsid_count = old_to_new
+                        .iter()
+                        .copied()
+                        .max()
+                        .map_or(0, |value| value as usize + 1);
+                    if quotient_tsid_count <= 64 && token_classes <= 64 {
+                        let normalize_started_at = Instant::now();
+                        let generic_quotient = std::env::var_os(
+                            "GLRMASK_EXPERIMENT_STATIC_SHARD_GENERIC_TSID_QUOTIENT",
+                        )
+                        .is_some();
+                        let mut candidate = if generic_quotient {
+                            let mut quotient_nwa = nwa.clone();
+                            let tsid_map = old_to_new
+                                .iter()
+                                .map(|&class| vec![class])
+                                .collect::<Vec<_>>();
+                            let token_identity = (0..token_classes as u32)
+                                .map(|token| vec![token])
+                                .collect::<Vec<_>>();
+                            {
+                                let mut weights = quotient_nwa.weight_refs_mut();
+                                remap_weights_with_maps(
+                                    &mut weights,
+                                    &tsid_map,
+                                    &token_identity,
+                                    quotient_tsid_count,
+                                );
+                            }
+                            normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                                num_parser_states,
+                                &quotient_nwa,
+                            )
+                        } else {
+                            let compact_candidate = (quotient_tsid_count <= 16)
+                                .then(|| {
+                                    normalize_weighted_parser_stack_nwa_small_boundary_compact_for_parser_state_count(
+                                        &nwa,
+                                        num_parser_states,
+                                        quotient_tsid_count,
+                                        token_classes,
+                                        Some(&old_to_new),
+                                    )
+                                })
+                                .flatten();
+                            if let Some(compact) = compact_candidate {
+                                let candidate = compact.to_generic_dwa();
+                                recursive_compact_tsid_map = old_to_new.clone();
+                                recursive_compact_parser_dwa = Some(compact);
+                                candidate
+                            } else {
+                                normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+                                    num_parser_states,
+                                    &nwa,
+                                    quotient_tsid_count,
+                                    token_classes,
+                                    Some(&old_to_new),
+                                )
+                            }
+                        };
+                        let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                        let expand_started_at = Instant::now();
+                        let mut quotient_to_composed =
+                            vec![Vec::<u32>::new(); quotient_tsid_count];
+                        for (old, &class) in old_to_new.iter().enumerate() {
+                            quotient_to_composed[class as usize].push(old as u32);
+                        }
+                        let token_identity = (0..token_classes as u32)
+                            .map(|token| vec![token])
+                            .collect::<Vec<_>>();
+                        {
+                            let mut weights = candidate.weight_refs_mut();
+                            remap_weights_with_maps(
+                                &mut weights,
+                                &quotient_to_composed,
+                                &token_identity,
+                                composed_tsid_count,
+                            );
+                        }
+                        let expand_ms = expand_started_at.elapsed().as_secs_f64() * 1000.0;
+                        if std::env::var_os(
+                            "GLRMASK_VALIDATE_STATIC_SHARD_SMALL_TSID_DETERMINIZER",
+                        )
+                        .is_some()
+                        {
+                            let reference =
+                                normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                                    num_parser_states,
+                                    &nwa,
+                                );
+                            let forward = find_difference(&candidate, &reference).map_err(|error| {
+                                format!("static shard quotient forward validation failed: {error}")
+                            })?;
+                            let reverse = find_difference(&reference, &candidate).map_err(|error| {
+                                format!("static shard quotient reverse validation failed: {error}")
+                            })?;
+                            assert!(
+                                forward.is_none() && reverse.is_none(),
+                                "static shard quotient determinizer changed weighted language: forward={forward:?} reverse={reverse:?}",
+                            );
+                            eprintln!(
+                                "[glrmask/validate][static_shard_small_tsid_determinizer] exact=true old_tsids={} quotient_tsids={} tokens={} states={} transitions={}",
+                                composed_tsid_count,
+                                quotient_tsid_count,
+                                token_classes,
+                                candidate.num_states(),
+                                candidate.num_transitions(),
+                            );
+                        }
+                        if compose_profile_enabled() {
+                            eprintln!(
+                                "[glrmask/profile][static_shard_small_tsid_determinizer] old_tsids={} quotient_tsids={} tokens={} normalize_ms={normalize_ms:.3} expand_ms={expand_ms:.3} states={} transitions={}",
+                                composed_tsid_count,
+                                quotient_tsid_count,
+                                token_classes,
+                                candidate.num_states(),
+                                candidate.num_transitions(),
+                            );
+                        }
+                        candidate
+                    } else {
+                        normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                            num_parser_states,
+                            &nwa,
+                        )
+                    }
+                } else {
+                    normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                        num_parser_states,
+                        &nwa,
+                    )
+                }
+            } else {
+                normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                    num_parser_states,
+                    &nwa,
+                )
+            }
+        }
+    };
+    let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_static_boundary_shard_detail] component={} first_foreign={:?} candidates={} positive_build_ms={positive_build_ms:.3} normalize_ms={normalize_ms:.3} parser_states={} parser_transitions={} total_ms={:.3}",
+            start_component,
+            first_foreign_component,
+            candidate_tokens.len(),
+            parser_dwa.num_states(),
+            parser_dwa.num_transitions(),
+            shard_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    Ok(PublishedStaticBoundaryShard {
+        start_component,
+        first_foreign_component,
+        candidate_tokens,
+        boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
+            parser_dwa: DWA::new(0, 0),
+            compact_parser_dwa: None,
+            recursive_parser_dwa: Some(parser_dwa),
+            recursive_compact_parser_dwa,
+            recursive_compact_tsid_map,
+            uses_composed_tsid_coordinate: true,
+            tokenizer_state_to_tsid: Vec::new(),
+            internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
+        }),
+    })
+}
 
 fn publish_real_boundary_parser_work(
     work: BoundaryParserWork,
@@ -2527,10 +6971,7 @@ fn publish_boundary_parser_candidate_for_state_count(
         id_map: mut boundary_id_map,
         template_cache,
         build_ms: positive_build_ms,
-    } = candidate
-    else {
-        return Err("real boundary parser publication received non-parser candidate".into());
-    };
+    } = candidate;
     positive.ensure_positive()?;
     let tsid_quotient = positive.quotient_boundary_tsids(&mut boundary_id_map);
     let normalize_started_at = Instant::now();
@@ -2612,51 +7053,42 @@ fn publish_boundary_parser_candidate_for_state_count(
     })
 }
 
-fn compute_boundary_tsid_behavior_quotient(
-    nwa: &NWA,
+fn compute_boundary_tsid_behavior_quotient_from_weights<'a>(
+    weights: impl IntoIterator<Item = &'a Weight>,
     old_tsid_count: usize,
     token_classes: usize,
 ) -> Option<(Vec<u32>, usize)> {
     if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
         return None;
     }
+    let old_tsid_count_u32 = u32::try_from(old_tsid_count).ok()?;
     let mut unique_ids = FxHashMap::<usize, u16>::default();
     let mut unique_weights = Vec::<Weight>::new();
-    let mut register = |weight: &Weight| {
+    for weight in weights {
         if weight.is_full() || weight.is_empty() {
-            return;
+            continue;
         }
         let key = weight.ptr_key();
         if unique_ids.contains_key(&key) {
-            return;
+            continue;
         }
-        let Ok(index) = u16::try_from(unique_weights.len()) else {
-            return;
-        };
+        let index = u16::try_from(unique_weights.len()).ok()?;
         unique_ids.insert(key, index);
         unique_weights.push(weight.clone());
-    };
-    for state in nwa.states() {
-        if let Some(weight) = state.final_weight.as_ref() {
-            register(weight);
-        }
-        for (_, weight) in &state.epsilons {
-            register(weight);
-        }
-        for branches in state.transitions.values() {
-            for (_, weight) in branches {
-                register(weight);
-            }
-        }
     }
-    if unique_weights.len() > u16::MAX as usize {
-        return None;
-    }
-    type Signature = SmallVec<[(u16, u64); 4]>;
-    let mut signatures = vec![Signature::new(); old_tsid_count];
-    for (weight_index, weight) in unique_weights.iter().enumerate() {
+
+    // Every Weight is piecewise constant in the TSID coordinate. The old
+    // implementation expanded each range into every TSID's SmallVec signature,
+    // which is O(sum(range lengths)) object traffic even when only a handful of
+    // boundaries exist. Sweep the union of range boundaries instead: within one
+    // interval every weight has exactly the same token mask, hence every TSID
+    // has exactly the same behavior signature.
+    let mut breakpoints = vec![0u32, old_tsid_count_u32];
+    let mut ranges_by_weight = Vec::<Vec<(u32, u32, u64)>>::with_capacity(unique_weights.len());
+    for weight in &unique_weights {
+        let mut ranges = Vec::new();
         for (start, end, tokens) in weight.range_entries() {
-            if end as usize >= old_tsid_count {
+            if start > end || end as usize >= old_tsid_count {
                 return None;
             }
             let mut mask = 0u64;
@@ -2671,34 +7103,94 @@ fn compute_boundary_tsid_behavior_quotient(
             if mask == 0 {
                 continue;
             }
-            for tsid in start..=end {
-                signatures[tsid as usize].push((weight_index as u16, mask));
+            breakpoints.push(start);
+            if let Some(after) = end.checked_add(1)
+                && after < old_tsid_count_u32
+            {
+                breakpoints.push(after);
             }
+            ranges.push((start, end, mask));
         }
+        ranges.sort_unstable_by_key(|&(start, end, _)| (start, end));
+        ranges_by_weight.push(ranges);
     }
+    breakpoints.sort_unstable();
+    breakpoints.dedup();
+
+    type Signature = SmallVec<[(u16, u64); 4]>;
     let mut classes = FxHashMap::<Signature, u32>::default();
     let mut old_to_new = vec![0u32; old_tsid_count];
-    for (old_tsid, signature) in signatures.into_iter().enumerate() {
+    let mut cursors = vec![0usize; ranges_by_weight.len()];
+    for pair in breakpoints.windows(2) {
+        let start = pair[0];
+        let end_exclusive = pair[1];
+        if start >= end_exclusive {
+            continue;
+        }
+        let mut signature = Signature::new();
+        for (weight_index, ranges) in ranges_by_weight.iter().enumerate() {
+            let cursor = &mut cursors[weight_index];
+            while *cursor < ranges.len() && ranges[*cursor].1 < start {
+                *cursor += 1;
+            }
+            if let Some(&(range_start, range_end, mask)) = ranges.get(*cursor)
+                && range_start <= start
+                && start <= range_end
+            {
+                signature.push((weight_index as u16, mask));
+            }
+        }
         let next = classes.len() as u32;
         let class = *classes.entry(signature).or_insert(next);
-        old_to_new[old_tsid] = class;
+        old_to_new[start as usize..end_exclusive as usize].fill(class);
     }
     Some((old_to_new, unique_weights.len()))
 }
 
-
+fn compute_boundary_tsid_behavior_quotient(
+    nwa: &NWA,
+    old_tsid_count: usize,
+    token_classes: usize,
+) -> Option<(Vec<u32>, usize)> {
+    let weights = nwa.states().iter().flat_map(|state| {
+        state
+            .final_weight
+            .iter()
+            .chain(state.epsilons.iter().map(|(_, weight)| weight))
+            .chain(
+                state
+                    .transitions
+                    .values()
+                    .flat_map(|branches| branches.iter().map(|(_, weight)| weight)),
+            )
+    });
+    compute_boundary_tsid_behavior_quotient_from_weights(weights, old_tsid_count, token_classes)
+}
 
 fn compute_boundary_dwa_tsid_behavior_quotient(
     dwa: &DWA,
     old_tsid_count: usize,
     token_classes: usize,
 ) -> Option<(Vec<u32>, usize)> {
-    if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
+    compute_boundary_tsid_behavior_quotient_from_weights(
+        dwa.weight_refs(),
+        old_tsid_count,
+        token_classes,
+    )
+}
+
+
+fn compute_boundary_token_behavior_quotient_from_weights<'a>(
+    weights: impl IntoIterator<Item = &'a Weight>,
+    old_tsid_count: usize,
+    token_classes: usize,
+) -> Option<(Vec<u32>, usize)> {
+    if old_tsid_count == 0 || token_classes <= 1 || token_classes > 64 {
         return None;
     }
     let mut unique_ids = FxHashMap::<usize, u16>::default();
     let mut unique_weights = Vec::<Weight>::new();
-    for weight in dwa.weight_refs() {
+    for weight in weights {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
@@ -2706,44 +7198,115 @@ fn compute_boundary_dwa_tsid_behavior_quotient(
         if unique_ids.contains_key(&key) {
             continue;
         }
-        let Ok(index) = u16::try_from(unique_weights.len()) else {
-            return None;
-        };
+        let index = u16::try_from(unique_weights.len()).ok()?;
         unique_ids.insert(key, index);
         unique_weights.push(weight.clone());
     }
-    type Signature = SmallVec<[(u16, u64); 4]>;
-    let mut signatures = vec![Signature::new(); old_tsid_count];
+    let mut signatures = vec![Vec::<(u16, u32, u32)>::new(); token_classes];
     for (weight_index, weight) in unique_weights.iter().enumerate() {
         for (start, end, tokens) in weight.range_entries() {
-            if end as usize >= old_tsid_count {
+            if start > end || end as usize >= old_tsid_count {
                 return None;
             }
-            let mut mask = 0u64;
             for range in tokens.ranges() {
                 for token in range {
-                    if token as usize >= token_classes || token >= 64 {
+                    if token as usize >= token_classes {
                         return None;
                     }
-                    mask |= 1u64 << token;
+                    signatures[token as usize].push((weight_index as u16, start, end));
                 }
-            }
-            if mask == 0 {
-                continue;
-            }
-            for tsid in start..=end {
-                signatures[tsid as usize].push((weight_index as u16, mask));
             }
         }
     }
-    let mut classes = FxHashMap::<Signature, u32>::default();
-    let mut old_to_new = vec![0u32; old_tsid_count];
-    for (old_tsid, signature) in signatures.into_iter().enumerate() {
+    let mut classes = FxHashMap::<Vec<(u16, u32, u32)>, u32>::default();
+    let mut old_to_new = Vec::with_capacity(token_classes);
+    for signature in signatures {
         let next = classes.len() as u32;
-        let class = *classes.entry(signature).or_insert(next);
-        old_to_new[old_tsid] = class;
+        old_to_new.push(*classes.entry(signature).or_insert(next));
     }
     Some((old_to_new, unique_weights.len()))
+}
+
+fn compute_boundary_dwa_token_behavior_quotient(
+    dwa: &DWA,
+    old_tsid_count: usize,
+    token_classes: usize,
+) -> Option<(Vec<u32>, usize)> {
+    compute_boundary_token_behavior_quotient_from_weights(
+        dwa.weight_refs(),
+        old_tsid_count,
+        token_classes,
+    )
+}
+
+fn apply_boundary_token_quotient_to_dwa_and_id_map(
+    dwa: &mut DWA,
+    id_map: &mut InternalIdMap,
+    old_to_new: &[u32],
+) -> Option<()> {
+    if id_map.deferred_vocab_singleton_original_ids.is_some() {
+        id_map.materialize_deferred_vocab_singletons();
+    }
+    let old_token_count = id_map.num_internal_tokens() as usize;
+    if old_to_new.len() != old_token_count {
+        return None;
+    }
+    let new_token_count = old_to_new
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |value| value as usize + 1);
+    if new_token_count == 0 || new_token_count >= old_token_count {
+        return None;
+    }
+    let tsid_count = id_map.num_tsids() as usize;
+    let tsid_identity = (0..tsid_count as u32)
+        .map(|tsid| vec![tsid])
+        .collect::<Vec<_>>();
+    let token_map = old_to_new
+        .iter()
+        .map(|&class| vec![class])
+        .collect::<Vec<_>>();
+    {
+        let mut weights = dwa.weight_refs_mut();
+        remap_weights_with_maps(
+            &mut weights,
+            &tsid_identity,
+            &token_map,
+            tsid_count,
+        );
+    }
+
+    let old_groups = std::mem::take(&mut id_map.vocab_tokens.internal_to_originals);
+    let old_representatives =
+        std::mem::take(&mut id_map.vocab_tokens.representative_original_ids);
+    let mut new_groups = vec![Vec::<u32>::new(); new_token_count];
+    let mut new_representatives = vec![u32::MAX; new_token_count];
+    for old_token in 0..old_token_count {
+        let class = old_to_new[old_token] as usize;
+        if let Some(group) = old_groups.get(old_token) {
+            new_groups[class].extend(group.iter().copied());
+        }
+        if new_representatives[class] == u32::MAX {
+            new_representatives[class] = old_representatives
+                .get(old_token)
+                .copied()
+                .or_else(|| new_groups[class].first().copied())
+                .unwrap_or(old_token as u32);
+        }
+    }
+    for group in &mut new_groups {
+        group.sort_unstable();
+        group.dedup();
+    }
+    for internal in &mut id_map.vocab_tokens.original_to_internal {
+        if *internal != u32::MAX {
+            *internal = *old_to_new.get(*internal as usize)?;
+        }
+    }
+    id_map.vocab_tokens.internal_to_originals = new_groups;
+    id_map.vocab_tokens.representative_original_ids = new_representatives;
+    Some(())
 }
 
 fn apply_boundary_tsid_quotient_to_dwa_and_id_map(
@@ -2859,6 +7422,14 @@ impl PositiveBoundaryParser {
         match self {
             Self::Dwa(dwa) => dwa,
             Self::Nwa(nwa) => normalize_weighted_parser_stack_nwa(table, &nwa),
+        }
+    }
+
+    fn into_runtime_dwa_for_parser_state_count(self, num_parser_states: u32) -> DWA {
+        match self {
+            Self::Dwa(dwa) => dwa,
+            Self::Nwa(nwa) =>
+                normalize_weighted_parser_stack_nwa_for_parser_state_count(num_parser_states, &nwa),
         }
     }
 
@@ -3053,144 +7624,61 @@ impl PositiveBoundaryParser {
 }
 
 
-fn build_boundary_terminal_trie_work(
-    terminal_automaton: &TerminalAutomaton,
-    id_map: &InternalIdMap,
-) -> Result<BoundaryTerminalTrieWork, String> {
-    // Keep the acyclic weighted terminal machine compact. Expanding it into a
-    // terminal-prefix trie is not viable in general: a small converging DAG can
-    // encode exponentially many terminal sequences. Runtime evaluation takes
-    // the product with the *current* parser frontier instead, where grammar
-    // state prunes almost all of those paths; exceptional wide products fall
-    // back to the unified dynamic evaluator.
-    let owned_nwa;
-    let nwa = match terminal_automaton {
-        TerminalAutomaton::Dwa(dwa) => {
-            owned_nwa = dwa.to_nwa();
-            &owned_nwa
-        }
-        TerminalAutomaton::TokenDeterministicNwa(nwa)
-        | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
-    };
-    if id_map.num_internal_tokens() == 0 {
-        return Err("runtime boundary terminal NWA requires a private token class".into());
-    }
-    if !nwa.is_acyclic() {
-        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
-    }
-
-    let state_count = nwa.states().len();
-    let mut indegree = vec![0usize; state_count];
-    for state in nwa.states() {
-        for (&label, branches) in &state.transitions {
-            if label < 0 {
-                return Err(format!(
-                    "boundary terminal NWA encountered non-terminal label {label}"
-                ));
-            }
-            for (target, _) in branches {
-                let Some(slot) = indegree.get_mut(*target as usize) else {
-                    return Err(format!(
-                        "boundary terminal NWA source references invalid state {target}"
-                    ));
-                };
-                *slot += 1;
-            }
-        }
-        for (target, _) in &state.epsilons {
-            let Some(slot) = indegree.get_mut(*target as usize) else {
-                return Err(format!(
-                    "boundary terminal NWA source references invalid state {target}"
-                ));
-            };
-            *slot += 1;
-        }
-    }
-    for &start in nwa.start_states() {
-        if start as usize >= state_count {
-            return Err(format!(
-                "boundary terminal NWA source references invalid start state {start}"
-            ));
-        }
-    }
-    let mut queue = VecDeque::new();
-    for (state, &degree) in indegree.iter().enumerate() {
-        if degree == 0 {
-            queue.push_back(state as u32);
-        }
-    }
-    let mut topological_order = Vec::with_capacity(state_count);
-    while let Some(state_id) = queue.pop_front() {
-        topological_order.push(state_id);
-        let state = &nwa.states()[state_id as usize];
-        for branches in state.transitions.values() {
-            for (target, _) in branches {
-                indegree[*target as usize] -= 1;
-                if indegree[*target as usize] == 0 {
-                    queue.push_back(*target);
+fn materialize_boundary_template_cache(
+    templates: Arc<Templates>,
+    num_terminals: u32,
+) -> Vec<Option<UnweightedDfa>> {
+    let mut template_cache = vec![None; num_terminals as usize];
+    match Arc::try_unwrap(templates) {
+        Ok(templates) => {
+            for (terminal, dfa) in templates.by_terminal {
+                if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                    *slot = Some(dfa);
                 }
             }
         }
-        for (target, _) in &state.epsilons {
-            indegree[*target as usize] -= 1;
-            if indegree[*target as usize] == 0 {
-                queue.push_back(*target);
+        Err(templates) => {
+            for (&terminal, dfa) in &templates.by_terminal {
+                if let Some(slot) = template_cache.get_mut(terminal as usize) {
+                    *slot = Some(dfa.clone());
+                }
             }
         }
     }
-    if topological_order.len() != state_count {
-        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
-    }
-
-    let nodes = nwa
-        .states()
-        .iter()
-        .map(|state| {
-            let mut transitions = Vec::new();
-            for (&label, branches) in &state.transitions {
-                for (target, weight) in branches {
-                    transitions.push(crate::runtime::BoundaryTerminalNwaTransition {
-                        terminal: label as u32,
-                        target: *target,
-                        weight: weight.clone(),
-                    });
-                }
-            }
-            crate::runtime::BoundaryTerminalNwaNode {
-                final_weight: state.final_weight.clone(),
-                transitions,
-                epsilons: state.epsilons.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
-    if compose_profile_enabled() {
-        let labeled_edges = nodes.iter().map(|node| node.transitions.len()).sum::<usize>();
-        let epsilon_edges = nodes.iter().map(|node| node.epsilons.len()).sum::<usize>();
-        eprintln!(
-            "[glrmask/profile][boundary_terminal_nwa] states={} starts={} labeled_edges={} epsilon_edges={} tsids={} token_classes={}",
-            nodes.len(),
-            nwa.start_states().len(),
-            labeled_edges,
-            epsilon_edges,
-            id_map.num_tsids(),
-            id_map.num_internal_tokens(),
-        );
-    }
-    Ok(BoundaryTerminalTrieWork {
-        // v21 artifacts used an expanded trie. New in-memory builds carry only
-        // the compact weighted DAG; the legacy fields remain for compatibility.
-        nodes: Vec::new(),
-        root_by_tsid: vec![u32::MAX; id_map.num_tsids() as usize],
-        symbolic_nwa: Some(crate::runtime::BoundaryTerminalNwa {
-            nodes,
-            start_states: nwa.start_states().to_vec(),
-            topological_order,
-        }),
-    })
+    template_cache
 }
 
-
 impl BoundaryParserWork {
+    fn set_precomputed_templates(&mut self, new_templates: Arc<Templates>) -> Result<(), String> {
+        match self {
+            Self::DeferredTerminalCount {
+                num_terminals,
+                templates,
+                selected_terminals,
+                parser_table_override,
+                ..
+            } => {
+                if selected_terminals.len() != *num_terminals as usize {
+                    return Err(format!(
+                        "boundary selected-terminal mask has {} entries for parser domain {num_terminals}",
+                        selected_terminals.len(),
+                    ));
+                }
+                if selected_terminals.iter().enumerate().any(|(terminal, &selected)| {
+                    selected && !new_templates.by_terminal.contains_key(&(terminal as u32))
+                }) {
+                    return Err("precomputed boundary templates do not cover every selected terminal".to_owned());
+                }
+                *templates = new_templates;
+                *parser_table_override = None;
+                Ok(())
+            }
+            _ => Err(
+                "precomputed templates require deferred count-only boundary work".to_owned(),
+            ),
+        }
+    }
+
     fn set_parser_table_override(
         &mut self,
         table: Arc<crate::compiler::glr::table::GLRTable>,
@@ -3199,6 +7687,7 @@ impl BoundaryParserWork {
             Self::DeferredTerminalCount {
                 num_terminals,
                 templates,
+                selected_terminals,
                 parser_table_override,
                 ..
             } => {
@@ -3213,21 +7702,18 @@ impl BoundaryParserWork {
                 // Re-characterize exactly the terminal subset already selected
                 // by boundary discovery; reusing materialized-table templates
                 // with a recursive provider table would mix two stack alphabets.
-                let mut selected = vec![false; *num_terminals as usize];
-                for &terminal in templates.by_terminal.keys() {
-                    let Some(slot) = selected.get_mut(terminal as usize) else {
-                        return Err(format!(
-                            "boundary template terminal {terminal} lies outside parser domain {num_terminals}"
-                        ));
-                    };
-                    *slot = true;
+                if selected_terminals.len() != *num_terminals as usize {
+                    return Err(format!(
+                        "boundary selected-terminal mask has {} entries for parser domain {num_terminals}",
+                        selected_terminals.len(),
+                    ));
                 }
                 let characterizations = characterize_selected_terminals_for_terminal_count(
                     &table,
                     *num_terminals,
-                    &selected,
+                    selected_terminals,
                 );
-                *templates = Templates::from_characterizations(&characterizations);
+                *templates = Arc::new(Templates::from_characterizations(&characterizations));
                 *parser_table_override = Some(table);
                 Ok(())
             }
@@ -3235,6 +7721,50 @@ impl BoundaryParserWork {
                 "parser-table override requires deferred count-only boundary work".to_owned(),
             ),
         }
+    }
+
+    fn clear_parser_table_override(&mut self) {
+        if let Self::DeferredTerminalCount {
+            parser_table_override,
+            future_admission_rows,
+            ..
+        } = self
+        {
+            *parser_table_override = None;
+        }
+    }
+
+    fn set_future_admission_rows(
+        &mut self,
+        rows: Arc<ParserTerminalAdmissionRows>,
+    ) -> Result<(), String> {
+        match self {
+            Self::DeferredTerminalCount {
+                num_terminals,
+                future_admission_rows,
+                ..
+            } => {
+                if rows.by_terminal.len() != *num_terminals as usize {
+                    return Err(format!(
+                        "parser admission terminal domain mismatch: rows={} boundary={}",
+                        rows.by_terminal.len(), *num_terminals,
+                    ));
+                }
+                *future_admission_rows = Some(rows);
+                Ok(())
+            }
+            _ => Err("parser admission rows require deferred count-only boundary work".to_owned()),
+        }
+    }
+
+    fn selected_terminal_mask(&self) -> Option<Vec<bool>> {
+        let Self::DeferredTerminalCount { num_terminals, selected_terminals, .. } = self else {
+            return None;
+        };
+        if selected_terminals.len() != *num_terminals as usize {
+            return None;
+        }
+        Some(selected_terminals.clone())
     }
 
     fn parser_table_override(
@@ -3246,35 +7776,6 @@ impl BoundaryParserWork {
                 ..
             } => parser_table_override.as_ref(),
             _ => None,
-        }
-    }
-
-    fn materialize_terminal_trie(
-        self,
-    ) -> Result<(
-        BoundaryTerminalTrieWork,
-        InternalIdMap,
-        Option<Vec<Option<UnweightedDfa>>>,
-    ), String> {
-        match self {
-            Self::DeferredTerminalCount {
-                terminal_automaton,
-                id_map,
-                num_terminals,
-                templates,
-                prebuilt_bundle_cache: _,
-                parser_table_override: _,
-            } => {
-                let trie = build_boundary_terminal_trie_work(&terminal_automaton, &id_map)?;
-                let mut template_cache = vec![None; num_terminals as usize];
-                for (terminal, dfa) in templates.by_terminal {
-                    if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                        *slot = Some(dfa);
-                    }
-                }
-                Ok((trie, id_map, Some(template_cache)))
-            }
-            _ => Err("runtime boundary terminal trie requires deferred count-only boundary work".into()),
         }
     }
 
@@ -3329,6 +7830,8 @@ impl BoundaryParserWork {
                 templates,
                 prebuilt_bundle_cache: _,
                 parser_table_override,
+                selected_terminals: _,
+                future_admission_rows: _,
             } => {
                 let table = parser_table_override.as_deref().unwrap_or(table);
                 if std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
@@ -3376,24 +7879,19 @@ impl BoundaryParserWork {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
                         &terminal_automaton,
                         num_terminals,
-                        &templates,
+                        templates.as_ref(),
                         table,
                     )
                 } else {
                     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
                         &terminal_automaton,
                         num_terminals,
-                        &templates,
+                        templates.as_ref(),
                         table,
                     )
                 };
-                let Some(mut parser_nwa) = parser_nwa else {
-                    let mut template_cache = vec![None; num_terminals as usize];
-                    for (terminal, dfa) in templates.by_terminal {
-                        if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                            *slot = Some(dfa);
-                        }
-                    }
+        let Some(mut parser_nwa) = parser_nwa else {
+                    let template_cache = materialize_boundary_template_cache(templates, num_terminals);
                     return Ok((
                         PositiveBoundaryParser::Dwa(DWA::new(
                             id_map.num_tsids(),
@@ -3422,12 +7920,7 @@ impl BoundaryParserWork {
                             "[glrmask/profile][constraint_segmented_boundary_parser_phases] build_nwa_ms={build_ms:.3} fused_signed_publish_ms={fused_ms:.3} deterministic_runtime=true compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
                         );
                     }
-                    let mut template_cache = vec![None; num_terminals as usize];
-                    for (terminal, dfa) in templates.by_terminal {
-                        if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                            *slot = Some(dfa);
-                        }
-                    }
+                    let template_cache = materialize_boundary_template_cache(templates, num_terminals);
                     return Ok((
                         PositiveBoundaryParser::Dwa(parser_dwa),
                         id_map,
@@ -3483,12 +7976,7 @@ impl BoundaryParserWork {
                         parser_nwa.num_transitions(),
                     );
                 }
-                let mut template_cache = vec![None; num_terminals as usize];
-                for (terminal, dfa) in templates.by_terminal {
-                    if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                        *slot = Some(dfa);
-                    }
-                }
+                let template_cache = materialize_boundary_template_cache(templates, num_terminals);
                 Ok((
                     PositiveBoundaryParser::Nwa(parser_nwa),
                     id_map,
@@ -3502,14 +7990,17 @@ impl BoundaryParserWork {
         self,
         allow_grouped_cancellation: bool,
         num_parser_states: u32,
+        retain_template_cache: bool,
     ) -> Result<BoundaryRuntimeCandidate, String> {
         let Self::DeferredTerminalCount {
             mut terminal_automaton,
             mut id_map,
             num_terminals,
             templates,
-            prebuilt_bundle_cache,
+            selected_terminals,
+            mut prebuilt_bundle_cache,
             parser_table_override,
+            future_admission_rows,
         } = self
         else {
             return Err(
@@ -3523,20 +8014,48 @@ impl BoundaryParserWork {
                 id_map,
                 num_terminals,
                 templates,
+                selected_terminals,
                 prebuilt_bundle_cache,
                 parser_table_override: None,
+                future_admission_rows,
             };
             let (positive, id_map, template_cache) =
                 work.materialize_positive_parser(table.as_ref())?;
             return Ok(BoundaryRuntimeCandidate::Parser {
                 positive,
                 id_map,
-                template_cache,
+                template_cache: if retain_template_cache { template_cache } else { None },
                 build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
             });
         }
-        let fused_signed_requested =
+        if std::env::var_os("GLRMASK_EXPERIMENT_RECURSIVE_BOUNDARY_DOMAIN_DP").is_some()
+            && let TerminalAutomaton::Dwa(dwa) = &terminal_automaton
+            && let Some(parser_dwa) =
+                build_boundary_parser_from_weighted_terminal_dwa_table_free(templates.as_ref(), dwa)
+        {
+            let template_cache = retain_template_cache
+                .then(|| materialize_boundary_template_cache(Arc::clone(&templates), num_terminals));
+            let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_recursive_boundary_domain_dp] states={} transitions={} build_ms={build_ms:.3}",
+                    parser_dwa.num_states(),
+                    parser_dwa.num_transitions(),
+                );
+            }
+            return Ok(BoundaryRuntimeCandidate::Parser {
+                positive: PositiveBoundaryParser::Dwa(parser_dwa),
+                id_map,
+                template_cache,
+                build_ms,
+            });
+        }        let fused_signed_requested =
             std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some();
+        // When an early TSID behavior quotient is used only as an internal
+        // compilation coordinate, retain the public/composed ID map so the
+        // final deterministic boundary can expand its weights back before
+        // publication. Runtime shards must stay in the composed TSID coordinate.
+        let mut early_tsid_quotient: Option<(InternalIdMap, Vec<u32>)> = None;
         if fused_signed_requested
             && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some()
             && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
@@ -3549,17 +8068,57 @@ impl BoundaryParserWork {
             {
                 let new_tsids = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
                 if new_tsids < old_tsids {
+                    let original_id_map = id_map.clone();
                     apply_boundary_tsid_quotient_to_dwa_and_id_map(
                         dwa,
                         &mut id_map,
                         &old_to_new,
                     )
                     .ok_or_else(|| "early table-free boundary TSID quotient failed".to_string())?;
+                    early_tsid_quotient = Some((original_id_map, old_to_new));
                     if compose_profile_enabled() {
                         eprintln!(
                             "[glrmask/profile][constraint_boundary_early_tsid_quotient_no_table] old_tsids={} new_tsids={} unique_terminal_weights={} total_ms={:.3}",
                             old_tsids,
                             new_tsids,
+                            unique_weights,
+                            quotient_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+            }
+        }
+        if std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_TOKEN_BEHAVIOR_QUOTIENT").is_some()
+            && let TerminalAutomaton::Dwa(dwa) = &mut terminal_automaton
+        {
+            let old_tokens = id_map.num_internal_tokens() as usize;
+            let quotient_started = Instant::now();
+            if let Some((old_to_new, unique_weights)) = compute_boundary_dwa_token_behavior_quotient(
+                dwa,
+                id_map.num_tsids() as usize,
+                old_tokens,
+            ) {
+                let new_tokens = old_to_new
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |value| value as usize + 1);
+                if new_tokens < old_tokens {
+                    apply_boundary_token_quotient_to_dwa_and_id_map(
+                        dwa,
+                        &mut id_map,
+                        &old_to_new,
+                    )
+                    .ok_or_else(|| "table-free boundary token behavior quotient failed".to_string())?;
+                    // Cached bundle weights use the old private token coordinate.
+                    prebuilt_bundle_cache = None;
+                    if compose_profile_enabled()
+                        || std::env::var_os("GLRMASK_PROFILE_BOUNDARY_TOKEN_BEHAVIOR_QUOTIENT").is_some()
+                    {
+                        eprintln!(
+                            "[glrmask/profile][boundary_token_behavior_quotient_active] old_tokens={} new_tokens={} unique_weights={} total_ms={:.3}",
+                            old_tokens,
+                            new_tokens,
                             unique_weights,
                             quotient_started.elapsed().as_secs_f64() * 1000.0,
                         );
@@ -3579,37 +8138,45 @@ impl BoundaryParserWork {
         .unwrap_or(64);
         let compile_nondeterministic_bundles = nondeterministic_bundles_requested
             && id_map.num_internal_tokens() >= nondeterministic_bundle_min_tokens;
+        let parser_nwa_started_at = Instant::now();
         let parser_nwa = if !compile_nondeterministic_bundles
+            && let Some(admission_rows) = future_admission_rows.as_deref()
+        {
+            build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_admission(
+                &terminal_automaton,
+                num_terminals,
+                templates.as_ref(),
+                admission_rows,
+                prebuilt_bundle_cache.as_ref(),
+            )
+        } else if !compile_nondeterministic_bundles
             && let Some(cache) = prebuilt_bundle_cache.as_ref()
         {
             build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_bundle_cache(
                 &terminal_automaton,
                 num_terminals,
-                &templates,
+                templates.as_ref(),
                 cache,
             )
         } else {
             build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table(
                 &terminal_automaton,
                 num_terminals,
-                &templates,
+                templates.as_ref(),
                 compile_nondeterministic_bundles,
             )
         };
+        let parser_nwa_ms = parser_nwa_started_at.elapsed().as_secs_f64() * 1000.0;
         let Some(mut parser_nwa) = parser_nwa else {
-            let mut template_cache = vec![None; num_terminals as usize];
-            for (terminal, dfa) in templates.by_terminal {
-                if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                    *slot = Some(dfa);
-                }
-            }
+            let template_cache = retain_template_cache
+                .then(|| materialize_boundary_template_cache(templates, num_terminals));
             return Ok(BoundaryRuntimeCandidate::Parser {
                 positive: PositiveBoundaryParser::Dwa(DWA::new(
                     id_map.num_tsids(),
                     id_map.max_internal_token_id(),
                 )),
                 id_map,
-                template_cache: Some(template_cache),
+                template_cache,
                 build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
             });
         };
@@ -3618,7 +8185,7 @@ impl BoundaryParserWork {
             && id_map.num_internal_tokens() as usize <= 64
         {
             let fused_started = Instant::now();
-            let parser_dwa =
+            let mut parser_dwa =
                 normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
                     num_parser_states,
                     &parser_nwa,
@@ -3629,34 +8196,62 @@ impl BoundaryParserWork {
                     "table-free small-boundary fused signed publication rejected coordinate"
                         .to_string()
                 })?;
-            let mut template_cache = vec![None; num_terminals as usize];
-            for (terminal, dfa) in templates.by_terminal {
-                if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                    *slot = Some(dfa);
+            let fused_ms = fused_started.elapsed().as_secs_f64() * 1000.0;
+            let expand_started = Instant::now();
+            let mut expanded_from_quotient = false;
+            if let Some((original_id_map, old_to_new)) = early_tsid_quotient.take() {
+                let original_tsid_count = original_id_map.num_tsids() as usize;
+                let quotient_tsid_count = id_map.num_tsids() as usize;
+                let token_count = id_map.num_internal_tokens() as usize;
+                let mut quotient_to_original = vec![Vec::<u32>::new(); quotient_tsid_count];
+                for (old, &class) in old_to_new.iter().enumerate() {
+                    let Some(group) = quotient_to_original.get_mut(class as usize) else {
+                        return Err("early boundary TSID quotient class is out of range".to_string());
+                    };
+                    group.push(old as u32);
                 }
+                let token_identity = (0..token_count as u32)
+                    .map(|token| vec![token])
+                    .collect::<Vec<_>>();
+                {
+                    let mut weights = parser_dwa.weight_refs_mut();
+                    remap_weights_with_maps(
+                        &mut weights,
+                        &quotient_to_original,
+                        &token_identity,
+                        original_tsid_count,
+                    );
+                }
+                id_map = original_id_map;
+                expanded_from_quotient = true;
             }
+            let expand_ms = expand_started.elapsed().as_secs_f64() * 1000.0;
+            let template_cache = retain_template_cache
+                .then(|| materialize_boundary_template_cache(templates, num_terminals));
             let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
             if compose_profile_enabled() {
                 eprintln!(
-                    "[glrmask/profile][constraint_boundary_fused_signed_no_table] signed_states={} output_states={} output_transitions={} fused_ms={:.3} total_ms={build_ms:.3}",
+                    "[glrmask/profile][constraint_boundary_fused_signed_no_table] signed_states={} output_states={} output_transitions={} fused_ms={fused_ms:.3} expand_ms={expand_ms:.3} expanded_from_quotient={} total_ms={build_ms:.3}",
                     parser_nwa.num_states(),
                     parser_dwa.num_states(),
                     parser_dwa.num_transitions(),
-                    fused_started.elapsed().as_secs_f64() * 1000.0,
+                    expanded_from_quotient,
                 );
             }
             return Ok(BoundaryRuntimeCandidate::Parser {
                 positive: PositiveBoundaryParser::Dwa(parser_dwa),
                 id_map,
-                template_cache: Some(template_cache),
+                template_cache,
                 build_ms,
             });
         }
         if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_SIGNED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_signed_acyclic_nwa_fast(parser_nwa);
         }
+        let resolve_started_at = Instant::now();
         let resolved_reverse_topo =
             resolve_negative_codes_in_nwa(&mut parser_nwa, allow_grouped_cancellation);
+        let resolve_ms = resolve_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
                 parser_nwa,
@@ -3665,24 +8260,19 @@ impl BoundaryParserWork {
         } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
             parser_nwa = reverse_hashcons_positive_acyclic_nwa(parser_nwa);
         }
-        let mut template_cache = vec![None; num_terminals as usize];
-        for (terminal, dfa) in templates.by_terminal {
-            if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                *slot = Some(dfa);
-            }
-        }
+        let template_cache = retain_template_cache
+            .then(|| materialize_boundary_template_cache(templates, num_terminals));
         let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_boundary_positive_no_table] states={} transitions={} build_ms={build_ms:.3} compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
+                "[glrmask/profile][constraint_boundary_positive_no_table] states={} transitions={} parser_nwa_ms={parser_nwa_ms:.3} resolve_ms={resolve_ms:.3} build_ms={build_ms:.3} compile_nondeterministic_bundles={compile_nondeterministic_bundles}",
                 parser_nwa.num_states(),
-                parser_nwa.num_transitions(),
-            );
+                parser_nwa.num_transitions(),            );
         }
         Ok(BoundaryRuntimeCandidate::Parser {
             positive: PositiveBoundaryParser::Nwa(parser_nwa),
             id_map,
-            template_cache: Some(template_cache),
+            template_cache,
             build_ms,
         })
     }
@@ -3919,6 +8509,816 @@ struct BoundaryTokenDiscovery {
     witnesses: Vec<BoundaryTokenWitness>,
 }
 
+fn boundary_return_suffix_delegations(
+    discovery: &BoundaryTokenDiscovery,
+    vocab: &Vocab,
+    terminal_offsets: &[u32],
+    tokenizer_state_offsets: &[u32],
+    components: &[&Constraint],
+    globally_erasable_ignore_terminals: &BitSet,
+) -> Vec<BoundaryReturnSuffixDelegation> {
+    let terminal_owner = |terminal: u32| -> Option<usize> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let tokenizer_state_owner = |state: u32| -> Option<usize> {
+        if state == 0 {
+            return None;
+        }
+        let component = tokenizer_state_offsets
+            .partition_point(|&offset| offset <= state)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let terminal_is_parser_identity = |component: usize, terminal: u32| {
+        globally_erasable_ignore_terminals.contains(terminal as usize)
+            || components
+                .get(component)
+                .and_then(|constraint| constraint.ignore_terminal)
+                .is_some_and(|local| terminal_offsets[component] + local == terminal)
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct State {
+        local: usize,
+        origin_component: Option<usize>,
+        last_component: Option<usize>,
+        ordinary_prefix: Vec<u32>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct Provisional {
+        fused_token: u32,
+        child_component: usize,
+        prefix_local_terminals: Vec<u32>,
+        suffix_bytes: Vec<u8>,
+        parent_suffix_local_terminals: Vec<u32>,
+        first_parent_local_terminal: u32,
+        crossing_offset: usize,
+        start_state: u32,
+    }
+
+    let mut provisional = BTreeSet::<Provisional>::new();
+    let mut wanted_suffixes = BTreeSet::<Vec<u8>>::new();
+    for witness in &discovery.witnesses {
+        let Some(bytes) = vocab.get(witness.token_id) else { continue; };
+        let mut starts_by_component = BTreeMap::<Option<usize>, Vec<u32>>::new();
+        for &start_state in &witness.start_states {
+            starts_by_component
+                .entry(tokenizer_state_owner(start_state))
+                .or_default()
+                .push(start_state);
+        }
+        for (initial_component, start_states) in starts_by_component {
+            // Parent-start paths belong to the parent shard. Fixed child starts
+            // and reset-origin paths that choose a child are the only paths of
+            // interest here.
+            if initial_component == Some(0) {
+                continue;
+            }
+            let start = State {
+                local: 0,
+                origin_component: initial_component,
+                last_component: initial_component,
+                ordinary_prefix: Vec::new(),
+            };
+            let mut queue = VecDeque::from([start.clone()]);
+            let mut seen = BTreeSet::from([start]);
+            while let Some(state) = queue.pop_front() {
+                if !witness.good.get(state.local).copied().unwrap_or(false) {
+                    continue;
+                }
+                let source = &witness.nodes[state.local];
+                for edge in source
+                    .outgoing
+                    .iter()
+                    .filter(|edge| witness.good.get(edge.target).copied().unwrap_or(false))
+                {
+                    let Some(next_component) = terminal_owner(edge.terminal) else { continue; };
+                    let origin_component = state.origin_component.or(Some(next_component));
+                    let switched = state
+                        .last_component
+                        .is_some_and(|component| component != next_component);
+                    if switched {
+                        if let Some(child) = origin_component
+                            && child != 0
+                            && next_component == 0
+                            && source.key.offset < bytes.len()
+                        {
+                            let suffix_bytes = bytes[source.key.offset..].to_vec();
+                            if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_DELEGATION").is_some()
+                                && witness.token_id == 3033
+                                && child == 1
+                            {
+                                let mut suffix_paths = Vec::<Vec<(usize, u32)>>::new();
+                                let mut queue = VecDeque::from([(edge.target, vec![(next_component, edge.terminal - terminal_offsets[next_component])])]);
+                                while let Some((node, path)) = queue.pop_front() {
+                                    if witness.accepting.get(node).copied().unwrap_or(false) {
+                                        suffix_paths.push(path.clone());
+                                        if suffix_paths.len() >= 32 { break; }
+                                    }
+                                    if path.len() >= 8 { continue; }
+                                    for next_edge in witness.nodes[node].outgoing.iter().filter(|next_edge| witness.good.get(next_edge.target).copied().unwrap_or(false)) {
+                                        let Some(owner) = terminal_owner(next_edge.terminal) else { continue; };
+                                        let mut next_path = path.clone();
+                                        next_path.push((owner, next_edge.terminal - terminal_offsets[owner]));
+                                        queue.push_back((next_edge.target, next_path));
+                                    }
+                                }
+                                eprintln!(
+                                    "[glrmask/validate][static_shard_return_suffix_boundary_paths] fused_token={} crossing_offset={} suffix_len={} paths={:?}",
+                                    witness.token_id, source.key.offset, suffix_bytes.len(), suffix_paths,
+                                );
+                            }
+                            // Enumerate the exact accepting suffix relations that stay in
+                            // the parent after this first child->parent crossing. A later
+                            // component switch is a different factorization and is deliberately
+                            // not claimed by this relation.
+                            let first_parent_local = edge.terminal - terminal_offsets[0];
+                            let mut parent_suffix_paths = BTreeSet::<Vec<u32>>::new();
+                            let mut suffix_queue = VecDeque::from([(edge.target, vec![first_parent_local])]);
+                            while let Some((node, path)) = suffix_queue.pop_front() {
+                                if witness.accepting.get(node).copied().unwrap_or(false) {
+                                    parent_suffix_paths.insert(path.clone());
+                                }
+                                for next_edge in witness.nodes[node]
+                                    .outgoing
+                                    .iter()
+                                    .filter(|next_edge| witness.good.get(next_edge.target).copied().unwrap_or(false))
+                                {
+                                    let Some(owner) = terminal_owner(next_edge.terminal) else { continue; };
+                                    if owner != 0 {
+                                        continue;
+                                    }
+                                    let mut next_path = path.clone();
+                                    next_path.push(next_edge.terminal - terminal_offsets[0]);
+                                    suffix_queue.push_back((next_edge.target, next_path));
+                                }
+                            }
+                            if !parent_suffix_paths.is_empty() {
+                                wanted_suffixes.insert(suffix_bytes.clone());
+                            }
+                            for parent_suffix_local_terminals in parent_suffix_paths {
+                                for &start_state in &start_states {
+                                    provisional.insert(Provisional {
+                                        fused_token: witness.token_id,
+                                        child_component: child,
+                                        prefix_local_terminals: state.ordinary_prefix.clone(),
+                                        suffix_bytes: suffix_bytes.clone(),
+                                        first_parent_local_terminal: first_parent_local,
+                                        crossing_offset: source.key.offset,
+                                        parent_suffix_local_terminals: parent_suffix_local_terminals.clone(),
+                                        start_state,
+                                    });
+                                }
+                            }
+                        }
+                        // This is the first lexical component crossing on the
+                        // retained path. Later crossings belong to the suffix.
+                        continue;
+                    }
+                    let Some(child) = origin_component else { continue; };
+                    if child == 0 || next_component != child {
+                        continue;
+                    }
+                    let mut ordinary_prefix = state.ordinary_prefix.clone();
+                    if !terminal_is_parser_identity(child, edge.terminal) {
+                        ordinary_prefix.push(edge.terminal - terminal_offsets[child]);
+                    }
+                    let next = State {
+                        local: edge.target,
+                        origin_component,
+                        last_component: Some(next_component),
+                        ordinary_prefix,
+                    };
+                    if seen.insert(next.clone()) {
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve only the handful of observed suffix byte strings. This scans the
+    // vocabulary once but clones no unrelated token bytes, avoiding the old
+    // full reverse-vocabulary-map cost.
+    let mut suffix_tokens_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+    for (&token_id, token_bytes) in vocab.entries_map() {
+        if wanted_suffixes.contains(token_bytes.as_slice()) {
+            suffix_tokens_by_bytes
+                .entry(token_bytes.clone())
+                .or_default()
+                .push(token_id);
+        }
+    }
+
+    let mut out = BTreeSet::<BoundaryReturnSuffixDelegation>::new();
+    for relation in provisional {
+        let Some(suffix_tokens) = suffix_tokens_by_bytes.get(&relation.suffix_bytes) else { continue; };
+        for &parent_suffix_token in suffix_tokens {
+            out.insert(BoundaryReturnSuffixDelegation {
+                fused_token: relation.fused_token,
+                child_component: relation.child_component as u32,
+                prefix_local_terminals: relation.prefix_local_terminals.clone(),
+                parent_suffix_token,
+                parent_suffix_local_terminals: relation.parent_suffix_local_terminals.clone(),
+                crossing_offset: relation.crossing_offset,
+                first_parent_local_terminal: relation.first_parent_local_terminal,
+                start_state: relation.start_state,
+            });
+        }
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_DELEGATION").is_some()
+        || std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_SHARED_ALL").is_some()
+    {
+        let semantic_signatures = out
+            .iter()
+            .map(|relation| (
+                relation.child_component,
+                relation.prefix_local_terminals.clone(),
+                relation.parent_suffix_local_terminals.clone(),
+            ))
+            .collect::<BTreeSet<_>>();
+        let fused_tokens = out.iter().map(|relation| relation.fused_token).collect::<BTreeSet<_>>();
+        eprintln!(
+            "[glrmask/validate][static_shard_return_suffix_semantic_signatures] rows={} signatures={} fused_tokens={} signatures_by_child={:?}",
+            out.len(),
+            semantic_signatures.len(),
+            fused_tokens.len(),
+            (1..components.len())
+                .map(|child| (
+                    child,
+                    semantic_signatures.iter().filter(|(component, _, _)| *component as usize == child).count(),
+                ))
+                .collect::<Vec<_>>(),
+        );
+    }
+    out.into_iter().collect()
+}
+
+fn fully_delegatable_return_suffix_tokens_by_child(
+    discovery: &BoundaryTokenDiscovery,
+    vocab: &Vocab,
+    terminal_offsets: &[u32],
+    tokenizer_state_offsets: &[u32],
+    component_count: usize,
+    delegations: &[BoundaryReturnSuffixDelegation],
+) -> BTreeMap<u32, BTreeSet<u32>> {
+    let terminal_owner = |terminal: u32| -> Option<usize> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        (component < component_count).then_some(component)
+    };
+    let tokenizer_state_owner = |state: u32| -> Option<usize> {
+        if state == 0 {
+            return None;
+        }
+        let component = tokenizer_state_offsets
+            .partition_point(|&offset| offset <= state)
+            .checked_sub(1)?;
+        (component < component_count).then_some(component)
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct State {
+        local: usize,
+        origin: Option<usize>,
+        last: Option<usize>,
+    }
+
+    let mut crossing_offsets = BTreeMap::<(u32, u32), BTreeSet<usize>>::new();
+    for witness in &discovery.witnesses {
+        let Some(bytes) = vocab.get(witness.token_id) else {
+            continue;
+        };
+        let initial_origins = witness
+            .start_states
+            .iter()
+            .map(|&state| tokenizer_state_owner(state))
+            .filter(|owner| *owner != Some(0))
+            .collect::<BTreeSet<_>>();
+        if initial_origins.is_empty() {
+            continue;
+        }
+        for initial in initial_origins {
+            let start = State {
+                local: 0,
+                origin: initial,
+                last: initial,
+            };
+            let mut queue = VecDeque::from([start]);
+            let mut seen = BTreeSet::from([start]);
+            while let Some(state) = queue.pop_front() {
+                if !witness.good.get(state.local).copied().unwrap_or(false) {
+                    continue;
+                }
+                let source = &witness.nodes[state.local];
+                for edge in source
+                    .outgoing
+                    .iter()
+                    .filter(|edge| witness.good.get(edge.target).copied().unwrap_or(false))
+                {
+                    let Some(next_component) = terminal_owner(edge.terminal) else {
+                        continue;
+                    };
+                    let origin = state.origin.or(Some(next_component));
+                    let switched = state.last.is_some_and(|last| last != next_component);
+                    if switched {
+                        if let Some(child) = origin.filter(|&component| component != 0)
+                            && next_component == 0
+                            && source.key.offset < bytes.len()
+                        {
+                            crossing_offsets
+                                .entry((child as u32, witness.token_id))
+                                .or_default()
+                                .insert(source.key.offset);
+                        }
+                        continue;
+                    }
+                    let Some(origin_component) = origin else {
+                        continue;
+                    };
+                    if origin_component == 0 || next_component != origin_component {
+                        continue;
+                    }
+                    let next = State {
+                        local: edge.target,
+                        origin,
+                        last: Some(next_component),
+                    };
+                    if seen.insert(next) {
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+
+    let delegated_offsets = delegations.iter().fold(
+        BTreeMap::<(u32, u32), BTreeSet<usize>>::new(),
+        |mut map, relation| {
+            map.entry((relation.child_component, relation.fused_token))
+                .or_default()
+                .insert(relation.crossing_offset);
+            map
+        },
+    );
+    crossing_offsets.into_iter().fold(
+        BTreeMap::<u32, BTreeSet<u32>>::new(),
+        |mut map, ((child, token), required)| {
+            if delegated_offsets
+                .get(&(child, token))
+                .is_some_and(|covered| required.is_subset(covered))
+            {
+                map.entry(child).or_default().insert(token);
+            }
+            map
+        },
+    )
+}
+fn profile_child_return_suffix_delegation(
+    discovery: &BoundaryTokenDiscovery,
+    vocab: &Vocab,
+    terminal_offsets: &[u32],
+    tokenizer_state_offsets: &[u32],
+    components: &[&Constraint],
+    globally_erasable_ignore_terminals: &BitSet,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_CHILD_RETURN_SUFFIX_DELEGATION").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    // Diagnostic only: unlike the production CALL-support path, index the full
+    // vocabulary so this survey can discover arbitrary parent-side suffixes.
+    let mut token_ids_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+    for (&token_id, bytes) in vocab.entries_map() {
+        token_ids_by_bytes.entry(bytes.clone()).or_default().push(token_id);
+    }
+    let terminal_owner = |terminal: u32| -> Option<usize> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let tokenizer_state_owner = |state: u32| -> Option<usize> {
+        if state == 0 { return None; }
+        let component = tokenizer_state_offsets
+            .partition_point(|&offset| offset <= state)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let parser_identity = |component: usize, terminal: u32| {
+        globally_erasable_ignore_terminals.contains(terminal as usize)
+            || components
+                .get(component)
+                .and_then(|constraint| constraint.ignore_terminal)
+                .is_some_and(|ignore| terminal_offsets[component] + ignore == terminal)
+    };
+
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct State {
+        local: usize,
+        origin: Option<usize>,
+        last: Option<usize>,
+        ordinary_prefix: Vec<u32>,
+    }
+    let mut crossing_cells = BTreeSet::<(u32, usize, usize)>::new();
+    let mut suffix_alias_cells = BTreeSet::<(u32, usize, usize)>::new();
+    let mut crossing_tokens = BTreeSet::<u32>::new();
+    let mut suffix_alias_tokens = BTreeSet::<u32>::new();
+    let mut suffix_tokens = BTreeSet::<u32>::new();
+    let mut prefix_len_hist = BTreeMap::<usize, usize>::new();
+    let mut offset_hist = BTreeMap::<usize, usize>::new();
+    let mut per_child = BTreeMap::<usize, (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<u32>)>::new();
+    let mut examples = Vec::<(u32, usize, usize, Vec<u32>, Vec<u32>)>::new();
+    let mut exact_relations = BTreeSet::<(usize, u32, Vec<u32>, u32)>::new();
+
+    for witness in &discovery.witnesses {
+        let Some(bytes) = vocab.get(witness.token_id) else { continue; };
+        let mut initial_origins = witness
+            .start_states
+            .iter()
+            .filter_map(|&state| tokenizer_state_owner(state))
+            .filter(|&component| component != 0)
+            .collect::<BTreeSet<_>>();
+        if witness.start_states.iter().any(|&state| tokenizer_state_owner(state).is_none()) {
+            initial_origins.insert(usize::MAX);
+        }
+        for encoded_origin in initial_origins {
+            let initial = (encoded_origin != usize::MAX).then_some(encoded_origin);
+            let start = State {
+                local: 0,
+                origin: initial,
+                last: initial,
+                ordinary_prefix: Vec::new(),
+            };
+            let mut queue = VecDeque::from([start.clone()]);
+            let mut seen = BTreeSet::from([start]);
+            while let Some(state) = queue.pop_front() {
+                if !witness.good.get(state.local).copied().unwrap_or(false) { continue; }
+                let source = &witness.nodes[state.local];
+                for edge in source.outgoing.iter().filter(|edge| witness.good.get(edge.target).copied().unwrap_or(false)) {
+                    let Some(next_component) = terminal_owner(edge.terminal) else { continue; };
+                    let origin = state.origin.or(Some(next_component));
+                    let switched = state.last.is_some_and(|last| last != next_component);
+                    if switched {
+                        if let Some(child) = origin.filter(|&component| component != 0)
+                            && next_component == 0
+                            && source.key.offset < bytes.len()
+                        {
+                            let cell = (witness.token_id, source.key.offset, child);
+                            if crossing_cells.insert(cell) {
+                                crossing_tokens.insert(witness.token_id);
+                                *prefix_len_hist.entry(state.ordinary_prefix.len()).or_default() += 1;
+                                *offset_hist.entry(source.key.offset).or_default() += 1;
+                                per_child.entry(child).or_default().0.insert(witness.token_id);
+                            }
+                            if let Some(aliases) = token_ids_by_bytes.get(&bytes[source.key.offset..]) {
+                                suffix_alias_cells.insert(cell);
+                                suffix_alias_tokens.insert(witness.token_id);
+                                suffix_tokens.extend(aliases.iter().copied());
+                                for &alias in aliases {
+                                    exact_relations.insert((child, witness.token_id, state.ordinary_prefix.clone(), alias));
+                                }
+                                let row = per_child.entry(child).or_default();
+                                row.1.insert(witness.token_id);
+                                row.2.extend(aliases.iter().copied());
+                                if examples.len() < 64 {
+                                    examples.push((
+                                        witness.token_id,
+                                        source.key.offset,
+                                        child,
+                                        state.ordinary_prefix.clone(),
+                                        aliases.iter().copied().take(8).collect(),
+                                    ));
+                                }
+                            }
+                        }
+                        // Only the first component crossing belongs to this
+                        // factorization survey.
+                        continue;
+                    }
+                    let Some(origin_component) = origin else { continue; };
+                    if origin_component == 0 || next_component != origin_component { continue; }
+                    let mut ordinary_prefix = state.ordinary_prefix.clone();
+                    if !parser_identity(origin_component, edge.terminal) {
+                        ordinary_prefix.push(edge.terminal - terminal_offsets[origin_component]);
+                        if ordinary_prefix.len() > 8 { continue; }
+                    }
+                    let next = State {
+                        local: edge.target,
+                        origin,
+                        last: Some(next_component),
+                        ordinary_prefix,
+                    };
+                    if seen.insert(next.clone()) { queue.push_back(next); }
+                }
+            }
+        }
+    }
+    let crossing_by_child_token = crossing_cells.iter().fold(
+        BTreeMap::<(usize, u32), BTreeSet<usize>>::new(),
+        |mut map, &(token, offset, child)| {
+            map.entry((child, token)).or_default().insert(offset);
+            map
+        },
+    );
+    let aliased_by_child_token = suffix_alias_cells.iter().fold(
+        BTreeMap::<(usize, u32), BTreeSet<usize>>::new(),
+        |mut map, &(token, offset, child)| {
+            map.entry((child, token)).or_default().insert(offset);
+            map
+        },
+    );
+    let fully_delegatable_by_child = crossing_by_child_token.iter().fold(
+        BTreeMap::<usize, BTreeSet<u32>>::new(),
+        |mut map, (&(child, token), crossing_offsets)| {
+            if aliased_by_child_token
+                .get(&(child, token))
+                .is_some_and(|aliased_offsets| crossing_offsets.is_subset(aliased_offsets))
+            {
+                map.entry(child).or_default().insert(token);
+            }
+            map
+        },
+    );
+    let incomplete_by_child = crossing_by_child_token.iter().fold(
+        BTreeMap::<usize, BTreeSet<u32>>::new(),
+        |mut map, (&(child, token), crossing_offsets)| {
+            if !aliased_by_child_token
+                .get(&(child, token))
+                .is_some_and(|aliased_offsets| crossing_offsets.is_subset(aliased_offsets))
+            {
+                map.entry(child).or_default().insert(token);
+            }
+            map
+        },
+    );
+    eprintln!(
+        "[glrmask/profile][child_return_suffix_completeness] fully_delegatable_by_child={:?} incomplete_by_child={:?}",
+        fully_delegatable_by_child,
+        incomplete_by_child,
+    );    let per_child = per_child
+        .into_iter()
+        .map(|(child, (crossing, aliased, suffixes))| (child, crossing.len(), aliased.len(), suffixes.len()))
+        .collect::<Vec<_>>();
+
+    // Conservative parser-shape survey for each distinct child-prefix word.
+    // A non-shift action means FINISH closure, not a naked RETURN, is required.
+    let prefix_words = exact_relations
+        .iter()
+        .map(|(child, _, prefix, _)| (*child, prefix.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut prefix_shapes = Vec::new();
+    for (child, prefix) in prefix_words {
+        let table = &components[child].table;
+        let mut starts_with_action = 0usize;
+        let mut pure_shift_words = 0usize;
+        let mut direct_eof_accept = 0usize;
+        let mut eof_kinds = BTreeMap::<String, usize>::new();
+        let mut complex_kinds = BTreeMap::<String, usize>::new();
+        for start_state in 0..table.num_states {
+            let mut state = start_state;
+            let mut saw_first = false;
+            let mut pure = true;
+            for (index, &terminal) in prefix.iter().enumerate() {
+                let action = table.action(state, terminal);
+                if index == 0 && action.is_some() {
+                    saw_first = true;
+                    starts_with_action += 1;
+                }
+                match action {
+                    Some(Action::Shift(target, _)) => state = *target,
+                    Some(action) => {
+                        *complex_kinds.entry(format!("{action:?}")).or_default() += 1;
+                        pure = false;
+                        break;
+                    }
+                    None => {
+                        pure = false;
+                        break;
+                    }
+                }
+            }
+            if !saw_first || !pure {
+                continue;
+            }
+            pure_shift_words += 1;
+            match table.action(state, EOF) {
+                Some(Action::Accept) => {
+                    direct_eof_accept += 1;
+                    *eof_kinds.entry("Accept".to_owned()).or_default() += 1;
+                }
+                Some(action) => *eof_kinds.entry(format!("{action:?}")).or_default() += 1,
+                None => *eof_kinds.entry("None".to_owned()).or_default() += 1,
+            }
+        }
+        prefix_shapes.push((child, prefix, starts_with_action, pure_shift_words, direct_eof_accept, eof_kinds, complex_kinds));
+    }
+    eprintln!("[glrmask/profile][child_return_suffix_prefix_shapes] rows={prefix_shapes:?}");
+    eprintln!(
+        "[glrmask/profile][child_return_suffix_delegation] crossing_cells={} suffix_alias_cells={} crossing_tokens={} suffix_alias_tokens={} suffix_tokens={} prefix_len_hist={:?} offset_hist={:?} per_child={:?} examples={:?} ms={:.3}",
+        crossing_cells.len(), suffix_alias_cells.len(), crossing_tokens.len(), suffix_alias_tokens.len(), suffix_tokens.len(), prefix_len_hist, offset_hist, per_child, examples, started_at.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
+fn boundary_suffix_delegations(
+    discovery: &BoundaryTokenDiscovery,
+    vocab: &Vocab,
+    terminal_offsets: &[u32],
+    tokenizer_state_offsets: &[u32],
+    components: &[&Constraint],
+    candidate_tokens_by_component: &[Vec<u32>],
+    globally_erasable_ignore_terminals: &BitSet,
+) -> Vec<BoundarySuffixDelegation> {
+    // Only suffix tokens owned by children can participate in a parent CALL
+    // delegation. Indexing the complete model vocabulary here was needlessly
+    // cloning ~100k byte strings on the composition critical path.
+    let mut token_ids_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+    let child_candidate_tokens = candidate_tokens_by_component
+        .iter()
+        .skip(1)
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for token_id in child_candidate_tokens {
+        if let Some(bytes) = vocab.get(token_id) {
+            token_ids_by_bytes
+                .entry(bytes.to_vec())
+                .or_default()
+                .push(token_id);
+        }
+    }
+    let terminal_owner = |terminal: u32| -> Option<usize> {
+        let component = terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let tokenizer_state_owner = |state: u32| -> Option<usize> {
+        if state == 0 {
+            return None;
+        }
+        let component = tokenizer_state_offsets
+            .partition_point(|&offset| offset <= state)
+            .checked_sub(1)?;
+        (component < components.len()).then_some(component)
+    };
+    let candidate_sets = candidate_tokens_by_component
+        .iter()
+        .map(|tokens| tokens.iter().copied().collect::<BTreeSet<_>>())
+        .collect::<Vec<_>>();
+    let parent_candidates = candidate_sets.first().cloned().unwrap_or_default();
+    let parent_ignore_terminal = components
+        .first()
+        .and_then(|component| component.ignore_terminal)
+        .map(|terminal| terminal_offsets[0] + terminal);
+    let parent_prefix_terminal_is_identity = |terminal: u32| {
+        globally_erasable_ignore_terminals.contains(terminal as usize)
+            || parent_ignore_terminal == Some(terminal)
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct PrefixState {
+        local: usize,
+        origin_component: Option<usize>,
+        last_component: Option<usize>,
+        ordinary_prefix_terminal: Option<u32>,
+    }
+
+    let mut out = BTreeSet::<BoundarySuffixDelegation>::new();
+    for witness in &discovery.witnesses {
+        if !parent_candidates.contains(&witness.token_id) {
+            continue;
+        }
+        let Some(bytes) = vocab.get(witness.token_id) else {
+            continue;
+        };
+
+        // This is the same start-component partition used by
+        // `direct_boundary_terminal_automaton`. A nonzero raw state has a fixed
+        // component owner; merged raw state zero is the reset dispatcher and
+        // acquires its origin from the first consumed terminal.
+        let mut starts_by_component = BTreeMap::<Option<usize>, Vec<u32>>::new();
+        for &state in &witness.start_states {
+            starts_by_component
+                .entry(tokenizer_state_owner(state))
+                .or_default()
+                .push(state);
+        }
+        for (initial_component, start_states) in starts_by_component {
+            // We are deriving only the parent-start shard. The authoritative
+            // builder rejects every fixed non-parent origin under
+            // `start_component_filter == Some(0)`.
+            if initial_component.is_some_and(|component| component != 0) {
+                continue;
+            }
+            if start_states.is_empty() {
+                continue;
+            }
+
+            // Follow only parser-identity parent prefixes until the *first*
+            // foreign component. This is the tiny fragment needed for exact
+            // CALL delegation: once the first foreign edge is reached, the
+            // target's `good` bit proves that some accepting continuation exists,
+            // and the authoritative CrossedFull metadata can no longer change
+            // either the parent origin or which child was first.
+            let start = PrefixState {
+                local: 0,
+                origin_component: initial_component,
+                last_component: initial_component,
+                ordinary_prefix_terminal: None,
+            };
+            let mut queue = VecDeque::from([start]);
+            let mut seen = BTreeSet::from([start]);
+            while let Some(state) = queue.pop_front() {
+                if !witness.good.get(state.local).copied().unwrap_or(false) {
+                    continue;
+                }
+                let source = &witness.nodes[state.local];
+                for edge in source
+                    .outgoing
+                    .iter()
+                    .filter(|edge| witness.good.get(edge.target).copied().unwrap_or(false))
+                {
+                    let Some(next_component) = terminal_owner(edge.terminal) else {
+                        continue;
+                    };
+                    let origin_component = state.origin_component.or(Some(next_component));
+                    let switched = state
+                        .last_component
+                        .is_some_and(|component| component != next_component);
+                    let first_foreign_component = origin_component.and_then(|origin| {
+                        (next_component != origin).then_some(next_component)
+                    });
+
+                    if switched {
+                        if origin_component == Some(0)
+                            && let Some(child) = first_foreign_component
+                            && child != 0
+                            && child < candidate_sets.len()
+                            && source.key.offset < bytes.len()
+                            && let Some(alias_ids) =
+                                token_ids_by_bytes.get(&bytes[source.key.offset..])
+                        {
+                            for &suffix_token in alias_ids {
+                                if !candidate_sets[child].contains(&suffix_token) {
+                                    continue;
+                                }
+                                for &start_state in &start_states {
+                                    out.insert(BoundarySuffixDelegation {
+                                        parent_token: witness.token_id,
+                                        child_component: child as u32,
+                                        suffix_token,
+                                        prefix_identity: state.ordinary_prefix_terminal.is_none(),
+                                        prefix_local_terminal: state
+                                            .ordinary_prefix_terminal
+                                            .map(|terminal| terminal - terminal_offsets[0]),
+                                        start_state,
+                                    });
+                                }
+                            }
+                        }
+                        // Any switched edge is the first component crossing on
+                        // the prefix states retained here. Delegation, if any,
+                        // has been recorded; later crossings belong to the child
+                        // shard and cannot change parent-start support.
+                        continue;
+                    }
+
+                    // Reset-origin execution that starts directly in a child has
+                    // origin=child and is therefore absent from the parent-start
+                    // shard. Otherwise the prefix must remain in parent component
+                    // zero and must be parser identity to be delegated exactly.
+                    if origin_component != Some(0) || next_component != 0 {
+                        continue;
+                    }
+                    let ordinary_prefix_terminal = if parent_prefix_terminal_is_identity(edge.terminal) {
+                        state.ordinary_prefix_terminal
+                    } else if state.ordinary_prefix_terminal.is_none() {
+                        Some(edge.terminal)
+                    } else {
+                        // PREFIX+CALL currently proves exactly one ordinary
+                        // parent terminal before the first child crossing.
+                        continue;
+                    };
+                    let next = PrefixState {
+                        local: edge.target,
+                        origin_component,
+                        last_component: Some(next_component),
+                        ordinary_prefix_terminal,
+                    };
+                    if seen.insert(next) {
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
 fn boundary_tokens_by_start_component(
     discovery: &BoundaryTokenDiscovery,
     terminal_offsets: &[u32],
@@ -4382,6 +9782,28 @@ fn merged_retained_terminal_exprs(
         }
     }
     merged.into_iter().collect()
+}
+
+fn component_recursive_tokenizer_state_layout_owned_parent(
+    components: &[&Constraint],
+) -> Result<(Vec<u32>, usize), String> {
+    let mut next_state = 0u32;
+    let mut offsets = Vec::with_capacity(components.len());
+    for (component_index, component) in components.iter().enumerate() {
+        offsets.push(next_state);
+        let state_count = if component.uses_compact_segmented_parser_runtime() {
+            component
+                .recursive_parser_layout()?
+                .ok_or_else(|| format!("recursive component {component_index} has no tokenizer layout"))?
+                .total_tokenizer_states
+        } else {
+            component.tokenizer.num_states()
+        };
+        next_state = next_state
+            .checked_add(state_count)
+            .ok_or_else(|| "recursive composed tokenizer state count overflow".to_owned())?;
+    }
+    Ok((offsets, next_state as usize))
 }
 
 fn component_tokenizer_state_layout_owned_parent(
@@ -7392,6 +12814,7 @@ fn direct_boundary_terminal_automaton(
     tokenizer_state_offsets: &[u32],
     delta_plan: Option<&ConcreteBoundaryDeltaPlan>,
     start_component_filter: Option<usize>,
+    first_foreign_component_filter: Option<usize>,
     preserve_symbolic_nwa: bool,
 ) -> Result<MappedArtifact<TerminalAutomaton>, String> {
     let total_started_at = Instant::now();
@@ -7525,6 +12948,54 @@ fn direct_boundary_terminal_automaton(
         }))
     };
 
+    if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_SUFFIX_TOKEN_REUSE").is_some()
+        && start_component_filter == Some(0)
+    {
+        let mut token_ids_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+        for (&token_id, bytes) in vocab.entries_map() {
+            token_ids_by_bytes.entry(bytes.clone()).or_default().push(token_id);
+        }
+        let terminal_owner = |terminal: u32| -> Option<usize> {
+            let component = terminal_offsets
+                .partition_point(|&offset| offset <= terminal)
+                .checked_sub(1)?;
+            (component < terminal_offsets.len()).then_some(component)
+        };
+        let mut crossings = BTreeSet::<(u32, usize, usize)>::new();
+        let mut reusable = BTreeSet::<(u32, usize, usize)>::new();
+        let mut crossing_tokens = BTreeSet::<u32>::new();
+        let mut reusable_tokens = BTreeSet::<u32>::new();
+        let mut examples = Vec::<(u32, usize, usize, Vec<u32>)>::new();
+        for witness in &discovery.witnesses {
+            let Some(bytes) = vocab.entries_map().get(&witness.token_id) else { continue; };
+            for (source_id, source) in witness.nodes.iter().enumerate() {
+                if !witness.good[source_id] || source.key.offset >= bytes.len() { continue; }
+                let previous_owner = if source.key.last_terminal == u32::MAX {
+                    Some(0usize)
+                } else {
+                    terminal_owner(source.key.last_terminal)
+                };
+                for edge in source.outgoing.iter().filter(|edge| witness.good[edge.target]) {
+                    let Some(next_owner) = terminal_owner(edge.terminal) else { continue; };
+                    if previous_owner != Some(0) || next_owner == 0 { continue; }
+                    let cell = (witness.token_id, source.key.offset, next_owner);
+                    crossings.insert(cell);
+                    crossing_tokens.insert(witness.token_id);
+                    if let Some(alias_ids) = token_ids_by_bytes.get(&bytes[source.key.offset..]) {
+                        reusable.insert(cell);
+                        reusable_tokens.insert(witness.token_id);
+                        if examples.len() < 24 {
+                            examples.push((witness.token_id, source.key.offset, next_owner, alias_ids.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][boundary_suffix_token_reuse] crossing_cells={} reusable_cells={} crossing_tokens={} reusable_tokens={} examples={:?}",
+            crossings.len(), reusable.len(), crossing_tokens.len(), reusable_tokens.len(), examples,
+        );
+    }
     let build_started_at = Instant::now();
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -7575,6 +13046,7 @@ fn direct_boundary_terminal_automaton(
         origin_component: Option<usize>,
         last_component: Option<usize>,
         crossed: bool,
+        first_foreign_component: Option<usize>,
         changed_count: u8,
         unsafe_path: bool,
     }
@@ -7708,6 +13180,7 @@ fn direct_boundary_terminal_automaton(
                 origin_component: initial_component,
                 last_component: initial_component,
                 crossed: false,
+                first_foreign_component: None,
                 changed_count: 0,
                 // Merged tokenizer state 0 epsilon-dispatches to every
                 // component start, and component parser-DWA transport maps each
@@ -7748,11 +13221,16 @@ fn direct_boundary_terminal_automaton(
                     let switched = source_key
                         .last_component
                         .is_some_and(|component| component != next_component);
+                    let first_foreign_component = source_key.first_foreign_component.or_else(|| {
+                        origin_component
+                            .and_then(|origin| (next_component != origin).then_some(next_component))
+                    });
                     let next_key = ExpandedKey {
                         local: edge.target,
                         origin_component,
                         last_component: Some(next_component),
                         crossed: source_key.crossed || switched,
+                        first_foreign_component,
                         changed_count: source_key
                             .changed_count
                             .saturating_add(u8::from(changed))
@@ -7907,6 +13385,13 @@ fn direct_boundary_terminal_automaton(
                     }
                     if start_component_filter
                         .is_some_and(|required| key.origin_component != Some(required))
+                    {
+                        return false;
+                    }
+                    if matches!(lane, DeltaLane::CrossedFull)
+                        && first_foreign_component_filter.is_some_and(|required| {
+                            key.first_foreign_component != Some(required)
+                        })
                     {
                         return false;
                     }
@@ -8190,6 +13675,53 @@ fn direct_boundary_terminal_automaton(
             )
         };
 
+    if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_TERMINAL_FANOUT").is_some()
+        && start_component_filter == Some(0)
+    {
+        let mut rows = Vec::<(usize, u32, u32, Vec<(usize, usize)>)>::new();
+        let mut add_edge = |state_id: u32, label: i32, target: u32, weight: &Weight| {
+            if label < 0 || weight.is_empty() { return; }
+            let terminal = label as u32;
+            let component = terminal_offsets
+                .partition_point(|&offset| offset <= terminal)
+                .saturating_sub(1);
+            if let Some(row) = rows.iter_mut().find(|row| row.1 == state_id && row.2 == target) {
+                row.0 += 1;
+                if let Some((_, count)) = row.3.iter_mut().find(|(owner, _)| *owner == component) {
+                    *count += 1;
+                } else {
+                    row.3.push((component, 1));
+                }
+            } else {
+                rows.push((1, state_id, target, vec![(component, 1)]));
+            }
+        };
+        match &terminal_automaton {
+            TerminalAutomaton::Dwa(dwa) => {
+                for (state_id, state) in dwa.states().iter().enumerate() {
+                    for (&label, (target, weight)) in &state.transitions {
+                        add_edge(state_id as u32, label, *target, weight);
+                    }
+                }
+            }
+            TerminalAutomaton::TokenDeterministicNwa(nwa) | TerminalAutomaton::EpsilonNwa(nwa) => {
+                for (state_id, state) in nwa.states().iter().enumerate() {
+                    for (&label, branches) in &state.transitions {
+                        for (target, weight) in branches {
+                            add_edge(state_id as u32, label, *target, weight);
+                        }
+                    }
+                }
+            }
+        }
+        rows.retain(|row| row.0 >= 8);
+        for row in &mut rows { row.3.sort_unstable(); }
+        rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
+        eprintln!(
+            "[glrmask/profile][boundary_terminal_fanout_parent] rows={:?}",
+            rows.into_iter().take(20).collect::<Vec<_>>(),
+        );
+    }
     if compose_profile_enabled() {
         eprintln!(
             "[glrmask/profile][constraint_boundary_direct_terminal] witnesses={} selected_tokens={} raw_lexer_states={} boundary_tsids={} canonical_states={} raw_states={} raw_transitions={} prefix_dwa_states={} final_states={} final_transitions={} controls={} delta_cross_lane_starts={} delta_cross_tokens={} delta_complex_lane_starts={} delta_single_lane_starts={} delta_start_groups={} one_byte_ms={one_byte_ms:.3} quotient_ms={quotient_ms:.3} build_ms={build_ms:.3} determinize_ms={determinize_ms:.3} minimize_ms={minimize_ms:.3} total_ms={:.3}",
@@ -8224,13 +13756,244 @@ fn build_static_boundary_shard_work(
     control_terminals: &BTreeSet<u32>,
     terminal_offsets: &[u32],
     tokenizer_state_offsets: &[u32],
+    components: &[&Constraint],
     plan: &ConcreteBoundaryDeltaPlan,
     candidate_tokens_by_component: &[Vec<u32>],
     static_boundary_components: Option<&BitSet>,
+    derive_child_return_suffix_supported: bool,
     parser_num_terminals: u32,
     templates: &Templates,
+    selected_terminals: &[bool],
     parser_table_override: Option<Arc<crate::compiler::glr::table::GLRTable>>,
 ) -> Result<Vec<BoundaryShardWork>, String> {
+    profile_child_return_suffix_delegation(
+        discovery,
+        vocab,
+        terminal_offsets,
+        tokenizer_state_offsets,
+        components,
+        globally_erasable_ignore_terminals,
+    );
+    if std::env::var_os("GLRMASK_PROFILE_PARENT_SHARD_SUFFIX_DELEGATION").is_some() {
+        let mut token_ids_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+        for (&token_id, bytes) in vocab.entries_map() {
+            token_ids_by_bytes.entry(bytes.clone()).or_default().push(token_id);
+        }
+        let terminal_owner = |terminal: u32| -> Option<usize> {
+            let component = terminal_offsets
+                .partition_point(|&offset| offset <= terminal)
+                .checked_sub(1)?;
+            (component < candidate_tokens_by_component.len()).then_some(component)
+        };
+        let child_candidates = candidate_tokens_by_component
+            .iter()
+            .map(|tokens| tokens.iter().copied().collect::<BTreeSet<_>>())
+            .collect::<Vec<_>>();
+        let mut crossing = BTreeSet::<(u32, usize, usize)>::new();
+        let mut suffix_alias = BTreeSet::<(u32, usize, usize)>::new();
+        let mut child_boundary_alias = BTreeSet::<(u32, usize, usize)>::new();
+        let mut no_visible_prefix_child_boundary_alias = BTreeSet::<(u32, usize, usize)>::new();
+        let mut crossing_tokens = BTreeSet::<u32>::new();
+        let mut child_boundary_alias_tokens = BTreeSet::<u32>::new();
+        let mut no_visible_prefix_tokens = BTreeSet::<u32>::new();
+        let mut examples = Vec::<(u32, usize, usize, u32, bool)>::new();
+        for witness in &discovery.witnesses {
+            let Some(bytes) = vocab.entries_map().get(&witness.token_id) else { continue; };
+            for (source_id, source) in witness.nodes.iter().enumerate() {
+                if !witness.good[source_id] || source.key.offset >= bytes.len() { continue; }
+                let previous_owner = if source.key.last_terminal == u32::MAX {
+                    Some(0usize)
+                } else {
+                    terminal_owner(source.key.last_terminal)
+                };
+                for edge in source.outgoing.iter().filter(|edge| witness.good[edge.target]) {
+                    let Some(child) = terminal_owner(edge.terminal) else { continue; };
+                    if previous_owner != Some(0) || child == 0 { continue; }
+                    let cell = (witness.token_id, source.key.offset, child);
+                    crossing.insert(cell);
+                    crossing_tokens.insert(witness.token_id);
+                    let Some(alias_ids) = token_ids_by_bytes.get(&bytes[source.key.offset..]) else { continue; };
+                    suffix_alias.insert(cell);
+                    if let Some(&alias) = alias_ids.iter().find(|&&alias| child_candidates[child].contains(&alias)) {
+                        child_boundary_alias.insert(cell);
+                        child_boundary_alias_tokens.insert(witness.token_id);
+                        let no_visible_prefix = source.key.last_terminal == u32::MAX;
+                        if no_visible_prefix {
+                            no_visible_prefix_child_boundary_alias.insert(cell);
+                            no_visible_prefix_tokens.insert(witness.token_id);
+                        }
+                        if examples.len() < 32 {
+                            examples.push((witness.token_id, source.key.offset, child, alias, no_visible_prefix));
+                        }
+                    }
+                }
+            }
+        }
+        let mut offset_hist = BTreeMap::<usize, usize>::new();
+        let mut previous_terminal_hist = BTreeMap::<(u32, bool, bool), usize>::new();
+        let mut ordinary_prefix_examples = Vec::<(u32, usize, usize, u32, u32)>::new();
+        for &(token, offset, child) in &child_boundary_alias {
+            *offset_hist.entry(offset).or_default() += 1;
+            if let Some(witness) = discovery.witnesses.iter().find(|w| w.token_id == token) {
+                for source in &witness.nodes {
+                    if source.key.offset != offset { continue; }
+                    let previous = source.key.last_terminal;
+                    if previous == u32::MAX { continue; }
+                    let Some(owner) = terminal_owner(previous) else { continue; };
+                    if owner != 0 { continue; }
+                    let local = previous - terminal_offsets[0];
+                    let is_skip = components[0].table.skip_terminals.contains(&local);
+                    let is_ignore = components[0].ignore_terminal == Some(local);
+                    *previous_terminal_hist.entry((previous, is_skip, is_ignore)).or_default() += 1;
+                    if !is_skip && !is_ignore && ordinary_prefix_examples.len() < 64 {
+                        if let Some(bytes) = vocab.get(token) {
+                            if let Some(alias_ids) = token_ids_by_bytes.get(&bytes[offset..]) {
+                                if let Some(&alias) = alias_ids.iter().find(|&&alias| child_candidates[child].contains(&alias)) {
+                                    ordinary_prefix_examples.push((token, offset, child, previous, alias));
+                                }
+                            }
+                        }
+                    }
+                    if source.outgoing.iter().any(|edge| witness.good[edge.target] && terminal_owner(edge.terminal) == Some(child)) {
+                        break;
+                    }
+                }
+            }
+        }
+        let ordinary_terminals = ordinary_prefix_examples
+            .iter()
+            .map(|row| row.3)
+            .collect::<BTreeSet<_>>();
+        let ordinary_terminal_actions = ordinary_terminals
+            .iter()
+            .map(|&global_terminal| {
+                let local_terminal = global_terminal - terminal_offsets[0];
+                let rows = components[0]
+                    .table
+                    .action
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(state, row)| row.get(&local_terminal).map(|action| (state as u32, format!("{action:?}"))))
+                    .collect::<Vec<_>>();
+                (global_terminal, local_terminal, rows)
+            })
+            .collect::<Vec<_>>();
+        eprintln!("[glrmask/profile][parent_shard_ordinary_prefix_actions] rows={ordinary_terminal_actions:?}");
+        eprintln!(
+            "[glrmask/profile][parent_shard_suffix_delegation] crossing_cells={} suffix_alias_cells={} child_boundary_alias_cells={} no_visible_prefix_child_boundary_alias_cells={} crossing_tokens={} child_boundary_alias_tokens={} no_visible_prefix_tokens={} examples={:?} offset_hist={:?} previous_terminal_hist={:?} ordinary_prefix_examples={:?}",
+            crossing.len(), suffix_alias.len(), child_boundary_alias.len(), no_visible_prefix_child_boundary_alias.len(), crossing_tokens.len(), child_boundary_alias_tokens.len(), no_visible_prefix_tokens.len(), examples, offset_hist, previous_terminal_hist, ordinary_prefix_examples,
+        );
+    }
+    let templates = Arc::new(templates.clone());
+    let split_parent_by_foreign = std::env::var_os(
+        "GLRMASK_EXPERIMENT_STATIC_SHARD_SPLIT_PARENT_BY_FOREIGN",
+    )
+    .is_some();
+    let derive_parent_call_delegation = cfg!(feature = "internal-api")
+        && !split_parent_by_foreign
+        && std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_PARENT_CALL_DELEGATION").is_some();
+    let derive_prefix_call_delegation = derive_parent_call_delegation
+        && std::env::var_os(
+            "GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_PARENT_PREFIX_CALL_DELEGATION",
+        )
+        .is_some();
+    let delegated_parent_tokens = if derive_parent_call_delegation {
+        let delegations = boundary_suffix_delegations(
+            discovery,
+            vocab,
+            terminal_offsets,
+            tokenizer_state_offsets,
+            components,
+            candidate_tokens_by_component,
+            globally_erasable_ignore_terminals,
+        );
+        let identity = delegations
+            .iter()
+            .filter(|delegation| delegation.prefix_identity)
+            .map(|delegation| delegation.parent_token)
+            .collect::<BTreeSet<_>>();
+        let mut delegated = identity.clone();
+        if derive_prefix_call_delegation {
+            delegated.extend(
+                delegations
+                    .iter()
+                    .filter(|delegation| {
+                        !delegation.prefix_identity
+                            && delegation.prefix_local_terminal.is_some()
+                            && !identity.contains(&delegation.parent_token)
+                    })
+                    .map(|delegation| delegation.parent_token),
+            );
+        }
+        delegated
+    } else {
+        BTreeSet::new()
+    };
+    if derive_parent_call_delegation && compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_static_parent_call_delegation_partition] parent_candidates={} delegated={} residual={}",
+            candidate_tokens_by_component.first().map_or(0, Vec::len),
+            delegated_parent_tokens.len(),
+            candidate_tokens_by_component.first().map_or(0, Vec::len).saturating_sub(delegated_parent_tokens.len()),
+        );
+    }
+    let delegated_child_return_tokens = if derive_child_return_suffix_supported {
+        let delegations = boundary_return_suffix_delegations(
+            discovery,
+            vocab,
+            terminal_offsets,
+            tokenizer_state_offsets,
+            components,
+            globally_erasable_ignore_terminals,
+        );
+        let fully = fully_delegatable_return_suffix_tokens_by_child(
+            discovery,
+            vocab,
+            terminal_offsets,
+            tokenizer_state_offsets,
+            components.len(),
+            &delegations,
+        );
+        let represented = delegations.iter().fold(
+            BTreeMap::<u32, BTreeSet<u32>>::new(),
+            |mut map, relation| {
+                map.entry(relation.child_component)
+                    .or_default()
+                    .insert(relation.fused_token);
+                map
+            },
+        );
+        if fully != represented {
+            return Err(format!(
+                "RETURN residual partition is not exact: fully={fully:?} represented={represented:?}"
+            ));
+        }
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_static_child_return_partition] {:?}",
+                candidate_tokens_by_component
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(child, tokens)| {
+                        let delegated = represented.get(&(child as u32)).map_or(0, BTreeSet::len);
+                        (child, tokens.len(), delegated, tokens.len().saturating_sub(delegated))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        represented
+    } else {
+        BTreeMap::new()
+    };
+    let parent_residual_chunk_size = derive_parent_call_delegation
+        .then(|| {
+            std::env::var("GLRMASK_EXPERIMENT_STATIC_SHARD_PARENT_RESIDUAL_CHUNK_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|&value| value > 0)
+        })
+        .flatten();
     candidate_tokens_by_component
         .par_iter()
         .enumerate()
@@ -8239,39 +14002,137 @@ fn build_static_boundary_shard_work(
                 && static_boundary_components
                     .is_none_or(|selected| selected.contains(*component_index))
         })
-        .map(|(component_index, tokens)| {
-            let artifact = direct_boundary_terminal_automaton(
-                merged_tokenizer_state_count,
-                Some(component_state_map),
-                vocab,
-                tokens,
-                BTreeMap::new(),
-                0.0,
-                discovery,
-                globally_erasable_ignore_terminals,
-                control_terminals,
-                terminal_offsets,
-                tokenizer_state_offsets,
-                Some(plan),
-                Some(component_index),
-                false,
-            )?;
-            let (terminal_automaton, id_map) = artifact.into_parts();
-            Ok(BoundaryShardWork {
-                start_component: component_index as u32,
-                candidate_tokens: Arc::<[u32]>::from(tokens.clone()),
-                parser: BoundaryParserWork::DeferredTerminalCount {
-                    terminal_automaton,
-                    id_map,
-                    num_terminals: parser_num_terminals,
-                    templates: templates.clone(),
-                    prebuilt_bundle_cache: None,
-                    parser_table_override: parser_table_override.clone(),
-                },
-            })
+        .flat_map_iter(|(component_index, tokens)| {
+            let tokens = if derive_parent_call_delegation && component_index == 0 {
+                tokens
+                    .iter()
+                    .copied()
+                    .filter(|token| !delegated_parent_tokens.contains(token))
+                    .collect::<Vec<_>>()
+            } else if component_index != 0
+                && !delegated_child_return_tokens.is_empty()
+            {
+                let delegated = delegated_child_return_tokens
+                    .get(&(component_index as u32));
+                tokens
+                    .iter()
+                    .copied()
+                    .filter(|token| delegated.is_none_or(|set| !set.contains(token)))
+                    .collect::<Vec<_>>()
+            } else {
+                tokens.clone()
+            };
+            let work_specs = if split_parent_by_foreign && component_index == 0 {
+                let mut specs = (1..candidate_tokens_by_component.len())
+                    .map(|child| (tokens.clone(), Some(child)))
+                    .collect::<Vec<_>>();
+                if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_CALL_DELEGATION_FULL_PARENT").is_some() {
+                    specs.push((tokens.clone(), None));
+                }
+                specs
+            } else if derive_parent_call_delegation && component_index == 0 {
+                if let Some(chunk_size) = parent_residual_chunk_size {
+                    tokens
+                        .chunks(chunk_size)
+                        .map(|chunk| (chunk.to_vec(), None))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![(tokens, None)]
+                }
+            } else {
+                vec![(tokens, None)]
+            };
+            let templates = Arc::clone(&templates);
+            let parser_table_override = parser_table_override.clone();
+            work_specs
+                .into_iter()
+                .map(move |(tokens, first_foreign_component)| {
+                    let artifact = direct_boundary_terminal_automaton(
+                        merged_tokenizer_state_count,
+                        Some(component_state_map),
+                        vocab,
+                        &tokens,
+                        BTreeMap::new(),
+                        0.0,
+                        discovery,
+                        globally_erasable_ignore_terminals,
+                        control_terminals,
+                        terminal_offsets,
+                        tokenizer_state_offsets,
+                        Some(plan),
+                        Some(component_index),
+                        first_foreign_component,
+                        std::env::var_os("GLRMASK_EXPERIMENT_STATIC_BOUNDARY_SYMBOLIC_TERMINAL_NWA").is_some(),
+                    )?;
+                    if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_FANOUT_MATCH_ROWS").is_some()
+                        && component_index == 0
+                    {
+                        let mut rows = BTreeMap::<(usize, u32, u32), Vec<u32>>::new();
+                        let mut collect = |source: u32, label: i32, target: u32, weight: &Weight| {
+                            if label < 0 || weight.is_empty() { return; }
+                            let terminal = label as u32;
+                            let owner = terminal_offsets
+                                .partition_point(|&offset| offset <= terminal)
+                                .saturating_sub(1);
+                            if owner == 0 || owner >= components.len() { return; }
+                            let local = terminal - terminal_offsets[owner];
+                            rows.entry((owner, source, target))
+                                .or_default()
+                                .push(local);
+                        };
+                        match artifact.artifact() {
+                            TerminalAutomaton::Dwa(dwa) => {
+                                for (state_id, state) in dwa.states().iter().enumerate() {
+                                    for (&label, (target, weight)) in &state.transitions {
+                                        collect(state_id as u32, label, *target, weight);
+                                    }
+                                }
+                            }
+                            TerminalAutomaton::TokenDeterministicNwa(nwa) | TerminalAutomaton::EpsilonNwa(nwa) => {
+                                for (state_id, state) in nwa.states().iter().enumerate() {
+                                    for (&label, branches) in &state.transitions {
+                                        for (target, weight) in branches {
+                                            collect(state_id as u32, label, *target, weight);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let mut report = Vec::new();
+                        for ((owner, source, target), mut local_terminals) in rows {
+                            local_terminals.sort_unstable();
+                            local_terminals.dedup();
+                            if local_terminals.len() < 8 { continue; }
+                            let wanted = local_terminals.iter().copied().collect::<BTreeSet<_>>();
+                            let tokenizer = &components[owner].tokenizer;
+                            let exact_states = (0..tokenizer.num_states())
+                                .filter(|&state| tokenizer.matched_terminals(state) == wanted)
+                                .collect::<Vec<_>>();
+                            report.push((local_terminals.len(), owner, source, target, exact_states.len(), exact_states.into_iter().take(8).collect::<Vec<_>>()));
+                        }
+                        report.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
+                        eprintln!("[glrmask/profile][boundary_fanout_match_rows] rows={:?}", report.into_iter().take(32).collect::<Vec<_>>());
+                    }
+                    let (terminal_automaton, id_map) = artifact.into_parts();
+                    Ok(BoundaryShardWork {
+                        start_component: component_index as u32,
+                        first_foreign_component: first_foreign_component.map(|value| value as u32),
+                        candidate_tokens: Arc::<[u32]>::from(tokens),
+                        parser: BoundaryParserWork::DeferredTerminalCount {
+                            terminal_automaton,
+                            id_map,
+                            num_terminals: parser_num_terminals,
+                            templates: templates.clone(),
+                            selected_terminals: selected_terminals.to_vec(),
+                            prebuilt_bundle_cache: None,
+                            parser_table_override: parser_table_override.clone(),
+                            future_admission_rows: None,
+                        },
+                    })
+                })
+                .collect::<Vec<Result<BoundaryShardWork, String>>>()
         })
-        .collect()
-}
+        .collect()}
 
 fn add_control_loops_to_terminal_artifact(
     artifact: MappedArtifact<TerminalAutomaton>,
@@ -12270,6 +18131,1075 @@ fn rebuild_transported_component_templates(
     result
 }
 
+
+fn transport_recursive_leaf_characterization(
+    source: &crate::compiler::stages::templates::characterize::TerminalCharacterization,
+    state_offset: u32,
+    nonterminal_offset: u32,
+) -> crate::compiler::stages::templates::characterize::TerminalCharacterization {
+    use crate::compiler::stages::templates::characterize::{
+        InitialEscape, InitialReduce, NtEscape, NtRereduce, StackMatcher, TerminalCharacterization,
+    };
+    let map_matcher = |matcher: &StackMatcher| match matcher {
+        StackMatcher::Any => StackMatcher::Any,
+        StackMatcher::State(state) => StackMatcher::State(state + state_offset),
+        StackMatcher::States(states) => {
+            StackMatcher::States(states.iter().map(|state| state + state_offset).collect())
+        }
+    };
+    TerminalCharacterization {
+        escapes: source
+            .escapes
+            .iter()
+            .map(|escape| InitialEscape {
+                pop: escape.pop.iter().map(&map_matcher).collect(),
+                pushes: escape.pushes.iter().map(|state| state + state_offset).collect(),
+            })
+            .collect(),
+        reduces: source
+            .reduces
+            .iter()
+            .map(|reduce| InitialReduce {
+                pop: reduce.pop.iter().map(&map_matcher).collect(),
+                nonterminal: reduce.nonterminal + nonterminal_offset,
+            })
+            .collect(),
+        nt_escapes: source
+            .nt_escapes
+            .iter()
+            .map(|escape| NtEscape {
+                source_nonterminal: escape.source_nonterminal + nonterminal_offset,
+                pop: escape.pop.iter().map(&map_matcher).collect(),
+                pushes: escape.pushes.iter().map(|state| state + state_offset).collect(),
+            })
+            .collect(),
+        nt_rereduces: source
+            .nt_rereduces
+            .iter()
+            .map(|reduce| NtRereduce {
+                source_nonterminal: reduce.source_nonterminal + nonterminal_offset,
+                pop: reduce.pop.iter().map(&map_matcher).collect(),
+                target_nonterminal: reduce.target_nonterminal + nonterminal_offset,
+            })
+            .collect(),
+        all_nts: source
+            .all_nts
+            .iter()
+            .map(|nonterminal| nonterminal + nonterminal_offset)
+            .collect(),
+    }
+}
+
+fn recursive_cached_characterizations_for_selected(
+    constraint: &Constraint,
+    selected: &[bool],
+) -> Result<Option<BTreeMap<u32, crate::compiler::stages::templates::characterize::TerminalCharacterization>>, String> {
+    let Some(layout) = constraint.recursive_parser_layout_for_pending_root()? else {
+        return Ok(None);
+    };
+    if selected.len() != layout.terminal_targets.len() {
+        return Err(format!(
+            "recursive cached characterization mask has {} entries for {} terminals",
+            selected.len(),
+            layout.terminal_targets.len(),
+        ));
+    }
+    let mut nonterminal_offsets = Vec::with_capacity(layout.leaves.len());
+    let mut next_nonterminal = 0u32;
+    for leaf_index in 0..layout.leaves.len() {
+        let leaf = constraint
+            .recursive_leaf_constraint(leaf_index)
+            .ok_or_else(|| format!("recursive parser leaf {leaf_index} does not resolve"))?;
+        nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal = next_nonterminal
+            .checked_add(leaf.table.nonterminal_display_names.len() as u32)
+            .ok_or_else(|| "recursive parser nonterminal coordinate overflow".to_owned())?;
+    }
+
+    let mut result = BTreeMap::<u32, TerminalCharacterization>::new();
+    for (global_terminal, &is_selected) in selected.iter().enumerate() {
+        if !is_selected {
+            continue;
+        }
+        let mut combined = TerminalCharacterization {
+            escapes: Vec::new(),
+            reduces: Vec::new(),
+            nt_escapes: Vec::new(),
+            nt_rereduces: Vec::new(),
+            all_nts: BTreeSet::new(),
+        };
+        let Some(targets) = layout.terminal_targets.get(global_terminal) else {
+            return Ok(None);
+        };
+        for &(leaf_index, local_terminal) in targets {
+            let leaf_index = leaf_index as usize;
+            let leaf = constraint
+                .recursive_leaf_constraint(leaf_index)
+                .ok_or_else(|| format!("recursive parser leaf {leaf_index} does not resolve"))?;
+            let Some(source) = leaf
+                .composition_parser_characterizations_by_terminal
+                .get(local_terminal as usize)
+                .and_then(Option::as_ref)
+            else {
+                return Ok(None);
+            };
+            let transported = transport_recursive_leaf_characterization(
+                source,
+                layout.leaf_state_offsets[leaf_index],
+                nonterminal_offsets[leaf_index],
+            );
+            combined.escapes.extend(transported.escapes);
+            combined.reduces.extend(transported.reduces);
+            combined.nt_escapes.extend(transported.nt_escapes);
+            combined.nt_rereduces.extend(transported.nt_rereduces);
+            combined.all_nts.extend(transported.all_nts);
+        }
+        combined.escapes.sort();
+        combined.escapes.dedup();
+        combined.reduces.sort();
+        combined.reduces.dedup();
+        combined.nt_escapes.sort();
+        combined.nt_escapes.dedup();
+        combined.nt_rereduces.sort();
+        combined.nt_rereduces.dedup();
+        result.insert(global_terminal as u32, combined);
+    }
+    Ok(Some(result))
+}
+
+
+struct RecursivePairParserTables<'a> {
+    parent: &'a Constraint,
+    child: &'a Constraint,
+}
+
+impl ParserComponentTableSource for RecursivePairParserTables<'_> {
+    #[inline]
+    fn component_count(&self) -> usize { 2 }
+
+    #[inline]
+    fn component_table(&self, component: u32) -> Option<&GLRTable> {
+        match component {
+            0 => Some(&self.parent.table),
+            1 => Some(&self.child.table),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn component_ignore_terminal(&self, component: u32) -> Option<u32> {
+        match component {
+            0 => self.parent.ignore_terminal,
+            1 => self.child.ignore_terminal,
+            _ => None,
+        }
+    }
+}
+
+fn transport_recursive_pair_characterization(
+    source: &crate::compiler::stages::templates::characterize::TerminalCharacterization,
+    parent_state_count: u32,
+    child_state_count: u32,
+    parent_state_offset: u32,
+    child_state_offset: u32,
+    parent_nonterminal_count: u32,
+    child_nonterminal_count: u32,
+    parent_nonterminal_offset: u32,
+    child_nonterminal_offset: u32,
+) -> Option<crate::compiler::stages::templates::characterize::TerminalCharacterization> {
+    use crate::compiler::stages::templates::characterize::{
+        InitialEscape, InitialReduce, NtEscape, NtRereduce, StackMatcher, TerminalCharacterization,
+    };
+    let pair_state_count = parent_state_count.checked_add(child_state_count)?;
+    let pair_nonterminal_count = parent_nonterminal_count.checked_add(child_nonterminal_count)?;
+    let map_state = |state: u32| -> Option<u32> {
+        if state < parent_state_count {
+            parent_state_offset.checked_add(state)
+        } else if state < pair_state_count {
+            child_state_offset.checked_add(state - parent_state_count)
+        } else {
+            None
+        }
+    };
+    let map_nonterminal = |nonterminal: u32| -> Option<u32> {
+        if nonterminal < parent_nonterminal_count {
+            parent_nonterminal_offset.checked_add(nonterminal)
+        } else if nonterminal < pair_nonterminal_count {
+            child_nonterminal_offset.checked_add(nonterminal - parent_nonterminal_count)
+        } else {
+            None
+        }
+    };
+    let map_matcher = |matcher: &StackMatcher| -> Option<StackMatcher> {
+        Some(match matcher {
+            StackMatcher::Any => StackMatcher::Any,
+            StackMatcher::State(state) => StackMatcher::State(map_state(*state)?),
+            StackMatcher::States(states) => StackMatcher::States(
+                states.iter().map(|&state| map_state(state)).collect::<Option<Vec<_>>>()?,
+            ),
+        })
+    };
+
+    Some(TerminalCharacterization {
+        escapes: source.escapes.iter().map(|escape| Some(InitialEscape {
+            pop: escape.pop.iter().map(&map_matcher).collect::<Option<Vec<_>>>()?,
+            pushes: escape.pushes.iter().map(|&state| map_state(state)).collect::<Option<Vec<_>>>()?,
+        })).collect::<Option<Vec<_>>>()?,
+        reduces: source.reduces.iter().map(|reduce| Some(InitialReduce {
+            pop: reduce.pop.iter().map(&map_matcher).collect::<Option<Vec<_>>>()?,
+            nonterminal: map_nonterminal(reduce.nonterminal)?,
+        })).collect::<Option<Vec<_>>>()?,
+        nt_escapes: source.nt_escapes.iter().map(|escape| Some(NtEscape {
+            source_nonterminal: map_nonterminal(escape.source_nonterminal)?,
+            pop: escape.pop.iter().map(&map_matcher).collect::<Option<Vec<_>>>()?,
+            pushes: escape.pushes.iter().map(|&state| map_state(state)).collect::<Option<Vec<_>>>()?,
+        })).collect::<Option<Vec<_>>>()?,
+        nt_rereduces: source.nt_rereduces.iter().map(|reduce| Some(NtRereduce {
+            source_nonterminal: map_nonterminal(reduce.source_nonterminal)?,
+            pop: reduce.pop.iter().map(&map_matcher).collect::<Option<Vec<_>>>()?,
+            target_nonterminal: map_nonterminal(reduce.target_nonterminal)?,
+        })).collect::<Option<Vec<_>>>()?,
+        all_nts: source.all_nts.iter().map(|&nonterminal| map_nonterminal(nonterminal)).collect::<Option<BTreeSet<_>>>()?,
+    })
+}
+
+/// Exact flat-link reconstruction of recursive frontier terminal semantics.
+/// Each parent/child pair is control-eliminated independently, then its parser
+/// and nonterminal coordinates are transported into the recursive leaf space.
+/// This is exact when links are flat (no child is itself a link parent) and a
+/// return cannot immediately enter another child without consuming an ordinary
+/// terminal; those structural guards keep cross-link zero-width closure out of
+/// the pairwise decomposition.
+struct RecursivePairwiseFrontierResult {
+    characterizations: BTreeMap<u32, TerminalCharacterization>,
+    /// Additional effective action rows created on child-owned states by
+    /// FINISH/RETURN control elimination, already transported to the global
+    /// recursive parser-state coordinate.
+    return_admission_rows: Vec<Vec<u32>>,
+}
+fn try_recursive_pairwise_frontier_characterizations(
+    constraint: &Constraint,
+    selected: &[bool],
+) -> Result<Option<RecursivePairwiseFrontierResult>, String> {
+
+    let Some(layout) = constraint.recursive_parser_layout_for_pending_root()? else {
+        return Ok(None);
+    };
+    if selected.len() != layout.terminal_targets.len() || layout.links.is_empty() {
+        return Ok(None);
+    }
+    let child_components = layout.links.iter().map(|link| link.child_component).collect::<BTreeSet<_>>();
+    if layout.links.iter().any(|link| child_components.contains(&link.parent_component))
+        || layout.links.iter().any(|link| link.child_start_nullable)
+    {
+        return Ok(None);
+    }
+
+    // If RETURN can expose another slot action immediately, two link controls
+    // can compose without an ordinary byte between them and one-link isolation
+    // is not complete. Decline rather than approximate that case.
+    for link in &layout.links {
+        let parent = constraint.recursive_leaf_constraint(link.parent_component as usize)
+            .ok_or_else(|| format!("recursive pairwise parent component {} does not resolve", link.parent_component))?;
+        let mut continuation_states = Vec::new();
+        for row in &parent.table.action {
+            if let Some(action) = row.get(&link.slot_terminal) {
+                match action {
+                    Action::Shift(target, _) if action.reduce_count() == 0 => continuation_states.push(*target),
+                    Action::Split { shift: Some((target, _)), accept: false, .. } if action.reduce_count() == 0 => continuation_states.push(*target),
+                    _ => return Ok(None),
+                }
+            }
+        }
+        for &continuation in &continuation_states {
+            for other in &layout.links {
+                if other.parent_component == link.parent_component
+                    && parent.table.action(continuation, other.slot_terminal).is_some()
+                {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    let Some(mut result) = try_recursive_simple_entry_frontier_characterizations(constraint, selected)? else {
+        return Ok(None);
+    };
+
+    let mut global_nonterminal_offsets = Vec::with_capacity(layout.leaves.len());
+    let mut next_nonterminal = 0u32;
+    for leaf_index in 0..layout.leaves.len() {
+        let leaf = constraint.recursive_leaf_constraint(leaf_index)
+            .ok_or_else(|| format!("recursive pairwise leaf {leaf_index} does not resolve"))?;
+        global_nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal = next_nonterminal
+            .checked_add(leaf.table.nonterminal_display_names.len() as u32)
+            .ok_or_else(|| "recursive pairwise nonterminal coordinate overflow".to_owned())?;
+    }
+
+    // Standalone constraints implement IGNORE outside their LR action rows, so
+    // the cached parser characterization intentionally has no identity edges for
+    // it. In the recursive provider an active scope's ignore is an explicit
+    // identity action. Install that exact component-local identity once here;
+    // RETURN-derived child-side ignore behavior is still supplied by the seeded
+    // pair deltas below.
+    let mut installed_ignore_identities = BTreeSet::new();
+    for link in &layout.links {
+        let parent_index = link.parent_component as usize;
+        let parent = constraint.recursive_leaf_constraint(parent_index)
+            .ok_or_else(|| format!("recursive pairwise parent component {parent_index} does not resolve"))?;
+        let Some(ignore_terminal) = parent.ignore_terminal else { continue; };
+        for (global_terminal, &active) in selected.iter().enumerate() {
+            if !active
+                || !layout.terminal_targets[global_terminal]
+                    .iter()
+                    .any(|&(component, local)| component == link.parent_component && local == ignore_terminal)
+                || !installed_ignore_identities.insert((link.parent_component, global_terminal as u32))
+            {
+                continue;
+            }
+            let Some(characterization) = result.get_mut(&(global_terminal as u32)) else {
+                return Ok(None);
+            };
+            let offset = layout.leaf_state_offsets[parent_index];
+            characterization.escapes.extend((0..parent.table.num_states).map(|state| {
+                let scoped = offset + state;
+                crate::compiler::stages::templates::characterize::InitialEscape {
+                    pop: vec![crate::compiler::stages::templates::characterize::StackMatcher::State(scoped)],
+                    pushes: vec![scoped],
+                }
+            }));
+        }
+    }
+    let pair_results = layout.links.par_iter().map(|link| -> Result<(Vec<(u32, TerminalCharacterization)>, Vec<(u32, Vec<u32>)>), String> {
+        let parent_index = link.parent_component as usize;
+        let child_index = link.child_component as usize;
+        let parent = constraint.recursive_leaf_constraint(parent_index)
+            .ok_or_else(|| format!("recursive pairwise parent component {parent_index} does not resolve"))?;
+        let child = constraint.recursive_leaf_constraint(child_index)
+            .ok_or_else(|| format!("recursive pairwise child component {child_index} does not resolve"))?;
+
+        let mut continuation_states = Vec::new();
+        for row in &parent.table.action {
+            if let Some(action) = row.get(&link.slot_terminal) {
+                match action {
+                    Action::Shift(target, _) if action.reduce_count() == 0 => continuation_states.push(*target),
+                    Action::Split { shift: Some((target, _)), accept: false, .. } if action.reduce_count() == 0 => continuation_states.push(*target),
+                    _ => return Ok((Vec::new(), Vec::new())),
+                }
+            }
+        }
+        continuation_states.sort_unstable();
+        continuation_states.dedup();
+
+        // Only terminals whose parent-side semantics can execute immediately
+        // after this child's RETURN need pair-local control elimination. ENTRY
+        // and child-start effects were already added by the simple-entry pass.
+        let mut pair_selected = vec![false; selected.len()];
+        for (global_terminal, &active) in selected.iter().enumerate() {
+            if !active { continue; }
+            pair_selected[global_terminal] = layout.terminal_targets[global_terminal]
+                .iter()
+                .any(|&(component, local_terminal)| {
+                    component == link.parent_component
+                        && (parent.ignore_terminal == Some(local_terminal)
+                            || continuation_states.iter().any(|&state| {
+                                parent.table.action(state, local_terminal).is_some()
+                            }))
+                });
+        }
+        if !pair_selected.iter().any(|&active| active) {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let pair = RecursivePairParserTables { parent, child };
+        let local_link = ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: link.slot_terminal,
+            child_component: 1,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        };
+        let provider = DisjointComponentActionProvider::new(&pair, std::slice::from_ref(&local_link))?;
+        let mut terminal_symbols = vec![SmallVec::<[ScopedParserSymbol; 4]>::new(); selected.len()];
+        for (global_terminal, &active) in pair_selected.iter().enumerate() {
+            if !active { continue; }
+            for &(component, local_terminal) in &layout.terminal_targets[global_terminal] {
+                if component == link.parent_component {
+                    terminal_symbols[global_terminal].push(ScopedParserSymbol::Terminal {
+                        component: 0,
+                        terminal: local_terminal,
+                    });
+                } else if component == link.child_component {
+                    terminal_symbols[global_terminal].push(ScopedParserSymbol::Terminal {
+                        component: 1,
+                        terminal: local_terminal,
+                    });
+                }
+            }
+        }
+        let pair_table = materialize_preselected_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+            &pair_selected,
+        )?;
+
+        // Additive initial-action delta: after RETURN, parent lookahead can be
+        // executed while the visible top still belongs to the child pair.
+        // Those appended child-owned rows are absent from both standalone
+        // component caches, so seed only them rather than re-characterizing the
+        // complete parent terminal language.
+        let mut action_seeds = vec![Vec::<u32>::new(); selected.len()];
+        let child_pair_start = parent.table.num_states;
+        for (terminal, &active) in pair_selected.iter().enumerate() {
+            if !active { continue; }
+            for state in child_pair_start..pair_table.num_states {
+                if pair_table.action(state, terminal as u32).is_some() {
+                    action_seeds[terminal].push(state);
+                }
+            }
+        }
+        let mut return_admission_rows = Vec::<(u32, Vec<u32>)>::new();
+        let child_global_offset = layout.leaf_state_offsets[child_index];
+        for (terminal, seeds) in action_seeds.iter().enumerate() {
+            if seeds.is_empty() {
+                continue;
+            }
+            let mut states = seeds
+                .iter()
+                .filter_map(|&pair_state| {
+                    pair_state
+                        .checked_sub(child_pair_start)
+                        .and_then(|local| child_global_offset.checked_add(local))
+                })
+                .collect::<Vec<_>>();
+            states.sort_unstable();
+            states.dedup();
+            if !states.is_empty() {
+                return_admission_rows.push((terminal as u32, states));
+            }
+        }        let action_deltas = characterize_terminal_action_state_seeds_for_terminal_count(
+            &pair_table,
+            pair_table.num_terminals,
+            &action_seeds,
+        );
+
+        // Additive nonterminal-continuation delta. The only new goto context in
+        // a flat link is the child's root nonterminal: finishing that root can
+        // expose the parent continuation before the selected lookahead executes.
+        let child_root = match child.table.rules.first().map(|rule| rule.rhs.as_slice()) {
+            Some([Symbol::Nonterminal(root)]) => *root,
+            _ => return Ok((Vec::new(), Vec::new())),
+        };
+        let pair_boundary_nonterminal = (parent.table.nonterminal_display_names.len() as u32)
+            .checked_add(child_root)
+            .ok_or_else(|| "recursive pairwise boundary nonterminal overflow".to_owned())?;
+        let mut nt_seeds = vec![Vec::<(u32, u32, u32, bool)>::new(); selected.len()];
+        for (revealed_state, row) in pair_table.goto.iter().enumerate() {
+            let Some(&(top_state, goto_replace)) = row.get(&pair_boundary_nonterminal) else {
+                continue;
+            };
+            for (terminal, &active) in pair_selected.iter().enumerate() {
+                if active && pair_table.action(top_state, terminal as u32).is_some() {
+                    nt_seeds[terminal].push((
+                        top_state,
+                        revealed_state as u32,
+                        pair_boundary_nonterminal,
+                        goto_replace,
+                    ));
+                }
+            }
+        }
+        for seeds in &mut nt_seeds {
+            seeds.sort_unstable();
+            seeds.dedup();
+        }
+        let nt_deltas = characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+            &pair_table,
+            pair_table.num_terminals,
+            &nt_seeds,
+        );
+
+        let parent_nt_count = parent.table.nonterminal_display_names.len() as u32;
+        let child_nt_count = child.table.nonterminal_display_names.len() as u32;
+        let mut output = Vec::new();
+        for (terminal, &active) in pair_selected.iter().enumerate() {
+            if !active { continue; }
+            let mut delta = TerminalCharacterization {
+                escapes: Vec::new(),
+                reduces: Vec::new(),
+                nt_escapes: Vec::new(),
+                nt_rereduces: Vec::new(),
+                all_nts: BTreeSet::new(),
+            };
+            for part in [action_deltas.get(&(terminal as u32)), nt_deltas.get(&(terminal as u32))]
+                .into_iter()
+                .flatten()
+            {
+                delta.escapes.extend(part.escapes.iter().cloned());
+                delta.reduces.extend(part.reduces.iter().cloned());
+                delta.nt_escapes.extend(part.nt_escapes.iter().cloned());
+                delta.nt_rereduces.extend(part.nt_rereduces.iter().cloned());
+                delta.all_nts.extend(part.all_nts.iter().copied());
+            }
+            if delta.escapes.is_empty()
+                && delta.reduces.is_empty()
+                && delta.nt_escapes.is_empty()
+                && delta.nt_rereduces.is_empty()
+            {
+                continue;
+            }
+            let transported = transport_recursive_pair_characterization(
+                &delta,
+                parent.table.num_states,
+                child.table.num_states,
+                layout.leaf_state_offsets[parent_index],
+                layout.leaf_state_offsets[child_index],
+                parent_nt_count,
+                child_nt_count,
+                global_nonterminal_offsets[parent_index],
+                global_nonterminal_offsets[child_index],
+            ).ok_or_else(|| "recursive pairwise seeded characterization coordinate remap failed".to_owned())?;
+            output.push((terminal as u32, transported));
+        }
+        Ok((output, return_admission_rows))
+    }).collect::<Vec<_>>();
+    let mut return_admission_rows = vec![Vec::<u32>::new(); selected.len()];
+    for pair_result in pair_results {
+        let (characterization_deltas, admission_deltas) = pair_result?;
+        for (terminal, transported) in characterization_deltas {
+            let Some(combined) = result.get_mut(&terminal) else { continue; };
+            combined.escapes.extend(transported.escapes);
+            combined.reduces.extend(transported.reduces);
+            combined.nt_escapes.extend(transported.nt_escapes);
+            combined.nt_rereduces.extend(transported.nt_rereduces);
+            combined.all_nts.extend(transported.all_nts);
+        }
+        for (terminal, states) in admission_deltas {
+            if let Some(row) = return_admission_rows.get_mut(terminal as usize) {
+                row.extend(states);
+            }
+        }
+    }
+    for row in &mut return_admission_rows {
+        row.sort_unstable();
+        row.dedup();
+    }
+    for characterization in result.values_mut() {
+        characterization.escapes.sort();
+        characterization.escapes.dedup();
+        characterization.reduces.sort();
+        characterization.reduces.dedup();
+        characterization.nt_escapes.sort();
+        characterization.nt_escapes.dedup();
+        characterization.nt_rereduces.sort();
+        characterization.nt_rereduces.dedup();
+    }
+    Ok(Some(RecursivePairwiseFrontierResult {
+        characterizations: result,
+        return_admission_rows,
+    }))
+}
+/// Exact additive characterization for the common provider-native link shape
+/// where ENTRY is a pure parent shift and the selected child-start terminal is
+/// also a pure shift. More general link shapes decline to the exact provider
+/// materializer.
+fn try_recursive_simple_entry_frontier_characterizations(
+    constraint: &Constraint,
+    selected: &[bool],
+) -> Result<Option<BTreeMap<u32, crate::compiler::stages::templates::characterize::TerminalCharacterization>>, String> {
+    use crate::compiler::stages::templates::characterize::{InitialEscape, StackMatcher};
+
+    let Some(layout) = constraint.recursive_parser_layout_for_pending_root()? else {
+        return Ok(None);
+    };
+    if selected.len() != layout.terminal_targets.len() {
+        return Ok(None);
+    }
+    let child_components = layout.links.iter().map(|link| link.child_component).collect::<BTreeSet<_>>();
+    if layout.links.iter().any(|link| child_components.contains(&link.parent_component))
+        || layout.links.iter().any(|link| link.child_start_nullable)
+    {
+        return Ok(None);
+    }
+
+    let Some(mut result) = recursive_cached_characterizations_for_selected(constraint, selected)? else {
+        return Ok(None);
+    };
+    let mut changed = vec![false; selected.len()];
+
+    for link in &layout.links {
+        let parent_index = link.parent_component as usize;
+        let child_index = link.child_component as usize;
+        let parent = constraint.recursive_leaf_constraint(parent_index).ok_or_else(|| {
+            format!("recursive simple-entry parent component {parent_index} does not resolve")
+        })?;
+        let child = constraint.recursive_leaf_constraint(child_index).ok_or_else(|| {
+            format!("recursive simple-entry child component {child_index} does not resolve")
+        })?;
+        let parent_offset = layout.leaf_state_offsets[parent_index];
+        let child_offset = layout.leaf_state_offsets[child_index];
+
+        let mut calls = Vec::<(u32, u32, bool)>::new();
+        for (source, row) in parent.table.action.iter().enumerate() {
+            let Some(action) = row.get(&link.slot_terminal) else { continue; };
+            let call = match action {
+                Action::Shift(target, replace) if action.reduce_count() == 0 => Some((*target, *replace)),
+                Action::Split { shift: Some((target, replace)), accept: false, .. }
+                    if action.reduce_count() == 0 => Some((*target, *replace)),
+                _ => None,
+            };
+            let Some((target, replace)) = call else { return Ok(None); };
+            calls.push((source as u32, target, replace));
+        }
+        if calls.is_empty() { return Ok(None); }
+
+        for (global_terminal, &is_selected) in selected.iter().enumerate() {
+            if !is_selected { continue; }
+            let targets = &layout.terminal_targets[global_terminal];
+
+            // Parent-continuation terminals require FINISH/RETURN composition,
+            // which is intentionally outside this first exact fast path.
+            if targets.iter().any(|&(component, local_terminal)| {
+                component == link.parent_component
+                    && calls.iter().any(|&(_, parent_target, _)| {
+                        parent.ignore_terminal == Some(local_terminal)
+                            || parent.table.action(parent_target, local_terminal).is_some()
+                    })
+            }) {
+                if compose_profile_enabled() {
+                    let parent_actions = targets
+                        .iter()
+                        .copied()
+                        .filter(|&(component, _)| component == link.parent_component)
+                        .flat_map(|(_, local_terminal)| {
+                            calls.iter().map(move |&(_, parent_target, _)| {
+                                (parent_target, local_terminal, parent.table.action(parent_target, local_terminal).cloned())
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let child_eof_actions = child
+                        .table
+                        .action
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(state, row)| row.get(&EOF).cloned().map(|action| (state as u32, action)))
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "[glrmask/profile][recursive_simple_entry_decline] reason=parent_continuation global_terminal={} targets={:?} calls={:?} return_pop={} parent_actions={:?} child_eof_actions={:?}",
+                        global_terminal, targets, calls, link.return_pop, parent_actions, child_eof_actions,
+                    );
+                }
+                if std::env::var_os("GLRMASK_EXPERIMENT_RECURSIVE_SIMPLE_ENTRY_IGNORE_RETURN_DIAG").is_some()
+                    || std::env::var_os("GLRMASK_EXPERIMENT_RECURSIVE_PAIRWISE_FRONTIER").is_some()
+                {
+                    changed[global_terminal] = true;
+                    continue;
+                }
+                return Ok(None);
+            }
+
+            for &(component, local_terminal) in targets {
+                if component != link.child_component { continue; }
+                let child_shift = if child.ignore_terminal == Some(local_terminal) {
+                    None
+                } else {
+                    let Some(action) = child.table.action(link.child_start, local_terminal) else { continue; };
+                    match action {
+                        Action::Shift(target, replace) if action.reduce_count() == 0 => Some((*target, *replace)),
+                        Action::Split { shift: Some((target, replace)), accept: false, .. }
+                            if action.reduce_count() == 0 => Some((*target, *replace)),
+                        _ => return Ok(None),
+                    }
+                };
+
+                let Some(characterization) = result.get_mut(&(global_terminal as u32)) else {
+                    return Ok(None);
+                };
+                for &(parent_source, parent_target, call_replace) in &calls {
+                    let mut pushes = vec![parent_offset + parent_target, child_offset + link.child_start];
+                    if let Some((child_target, child_replace)) = child_shift {
+                        if child_replace { pushes.pop(); }
+                        pushes.push(child_offset + child_target);
+                    }
+                    characterization.escapes.push(InitialEscape {
+                        pop: call_replace
+                            .then(|| StackMatcher::State(parent_offset + parent_source))
+                            .into_iter()
+                            .collect(),
+                        pushes,
+                    });
+                    changed[global_terminal] = true;
+                }
+            }
+        }
+    }
+
+    if selected.iter().enumerate().any(|(terminal, &active)| active && !changed[terminal]) {
+        return Ok(None);
+    }
+    for (&terminal, characterization) in &mut result {
+        if selected[terminal as usize] {
+            characterization.escapes.sort();
+            characterization.escapes.dedup();
+        }
+    }
+    Ok(Some(result))
+}
+fn transport_recursive_template_dfa_by_state_offset_with_skeleton(
+    mut dfa: UnweightedDfa,
+    state_offset: u32,
+) -> Option<(UnweightedDfa, NWA)> {
+    let mut nwa_states = Vec::with_capacity(dfa.states.len());
+    for state in &mut dfa.states {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::new();
+        let mut nwa_transitions = BTreeMap::new();
+        for (label, target) in old {
+            let mapped_label = if label == DEFAULT_LABEL {
+                label
+            } else if is_negative_label(label) {
+                let local = negative_to_positive_label(label) as u32;
+                encode_negative_label(local.checked_add(state_offset)?)
+            } else if label >= 0 {
+                (label as u32).checked_add(state_offset)? as i32
+            } else {
+                return None;
+            };
+            if let Some(previous) = mapped.insert(mapped_label, target)
+                && previous != target
+            {
+                return None;
+            }
+            if let Some(previous) = nwa_transitions.insert(
+                mapped_label,
+                vec![(target, Weight::empty())],
+            ) && previous[0].0 != target
+            {
+                return None;
+            }
+        }
+        state.transitions = mapped;
+        nwa_states.push(NWAState {
+            final_weight: state.is_accepting.then(Weight::empty),
+            transitions: nwa_transitions,
+            epsilons: Vec::new(),
+        });
+    }
+    let start_state = dfa.start_state;
+    let nwa = NWA::from_parts(nwa_states, vec![start_state]);
+    Some((dfa, nwa))
+}
+
+fn build_recursive_cached_link_frontier_templates(
+    constraint: &Constraint,
+    selected: &[bool],
+) -> Result<Option<(Templates, u32, Option<ParserTerminalAdmissionRows>)>, String> {
+    let total_started_at = Instant::now();
+    let Some(layout) = constraint.recursive_parser_layout_for_pending_root()? else {
+        return Ok(None);
+    };
+    if selected.len() != layout.terminal_targets.len() {
+        return Ok(None);
+    }
+    let Some(frontier) = constraint.recursive_link_frontier_terminals(selected)? else {
+        return Ok(None);
+    };
+    let mut exact_selected = frontier.clone();
+    let mut by_terminal = BTreeMap::<u32, UnweightedDfa>::new();
+    let mut by_terminal_nwa = BTreeMap::<u32, NWA>::new();
+    let cache_started_at = Instant::now();
+    let mut cache_hits = 0usize;
+    let mut cache_fallbacks = 0usize;
+
+    let transported = selected
+        .par_iter()
+        .enumerate()
+        .filter_map(|(global_terminal, &is_selected)| {
+            if !is_selected || frontier[global_terminal] {
+                return None;
+            }
+            let outcome = (|| {
+                let targets = layout.terminal_targets.get(global_terminal)?;
+                if targets.len() != 1 {
+                    return None;
+                }
+                let (leaf_index, local_terminal) = targets[0];
+                let leaf_index = leaf_index as usize;
+                let leaf = constraint.recursive_leaf_constraint(leaf_index)?;
+                let cached = leaf
+                    .composition_parser_templates_by_terminal
+                    .get(local_terminal as usize)
+                    .and_then(Option::as_ref)
+                    .cloned()?;
+                let (dfa, nwa) = transport_recursive_template_dfa_by_state_offset_with_skeleton(
+                    cached,
+                    layout.leaf_state_offsets[leaf_index],
+                )?;
+                Some((dfa, nwa))
+            })();
+            Some((global_terminal, outcome))
+        })
+        .collect::<Vec<_>>();
+    for (global_terminal, outcome) in transported {
+        if let Some((dfa, nwa)) = outcome {
+            by_terminal.insert(global_terminal as u32, dfa);
+            by_terminal_nwa.insert(global_terminal as u32, nwa);
+            cache_hits += 1;
+        } else {
+            exact_selected[global_terminal] = true;
+            cache_fallbacks += 1;
+        }
+    }
+    let cache_ms = cache_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let exact_count = exact_selected.iter().filter(|&&value| value).count();
+    let exact_started_at = Instant::now();
+    let mut simple_entry_count = 0usize;
+    let mut pairwise_return_admission_rows = None::<Vec<Vec<u32>>>;
+    if exact_count != 0 {
+        let simple_entry = if std::env::var_os(
+            "GLRMASK_EXPERIMENT_RECURSIVE_PAIRWISE_FRONTIER",
+        )
+        .is_some()
+        {
+            match try_recursive_pairwise_frontier_characterizations(constraint, &exact_selected)? {
+                Some(pairwise) => {
+                    pairwise_return_admission_rows = Some(pairwise.return_admission_rows);
+                    Some(pairwise.characterizations)
+                }
+                None => None,
+            }
+        } else if std::env::var_os(
+            "GLRMASK_EXPERIMENT_RECURSIVE_SIMPLE_ENTRY_FRONTIER",
+        )
+        .is_some()
+        {
+            try_recursive_simple_entry_frontier_characterizations(constraint, &exact_selected)?
+        } else {
+            None
+        };
+        if let Some(characterizations) = simple_entry {
+            let candidate_templates = Templates::from_characterizations(&characterizations);
+            simple_entry_count = candidate_templates.by_terminal.len();
+            if std::env::var_os("GLRMASK_VALIDATE_RECURSIVE_SIMPLE_ENTRY_FRONTIER").is_some() {
+                let Some(table) = constraint
+                    .recursive_control_eliminated_preselected_parser_table(&exact_selected)?
+                else {
+                    return Ok(None);
+                };
+                let reference_characterizations = characterize_selected_terminals_for_terminal_count(
+                    &table,
+                    table.num_terminals,
+                    &exact_selected,
+                );
+                let reference = Templates::from_characterizations(&reference_characterizations);
+                if std::env::var_os("GLRMASK_PROFILE_RECURSIVE_SIMPLE_ENTRY_DELTA").is_some() {
+                    for terminal in [11u32, 16u32] {
+                        if let (Some(candidate), Some(expected)) = (
+                            characterizations.get(&terminal),
+                            reference_characterizations.get(&terminal),
+                        ) {
+                            let candidate_escapes = candidate.escapes.iter().cloned().collect::<BTreeSet<_>>();
+                            let expected_escapes = expected.escapes.iter().cloned().collect::<BTreeSet<_>>();
+                            let candidate_reduces = candidate.reduces.iter().cloned().collect::<BTreeSet<_>>();
+                            let expected_reduces = expected.reduces.iter().cloned().collect::<BTreeSet<_>>();
+                            let candidate_nt_escapes = candidate.nt_escapes.iter().cloned().collect::<BTreeSet<_>>();
+                            let expected_nt_escapes = expected.nt_escapes.iter().cloned().collect::<BTreeSet<_>>();
+                            let candidate_nt_rereduces = candidate.nt_rereduces.iter().cloned().collect::<BTreeSet<_>>();
+                            let expected_nt_rereduces = expected.nt_rereduces.iter().cloned().collect::<BTreeSet<_>>();
+                            let missing_escapes = expected_escapes.difference(&candidate_escapes).cloned().collect::<Vec<_>>();
+                            let missing_reduces = expected_reduces.difference(&candidate_reduces).cloned().collect::<Vec<_>>();
+                            let missing_nt_escapes = expected_nt_escapes.difference(&candidate_nt_escapes).cloned().collect::<Vec<_>>();
+                            let missing_nt_rereduces = expected_nt_rereduces.difference(&candidate_nt_rereduces).cloned().collect::<Vec<_>>();
+                            eprintln!(
+                                "[glrmask/profile][recursive_simple_entry_characterization_delta] terminal={} missing_escapes={} {:?} missing_reduces={} {:?} missing_nt_escapes={} {:?} missing_nt_rereduces={} {:?}",
+                                terminal,
+                                missing_escapes.len(), missing_escapes,
+                                missing_reduces.len(), missing_reduces,
+                                missing_nt_escapes.len(), missing_nt_escapes,
+                                missing_nt_rereduces.len(), missing_nt_rereduces,
+                            );
+                        }
+                    }
+                }
+                let mut exact = 0usize;
+                let mut mismatches = Vec::new();
+                for (terminal, &selected) in exact_selected.iter().enumerate() {
+                    if !selected { continue; }
+                    let terminal = terminal as u32;
+                    let Some(candidate) = candidate_templates.by_terminal.get(&terminal) else {
+                        mismatches.push((terminal, None, None));
+                        continue;
+                    };
+                    let Some(expected) = reference.by_terminal.get(&terminal) else {
+                        mismatches.push((terminal, None, None));
+                        continue;
+                    };
+                    let candidate_only = unweighted_dfa_difference(candidate, expected);
+                    let expected_only = unweighted_dfa_difference(expected, candidate);
+                    if unweighted_dfa_language_is_empty(&candidate_only)
+                        && unweighted_dfa_language_is_empty(&expected_only)
+                    {
+                        exact += 1;
+                    } else {
+                        mismatches.push((
+                            terminal,
+                            unweighted_dfa_shortest_word(&candidate_only),
+                            unweighted_dfa_shortest_word(&expected_only),
+                        ));
+                    }
+                }
+                eprintln!(
+                    "[glrmask/validate][recursive_simple_entry_frontier] selected={} exact={} mismatched={} examples={:?}",
+                    exact_count, exact, exact_count.saturating_sub(exact),
+                    mismatches.iter().take(16).collect::<Vec<_>>(),
+                );
+                if exact != exact_count {
+                    return Ok(None);
+                }
+            }
+            by_terminal.extend(candidate_templates.by_terminal);
+            by_terminal_nwa.extend(candidate_templates.by_terminal_nwa);
+        } else {
+            let Some(table) = constraint
+                .recursive_control_eliminated_preselected_parser_table(&exact_selected)?
+            else {
+                return Ok(None);
+            };
+            let characterizations = characterize_selected_terminals_for_terminal_count(
+                &table,
+                table.num_terminals,
+                &exact_selected,
+            );
+            let exact_templates = Templates::from_characterizations(&characterizations);
+            by_terminal.extend(exact_templates.by_terminal);
+            by_terminal_nwa.extend(exact_templates.by_terminal_nwa);
+        }
+    }
+    let exact_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if selected.iter().enumerate().any(|(terminal, &is_selected)| {
+        is_selected && !by_terminal.contains_key(&(terminal as u32))
+    }) {
+        return Ok(None);
+    }
+    if selected.iter().enumerate().any(|(terminal, &is_selected)| {
+        is_selected && !by_terminal_nwa.contains_key(&(terminal as u32))
+    }) {
+        return Ok(None);
+    }
+    let skeleton_ms = 0.0;
+    let templates = Templates { by_terminal, by_terminal_nwa };
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][recursive_cached_link_frontier_templates] selected={} frontier={} cache_hits={} cache_fallbacks={} exact={} simple_entry={} cache_ms={cache_ms:.3} exact_ms={exact_ms:.3} skeleton_ms={skeleton_ms:.3} total_ms={:.3}",
+            selected.iter().filter(|&&value| value).count(),
+            frontier.iter().filter(|&&value| value).count(),
+            cache_hits,
+            cache_fallbacks,
+            exact_count,
+            simple_entry_count,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let admission_rows = if exact_count == 0 || pairwise_return_admission_rows.is_some() {
+        let mut by_terminal = vec![Vec::<u32>::new(); selected.len()];
+
+        // Ordinary scoped terminal admission, including provider-level IGNORE
+        // identity. These rows are already retained on the compiled leaves.
+        for (global_terminal, &active) in selected.iter().enumerate() {
+            if !active {
+                continue;
+            }
+            for &(leaf_index, local_terminal) in &layout.terminal_targets[global_terminal] {
+                let leaf_index = leaf_index as usize;
+                let leaf = constraint
+                    .recursive_leaf_constraint(leaf_index)
+                    .ok_or_else(|| format!("recursive admission leaf {leaf_index} does not resolve"))?;
+                let offset = layout.leaf_state_offsets[leaf_index];
+                let row = &mut by_terminal[global_terminal];
+                if leaf.ignore_terminal == Some(local_terminal) {
+                    row.extend((0..leaf.table.num_states).map(|state| offset + state));
+                } else {
+                    row.extend(
+                        leaf.table
+                            .action
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(state, actions)| {
+                                actions
+                                    .contains_key(&local_terminal)
+                                    .then_some(offset + state as u32)
+                            }),
+                    );
+                }
+            }
+        }
+
+        // ENTRY is zero-width. A parent state which can CALL a child therefore
+        // admits every selected terminal which the child's start row admits.
+        for link in &layout.links {
+            let parent_index = link.parent_component as usize;
+            let child_index = link.child_component as usize;
+            let parent = constraint
+                .recursive_leaf_constraint(parent_index)
+                .ok_or_else(|| format!("recursive admission parent {parent_index} does not resolve"))?;
+            let child = constraint
+                .recursive_leaf_constraint(child_index)
+                .ok_or_else(|| format!("recursive admission child {child_index} does not resolve"))?;
+            let parent_offset = layout.leaf_state_offsets[parent_index];
+            let call_sources = parent
+                .table
+                .action
+                .iter()
+                .enumerate()
+                .filter_map(|(state, actions)| {
+                    actions
+                        .contains_key(&link.slot_terminal)
+                        .then_some(parent_offset + state as u32)
+                })
+                .collect::<Vec<_>>();
+            for (global_terminal, &active) in selected.iter().enumerate() {
+                if !active {
+                    continue;
+                }
+                let child_start_admits = layout.terminal_targets[global_terminal]
+                    .iter()
+                    .any(|&(component, local_terminal)| {
+                        component == link.child_component
+                            && (child.ignore_terminal == Some(local_terminal)
+                                || child.table.action(link.child_start, local_terminal).is_some())
+                    });
+                if child_start_admits {
+                    by_terminal[global_terminal].extend(call_sources.iter().copied());
+                }
+            }
+        }
+
+        // FINISH/RETURN can create parent-lookahead actions while the visible top
+        // is still child-owned. The pairwise frontier pass already computed those
+        // exact rows; merge them rather than materializing the recursive table.
+        if let Some(return_rows) = pairwise_return_admission_rows {
+            for (dst, src) in by_terminal.iter_mut().zip(return_rows) {
+                dst.extend(src);
+            }
+        }
+        for row in &mut by_terminal {
+            row.sort_unstable();
+            row.dedup();
+        }
+        Some(ParserTerminalAdmissionRows {
+            state_count: layout.total_states,
+            by_terminal,
+        })
+    } else {
+        None
+    };
+    Ok(Some((templates, layout.total_states, admission_rows)))
+}
+
 fn build_complete_composed_parser_template_cache(
     composed_table: &ComposedTable,
     components: &[&Constraint],
@@ -15105,6 +22035,184 @@ fn build_boundary_parser_from_weighted_terminal_paths(
     Some(candidate)
 }
 
+fn build_boundary_parser_from_weighted_terminal_dwa_table_free(
+    templates: &Templates,
+    terminal_dwa: &DWA,
+) -> Option<DWA> {
+    if !terminal_dwa.is_acyclic() {
+        return None;
+    }
+    let total_started_at = Instant::now();
+    let n = terminal_dwa.states().len();
+    let mut indegree = vec![0usize; n];
+    for state in terminal_dwa.states() {
+        for &(target, _) in state.transitions.values() {
+            indegree[target as usize] += 1;
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state as u32);
+        }
+    }
+    let mut topo = Vec::with_capacity(n);
+    while let Some(source) = queue.pop_front() {
+        topo.push(source);
+        for &(target, _) in terminal_dwa.states()[source as usize].transitions.values() {
+            indegree[target as usize] -= 1;
+            if indegree[target as usize] == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    if topo.len() != n {
+        return None;
+    }
+
+    #[derive(Clone)]
+    struct TerminalGroup {
+        target: u32,
+        edge_weight: Weight,
+        terminals: Vec<u32>,
+    }
+    let groups_started_at = Instant::now();
+    let mut groups_by_state = Vec::<Vec<TerminalGroup>>::with_capacity(n);
+    let mut terminal_sets = BTreeSet::<Vec<u32>>::new();
+    for state in terminal_dwa.states() {
+        let mut groups = BTreeMap::<(u32, usize), (Weight, Vec<u32>)>::new();
+        for (&label, (target, weight)) in &state.transitions {
+            if label < 0 || weight.is_empty() {
+                if label < 0 {
+                    return None;
+                }
+                continue;
+            }
+            groups
+                .entry((*target, weight.ptr_key()))
+                .or_insert_with(|| (weight.clone(), Vec::new()))
+                .1
+                .push(label as u32);
+        }
+        groups_by_state.push(
+            groups
+                .into_iter()
+                .map(|((target, _), (edge_weight, mut terminals))| {
+                    terminals.sort_unstable();
+                    terminals.dedup();
+                    terminal_sets.insert(terminals.clone());
+                    TerminalGroup {
+                        target,
+                        edge_weight,
+                        terminals,
+                    }
+                })
+                .collect(),
+        );
+    }
+    let groups_ms = groups_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let bundle_started_at = Instant::now();
+    let bundles = terminal_sets
+        .par_iter()
+        .filter_map(|terminals| {
+            build_boolean_terminal_bundle_nwa(templates, terminals)
+                .map(|bundle| (terminals.clone(), Arc::new(bundle)))
+        })
+        .collect::<FxHashMap<_, _>>();
+    let bundle_ms = bundle_started_at.elapsed().as_secs_f64() * 1000.0;
+    if bundles.len() != terminal_sets.len() {
+        return None;
+    }
+
+    fn merge_lane(
+        lanes: &mut BTreeMap<u32, Weight>,
+        root: u32,
+        weight: Weight,
+        weight_ops: &mut ScopedWeightOpCache,
+    ) {
+        if weight.is_empty() {
+            return;
+        }
+        if let Some(existing) = lanes.get_mut(&root) {
+            *existing = weight_ops.union(existing, &weight);
+        } else {
+            lanes.insert(root, weight);
+        }
+    }
+
+    let dp_started_at = Instant::now();
+    let mut arena = SharedBooleanParserDomains::new();
+    let mut domains = vec![BTreeMap::<u32, Weight>::new(); n];
+    let mut preimage_cache = FxHashMap::<(Vec<u32>, u32), u32>::default();
+    let mut weight_ops = ScopedWeightOpCache::default();
+    let mut preimage_calls = 0usize;
+    let mut preimage_hits = 0usize;
+    let mut max_lanes = 0usize;
+    for &source in topo.iter().rev() {
+        let state = &terminal_dwa.states()[source as usize];
+        let mut lanes = BTreeMap::<u32, Weight>::new();
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            merge_lane(
+                &mut lanes,
+                SharedBooleanParserDomains::UNIVERSAL,
+                final_weight.clone(),
+                &mut weight_ops,
+            );
+        }
+        for group in &groups_by_state[source as usize] {
+            let bundle = bundles.get(&group.terminals)?;
+            for (&target_root, target_support) in &domains[group.target as usize] {
+                let support = weight_ops.intersection(&group.edge_weight, target_support);
+                if support.is_empty() {
+                    continue;
+                }
+                let key = (group.terminals.clone(), target_root);
+                let source_root = if let Some(&cached) = preimage_cache.get(&key) {
+                    preimage_hits += 1;
+                    cached
+                } else {
+                    let root = arena.preimage_bundle(bundle, target_root)?;
+                    preimage_cache.insert(key, root);
+                    root
+                };
+                preimage_calls += 1;
+                if source_root != SharedBooleanParserDomains::EMPTY {
+                    merge_lane(&mut lanes, source_root, support, &mut weight_ops);
+                }
+            }
+        }
+        max_lanes = max_lanes.max(lanes.len());
+        domains[source as usize] = lanes;
+    }
+    let dp_ms = dp_started_at.elapsed().as_secs_f64() * 1000.0;
+    let roots = domains[terminal_dwa.start_state() as usize]
+        .iter()
+        .map(|(&root, weight)| (root, weight.clone()))
+        .collect::<Vec<_>>();
+    let combine_started_at = Instant::now();
+    let candidate = combine_weighted_shared_parser_roots(&mut arena, &roots);
+    let combine_ms = combine_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][recursive_boundary_domain_dp] terminal_states={} terminal_transitions={} groups={} terminal_sets={} graph_nodes={} roots={} max_lanes={} preimage_calls={} preimage_hits={} cache_entries={} output_states={} output_transitions={} groups_ms={groups_ms:.3} bundle_ms={bundle_ms:.3} dp_ms={dp_ms:.3} combine_ms={combine_ms:.3} total_ms={:.3}",
+            terminal_dwa.num_states(),
+            terminal_dwa.num_transitions(),
+            groups_by_state.iter().map(Vec::len).sum::<usize>(),
+            terminal_sets.len(),
+            arena.node_count(),
+            roots.len(),
+            max_lanes,
+            preimage_calls,
+            preimage_hits,
+            preimage_cache.len(),
+            candidate.num_states(),
+            candidate.num_transitions(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(candidate)
+}
 fn build_boundary_parser_from_weighted_terminal_dwa(
     table: &crate::compiler::glr::table::GLRTable,
     templates: &Templates,
@@ -15978,6 +23086,7 @@ fn try_prepare_pre_table_boundary_base_discovery(
                 &tokenizer_state_offsets,
                 Some(&plan),
                 None,
+                None,
                 authoritative_dynamic_boundary,
             )
             .ok()
@@ -16144,20 +23253,25 @@ fn build_boundary_repair(
             );
         }
         return Ok(Some(BoundaryRepair {
-            parser: BoundaryParserWork::DeferredTerminalCount {
+            parser: Some(BoundaryParserWork::DeferredTerminalCount {
                 terminal_automaton: TerminalAutomaton::Dwa(terminal_dwa),
                 id_map,
                 num_terminals,
-                templates,
+                templates: Arc::new(templates),
+                selected_terminals: active_terminals.clone(),
                 prebuilt_bundle_cache: None,
                 parser_table_override: None,
-            },
+                future_admission_rows: None,
+            }),
             static_boundary_shards: None,
             template_dfas_by_terminal,
             commit_templates_deferred: defer_boundary_commit_templates(),
             composition_parser_templates_by_terminal,
             active_terminals,
             boundary_tokens_by_start_component: None,
+            suffix_delegations: None,
+            return_suffix_delegations: None,
+            derive_child_return_suffix_supported: false,
         }));
     }
 
@@ -16206,6 +23320,18 @@ fn build_boundary_repair(
                 && std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some()))
         && std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_none()
         && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_splice_gate] cross_only={} authoritative_segmented={} component_splice_env={} segmented_runtime_env={} defer_disabled={} generic_reference={} fast_splice={}",
+            cross_only_boundary,
+            authoritative_segmented_boundary,
+            std::env::var_os("GLRMASK_EXPERIMENT_COMPONENT_GRAMMAR_SPLICE").is_some(),
+            std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_RUNTIME").is_some(),
+            std::env::var_os("GLRMASK_DISABLE_DEFER_BOUNDARY_PARSER_TO_FINAL_UNION").is_some(),
+            std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some(),
+            fast_component_grammar_splice,
+        );
+    }
     // In the cross-only factor every accepted repair word has a parser-visible
     // component ownership switch.  The transported component union A contains
     // only component-local words, so no per-terminal `New \ Old` factor is
@@ -16911,6 +24037,7 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             Some(&plan),
                             None,
+                            None,
                             false,
                         )
                         .ok()
@@ -16936,12 +24063,162 @@ fn build_boundary_repair(
             prebuilt_bundle_cache.as_ref().map_or(0, PrebuiltParserBundleCache::len),
         );
     }
-    let boundary_tokens_by_start_component = boundary_tokens_by_start_component(
+    let mut boundary_tokens_by_start_component = boundary_tokens_by_start_component(
         &boundary_paths,
         &composed_table.terminal_offsets,
         tokenizer_state_offsets,
         components.len(),
     );
+    let suffix_delegations_requested =
+        std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_CALL_DELEGATION").is_some()
+            || std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_PREFIX_CALL_DELEGATION").is_some()
+            || (cfg!(feature = "internal-api")
+                && std::env::var_os(
+                    "GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_PARENT_CALL_DELEGATION",
+                )
+                .is_some());
+    let suffix_delegations = suffix_delegations_requested.then(|| {
+        let started_at = Instant::now();
+        let result = boundary_suffix_delegations(
+            &boundary_paths,
+            vocab,
+            &composed_table.terminal_offsets,
+            tokenizer_state_offsets,
+            components,
+            &boundary_tokens_by_start_component,
+            &ignore_terminals.global,
+        );
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_suffix_delegations] rows={} ms={:.3}",
+                result.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    });
+    // Exact RETURN-suffix derivation is the default for the conservatively proved
+    // flat composition shape. Keep an explicit disable switch for differential
+    // testing against the historical full child-shard build.
+    let derive_child_return_suffix_enabled =
+        std::env::var_os("GLRMASK_DISABLE_STATIC_SHARD_DERIVE_CHILD_RETURN_SUFFIX").is_none();
+    let derive_child_return_suffix_supported = derive_child_return_suffix_enabled
+        && static_child_return_suffix_flat_shape_supported(composed_table, components)?;
+    if derive_child_return_suffix_enabled
+        && !derive_child_return_suffix_supported
+        && compose_profile_enabled()
+    {
+        eprintln!("[glrmask/profile][constraint_static_child_return_partition] declined=unsupported_recursive_shape");
+    }
+    let return_suffix_delegations = (
+        std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_DELEGATION").is_some()
+            || std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_SHARED_ALL").is_some()
+            || derive_child_return_suffix_supported
+    )
+    .then(|| -> Result<Vec<BoundaryReturnSuffixDelegation>, String> {
+        let started_at = Instant::now();
+        let result = boundary_return_suffix_delegations(
+            &boundary_paths,
+            vocab,
+            &composed_table.terminal_offsets,
+            tokenizer_state_offsets,
+            components,
+            &ignore_terminals.global,
+        );
+        if derive_child_return_suffix_supported {
+            let fully = fully_delegatable_return_suffix_tokens_by_child(
+                &boundary_paths,
+                vocab,
+                &composed_table.terminal_offsets,
+                tokenizer_state_offsets,
+                components.len(),
+                &result,
+            );
+            let represented = result.iter().fold(
+                BTreeMap::<u32, BTreeSet<u32>>::new(),
+                |mut map, relation| {
+                    map.entry(relation.child_component)
+                        .or_default()
+                        .insert(relation.fused_token);
+                    map
+                },
+            );
+            if fully != represented {
+                return Err(format!(
+                    "RETURN-suffix represented token set is not exactly the fully delegatable set: fully={fully:?} represented={represented:?}"
+                ));
+            }
+            eprintln!(
+                "[glrmask/validate][static_shard_return_suffix_complete_token_partition] exact=true per_child={:?}",
+                represented.iter().map(|(&child, tokens)| (child, tokens.len())).collect::<Vec<_>>(),
+            );
+        }
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_return_suffix_delegations] rows={} ms={:.3}",
+            result.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(result)
+    })
+    .transpose()?;
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_BOUNDARY_PREFILTER_OWNERS").is_some() {
+        let owner = |terminal: u32| {
+            composed_table
+                .terminal_offsets
+                .partition_point(|&offset| offset <= terminal)
+                .saturating_sub(1)
+        };
+        let mut grouped_pairs = vec![BTreeSet::<(u32, u32)>::new(); components.len()];
+        for &(left, right) in &interface_pairs {
+            let left_owner = owner(left);
+            let right_owner = owner(right);
+            if left_owner != right_owner && left_owner < grouped_pairs.len() {
+                grouped_pairs[left_owner].insert((left, right));
+            }
+        }
+        let cheap_by_component = grouped_pairs
+            .iter()
+            .map(|pairs| {
+                boundary_interface_adjacent_pair_candidates(
+                    vocab,
+                    components,
+                    &composed_table.terminal_offsets,
+                    pairs,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut missing_total = 0usize;
+        for (component, exact) in boundary_tokens_by_start_component.iter().enumerate() {
+            let cheap = cheap_by_component
+                .get(component)
+                .cloned()
+                .unwrap_or_default();
+            let cheap_set = cheap.iter().copied().collect::<BTreeSet<_>>();
+            let missing = exact
+                .iter()
+                .copied()
+                .filter(|token| !cheap_set.contains(token))
+                .collect::<Vec<_>>();
+            missing_total += missing.len();
+            eprintln!(
+                "[glrmask/validate][direct_boundary_prefilter_owners] component={} exact={} cheap={} missing={} missing_ids={:?}",
+                component,
+                exact.len(),
+                cheap.len(),
+                missing.len(),
+                missing,
+            );
+        }
+        assert_eq!(
+            missing_total, 0,
+            "left-owner grouped DynamicDirect boundary prefilter omitted exact candidates",
+        );
+    }
+    if std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_BOUNDARY_GLOBAL_CANDIDATES").is_some() {
+        for tokens in &mut boundary_tokens_by_start_component {
+            *tokens = boundary_paths.token_ids.clone();
+        }
+    }
     let discovered_boundary_terminals = boundary_paths.terminals.clone();
     let mut active_terminals = one_terminal_support_terminals.clone();
     for terminal in discovered_boundary_terminals.iter() {
@@ -16994,6 +24271,50 @@ fn build_boundary_repair(
             let _ = selected_boundary_tokens.set(Ok(None));
         }
         return Ok(None);
+    }
+    if authoritative_segmented_boundary
+        && !dynamic_boundary_backend
+        && std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY").is_some()
+        && std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY_EARLY_ONLY").is_some()
+    {
+        if let Some(selected_boundary_tokens) = selected_boundary_tokens {
+            let selected = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY_EARLY_KEEP_SELECTED_TOKENS",
+            )
+            .is_some()
+            {
+                Some(boundary_paths.token_ids.clone())
+            } else {
+                // DynamicDirect consumes original model-token IDs directly
+                // through retained component constraints; this experiment
+                // measures whether private B token refinement is still useful
+                // as a runtime accelerator.
+                None
+            };
+            let _ = selected_boundary_tokens.set(Ok(selected));
+        }
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_static_direct_boundary_only] tokens={} shards={} terminal_artifact_skipped=true parser_artifact_skipped=true",
+                boundary_paths.token_ids.len(),
+                boundary_tokens_by_start_component.len(),
+            );
+        }
+        return Ok(Some(BoundaryRepair {
+            parser: None,
+            // Some marks the partitioned boundary representation complete.
+            // Publication replaces these empty static-parser works with exact
+            // DynamicDirect shards using oundary_tokens_by_start_component.
+            static_boundary_shards: Some(Vec::new()),
+            template_dfas_by_terminal: vec![None; analyzed.num_terminals as usize],
+            commit_templates_deferred: false,
+            composition_parser_templates_by_terminal: Vec::new(),
+            active_terminals,
+            boundary_tokens_by_start_component: Some(boundary_tokens_by_start_component),
+            suffix_delegations: suffix_delegations.clone(),
+            return_suffix_delegations: return_suffix_delegations.clone(),
+            derive_child_return_suffix_supported,
+        }));
     }
     if compose_profile_enabled() {
         let selected_count = active_terminals.iter().filter(|&&active| active).count();
@@ -17147,6 +24468,11 @@ fn build_boundary_repair(
     let use_concrete_delta =
         std::env::var_os("GLRMASK_DISABLE_CONCRETE_BOUNDARY_TEMPLATE_DELTA").is_none()
             && std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_none();
+    let defer_provider_native_static_templates = authoritative_segmented_boundary
+        && !dynamic_boundary_backend
+        && cross_only_trivial_delta
+        && boundary_special_token_terminals.is_empty()
+        && std::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS").is_none();
     let lazy_seed_relations = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_LAZY_DIRECT_PARSER")
         .is_some()
         .then(|| seed_relations.clone());
@@ -17159,7 +24485,13 @@ fn build_boundary_repair(
             // the existing rayon overlap below.
             let (mut templates, mut template_dfas_by_terminal, templates_ms) =
                 eager_templates.unwrap_or_else(|| {
-                    if static_boundary_parser_table.is_some() {
+                    if defer_provider_native_static_templates {
+                        (
+                            Templates::default(),
+                            vec![None; analyzed.num_terminals as usize],
+                            0.0,
+                        )
+                    } else if static_boundary_parser_table.is_some() {
                         build_composition_templates(
                             boundary_parser_table,
                             &analyzed,
@@ -17293,6 +24625,7 @@ fn build_boundary_repair(
                     tokenizer_state_offsets,
                     Some(&plan),
                     None,
+                    None,
                     dynamic_boundary_backend,
                 )
             };
@@ -17311,7 +24644,13 @@ fn build_boundary_repair(
                 || {
                     let (templates, mut template_dfas_by_terminal, templates_ms) =
                         eager_templates.unwrap_or_else(|| {
-                            if static_boundary_parser_table.is_some() {
+                            if defer_provider_native_static_templates {
+                                (
+                                    Templates::default(),
+                                    vec![None; analyzed.num_terminals as usize],
+                                    0.0,
+                                )
+                            } else if static_boundary_parser_table.is_some() {
                                 build_composition_templates(
                                     boundary_parser_table,
                                     &analyzed,
@@ -17434,6 +24773,7 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             None,
                             None,
+                            None,
                             dynamic_boundary_backend,
                         )
                     };
@@ -17524,11 +24864,14 @@ fn build_boundary_repair(
             &boundary_lexical_control_terminals,
             &composed_table.terminal_offsets,
             tokenizer_state_offsets,
+            components,
             plan,
             &boundary_tokens_by_start_component,
             static_boundary_components,
+            derive_child_return_suffix_supported,
             plan.synthetic_num_terminals,
             &templates,
+            &active_terminals,
             static_boundary_parser_table.clone(),
         )?)
     } else {
@@ -17639,9 +24982,11 @@ fn build_boundary_repair(
                 terminal_automaton,
                 id_map,
                 num_terminals: parser_analyzed.num_terminals,
-                templates,
+                templates: Arc::new(templates),
+                selected_terminals: active_terminals.clone(),
                 prebuilt_bundle_cache,
                 parser_table_override: static_boundary_parser_table.clone(),
+                future_admission_rows: None,
             }
         } else {
             BoundaryParserWork::Deferred {
@@ -17652,13 +24997,17 @@ fn build_boundary_repair(
             }
         };
         return Ok(Some(BoundaryRepair {
-            parser,
+
+            parser: Some(parser),
             static_boundary_shards,
             template_dfas_by_terminal,
             commit_templates_deferred: defer_boundary_commit_templates(),
             composition_parser_templates_by_terminal,
             active_terminals,
             boundary_tokens_by_start_component: Some(boundary_tokens_by_start_component),
+            suffix_delegations: suffix_delegations.clone(),
+            return_suffix_delegations: return_suffix_delegations.clone(),
+            derive_child_return_suffix_supported,
         }));
     }
     let terminal_path_candidate = match &terminal_automaton {
@@ -17821,13 +25170,16 @@ fn build_boundary_repair(
         );
     }
     Ok(Some(BoundaryRepair {
-        parser: BoundaryParserWork::Materialized(MappedArtifact::new(parser_dwa, id_map)),
+        parser: Some(BoundaryParserWork::Materialized(MappedArtifact::new(parser_dwa, id_map))),
         static_boundary_shards,
         template_dfas_by_terminal,
         commit_templates_deferred: defer_boundary_commit_templates(),
         composition_parser_templates_by_terminal,
         active_terminals,
         boundary_tokens_by_start_component: Some(boundary_tokens_by_start_component),
+        suffix_delegations,
+        return_suffix_delegations,
+        derive_child_return_suffix_supported,
     }))
 }
 
@@ -17868,6 +25220,31 @@ fn merged_original_token_ids(
         merged.push(token);
     }
     merged.extend(extras);
+    merged
+}
+
+fn merged_provider_native_special_token_terminals(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    terminal_offsets: &[u32],
+    control_terminals: &BTreeSet<u32>,
+) -> Vec<SpecialTokenTerminal> {
+    let mut merged = Vec::new();
+    for (component_index, constraint) in std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .enumerate()
+    {
+        let terminal_offset = terminal_offsets[component_index];
+        merged.extend(constraint.special_token_terminals.iter().filter_map(|special| {
+            let terminal_id = terminal_offset + special.terminal_id;
+            (!control_terminals.contains(&terminal_id)).then_some(SpecialTokenTerminal {
+                terminal_id,
+                token_id: special.token_id,
+            })
+        }));
+    }
+    merged.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    merged.dedup_by_key(|special| (special.token_id, special.terminal_id));
     merged
 }
 
@@ -18055,7 +25432,6 @@ fn build_static_dynamic_overlay_metadata(
             segmented_component_union_root_dispatch: Vec::new(),
             segmented_boundary_shards: Vec::new(),
             segmented_boundary_parser: None,
-            segmented_boundary_terminal_trie: None,
         },
         template_dfas_by_terminal,
     ))
@@ -18737,12 +26113,13 @@ fn materialized_constraint_for_composition(source: &Constraint) -> Result<Option
 /// static one before it is stored in `SegmentedParserComponent`.
 fn prepared_constraint_for_segmented_composition(
     source: &Constraint,
+    require_flat_compiler_views: bool,
 ) -> Result<Option<Constraint>, String> {
-    let recursive_compiler_table_missing = source.uses_compact_segmented_parser_runtime()
+    let recursive_compiler_table_missing = require_flat_compiler_views
+        && source.uses_compact_segmented_parser_runtime()
         && (source.table.num_states == 0 || source.table.action.is_empty());
-    let recursive_compiler_tokenizer_missing = source
-        .recursive_parser_layout()?
-        .is_some_and(|layout| {
+    let recursive_compiler_tokenizer_missing = require_flat_compiler_views
+        && source.recursive_parser_layout()?.is_some_and(|layout| {
             source.tokenizer.num_states() != layout.total_tokenizer_states
                 || source.state_to_internal_tsid.len() != layout.total_tokenizer_states as usize
         });
@@ -18759,8 +26136,10 @@ fn prepared_constraint_for_segmented_composition(
     {
         prepared.materialize_composition_link_metadata_for_compilation()?;
     }
-    prepared.prepare_recursive_compiler_table_for_composition()?;
-    prepared.prepare_recursive_compiler_tokenizer_for_composition()?;
+    if require_flat_compiler_views {
+        prepared.prepare_recursive_compiler_table_for_composition()?;
+        prepared.prepare_recursive_compiler_tokenizer_for_composition()?;
+    }
     // Segmented A retains the component's own runtime backend. In particular,
     // a loaded static component's packed parser DWA is already a complete
     // runtime representation; unpacking it here merely to link B duplicates
@@ -18778,6 +26157,15 @@ fn detach_recursive_component_compiler_views(constraint: &mut Constraint) -> Res
         return Ok(());
     };
     for component in &mut overlay.segmented_parser_components {
+        // Intact leaves have no detached recursive compiler view. Calling
+        // Arc::make_mut on them would deep-clone the entire compiled child just
+        // to discover that both detach operations are no-ops.
+        if !component.constraint.uses_compact_segmented_parser_runtime() {
+            continue;
+        }
+        if component.constraint.recursive_compiler_views_are_detached()? {
+            continue;
+        }
         let source = Arc::make_mut(&mut component.constraint);
         source.detach_recursive_outer_table()?;
         source.detach_recursive_outer_tokenizer()?;
@@ -19487,6 +26875,7 @@ pub(crate) fn compose_constraints(
                         composition_parser_templates_by_terminal,
                         ..
                     } = boundary;
+                    let parser = parser.ok_or_else(|| "direct-only boundary repair is unsupported by flattened composition".to_string())?;
                     let boundary_parser = parser.materialize(&composed_table.table, vocab);
                     if commit_templates_deferred {
                         template_dfas_by_terminal = build_commit_templates_from_raw_templates(
@@ -19718,17 +27107,17 @@ fn compose_constraints_owned_parent_impl(
     } else {
         parent.materialize_composition_metadata_for_compilation()?;
     }
-    if explicit_segmented_boundary.is_some() {
-        parent.prepare_recursive_compiler_table_for_composition()?;
-        parent.prepare_recursive_compiler_tokenizer_for_composition()?;
-    }
+    // Explicit segmented composition is provider-native for both static and
+    // dynamic boundary policy. Retained recursive leaves plus CALL/RETURN links
+    // are the compiler/runtime coordinate; never reconstruct historical flat
+    // parser or tokenizer views here.
     let parent_metadata_materialize_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let phase_started_at = Instant::now();
     let materialized_children = children
         .iter()
         .map(|child| {
             if explicit_segmented_boundary.is_some() {
-                prepared_constraint_for_segmented_composition(child.constraint)
+                prepared_constraint_for_segmented_composition(child.constraint, false)
             } else {
                 materialized_constraint_for_composition(child.constraint)
             }
@@ -19916,10 +27305,37 @@ fn compose_constraints_owned_parent_impl(
         && components_have_no_compiled_eof_stack_rewrites(&parent, children)
         && (all_children_nonnullable
             || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
+    // Provider-native segmented runtimes are expressed by retained recursive
+    // components plus CALL/RETURN links, so neither static nor dynamic boundary
+    // policy needs a flattened executable coordinator LR table.
+    let direct_dynamic_shell = direct_dynamic_boundary;
+    let direct_static_shell =
+        explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa);
+    // A static composition that deliberately publishes DynamicDirect B has the
+    // same runtime token-coordinate requirements as the native dynamic shell:
+    // retained leaves consume original model-token IDs, so the parent's public
+    // token quotient is already exact and no cross-component token product is
+    // needed. Keep this tied to the artifact-free experiment until that path is
+    // promoted generally.
+    let direct_dynamic_coordinate_shell = direct_dynamic_shell
+        || (direct_static_shell
+            && std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY").is_some()
+            && std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY_EARLY_ONLY").is_some());
+    let direct_parser_shell = direct_dynamic_shell || direct_static_shell;
     let table_started_at = Instant::now();
     let (composed_table_result, mut pre_table_base_discovery) = rayon::join(
         || {
-            if use_legacy_splice {
+            if direct_parser_shell {
+                compose_subgrammar_table_shell_explicit_with_rules(
+                    &parent.table,
+                    parent_rules,
+                    (!global_ignores)
+                        .then_some(parent.ignore_terminal)
+                        .flatten(),
+                    &table_inputs,
+                    &child_rules,
+                )
+            } else if use_legacy_splice {
                 compose_subgrammar_tables_with_rules(
                     &parent.table,
                     parent_rules,
@@ -19954,9 +27370,12 @@ fn compose_constraints_owned_parent_impl(
         },
     );
     let mut composed_table = composed_table_result?;
+    let composition_terminal_offsets = composed_table.terminal_offsets.clone();
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
-    let attempt_structural_sharing = structural_sharing_enabled() && children.len() > 1;
+    let attempt_structural_sharing = !direct_parser_shell
+        && structural_sharing_enabled()
+        && children.len() > 1;
     let structural_report = if attempt_structural_sharing {
         let terminal_analysis = composition_terminal_classes(&parent, children, &composed_table);
         let nonterminal_classes = structural_nonterminal_classes(
@@ -20033,11 +27452,35 @@ fn compose_constraints_owned_parent_impl(
         )
         .ok()
         .map(|(summary, _)| summary)
+    } else if direct_static_shell && all_children_nonnullable {
+        // Provider-native static composition already computes the exact
+        // nonnullable grammar-adjacency summary during pre-table boundary
+        // discovery. Preserve that summary on the returned constraint so a
+        // later recursive rebind can splice it algebraically instead of
+        // reconstructing FIRST/FOLLOW from the detached composed rule set.
+        // This is link metadata only; runtime parser semantics are unchanged.
+        pre_table_base_discovery
+            .as_ref()
+            .filter(|precomputed| precomputed.terminal_offsets == composed_table.terminal_offsets)
+            .map(|precomputed| precomputed.summary.clone())
+            .or_else(|| {
+                compose_nonnullable_grammar_adjacency_summaries(
+                    &component_constraints,
+                    &composed_table.terminal_offsets,
+                    &composed_table.placeholder_terminals,
+                    &composed_table.placeholder_component_indices,
+                )
+                .ok()
+                .map(|(summary, _)| summary)
+            })
     } else {
         None
     };
-    let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
-        component_tokenizer_state_layout_owned_parent(&component_constraints);
+    let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) = if direct_parser_shell {
+        component_recursive_tokenizer_state_layout_owned_parent(&component_constraints)?
+    } else {
+        component_tokenizer_state_layout_owned_parent(&component_constraints)
+    };
     let tokenizer_inputs = component_constraints
         .iter()
         .enumerate()
@@ -20057,13 +27500,28 @@ fn compose_constraints_owned_parent_impl(
         .as_ref()
         .map(|report| report.elapsed_ms)
         .unwrap_or(0.0);
-    let special_token_terminals = merged_special_token_terminals(
-        &parent,
-        children,
-        &composed_table.terminal_offsets,
-        &composed_table.table,
-        &composed_table.control_terminals,
-    );
+    let special_token_terminals = if direct_dynamic_shell {
+        // DynamicDirect handles exact-special admission in the retained leaves.
+        Vec::new()
+    } else if direct_static_shell {
+        // Component special lists are already locally live. The only specials
+        // killed by the current composition are placeholders rewritten into
+        // zero-width linker controls, which can be filtered without LR rows.
+        merged_provider_native_special_token_terminals(
+            &parent,
+            children,
+            &composed_table.terminal_offsets,
+            &composed_table.control_terminals,
+        )
+    } else {
+        merged_special_token_terminals(
+            &parent,
+            children,
+            &composed_table.terminal_offsets,
+            &composed_table.table,
+            &composed_table.control_terminals,
+        )
+    };
     let parser_components = component_constraints
         .iter()
         .enumerate()
@@ -20103,10 +27561,17 @@ fn compose_constraints_owned_parent_impl(
             );
         }
     }
-    let parser_default_domains = build_parser_default_domain_plan(
-        &parser_components,
-        composed_table.table.num_states,
-    );
+    let parser_default_domains = if direct_parser_shell {
+        // A zero-state provider shell has no materialized parser-state alphabet
+        // to quotient. This is exactly the result the generic builder produces.
+        ParserDefaultDomainPlan {
+            parser_state_labels: Vec::new(),
+            component_domains: vec![None; parser_components.len()],
+            predicted_saved_edges: 0,
+        }
+    } else {
+        build_parser_default_domain_plan(&parser_components, composed_table.table.num_states)
+    };
     if compose_profile_enabled() {
         let selected = parser_default_domains
             .component_domains
@@ -20185,22 +27650,30 @@ fn compose_constraints_owned_parent_impl(
         rayon::join(
             || {
                 let started_at = Instant::now();
-                let parent_tokenizer = parent.tokenizer.clone();
-                let child_tokenizers = children
-                    .iter()
-                    .enumerate()
-                    .map(|(index, child)| {
-                        (
-                            &child.constraint.tokenizer,
-                            composed_table.terminal_offsets[index + 1],
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let result = Tokenizer::disjoint_union_with_owned_parent(
-                    parent_tokenizer,
-                    composed_table.terminal_offsets[0],
-                    &child_tokenizers,
-                );
+                let result = if direct_parser_shell {
+                    // Provider-native segmented runtime never executes a flattened
+                    // coordinator tokenizer. Keep the root tokenizer only; the
+                    // exact recursive leaf-state coordinate lives in the layout
+                    // and retained component tokenizers below.
+                    (parent.tokenizer.clone(), expected_tokenizer_state_offsets.clone())
+                } else {
+                    let parent_tokenizer = parent.tokenizer.clone();
+                    let child_tokenizers = children
+                        .iter()
+                        .enumerate()
+                        .map(|(index, child)| {
+                            (
+                                &child.constraint.tokenizer,
+                                composed_table.terminal_offsets[index + 1],
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    Tokenizer::disjoint_union_with_owned_parent(
+                        parent_tokenizer,
+                        composed_table.terminal_offsets[0],
+                        &child_tokenizers,
+                    )
+                };
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
             || rayon::join(
@@ -20268,10 +27741,28 @@ fn compose_constraints_owned_parent_impl(
                         || rayon::join(
                         || {
                             let started_at = Instant::now();
-                            let result = build_direct_component_token_coordinates(
-                                &parser_components,
-                                &original_token_ids,
-                            );
+                            let result = if direct_dynamic_coordinate_shell {
+                                // The recursive DynamicDirect coordinator never
+                                // interprets child-local Weight token classes. Its
+                                // only public-token quotient is needed for generic
+                                // mask caches/output filtering, and every component
+                                // targets the same Vocab, so the parent's quotient is
+                                // already exact. Do not construct the cross-product
+                                // token partition across all children.
+                                build_direct_component_token_coordinates(
+                                    &parser_components[..1],
+                                    &original_token_ids,
+                                )
+                                .map(|(vocab_tokens, mut maps, singleton)| {
+                                    maps.resize_with(parser_components.len(), Vec::new);
+                                    (vocab_tokens, maps, singleton)
+                                })
+                            } else {
+                                build_direct_component_token_coordinates(
+                                    &parser_components,
+                                    &original_token_ids,
+                                )
+                            };
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
                         || {
@@ -20319,7 +27810,25 @@ fn compose_constraints_owned_parent_impl(
                 };
                 let selected_wait_ms = selected_wait_started_at.elapsed().as_secs_f64() * 1000.0;
                 let possible_matches_by_component = possible_matches_result?;
-                let prepared = if let Some(selected_boundary_tokens) = selected_boundary_tokens {
+                let prepared = if direct_dynamic_coordinate_shell {
+                    // Provider-native DynamicDirect A/B never reads a coordinator
+                    // possible-matches automaton: A stays in each retained child
+                    // coordinate and B validates model tokens by exact recursive
+                    // commit. Keep only the already-built coordinate maps needed
+                    // to derive the recursive leaf TSID relation; remapping every
+                    // component Weight into an otherwise-unused global PM table
+                    // is pure link-time work.
+                    PreparedOwnedComponentArtifacts {
+                        automata_maps: component_maps,
+                        possible_matches: PossibleMatches::default(),
+                        id_map: component_id_map,
+                        boundary_tsid_map: None,
+                        boundary_token_map: None,
+                        token_mask_caches: None,
+                        token_mask_cache_ms: 0.0,
+                        remap_ms: 0.0,
+                    }
+                } else if let Some(selected_boundary_tokens) = selected_boundary_tokens {
                     let boundary_id_map_started_at = Instant::now();
                     let boundary_id_map = boundary_id_map_for_selected_tokens(
                         &component_id_map.tokenizer_states,
@@ -20445,16 +27954,22 @@ fn compose_constraints_owned_parent_impl(
         composition_parser_templates_by_terminal,
         commit_templates_deferred,
         boundary_tokens_by_start_component,
+        suffix_delegations,
+        return_suffix_delegations,
+        derive_child_return_suffix_supported,
     ) = match boundary_repair {
         Some(boundary) => {
             debug_assert!(boundary.active_terminals.iter().any(|&active| active));
             (
-                Some(boundary.parser),
+                boundary.parser,
                 boundary.static_boundary_shards,
                 boundary.template_dfas_by_terminal,
                 boundary.composition_parser_templates_by_terminal,
                 boundary.commit_templates_deferred,
                 boundary.boundary_tokens_by_start_component,
+                boundary.suffix_delegations,
+                boundary.return_suffix_delegations,
+                boundary.derive_child_return_suffix_supported,
             )
         }
         None => (
@@ -20464,6 +27979,9 @@ fn compose_constraints_owned_parent_impl(
             Vec::new(),
             false,
             None,
+            None,
+            None,
+            false,
         ),
     };
     // A present partitioned-static work set is a complete composition-specific
@@ -20472,6 +27990,10 @@ fn compose_constraints_owned_parent_impl(
     // serialization use the component-owned shards. Keep global publication
     // only for legacy/oracle paths where partitioned work is unavailable.
     let partitioned_static_boundary_complete = static_boundary_shard_work.is_some();
+    let recursive_global_static_boundary_requested =
+        explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+            && !partitioned_static_boundary_complete
+            && std::env::var_os("GLRMASK_EXPERIMENT_RECURSIVE_GLOBAL_STATIC_BOUNDARY").is_some();
 
     // Build the signed/resolved/hash-consed positive boundary parser as soon as
     // boundary repair has produced its terminal automaton and templates.  This
@@ -20481,11 +28003,11 @@ fn compose_constraints_owned_parent_impl(
     // unfinalized constraint construction.
     let early_boundary_positive_requested =
         std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_POSITIVE").is_some()
-            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_positive = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
         && !partitioned_static_boundary_complete
+        && !recursive_global_static_boundary_requested
         && early_boundary_positive_requested
         && std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_none()
         && let Some(work) = boundary_work.take()
@@ -20496,6 +28018,7 @@ fn compose_constraints_owned_parent_impl(
             let candidate = work.materialize_positive_parser_without_table(
                 allow_grouped_cancellation,
                 num_parser_states,
+                true,
             )?;
             publish_boundary_parser_candidate_for_state_count(candidate, num_parser_states)
         }));
@@ -20520,19 +28043,27 @@ fn compose_constraints_owned_parent_impl(
     // compiler tokenizer. The coordinator drops that flat tokenizer again
     // before publication.
     let preserve_parent_runtime = explicit_segmented_boundary.is_some();
-    let mut terminal_live_states = merged_terminal_live_states_owned_parent(
-        &mut parent,
-        children,
-        &composed_table.terminal_offsets,
-        &expected_tokenizer_state_offsets,
-        composed_table.table.num_terminals as usize,
-        preserve_parent_runtime,
-    );
-    canonicalize_terminal_live_states(
-        &mut terminal_live_states,
-        merged_ignores.canonical,
-        &merged_ignores.aliases,
-    );
+    let mut terminal_live_states = if direct_parser_shell {
+        // The coordinator lexer is not executable in provider-native mode;
+        // each retained leaf owns its own terminal-live index.
+        Vec::new()
+    } else {
+        merged_terminal_live_states_owned_parent(
+            &mut parent,
+            children,
+            &composed_table.terminal_offsets,
+            &expected_tokenizer_state_offsets,
+            composed_table.table.num_terminals as usize,
+            preserve_parent_runtime,
+        )
+    };
+    if !direct_parser_shell {
+        canonicalize_terminal_live_states(
+            &mut terminal_live_states,
+            merged_ignores.canonical,
+            &merged_ignores.aliases,
+        );
+    }
     let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let parent_fast_transitions = if preserve_parent_runtime {
@@ -20550,9 +28081,13 @@ fn compose_constraints_owned_parent_impl(
             )
         })
         .collect::<Vec<_>>();
-    let tokenizer_fast_transitions = parent_fast_transitions
-        .append_rebased_children(&child_fast_transitions)
-        .unwrap_or_default();
+    let tokenizer_fast_transitions = if direct_parser_shell {
+        parent_fast_transitions
+    } else {
+        parent_fast_transitions
+            .append_rebased_children(&child_fast_transitions)
+            .unwrap_or_default()
+    };
     let merged_exprs_for_restore = (parent.tokenizer.terminal_exprs().is_none()
         || children
             .iter()
@@ -20569,13 +28104,15 @@ fn compose_constraints_owned_parent_impl(
     })
     .flatten();
     let (mut tokenizer, tokenizer_state_offsets) = tokenizer_result;
-    if tokenizer.terminal_exprs().is_none()
-        && let Some(exprs) = merged_exprs_for_restore
-    {
-        tokenizer.restore_terminal_exprs(Some(exprs))?;
-    }
-    if let Some(canonical) = merged_ignores.canonical {
-        tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
+    if !direct_parser_shell {
+        if tokenizer.terminal_exprs().is_none()
+            && let Some(exprs) = merged_exprs_for_restore
+        {
+            tokenizer.restore_terminal_exprs(Some(exprs))?;
+        }
+        if let Some(canonical) = merged_ignores.canonical {
+            tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
+        }
     }
     assert_eq!(
         tokenizer_state_offsets, expected_tokenizer_state_offsets,
@@ -20645,11 +28182,11 @@ fn compose_constraints_owned_parent_impl(
     // artifact assembly so deterministic B publication can overlap that work.
     let early_boundary_publish_requested =
         std::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_PUBLISH").is_some()
-            && std::env::var_os("GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE").is_none()
             && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_none();
     let mut early_boundary_publish = None;
     if (segmented_skip_requested || two_dwa_runtime_requested)
         && !partitioned_static_boundary_complete
+        && !recursive_global_static_boundary_requested
         && early_boundary_publish_requested
         && let Some(work) = boundary_work.take()
     {
@@ -20729,7 +28266,7 @@ fn compose_constraints_owned_parent_impl(
                 (sources, elapsed_ms)
             },
             || -> Result<Option<BoundaryRuntimeCandidate>, String> {
-                if partitioned_static_boundary_complete {
+                if partitioned_static_boundary_complete || recursive_global_static_boundary_requested {
                     return Ok(None);
                 }
                 if early_boundary_positive.is_some() || early_boundary_publish.is_some() {
@@ -20738,62 +28275,34 @@ fn compose_constraints_owned_parent_impl(
                 if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_BOUNDARY_PARSER_BUILD").is_some() {
                     return Ok(None);
                 }
-                let Some(work) = boundary_work else {
+                let Some(work) = boundary_work.take() else {
                     return Ok(None);
                 };
                 let started_at = Instant::now();
-                if explicit_segmented_boundary
-                    == Some(SegmentedBoundaryBackend::Dynamic)
-                    || (explicit_segmented_boundary.is_none()
-                        && std::env::var_os(
-                            "GLRMASK_EXPERIMENT_RUNTIME_BOUNDARY_TERMINAL_TRIE",
-                        )
-                        .is_some())
-                {
-                    let (trie, boundary_id_map, template_cache) =
-                        work.materialize_terminal_trie()?;
-                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                    if compose_profile_enabled() {
-                        eprintln!(
-                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=terminal_trie nodes={} live_tsids={} token_classes={} build_ms={elapsed_ms:.3}",
-                            trie.nodes.len(),
-                            trie.root_by_tsid.iter().filter(|&&root| root != u32::MAX).count(),
-                            boundary_id_map.num_internal_tokens(),
-                        );
+                let (positive, boundary_id_map, template_cache) =
+                    work.materialize_positive_parser(&result.constraint.table)?;
+                positive.ensure_positive()?;
+                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                if compose_profile_enabled() {
+                    match &positive {
+                        PositiveBoundaryParser::Nwa(nwa) => eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=nwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                            nwa.num_states(),
+                            nwa.num_transitions(),
+                        ),
+                        PositiveBoundaryParser::Dwa(dwa) => eprintln!(
+                            "[glrmask/profile][constraint_segmented_boundary_positive] representation=dwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
+                            dwa.num_states(),
+                            dwa.num_transitions(),
+                        ),
                     }
-                    Ok(Some(BoundaryRuntimeCandidate::TerminalTrie {
-                        trie,
-                        id_map: boundary_id_map,
-                        template_cache,
-                        build_ms: elapsed_ms,
-                    }))
-                } else {
-                    let (positive, boundary_id_map, template_cache) =
-                        work.materialize_positive_parser(&result.constraint.table)?;
-                    positive.ensure_positive()?;
-                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                    if compose_profile_enabled() {
-                        match &positive {
-                            PositiveBoundaryParser::Nwa(nwa) => eprintln!(
-                                "[glrmask/profile][constraint_segmented_boundary_positive] representation=nwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
-                                nwa.num_states(),
-                                nwa.num_transitions(),
-                            ),
-                            PositiveBoundaryParser::Dwa(dwa) => eprintln!(
-                                "[glrmask/profile][constraint_segmented_boundary_positive] representation=dwa states={} transitions={} positive_only=true build_ms={elapsed_ms:.3}",
-                                dwa.num_states(),
-                                dwa.num_transitions(),
-                            ),
-                        }
-                    }
-                    Ok(Some(BoundaryRuntimeCandidate::Parser {
-                        positive,
-                        id_map: boundary_id_map,
-                        template_cache,
-                        build_ms: elapsed_ms,
-                    }))
                 }
-            },
+                Ok(Some(BoundaryRuntimeCandidate::Parser {
+                    positive,
+                    id_map: boundary_id_map,
+                    template_cache,
+                    build_ms: elapsed_ms,
+                }))            },
         );
         let segment_prepare_ms = segment_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
         let (mut source_constraints, child_clone_ms) = child_clone_result;
@@ -20847,6 +28356,7 @@ fn compose_constraints_owned_parent_impl(
                 id_num_tsids,
                 merged_ignores.canonical,
                 &merged_ignores.aliases,
+                explicit_segmented_boundary.is_some(),
             );
             let handle = early_boundary_positive
                 .take()
@@ -20931,17 +28441,6 @@ fn compose_constraints_owned_parent_impl(
                             tsid_quotient,
                         }))
                     }
-                    BoundaryRuntimeCandidate::TerminalTrie {
-                        trie,
-                        id_map,
-                        template_cache,
-                        build_ms,
-                    } => Ok(Some(PublishedBoundaryRuntime::TerminalTrie {
-                        trie,
-                        id_map,
-                        template_cache,
-                        build_ms,
-                    })),
                 }
             },
             || build_segmented_runtime_metadata(
@@ -20956,11 +28455,12 @@ fn compose_constraints_owned_parent_impl(
                 id_num_tsids,
                 merged_ignores.canonical,
                 &merged_ignores.aliases,
+                explicit_segmented_boundary.is_some(),
             ),
             )
         };
         let segment_publish_wall_ms = segment_publish_started_at.elapsed().as_secs_f64() * 1000.0;
-        let boundary_runtime = boundary_runtime_result?;
+        let mut boundary_runtime = boundary_runtime_result?;
         let (segmented_components, deterministic_root_dispatch, segment_publish_ms) = segmented_result?;
 
         let overlay = result.constraint.static_dynamic_overlay.get_or_insert_with(|| {
@@ -20980,7 +28480,6 @@ fn compose_constraints_owned_parent_impl(
                 segmented_component_union_root_dispatch: Vec::new(),
                 segmented_boundary_shards: Vec::new(),
                 segmented_boundary_parser: None,
-                segmented_boundary_terminal_trie: None,
             }
         });
         overlay.segmented_parser_components = segmented_components;
@@ -20996,6 +28495,53 @@ fn compose_constraints_owned_parent_impl(
                 overlay.segmented_parser_components.len(),
                 !overlay.segmented_component_union_root_dispatch.is_empty(),
             );
+        }
+
+        if recursive_global_static_boundary_requested {
+            let delayed_started_at = Instant::now();
+            let mut work = boundary_work.take().ok_or_else(||
+                "recursive global static boundary lost deferred boundary work".to_owned())?;
+            let selected_terminals = work.selected_terminal_mask().ok_or_else(||
+                "recursive global static boundary requires deferred count-only work".to_owned())?;
+            let (templates, recursive_parser_state_count, admission_rows) =
+                build_recursive_cached_link_frontier_templates(&result.constraint, &selected_terminals)?
+                    .ok_or_else(|| "recursive global static boundary could not build recursive templates".to_owned())?;
+            work.set_precomputed_templates(Arc::new(templates))?;
+            if let Some(rows) = admission_rows { work.set_future_admission_rows(Arc::new(rows))?; }
+            let candidate = work.materialize_positive_parser_without_table(
+                false,
+                recursive_parser_state_count,
+                true,
+            )?;
+            let BoundaryRuntimeCandidate::Parser {
+                positive,
+                id_map,
+                template_cache,
+                build_ms: positive_build_ms,
+            } = candidate;
+            positive.ensure_positive()?;
+            let normalize_started_at = Instant::now();
+            let parser_dwa = positive.into_runtime_dwa_for_parser_state_count(
+                recursive_parser_state_count,
+            );
+            ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+            let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_recursive_global_static_boundary] parser_states={} parser_transitions={} positive_build_ms={positive_build_ms:.3} normalize_ms={normalize_ms:.3} total_ms={:.3}",
+                    parser_dwa.num_states(),
+                    parser_dwa.num_transitions(),
+                    delayed_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            boundary_runtime = Some(PublishedBoundaryRuntime::Parser {
+                parser_dwa,
+                id_map,
+                template_cache,
+                positive_build_ms,
+                normalize_ms,
+                tsid_quotient: None,
+            });
         }
 
         if let Some(boundary_runtime) = boundary_runtime {
@@ -21068,6 +28614,8 @@ fn compose_constraints_owned_parent_impl(
                             parser_dwa,
                             compact_parser_dwa: None,
                             recursive_parser_dwa: None,
+                            recursive_compact_parser_dwa: None,
+                            recursive_compact_tsid_map: Vec::new(),
                             uses_composed_tsid_coordinate: false,
                             tokenizer_state_to_tsid,
                             internal_token_to_originals,
@@ -21143,6 +28691,8 @@ fn compose_constraints_owned_parent_impl(
                             parser_dwa: DWA::new(0, 0),
                             compact_parser_dwa: Some(parser_dwa),
                             recursive_parser_dwa: None,
+                            recursive_compact_parser_dwa: None,
+                            recursive_compact_tsid_map: Vec::new(),
                             uses_composed_tsid_coordinate: false,
                             tokenizer_state_to_tsid,
                             internal_token_to_originals,
@@ -21155,45 +28705,6 @@ fn compose_constraints_owned_parent_impl(
                             boundary_tokens_by_start_component.as_deref(),
                         );
                     }
-                }
-                PublishedBoundaryRuntime::TerminalTrie {
-                    trie,
-                    id_map: boundary_id_map,
-                    template_cache,
-                    build_ms,
-                } => {
-                    if let Some(template_cache) = template_cache {
-                        result.constraint.composition_parser_templates_by_terminal =
-                            template_cache;
-                    }
-                    let tokenizer_state_to_tsid = segmented_boundary_state_to_tsid
-                        .clone()
-                        .unwrap_or(boundary_id_map.tokenizer_states.original_to_internal);
-                    let internal_token_to_originals =
-                        boundary_id_map.vocab_tokens.internal_to_originals;
-                    if compose_profile_enabled() {
-                        eprintln!(
-                            "[glrmask/profile][constraint_segmented_boundary_terminal_nwa] states={} token_classes={} build_ms={build_ms:.3}",
-                            trie.symbolic_nwa.as_ref().map_or(0, |nwa| nwa.nodes.len()),
-                            internal_token_to_originals.len(),
-                        );
-                    }
-                    let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
-                        "segmented component metadata must exist before boundary metadata",
-                    );
-                    let boundary = Arc::new(crate::runtime::SegmentedBoundaryTerminalTrie {
-                            nodes: trie.nodes,
-                            root_by_tsid: trie.root_by_tsid,
-                            tokenizer_state_to_tsid,
-                            internal_token_to_originals,
-                            symbolic_nwa: trie.symbolic_nwa,
-                        });
-                    overlay.segmented_boundary_terminal_trie = Some(Arc::clone(&boundary));
-                    install_segmented_boundary_shards(
-                        overlay,
-                        crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary),
-                        boundary_tokens_by_start_component.as_deref(),
-                    );
                 }
             }
         }
@@ -21210,29 +28721,489 @@ fn compose_constraints_owned_parent_impl(
                 boundary_tokens_by_start_component.as_deref(),
             );
             overlay.segmented_boundary_parser = None;
-            overlay.segmented_boundary_terminal_trie = None;
         }
 
-        let published_static_boundary_shards = if partitioned_static_boundary_complete {
-            let recursive_table = result
-                .constraint
-                .recursive_control_eliminated_parser_table()?
-                .expect("partitioned static boundary requires recursive provider table");
-            for work in &mut pending_static_boundary_shards {
-                work.parser
-                    .set_parser_table_override(Arc::clone(&recursive_table))?;
+        // For a tiny exact B-domain, compiling a parser DWA costs far more
+        // than validating those few model tokens through the already-authoritative
+        // recursive parser. Boundary discovery supplies the exact candidate domain,
+        // and DynamicDirect performs the same scoped commit used by runtime parsing,
+        // so this changes only the accelerator representation, not the language.
+        // Keep a disable switch solely for compiler/reference equivalence tests.
+        let force_direct_static_boundary =
+            std::env::var_os("GLRMASK_EXPERIMENT_STATIC_DIRECT_BOUNDARY").is_some();
+        let tiny_direct_static_boundary = partitioned_static_boundary_complete
+            && (force_direct_static_boundary
+                || (std::env::var_os("GLRMASK_DISABLE_STATIC_TINY_DIRECT_BOUNDARY").is_none()
+                    && !pending_static_boundary_shards.is_empty()
+                    && pending_static_boundary_shards
+                        .iter()
+                        .all(|work| work.candidate_tokens.len() <= 8)
+                    && pending_static_boundary_shards
+                        .iter()
+                        .map(|work| work.candidate_tokens.len())
+                        .sum::<usize>()
+                        <= 8));
+        if tiny_direct_static_boundary && compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_static_tiny_direct_boundary] shards={} candidates={} parser_compile_skipped=true",
+                pending_static_boundary_shards.len(),
+                pending_static_boundary_shards.iter().map(|work| work.candidate_tokens.len()).sum::<usize>(),
+            );
+        }
+
+        let mut published_static_boundary_shards = if partitioned_static_boundary_complete && !tiny_direct_static_boundary {
+            let mut selected_terminals = vec![false; result.constraint.table.num_terminals as usize];
+            for work in &pending_static_boundary_shards {
+                let selected = work.parser.selected_terminal_mask().ok_or_else(||
+                    "partitioned static boundary requires deferred count-only work".to_owned())?;
+                if selected.len() != selected_terminals.len() {
+                    return Err("partitioned static boundary terminal-domain mismatch".to_owned());
+                }
+                for (dst, src) in selected_terminals.iter_mut().zip(selected) { *dst |= src; }
+            }
+            let validate_recursive_cached_characterizations =
+                std::env::var_os("GLRMASK_VALIDATE_RECURSIVE_CACHED_CHARACTERIZATIONS").is_some();
+            let fast_recursive_templates = if validate_recursive_cached_characterizations {
+                None
+            } else {
+                build_recursive_cached_link_frontier_templates(
+                    &result.constraint,
+                    &selected_terminals,
+                )?
+            };
+            let recursive_parser_state_count;
+            if let Some((templates, state_count, admission_rows)) = fast_recursive_templates {
+                recursive_parser_state_count = state_count;
+                let templates = Arc::new(templates);
+                let admission_rows = admission_rows.map(Arc::new);
+                if std::env::var_os("GLRMASK_VALIDATE_RECURSIVE_TERMINAL_ADMISSION_ROWS").is_some()
+                    && let Some(rows) = admission_rows.as_ref()
+                {
+                    let reference_table = result
+                        .constraint
+                        .recursive_control_eliminated_selected_parser_table(&selected_terminals)?
+                        .expect("recursive admission validation requires provider table");
+                    assert_eq!(
+                        rows.state_count, reference_table.num_states,
+                        "recursive admission state-count mismatch",
+                    );
+                    assert_eq!(
+                        rows.by_terminal.len(), reference_table.num_terminals as usize,
+                        "recursive admission terminal-count mismatch",
+                    );
+                    for (terminal, &selected) in selected_terminals.iter().enumerate() {
+                        if !selected {
+                            continue;
+                        }
+                        let expected = (0..reference_table.num_states)
+                            .filter(|&state| reference_table.action(state, terminal as u32).is_some())
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            rows.by_terminal[terminal], expected,
+                            "recursive admission mismatch for terminal {terminal}",
+                        );
+                    }
+                    eprintln!(
+                        "[glrmask/validate][recursive_terminal_admission_rows] exact=true states={} terminals={}",
+                        rows.state_count,
+                        selected_terminals.iter().filter(|&&selected| selected).count(),
+                    );
+                }
+                for work in &mut pending_static_boundary_shards {
+                    work.parser.set_precomputed_templates(Arc::clone(&templates))?;
+                    if let Some(rows) = admission_rows.as_ref() { work.parser.set_future_admission_rows(Arc::clone(rows))?; }
+                }
+            } else {
+                let recursive_table = result
+                    .constraint
+                    .recursive_control_eliminated_selected_parser_table(&selected_terminals)?
+                    .expect("partitioned static boundary requires recursive provider table");
+                recursive_parser_state_count = recursive_table.num_states;
+                if std::env::var_os("GLRMASK_VALIDATE_RECURSIVE_CACHED_CHARACTERIZATIONS").is_some() {
+                    let validation_started_at = Instant::now();
+                    let reference = characterize_selected_terminals_for_terminal_count(
+                        &recursive_table,
+                        recursive_table.num_terminals,
+                        &selected_terminals,
+                    );
+                    let cached = recursive_cached_characterizations_for_selected(
+                        &result.constraint,
+                        &selected_terminals,
+                    )?;
+                    let mut mismatches = Vec::new();
+                    let mut missing = Vec::new();
+                    let mut exact = 0usize;
+                    if let Some(cached) = cached {
+                        let cached_templates = Templates::from_characterizations(&cached);
+                        let reference_templates = Templates::from_characterizations(&reference);
+                        let mut semantic_exact = 0usize;
+                        let mut semantic_mismatches = Vec::new();
+                        let mut semantic_mismatch_ids = Vec::new();
+                        for (terminal, &selected) in selected_terminals.iter().enumerate() {
+                            if !selected { continue; }
+                            let terminal = terminal as u32;
+                            match (cached.get(&terminal), reference.get(&terminal)) {
+                                (Some(candidate), Some(expected)) if candidate == expected => exact += 1,
+                                (Some(candidate), Some(expected)) => {
+                                    if mismatches.len() < 16 {
+                                        mismatches.push((
+                                            terminal,
+                                            candidate.escapes.len(), expected.escapes.len(),
+                                            candidate.reduces.len(), expected.reduces.len(),
+                                            candidate.nt_escapes.len(), expected.nt_escapes.len(),
+                                            candidate.nt_rereduces.len(), expected.nt_rereduces.len(),
+                                        ));
+                                    }
+                                }
+                                _ => missing.push(terminal),
+                            }
+                            if let (Some(candidate), Some(expected)) = (
+                                cached_templates.by_terminal.get(&terminal),
+                                reference_templates.by_terminal.get(&terminal),
+                            ) {
+                                let candidate_only = unweighted_dfa_difference(candidate, expected);
+                                let expected_only = unweighted_dfa_difference(expected, candidate);
+                                if unweighted_dfa_language_is_empty(&candidate_only)
+                                    && unweighted_dfa_language_is_empty(&expected_only)
+                                {
+                                    semantic_exact += 1;
+                                } else {
+                                    semantic_mismatch_ids.push(terminal);
+                                    if semantic_mismatches.len() < 16 {
+                                        semantic_mismatches.push((
+                                            terminal,
+                                            unweighted_dfa_shortest_word(&candidate_only),
+                                            unweighted_dfa_shortest_word(&expected_only),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if !semantic_mismatch_ids.is_empty() {
+                            if let Some(frontier) = result
+                                .constraint
+                                .recursive_link_frontier_terminals(&selected_terminals)?
+                            {
+                                let frontier_ids = frontier
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(terminal, &value)| value.then_some(terminal as u32))
+                                    .collect::<Vec<_>>();
+                                let missed = semantic_mismatch_ids
+                                    .iter()
+                                    .copied()
+                                    .filter(|&terminal| !frontier[terminal as usize])
+                                    .collect::<Vec<_>>();
+                                let extras = frontier_ids
+                                    .iter()
+                                    .copied()
+                                    .filter(|terminal| !semantic_mismatch_ids.contains(terminal))
+                                    .collect::<Vec<_>>();
+                                eprintln!(
+                                    "[glrmask/validate][recursive_link_frontier] frontier={} semantic_deltas={} missed={} extras={} frontier_ids={:?} missed_ids={:?} extra_ids={:?}",
+                                    frontier_ids.len(),
+                                    semantic_mismatch_ids.len(),
+                                    missed.len(),
+                                    extras.len(),
+                                    frontier_ids,
+                                    missed,
+                                    extras,
+                                );
+                            }
+                            let mut delta_selected = vec![false; selected_terminals.len()];
+                            for &terminal in &semantic_mismatch_ids {
+                                delta_selected[terminal as usize] = true;
+                            }
+                            let slim_started_at = Instant::now();
+                            let slim_table = result
+                                .constraint
+                                .recursive_control_eliminated_preselected_parser_table(&delta_selected)?
+                                .expect("recursive cached-characterization validation requires provider table");
+                            let slim_materialize_ms = slim_started_at.elapsed().as_secs_f64() * 1000.0;
+                            let slim_characterize_started_at = Instant::now();
+                            let slim_characterizations = characterize_selected_terminals_for_terminal_count(
+                                &slim_table,
+                                slim_table.num_terminals,
+                                &delta_selected,
+                            );
+                            let slim_characterize_ms = slim_characterize_started_at.elapsed().as_secs_f64() * 1000.0;
+                            let slim_templates = Templates::from_characterizations(&slim_characterizations);
+                            let mut slim_exact = 0usize;
+                            let mut slim_mismatches = Vec::new();
+                            for &terminal in &semantic_mismatch_ids {
+                                let Some(candidate) = slim_templates.by_terminal.get(&terminal) else {
+                                    slim_mismatches.push((terminal, None, None));
+                                    continue;
+                                };
+                                let Some(expected) = reference_templates.by_terminal.get(&terminal) else {
+                                    slim_mismatches.push((terminal, None, None));
+                                    continue;
+                                };
+                                let candidate_only = unweighted_dfa_difference(candidate, expected);
+                                let expected_only = unweighted_dfa_difference(expected, candidate);
+                                if unweighted_dfa_language_is_empty(&candidate_only)
+                                    && unweighted_dfa_language_is_empty(&expected_only)
+                                {
+                                    slim_exact += 1;
+                                } else {
+                                    slim_mismatches.push((
+                                        terminal,
+                                        unweighted_dfa_shortest_word(&candidate_only),
+                                        unweighted_dfa_shortest_word(&expected_only),
+                                    ));
+                                }
+                            }
+                            eprintln!(
+                                "[glrmask/validate][recursive_preselected_characterizations] selected={} exact={} mismatched={} materialize_ms={slim_materialize_ms:.3} characterize_ms={slim_characterize_ms:.3} examples={:?}",
+                                semantic_mismatch_ids.len(),
+                                slim_exact,
+                                semantic_mismatch_ids.len().saturating_sub(slim_exact),
+                                slim_mismatches.iter().take(16).collect::<Vec<_>>(),
+                            );
+                        }
+                        eprintln!(
+                            "[glrmask/validate][recursive_cached_characterizations] selected={} exact={} mismatched={} semantic_exact={} semantic_mismatched={} missing={} examples={:?} semantic_examples={:?} missing_ids={:?} ms={:.3}",
+                            selected_terminals.iter().filter(|&&value| value).count(),
+                            exact,
+                            selected_terminals.iter().filter(|&&value| value).count().saturating_sub(exact + missing.len()),
+                            semantic_exact,
+                            selected_terminals.iter().filter(|&&value| value).count().saturating_sub(semantic_exact + missing.len()),
+                            missing.len(),
+                            mismatches,
+                            semantic_mismatches,
+                            missing.iter().take(16).copied().collect::<Vec<_>>(),
+                            validation_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    } else {
+                        eprintln!(
+                            "[glrmask/validate][recursive_cached_characterizations] unavailable=true selected={} ms={:.3}",
+                            selected_terminals.iter().filter(|&&value| value).count(),
+                            validation_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+                for work in &mut pending_static_boundary_shards {
+                    work.parser.set_parser_table_override(Arc::clone(&recursive_table))?;
+                    // Templates now live in the recursive provider state coordinate.
+                    // Publication itself needs only that state count, not the temporary
+                    // control-eliminated GLR table.
+                    if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_KEEP_PARSER_TABLE_OVERRIDE").is_none() {
+                        work.parser.clear_parser_table_override();
+                    }
+                }
+                drop(recursive_table);
+
+            }
+            let first_label_ranges = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_STATIC_SHARD_FIRST_COMPONENT_LABELS",
+            )
+            .is_some()
+            {
+                let layout = result
+                    .constraint
+                    .recursive_parser_layout_for_pending_root()?
+                    .expect("static recursive shards require a recursive parser layout");
+                if layout.total_states != recursive_parser_state_count {
+                    return Err(format!(
+                        "recursive layout state count {} differs from shard parser coordinate {}",
+                        layout.total_states, recursive_parser_state_count,
+                    ));
+                }
+                Some(
+                    layout
+                        .component_offsets
+                        .iter()
+                        .enumerate()
+                        .map(|(component, &start)| {
+                            let end = layout
+                                .component_offsets
+                                .get(component + 1)
+                                .copied()
+                                .unwrap_or(layout.total_states);
+                            start..end
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+            if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_GLOBAL_GROUP_CACHE").is_some() {
+                let cache_started_at = Instant::now();
+                let shared_spec = pending_static_boundary_shards.iter().find_map(|work| {
+                    match &work.parser {
+                        BoundaryParserWork::DeferredTerminalCount {
+                            num_terminals,
+                            templates,
+                            ..
+                        } => Some((*num_terminals, Arc::clone(templates))),
+                        _ => None,
+                    }
+                });
+                if let Some((num_terminals, templates)) = shared_spec {
+                    let terminal_automata = pending_static_boundary_shards
+                        .iter()
+                        .filter_map(|work| match &work.parser {
+                            BoundaryParserWork::DeferredTerminalCount { terminal_automaton, .. } => {
+                                Some(terminal_automaton)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let excluded = vec![false; num_terminals as usize];
+                    let shared_cache = prebuild_parser_bundle_group_cache_for_terminal_automata(
+                        &terminal_automata,
+                        num_terminals,
+                        templates.as_ref(),
+                        &excluded,
+                    );
+                    let groups = shared_cache.group_len();
+                    for work in &mut pending_static_boundary_shards {
+                        if let BoundaryParserWork::DeferredTerminalCount {
+                            prebuilt_bundle_cache,
+                            ..
+                        } = &mut work.parser
+                        {
+                            *prebuilt_bundle_cache = Some(shared_cache.clone());
+                        }
+                    }
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_static_boundary_global_group_cache] groups={} build_ms={:.3}",
+                            groups,
+                            cache_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+            } else if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_GLOBAL_BUNDLE_CACHE").is_some() {
+                let cache_started_at = Instant::now();
+                let shared_spec = pending_static_boundary_shards.iter().find_map(|work| {
+                    match &work.parser {
+                        BoundaryParserWork::DeferredTerminalCount {
+                            num_terminals,
+                            templates,
+                            ..
+                        } => Some((*num_terminals, Arc::clone(templates))),
+                        _ => None,
+                    }
+                });
+                if let Some((num_terminals, templates)) = shared_spec {
+                    let terminal_automata = pending_static_boundary_shards
+                        .iter()
+                        .filter_map(|work| match &work.parser {
+                            BoundaryParserWork::DeferredTerminalCount { terminal_automaton, .. } => {
+                                Some(terminal_automaton)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let excluded = vec![false; num_terminals as usize];
+                    let shared_cache = prebuild_parser_bundle_cache_for_terminal_automata(
+                        &terminal_automata,
+                        num_terminals,
+                        templates.as_ref(),
+                        &excluded,
+                    );
+                    let entries = shared_cache.len();
+                    for work in &mut pending_static_boundary_shards {
+                        if let BoundaryParserWork::DeferredTerminalCount {
+                            prebuilt_bundle_cache,
+                            ..
+                        } = &mut work.parser
+                        {
+                            *prebuilt_bundle_cache = Some(shared_cache.clone());
+                        }
+                    }
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_static_boundary_global_bundle_cache] entries={} build_ms={:.3}",
+                            entries,
+                            cache_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+            } else if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_SHARED_BUNDLE_CACHE").is_some() {
+                let cache_started_at = Instant::now();
+                let shared_cache = pending_static_boundary_shards
+                    .iter()
+                    .filter(|work| work.start_component != 0)
+                    .max_by_key(|work| work.candidate_tokens.len())
+                    .and_then(|work| match &work.parser {
+                        BoundaryParserWork::DeferredTerminalCount {
+                            terminal_automaton,
+                            num_terminals,
+                            templates,
+                            ..
+                        } => {
+                            let excluded = vec![false; *num_terminals as usize];
+                            Some(prebuild_parser_bundle_cache_excluding_terminals(
+                                terminal_automaton,
+                                *num_terminals,
+                                templates.as_ref(),
+                                &excluded,
+                            ))
+                        }
+                        _ => None,
+                    });
+                if let Some(shared_cache) = shared_cache {
+                    let entries = shared_cache.len();
+                    for work in &mut pending_static_boundary_shards {
+                        if let BoundaryParserWork::DeferredTerminalCount {
+                            prebuilt_bundle_cache,
+                            ..
+                        } = &mut work.parser
+                        {
+                            *prebuilt_bundle_cache = Some(shared_cache.clone());
+                        }
+                    }
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_static_boundary_shared_bundle_cache] entries={} build_ms={:.3}",
+                            entries,
+                            cache_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
             }
             let static_shard_publish_started_at = Instant::now();
-            let published = pending_static_boundary_shards
-                .into_par_iter()
-                .map(|work| {
-                    publish_static_boundary_shard_work(
-                        work,
-                        &result.constraint.table,
-                        id_num_tsids as usize,
-                    )
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+            let publish_one = |work: BoundaryShardWork| {
+                let first_label_range = first_label_ranges
+                    .as_ref()
+                    .and_then(|ranges| ranges.get(work.start_component as usize))
+                    .cloned();
+                publish_static_boundary_shard_work_without_table(
+                    work,
+                    recursive_parser_state_count,
+                    id_num_tsids as usize,
+                    first_label_range,
+                )
+            };
+            let published = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_STATIC_SHARD_PARENT_FIRST",
+            )
+            .is_some()
+            {
+                let parent_index = pending_static_boundary_shards
+                    .iter()
+                    .position(|work| work.start_component == 0);
+                let parent = parent_index
+                    .map(|index| pending_static_boundary_shards.remove(index))
+                    .map(&publish_one)
+                    .transpose()?;
+                let mut children = pending_static_boundary_shards
+                    .into_par_iter()
+                    .map(publish_one)
+                    .collect::<Result<Vec<_>, String>>()?;
+                if let Some(parent) = parent {
+                    children.push(parent);
+                }
+                children.sort_by_key(|shard| shard.start_component);
+                children
+            } else {
+                pending_static_boundary_shards
+                    .into_par_iter()
+                    .map(publish_one)
+                    .collect::<Result<Vec<_>, String>>()?
+            };
             let static_shard_publish_ms =
                 static_shard_publish_started_at.elapsed().as_secs_f64() * 1000.0;
             if compose_profile_enabled() {
@@ -21256,13 +29227,110 @@ fn compose_constraints_owned_parent_impl(
             Vec::new()
         };
 
+        #[cfg(feature = "internal-api")]
+        if std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_DERIVE_PARENT_CALL_DELEGATION").is_some()
+            && !tiny_direct_static_boundary
+            && !std::env::var_os("GLRMASK_EXPERIMENT_STATIC_SHARD_SPLIT_PARENT_BY_FOREIGN").is_some()
+        {
+            let delegations = suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "derived static parent lost exact suffix metadata".to_owned())?;
+            let parent_candidates = boundary_tokens_by_start_component
+                .as_deref()
+                .and_then(|rows| rows.first())
+                .ok_or_else(|| "derived static parent lost parent candidate tokens".to_owned())?;
+            published_static_boundary_shards = derive_static_parent_call_delegation_shard(
+                &result.constraint,
+                published_static_boundary_shards,
+                delegations,
+                parent_candidates,
+            )?;
+        }
+        #[cfg(feature = "internal-api")]
+        if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_CALL_DELEGATION").is_some()
+            && !tiny_direct_static_boundary
+        {
+            let delegations = suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "CALL-delegation validator lost exact suffix metadata".to_owned())?;
+            validate_static_shard_call_delegation(
+                &result.constraint,
+                &published_static_boundary_shards,
+                delegations,
+            )?;
+        }
+        #[cfg(feature = "internal-api")]
+        if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_PREFIX_CALL_DELEGATION").is_some()
+            && !tiny_direct_static_boundary
+        {
+            let delegations = suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "PREFIX+CALL validator lost exact suffix metadata".to_owned())?;
+            validate_static_shard_prefix_call_delegation(
+                &result.constraint,
+                &published_static_boundary_shards,
+                delegations,
+            )?;
+        }
+        if derive_child_return_suffix_supported
+            && !tiny_direct_static_boundary
+            && return_suffix_delegations.as_ref().is_some_and(|relations| !relations.is_empty())
+        {
+            let delegations = return_suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "derived child RETURN suffix lost exact suffix metadata".to_owned())?;
+            let candidates = boundary_tokens_by_start_component
+                .as_deref()
+                .ok_or_else(|| "derived child RETURN suffix lost full child candidate sets".to_owned())?;
+            published_static_boundary_shards = derive_static_child_return_suffix_shards(
+                &result.constraint,
+                published_static_boundary_shards,
+                delegations,
+                candidates,
+            )?;
+        }
+#[cfg(feature = "internal-api")]
+        if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_SHARED_ALL").is_some()
+            && !tiny_direct_static_boundary
+        {
+            let delegations = return_suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "shared RETURN-suffix validator lost exact suffix metadata".to_owned())?;
+            build_static_child_return_suffix_exact(
+                &result.constraint,
+                delegations,
+            )?;
+        }
+
+        #[cfg(feature = "internal-api")]
+        if std::env::var_os("GLRMASK_VALIDATE_STATIC_SHARD_RETURN_SUFFIX_DELEGATION").is_some()
+            && !tiny_direct_static_boundary
+        {
+            let delegations = return_suffix_delegations
+                .as_deref()
+                .ok_or_else(|| "RETURN-suffix validator lost exact suffix metadata".to_owned())?;
+            validate_static_shard_return_suffix_delegation(
+                &result.constraint,
+                &published_static_boundary_shards,
+                delegations,
+                &composition_terminal_offsets,
+                vocab,
+            )?;
+        }
+
         if partitioned_static_boundary_complete {
             let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
                 "segmented component metadata must exist before static boundary shards",
             );
             overlay.segmented_boundary_parser = None;
-            overlay.segmented_boundary_terminal_trie = None;
-            install_published_static_boundary_shards(overlay, published_static_boundary_shards)?;
+            if tiny_direct_static_boundary {
+                install_dynamic_direct_boundary_shards(
+                    overlay,
+                    boundary_tokens_by_start_component.as_deref(),
+                );
+            } else {
+                install_published_static_boundary_shards(overlay, published_static_boundary_shards)?;
+            }
             if let Some(static_components) = static_boundary_components {
                 append_dynamic_direct_boundary_shards_for_unselected(
                     overlay,
@@ -21273,6 +29341,7 @@ fn compose_constraints_owned_parent_impl(
         }
 
         if result.constraint.uses_compact_segmented_parser_runtime() {
+            let recursive_layout_started_at = Instant::now();
             // Derive and cache the authoritative recursive leaf layout before
             // discarding historical per-component projections. This is needed
             // for dynamic-only compositions too because a compiled child can
@@ -21281,13 +29350,18 @@ fn compose_constraints_owned_parent_impl(
                 .constraint
                 .recursive_parser_layout_for_pending_root()?
                 .expect("compact segmented runtime must have a recursive parser layout");
+            let recursive_layout_ms = recursive_layout_started_at.elapsed().as_secs_f64() * 1000.0;
+            let recursive_tsid_started_at = Instant::now();
             let recursive_tokenizer_tsids = build_recursive_tokenizer_internal_tsid_relation(
                 &result.constraint,
                 &automata_maps,
             )?;
+            let recursive_tsid_build_ms = recursive_tsid_started_at.elapsed().as_secs_f64() * 1000.0;
+            let recursive_tsid_install_started_at = Instant::now();
             result
                 .constraint
                 .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_tsids)?;
+            let recursive_tsid_install_ms = recursive_tsid_install_started_at.elapsed().as_secs_f64() * 1000.0;
             // Recursive wrapper intervals are now the authoritative component
             // ownership coordinate. The materialized composed-state dispatch
             // was useful only to certify the transitional deterministic-union
@@ -21301,6 +29375,9 @@ fn compose_constraints_owned_parent_impl(
                 .clear();
             result.constraint.clear_recursive_legacy_boundary_start_states();
             result.constraint.clear_recursive_legacy_parser_state_projections();
+            if compose_profile_enabled() {
+                eprintln!("[glrmask/profile][constraint_recursive_runtime_metadata] layout_ms={recursive_layout_ms:.3} tsid_build_ms={recursive_tsid_build_ms:.3} tsid_install_ms={recursive_tsid_install_ms:.3}");
+            }
         }
 
         if compose_profile_enabled() {
@@ -21322,9 +29399,18 @@ fn compose_constraints_owned_parent_impl(
                 components_have_no_runtime_product,
             )
         });
+        let detach_started_at = Instant::now();
         detach_recursive_component_compiler_views(&mut result.constraint)?;
+        let component_detach_ms = detach_started_at.elapsed().as_secs_f64() * 1000.0;
+        let outer_table_detach_started_at = Instant::now();
         result.constraint.detach_recursive_outer_table()?;
+        let outer_table_detach_ms = outer_table_detach_started_at.elapsed().as_secs_f64() * 1000.0;
+        let outer_tokenizer_detach_started_at = Instant::now();
         result.constraint.detach_recursive_outer_tokenizer()?;
+        let outer_tokenizer_detach_ms = outer_tokenizer_detach_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compose_profile_enabled() {
+            eprintln!("[glrmask/profile][constraint_recursive_detach] components_ms={component_detach_ms:.3} outer_table_ms={outer_table_detach_ms:.3} outer_tokenizer_ms={outer_tokenizer_detach_ms:.3}");
+        }
         if compose_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms=0.000 boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} parser_runtime_cache_ms={parser_runtime_cache_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
@@ -21461,7 +29547,6 @@ fn compose_constraints_owned_parent_impl(
                     segmented_component_union_root_dispatch: Vec::new(),
                     segmented_boundary_shards: Vec::new(),
                     segmented_boundary_parser: None,
-                    segmented_boundary_terminal_trie: None,
                 }
             });
             overlay.segmented_parser_components = segmented_components;
@@ -21530,7 +29615,6 @@ fn compose_constraints_owned_parent_impl(
                 segmented_component_union_root_dispatch: Vec::new(),
                 segmented_boundary_shards: Vec::new(),
                 segmented_boundary_parser: None,
-                segmented_boundary_terminal_trie: None,
             }
         });
         if compose_profile_enabled() {
@@ -21547,6 +29631,8 @@ fn compose_constraints_owned_parent_impl(
             parser_dwa,
             compact_parser_dwa: None,
             recursive_parser_dwa: None,
+            recursive_compact_parser_dwa: None,
+            recursive_compact_tsid_map: Vec::new(),
             uses_composed_tsid_coordinate: false,
             tokenizer_state_to_tsid,
             internal_token_to_originals,
@@ -21817,6 +29903,87 @@ mod tests {
     use crate::grammar::flat::TerminalID;
     include!("minbound_trigram.rs");
     include!("minbound_factor.rs");
+
+    #[test]
+    fn interval_tsid_behavior_quotient_matches_expanded_reference() {
+        fn reference(
+            weights: &[Weight],
+            old_tsid_count: usize,
+            token_classes: usize,
+        ) -> (Vec<u32>, usize) {
+            let mut unique_ids = FxHashMap::<usize, u16>::default();
+            let mut unique_weights = Vec::<Weight>::new();
+            for weight in weights {
+                if weight.is_full() || weight.is_empty() {
+                    continue;
+                }
+                let key = weight.ptr_key();
+                if unique_ids.contains_key(&key) {
+                    continue;
+                }
+                let index = u16::try_from(unique_weights.len()).unwrap();
+                unique_ids.insert(key, index);
+                unique_weights.push(weight.clone());
+            }
+            type Signature = SmallVec<[(u16, u64); 4]>;
+            let mut signatures = vec![Signature::new(); old_tsid_count];
+            for (weight_index, weight) in unique_weights.iter().enumerate() {
+                for (start, end, tokens) in weight.range_entries() {
+                    let mut mask = 0u64;
+                    for range in tokens.ranges() {
+                        for token in range {
+                            assert!((token as usize) < token_classes && token < 64);
+                            mask |= 1u64 << token;
+                        }
+                    }
+                    if mask == 0 {
+                        continue;
+                    }
+                    for tsid in start..=end {
+                        signatures[tsid as usize].push((weight_index as u16, mask));
+                    }
+                }
+            }
+            let mut classes = FxHashMap::<Signature, u32>::default();
+            let mut old_to_new = vec![0u32; old_tsid_count];
+            for (old_tsid, signature) in signatures.into_iter().enumerate() {
+                let next = classes.len() as u32;
+                old_to_new[old_tsid] = *classes.entry(signature).or_insert(next);
+            }
+            (old_to_new, unique_weights.len())
+        }
+
+        const TSIDS: usize = 97;
+        const TOKENS: usize = 5;
+        for seed in 0u32..64 {
+            let weights = (0u32..17)
+                .map(|weight_index| {
+                    let entries = (0u32..TSIDS as u32).filter_map(|tsid| {
+                        let mixed = tsid
+                            .wrapping_mul(0x9e37_79b9)
+                            .wrapping_add(weight_index.wrapping_mul(0x85eb_ca6b))
+                            .wrapping_add(seed.wrapping_mul(0xc2b2_ae35));
+                        let tokens = (0u32..TOKENS as u32)
+                            .filter(|token| {
+                                let rotate = (token * 5 + weight_index + seed) & 31;
+                                mixed.rotate_left(rotate) & (1u32 << token) != 0
+                            })
+                            .collect::<RangeSetBlaze<u32>>();
+                        (!tokens.is_empty()).then_some((tsid, tokens))
+                    });
+                    Weight::from_per_tsid_token_sets(entries)
+                })
+                .collect::<Vec<_>>();
+            let expected = reference(&weights, TSIDS, TOKENS);
+            let actual = compute_boundary_tsid_behavior_quotient_from_weights(
+                weights.iter(),
+                TSIDS,
+                TOKENS,
+            )
+            .expect("generated quotient input must be supported");
+            assert_eq!(actual, expected, "seed {seed}");
+        }
+    }
 
     fn byte_vocab() -> Vocab {
         Vocab::new(
@@ -25078,7 +33245,6 @@ constraint: &third,
             let assert_policy = |constraint: &Constraint| {
                 let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
                 assert!(overlay.segmented_boundary_parser.is_none());
-                assert!(overlay.segmented_boundary_terminal_trie.is_none());
                 assert_eq!(overlay.segmented_parser_components.len(), 2);
                 for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
                     let shard = component

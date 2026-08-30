@@ -15,8 +15,12 @@
 //! cannot replace the entire arguments object and bypass its shape.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use crate::compiler::constraint_compose::{CompiledSubgrammarInput, compose_constraints};
+use crate::compiler::constraint_compose::{
+    CompiledSubgrammarInput, SegmentedBoundaryBackend, compose_constraints,
+    compose_constraints_owned_parent_segmented_shared,
+};
 use crate::{Constraint, GlrMaskError, Vocab};
 
 const JAVASCRIPT_GLRM: &str = include_str!("programmatic_js/javascript.glrm");
@@ -58,7 +62,7 @@ nt dynamic_reference_suffix ::=
 
 /// Reusable compiler for programmatic JavaScript tool calling.
 #[derive(Debug)]
-pub(crate) struct ProgrammaticJsCompiler {
+pub struct ProgrammaticJsCompiler {
     parent: Constraint,
     dynamic_value: Constraint,
     condition: Constraint,
@@ -165,6 +169,76 @@ impl ProgrammaticJsCompiler {
         Constraint::from_glrm_grammar_with_subgrammars(&dispatcher_source, &borrowed, vocab)
     }
 
+    /// Compose an already-compiled static tool set behind the exact dynamic
+    /// boundary walker while retaining every schema as a static component.
+    /// This consuming form is used by build systems that already own/cache the
+    /// component artifacts and do not want to clone them merely to publish the
+    /// recursive runtime tree.
+    #[doc(hidden)]
+    pub fn compile_dispatcher_dynamic_boundary_owned(
+        &self,
+        tools: Vec<(String, Constraint)>,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        validate_tool_names(tools.iter().map(|(name, _)| name.as_str()))?;
+        if tools.is_empty() {
+            return Err(GlrMaskError::Compilation(
+                "programmatic JavaScript requires at least one tool".into(),
+            ));
+        }
+
+        let dispatcher_source = dispatcher_source(tools.iter().map(|(name, _)| name.as_str()));
+        let parent = Constraint::from_glrm_grammar_with_subgrammars(&dispatcher_source, &[], vocab)?;
+
+        let mut shared_children = Vec::<Arc<Constraint>>::with_capacity(tools.len());
+        let mut binding_names = Vec::<String>::with_capacity(tools.len());
+        for (index, (tool_name, mut child)) in tools.into_iter().enumerate() {
+            child
+                .materialize_composition_link_metadata_for_compilation()
+                .map_err(GlrMaskError::Compilation)?;
+            binding_names.push(format!("args_{index}"));
+            let _ = tool_name;
+            shared_children.push(Arc::new(child));
+        }
+
+        let mut terminals = Vec::<Vec<u32>>::with_capacity(binding_names.len());
+        for binding_name in &binding_names {
+            let matching = parent
+                .late_grammar_slots
+                .iter()
+                .filter(|slot| slot.name == *binding_name)
+                .map(|slot| slot.terminal_id)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(GlrMaskError::Compilation(format!(
+                    "programmatic dispatcher lost external grammar {binding_name:?}"
+                )));
+            }
+            terminals.push(matching);
+        }
+
+        let inputs = shared_children
+            .iter()
+            .zip(&terminals)
+            .map(|(child, terminals)| CompiledSubgrammarInput {
+                placeholder_terminal: terminals[0],
+                additional_placeholder_terminals: &terminals[1..],
+                constraint: child.as_ref(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut composition = compose_constraints_owned_parent_segmented_shared(
+            parent,
+            &inputs,
+            &shared_children,
+            vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .map_err(GlrMaskError::Compilation)?;
+        composition.constraint.late_grammar_slots.clear();
+        Ok(composition.constraint)
+    }
+
     /// Link a compiled tool dispatcher into the reusable full-JavaScript parent.
     pub fn compose_dispatcher(
         &self,
@@ -179,6 +253,36 @@ impl ProgrammaticJsCompiler {
                 constraint: dispatcher,
             }],
             vocab,
+        )
+        .map(|composition| composition.constraint)
+        .map_err(GlrMaskError::Compilation)
+    }
+
+    /// Consume this reusable compiler and a compiled dispatcher, linking the
+    /// dispatcher into the static JavaScript parent with a dynamic boundary.
+    /// The parent and dispatcher remain static component runtimes; only the
+    /// cross-component B evaluator is dynamic.
+    #[doc(hidden)]
+    pub fn compose_dispatcher_dynamic_boundary_owned(
+        self,
+        mut dispatcher: Constraint,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        dispatcher
+            .materialize_composition_link_metadata_for_compilation()
+            .map_err(GlrMaskError::Compilation)?;
+        let shared = vec![Arc::new(dispatcher)];
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: self.parent_placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: shared[0].as_ref(),
+        }];
+        compose_constraints_owned_parent_segmented_shared(
+            self.parent,
+            &inputs,
+            &shared,
+            vocab,
+            SegmentedBoundaryBackend::Dynamic,
         )
         .map(|composition| composition.constraint)
         .map_err(GlrMaskError::Compilation)

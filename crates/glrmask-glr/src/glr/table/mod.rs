@@ -11,14 +11,16 @@ pub(crate) mod action;
 mod build;
 mod compose;
 mod optimize;
+pub(crate) use optimize::{ControlPredecessorEquationBuilder, RuntimePredecessors};
 pub(crate) mod row;
 
 pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 #[allow(unused_imports)]
 pub use compose::{
     ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
-    compose_subgrammar_tables_explicit, compose_subgrammar_tables_explicit_with_rules,
-    compose_subgrammar_tables_with_rules, subgrammar_child_return_pop,
+    compose_subgrammar_table_shell_explicit_with_rules, compose_subgrammar_tables_explicit,
+    compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
+    subgrammar_child_return_pop,
 };
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};

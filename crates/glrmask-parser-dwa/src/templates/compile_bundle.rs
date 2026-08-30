@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use crate::automata::unweighted_u32::nfa::NFA as UnweightedNfa;
 use crate::automata::unweighted_u32::determinize::determinize as unweighted_determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as unweighted_minimize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::{minimize, reverse_hashcons_owned};
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
@@ -37,7 +37,7 @@ enum BundleGroupDfa<'a> {
 /// The key is the exact sorted terminal set in one equal-weight group. The
 /// weights themselves deliberately are not part of the cache: each bundle
 /// still performs its own weighted product/determinization.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct BundleGroupDfaCache {
     multi_terminal_groups: FxHashMap<Vec<TerminalID>, Arc<UnweightedDfa>>,
 }
@@ -480,6 +480,42 @@ impl Templates {
         weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
         group_cache: Option<&BundleGroupDfaCache>,
     ) -> Vec<(&'a Weight, BundleGroupDfa<'a>)> {
+        let parallel = std::env::var_os("GLRMASK_EXPERIMENT_PARALLEL_GROUP_DFAS").is_some()
+            && weight_groups.len() >= 4
+            && weight_groups.iter().map(|(_, terminals)| terminals.len()).sum::<usize>() >= 64
+            && rayon::current_num_threads() > 1;
+        if parallel {
+            // Each weight group is an independent exact union of terminal
+            // template DFAs. `IndexedParallelIterator::collect` preserves the
+            // original group order, so this is scheduling-only: the subsequent
+            // weighted product sees byte-for-byte the same ordered group list
+            // as the serial path. Nested Rayon work stealing is intentional;
+            // bundle prebuild already runs across bundles, but realistic large
+            // boundaries are commonly dominated by one giant bundle after the
+            // other workers finish their small bundles.
+            return weight_groups
+                .par_iter()
+                .filter_map(|(weight, terminals)| {
+                    if terminals.len() == 1 {
+                        self.by_terminal
+                            .get(&terminals[0])
+                            .map(|template| (*weight, BundleGroupDfa::Borrowed(template)))
+                    } else if let Some(cached) = group_cache
+                        .and_then(|cache| cache.multi_terminal_groups.get(terminals))
+                    {
+                        Some((*weight, BundleGroupDfa::Cached(Arc::clone(cached))))
+                    } else {
+                        let merged = union_unweighted_dfas(
+                            terminals
+                                .iter()
+                                .filter_map(|terminal| self.by_terminal.get(terminal)),
+                        );
+                        Some((*weight, BundleGroupDfa::Owned(merged)))
+                    }
+                })
+                .collect();
+        }
+
         let mut group_dfas = Vec::with_capacity(weight_groups.len());
         for (weight, terminals) in weight_groups {
             if terminals.len() == 1 {
@@ -534,6 +570,28 @@ impl Templates {
             return (bundle, profile);
         }
 
+        if terminal_weights.len() >= 500
+            && std::env::var_os("GLRMASK_PROFILE_LARGE_BUNDLE_TERMINALS").is_some()
+        {
+            let groups = self.group_terminals_by_weight(terminal_weights);
+            eprintln!("[glrmask/profile][large_bundle_terminal_ids] terminals={} groups={}", terminal_weights.len(), groups.len());
+            for (group_index, (weight, terminals)) in groups.iter().enumerate() {
+                let mut ranges = Vec::<(u32, u32)>::new();
+                for &terminal in terminals {
+                    if let Some(last) = ranges.last_mut()
+                        && last.1.checked_add(1) == Some(terminal)
+                    {
+                        last.1 = terminal;
+                    } else {
+                        ranges.push((terminal, terminal));
+                    }
+                }
+                eprintln!(
+                    "[glrmask/profile][large_bundle_terminal_group] group={} terminals={} weight_ptr={} outer_ranges={} ids={:?}",
+                    group_index, terminals.len(), weight.ptr_key(), weight.outer_range_count(), ranges,
+                );
+            }
+        }
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
         profile.weight_groups = weight_groups.len();
         for (weight, _) in &weight_groups {
@@ -672,6 +730,8 @@ impl Templates {
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
         let minimized = if weight_groups.len() > 1 && minimize_template_bundles_enabled() {
             minimize(&bundle_dwa)
+        } else if std::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_TEMPLATE_BUNDLES").is_some() {
+            reverse_hashcons_owned(bundle_dwa)
         } else {
             bundle_dwa
         };
@@ -1478,8 +1538,12 @@ fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
     dwa
 }
 
-/// Union multiple unweighted DFAs into one DFA via NFA union + determinize + minimize.
-fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> UnweightedDfa {
+/// Reference union for multiple unweighted DFAs via NFA union + determinize.
+///
+/// This remains the validation/fallback path for the direct deterministic
+/// construction below.  Parser template DFAs are acyclic, so copying all of
+/// them into one epsilon-NFA is semantically unnecessary on the hot path.
+fn union_unweighted_dfas_nfa<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> UnweightedDfa {
     let mut nfa = UnweightedNfa::new_empty();
     let shared_start = nfa.add_state();
     nfa.start_states.push(shared_start);
@@ -1518,6 +1582,279 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
 
     let det = unweighted_determinize(&nfa);
     unweighted_minimize(&det)
+}
+
+/// Exact union of deterministic acyclic template DFAs without first copying
+/// them into an epsilon-NFA.
+///
+/// A state is the sorted set of `(source_dfa, source_state)` pairs that remain
+/// alive after one input prefix. Since each source is deterministic, advancing
+/// one label contributes at most one state from each source DFA. This is exactly
+/// the subset construction performed by determinizing the epsilon-NFA union,
+/// but it skips NFA allocation, epsilon closure, and the copied transition
+/// graph. The ordinary acyclic minimizer is still applied afterwards, so the
+/// published group DFA has the same partial-DFA language semantics.
+fn union_unweighted_dfas_direct<'a>(
+    dfas: impl Iterator<Item = &'a UnweightedDfa>,
+) -> Option<UnweightedDfa> {
+    let mut dfas = dfas.filter(|dfa| !dfa.states.is_empty()).collect::<Vec<_>>();
+    if std::env::var_os("GLRMASK_EXPERIMENT_DEDUP_IDENTICAL_GROUP_DFAS").is_some() && dfas.len() > 1 {
+        let before = dfas.len();
+        let mut seen = FxHashSet::<&UnweightedDfa>::default();
+        dfas.retain(|dfa| seen.insert(*dfa));
+        if std::env::var_os("GLRMASK_PROFILE_DEDUP_IDENTICAL_GROUP_DFAS").is_some() && before != dfas.len() {
+            eprintln!("[glrmask/profile][dedup_identical_group_dfas] inputs={} unique={}", before, dfas.len());
+        }
+    }
+    if dfas.iter().any(|dfa| !dfa.compute_is_acyclic()) {
+        return None;
+    }
+    if dfas.is_empty() {
+        return Some(UnweightedDfa::new());
+    }
+
+    #[inline]
+    fn encode_source_state(source: usize, state: u32) -> u64 {
+        ((source as u64) << 32) | state as u64
+    }
+
+    let start = dfas
+        .iter()
+        .enumerate()
+        .map(|(source, dfa)| encode_source_state(source, dfa.start_state))
+        .collect::<Vec<_>>();
+
+    let mut result = UnweightedDfa::new();
+    let mut state_ids = FxHashMap::<Vec<u64>, u32>::default();
+    let mut state_subsets = Vec::<Vec<u64>>::new();
+    state_ids.insert(start.clone(), 0);
+    state_subsets.push(start);
+
+    let mut next_state = 0usize;
+    let mut edges = Vec::<(i32, u64)>::new();
+    while next_state < state_subsets.len() {
+        let subset = state_subsets[next_state].clone();
+        let result_state = next_state as u32;
+        next_state += 1;
+
+        edges.clear();
+        let mut accepting = false;
+        for encoded in subset {
+            let source = (encoded >> 32) as usize;
+            let source_state = encoded as u32;
+            let Some(dfa) = dfas.get(source) else {
+                return None;
+            };
+            let Some(state) = dfa.states.get(source_state as usize) else {
+                return None;
+            };
+            accepting |= state.is_accepting;
+            edges.extend(
+                state
+                    .transitions
+                    .iter()
+                    .map(|(&label, &target)| (label, encode_source_state(source, target))),
+            );
+        }
+        result.states[result_state as usize].is_accepting = accepting;
+
+        // Sorting by `(label, encoded source/state)` groups equal labels and
+        // leaves each target subset in canonical source order for hashing.
+        edges.sort_unstable();
+        let mut edge_index = 0usize;
+        while edge_index < edges.len() {
+            let label = edges[edge_index].0;
+            let group_start = edge_index;
+            edge_index += 1;
+            while edge_index < edges.len() && edges[edge_index].0 == label {
+                edge_index += 1;
+            }
+            let target_subset = edges[group_start..edge_index]
+                .iter()
+                .map(|&(_, target)| target)
+                .collect::<Vec<_>>();
+            let target_state = if let Some(&existing) = state_ids.get(target_subset.as_slice()) {
+                existing
+            } else {
+                let id = checked_usize_to_u32(state_subsets.len(), "direct bundle-union state");
+                state_ids.insert(target_subset.clone(), id);
+                state_subsets.push(target_subset);
+                result.add_state();
+                id
+            };
+            result.add_transition(result_state, label, target_state);
+        }
+    }
+
+    if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_UNWEIGHTED_GROUP_MINIMIZE").is_some() {
+        Some(result)
+    } else {
+        Some(unweighted_minimize(&result))
+    }
+}
+
+/// Exact union of acyclic DFAs after globally hash-consing equivalent suffix
+/// states across all inputs. Individual template DFAs are already minimized,
+/// but equivalent states in different templates otherwise retain distinct
+/// source identities and inflate every subset in the direct union.
+fn union_unweighted_dfas_shared_direct<'a>(
+    dfas: impl Iterator<Item = &'a UnweightedDfa>,
+) -> Option<UnweightedDfa> {
+    #[derive(Clone, Hash, PartialEq, Eq)]
+    struct CanonicalSignature {
+        accepting: bool,
+        transitions: Vec<(i32, u32)>,
+    }
+
+    let dfas = dfas.filter(|dfa| !dfa.states.is_empty()).collect::<Vec<_>>();
+    if dfas.is_empty() {
+        return Some(UnweightedDfa::new());
+    }
+
+    let mut canonical_ids = FxHashMap::<CanonicalSignature, u32>::default();
+    let mut canonical_states = Vec::<crate::automata::unweighted_u32::dfa::DFAState>::new();
+    let mut starts = Vec::<u32>::with_capacity(dfas.len());
+    for dfa in &dfas {
+        let mut reachable = vec![false; dfa.states.len()];
+        let mut stack = vec![dfa.start_state];
+        while let Some(state) = stack.pop() {
+            let Some(mark) = reachable.get_mut(state as usize) else { return None; };
+            if *mark { continue; }
+            *mark = true;
+            stack.extend(dfa.states[state as usize].transitions.values().copied());
+        }
+        let reachable_count = reachable.iter().filter(|&&value| value).count();
+        let mut indegree = vec![0u32; dfa.states.len()];
+        for (source, state) in dfa.states.iter().enumerate() {
+            if !reachable[source] { continue; }
+            for &target in state.transitions.values() {
+                let target = target as usize;
+                if target >= reachable.len() || !reachable[target] { return None; }
+                indegree[target] += 1;
+            }
+        }
+        let mut queue = VecDeque::<u32>::new();
+        for (state, (&is_reachable, &degree)) in reachable.iter().zip(&indegree).enumerate() {
+            if is_reachable && degree == 0 { queue.push_back(state as u32); }
+        }
+        let mut topo = Vec::<u32>::with_capacity(reachable_count);
+        while let Some(state) = queue.pop_front() {
+            topo.push(state);
+            for &target in dfa.states[state as usize].transitions.values() {
+                let degree = &mut indegree[target as usize];
+                *degree -= 1;
+                if *degree == 0 { queue.push_back(target); }
+            }
+        }
+        if topo.len() != reachable_count { return None; }
+
+        let mut local_to_canonical = vec![u32::MAX; dfa.states.len()];
+        for state in topo.into_iter().rev() {
+            let source = &dfa.states[state as usize];
+            let mut transitions = Vec::with_capacity(source.transitions.len());
+            for (&label, &target) in &source.transitions {
+                let canonical_target = local_to_canonical[target as usize];
+                if canonical_target == u32::MAX { return None; }
+                transitions.push((label, canonical_target));
+            }
+            let signature = CanonicalSignature { accepting: source.is_accepting, transitions };
+            let canonical = if let Some(&existing) = canonical_ids.get(&signature) {
+                existing
+            } else {
+                let id = checked_usize_to_u32(canonical_states.len(), "shared direct union canonical state");
+                let mut canonical_state = crate::automata::unweighted_u32::dfa::DFAState::default();
+                canonical_state.is_accepting = signature.accepting;
+                canonical_state.transitions.extend(signature.transitions.iter().copied());
+                canonical_states.push(canonical_state);
+                canonical_ids.insert(signature, id);
+                id
+            };
+            local_to_canonical[state as usize] = canonical;
+        }
+        starts.push(local_to_canonical[dfa.start_state as usize]);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    let canonical_input_states = canonical_states.len();
+    let canonical_start_states = starts.len();
+
+    let mut result = UnweightedDfa::new();
+    let mut state_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut subsets = vec![starts.clone()];
+    state_ids.insert(starts, 0);
+    let mut next_state = 0usize;
+    let mut edges = Vec::<(i32, u32)>::new();
+    while next_state < subsets.len() {
+        let subset = subsets[next_state].clone();
+        let result_state = next_state as u32;
+        next_state += 1;
+        edges.clear();
+        let mut accepting = false;
+        for canonical in subset {
+            let Some(state) = canonical_states.get(canonical as usize) else { return None; };
+            accepting |= state.is_accepting;
+            edges.extend(state.transitions.iter().map(|(&label, &target)| (label, target)));
+        }
+        result.states[result_state as usize].is_accepting = accepting;
+        edges.sort_unstable();
+        let mut edge_index = 0usize;
+        while edge_index < edges.len() {
+            let label = edges[edge_index].0;
+            let mut target_subset = Vec::<u32>::new();
+            while edge_index < edges.len() && edges[edge_index].0 == label {
+                let target = edges[edge_index].1;
+                if target_subset.last().copied() != Some(target) { target_subset.push(target); }
+                edge_index += 1;
+            }
+            let target_state = if let Some(&existing) = state_ids.get(target_subset.as_slice()) {
+                existing
+            } else {
+                let id = checked_usize_to_u32(subsets.len(), "shared direct union subset state");
+                state_ids.insert(target_subset.clone(), id);
+                subsets.push(target_subset);
+                result.add_state();
+                id
+            };
+            result.add_transition(result_state, label, target_state);
+        }
+    }
+    let subset_states = result.states.len();
+    let minimized = unweighted_minimize(&result);
+    if std::env::var_os("GLRMASK_PROFILE_SHARED_DIRECT_UNWEIGHTED_DFA_UNION").is_some() {
+        eprintln!(
+            "[glrmask/profile][shared_direct_unweighted_dfa_union] inputs={} canonical_states={} canonical_starts={} subset_states={} output_states={}",
+            dfas.len(), canonical_input_states, canonical_start_states, subset_states, minimized.states.len(),
+        );
+    }
+    Some(minimized)
+}
+fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> UnweightedDfa {
+    let dfas = dfas.collect::<Vec<_>>();
+    let use_shared_direct = std::env::var_os("GLRMASK_EXPERIMENT_SHARED_DIRECT_UNWEIGHTED_DFA_UNION").is_some();
+    let use_direct = use_shared_direct
+        || std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_UNWEIGHTED_DFA_UNION").is_some();
+    let direct = if use_shared_direct {
+        union_unweighted_dfas_shared_direct(dfas.iter().copied())
+    } else if use_direct {
+        union_unweighted_dfas_direct(dfas.iter().copied())
+    } else {
+        None
+    };
+    if let Some(direct) = direct {
+        if std::env::var_os("GLRMASK_VALIDATE_DIRECT_UNWEIGHTED_DFA_UNION").is_some() {
+            use crate::automata::unweighted_u32::subtract::subtract;
+            let reference = union_unweighted_dfas_nfa(dfas.iter().copied());
+            let direct_only = subtract(&direct, &reference);
+            let reference_only = subtract(&reference, &direct);
+            assert!(
+                direct_only.states.iter().all(|state| !state.is_accepting)
+                    && reference_only.states.iter().all(|state| !state.is_accepting),
+                "direct unweighted DFA union differs from epsilon-NFA reference",
+            );
+        }
+        return direct;
+    }
+    union_unweighted_dfas_nfa(dfas.into_iter())
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {

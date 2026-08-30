@@ -23,6 +23,7 @@ use crate::compiler::stages::resolve_negatives::{
     apply_finality_fixpoint, resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
+use crate::templates::compile_bundle::BundleGroupDfaCache;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
@@ -369,9 +370,18 @@ struct StateSummaries {
     bundle_accepts: Vec<bool>,
 }
 
+/// Compile-time-only exact admission relation for parser-template continuation
+/// pruning. `by_terminal[t]` is the sorted set of parser top states from which
+/// terminal `t` has an action in the effective (control-eliminated) parser.
+#[derive(Clone, Debug)]
+pub struct ParserTerminalAdmissionRows {
+    pub state_count: u32,
+    pub by_terminal: Vec<Vec<u32>>,
+}
 #[derive(Clone, Default)]
 pub struct PrebuiltParserBundleCache {
     by_signature: FxHashMap<BundleSignature, Arc<NWA>>,
+    group_cache: Option<Arc<BundleGroupDfaCache>>,
 }
 
 impl PrebuiltParserBundleCache {
@@ -381,6 +391,10 @@ impl PrebuiltParserBundleCache {
 
     pub fn is_empty(&self) -> bool {
         self.by_signature.is_empty()
+    }
+
+    pub fn group_len(&self) -> usize {
+        self.group_cache.as_deref().map_or(0, BundleGroupDfaCache::len)
     }
 }
 
@@ -684,39 +698,64 @@ pub fn prebuild_parser_bundle_cache_excluding_terminals(
     templates: &Templates,
     excluded_terminals: &[bool],
 ) -> PrebuiltParserBundleCache {
-    let summaries = build_state_summaries(terminal_automaton, num_terminals, templates);
-    let productive = compute_productive_terminal_states(&summaries);
-    let mut used = vec![false; summaries.unique_bundles.len()];
-    for (state_id, state) in summaries.states.iter().enumerate() {
-        if !productive[state_id] {
-            continue;
-        }
-        for branch in &state.branches {
-            let target_idx = branch.target as usize;
-            if productive.get(target_idx).copied().unwrap_or(false)
-                && summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
-                && summaries.unique_bundles[branch.bundle_id].len() > 1
-            {
-                used[branch.bundle_id] = true;
+    prebuild_parser_bundle_cache_for_terminal_automata(
+        &[terminal_automaton],
+        num_terminals,
+        templates,
+        excluded_terminals,
+    )
+}
+
+/// Build one exact compile-time parser-bundle cache for several terminal
+/// automata sharing the same parser coordinate/templates. Bundle signatures
+/// include both terminal IDs and token-domain weights, so reuse across static
+/// boundary shards is exact.
+pub fn prebuild_parser_bundle_cache_for_terminal_automata(
+    terminal_automata: &[&TerminalAutomaton],
+    num_terminals: u32,
+    templates: &Templates,
+    excluded_terminals: &[bool],
+) -> PrebuiltParserBundleCache {
+    let started_at = Instant::now();
+    let mut referenced = 0usize;
+    let mut selected_by_signature = FxHashMap::<BundleSignature, TerminalBundle>::default();
+    for terminal_automaton in terminal_automata {
+        let summaries = build_state_summaries(terminal_automaton, num_terminals, templates);
+        let productive = compute_productive_terminal_states(&summaries);
+        let mut used = vec![false; summaries.unique_bundles.len()];
+        for (state_id, state) in summaries.states.iter().enumerate() {
+            if !productive[state_id] {
+                continue;
+            }
+            for branch in &state.branches {
+                let target_idx = branch.target as usize;
+                if productive.get(target_idx).copied().unwrap_or(false)
+                    && summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                    && summaries.unique_bundles[branch.bundle_id].len() > 1
+                {
+                    used[branch.bundle_id] = true;
+                }
             }
         }
-    }
-    use rayon::prelude::*;
-    let selected = summaries
-        .unique_bundles
-        .iter()
-        .enumerate()
-        .filter_map(|(bundle_id, bundle)| {
-            (used[bundle_id]
-                && !bundle.keys().any(|&terminal| {
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if !used[bundle_id]
+                || bundle.keys().any(|&terminal| {
                     excluded_terminals
                         .get(terminal as usize)
                         .copied()
                         .unwrap_or(true)
-                }))
-            .then_some(bundle)
-        })
-        .collect::<Vec<_>>();
+                })
+            {
+                continue;
+            }
+            referenced += 1;
+            selected_by_signature
+                .entry(bundle_signature(bundle))
+                .or_insert_with(|| bundle.clone());
+        }
+    }
+    use rayon::prelude::*;
+    let selected = selected_by_signature.values().collect::<Vec<_>>();
     let repeated_group_cache = templates.build_bundle_group_dfa_cache(&selected);
     let built = selected
         .par_iter()
@@ -727,8 +766,83 @@ pub fn prebuild_parser_bundle_cache_excluding_terminals(
             )
         })
         .collect::<Vec<_>>();
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_global_bundle_cache] automata={} references={} unique={} duplicate_refs={} build_ms={:.3}",
+            terminal_automata.len(),
+            referenced,
+            built.len(),
+            referenced.saturating_sub(built.len()),
+            elapsed_ms(started_at),
+        );
+    }
     PrebuiltParserBundleCache {
         by_signature: built.into_iter().collect(),
+        group_cache: Some(Arc::new(repeated_group_cache)),
+    }
+}
+
+/// Build only the repeated terminal-group DFA cache shared by several parser
+/// bundle builders. Whole weighted bundles remain shard-local.
+pub fn prebuild_parser_bundle_group_cache_for_terminal_automata(
+    terminal_automata: &[&TerminalAutomaton],
+    num_terminals: u32,
+    templates: &Templates,
+    excluded_terminals: &[bool],
+) -> PrebuiltParserBundleCache {
+    let started_at = Instant::now();
+    let mut referenced = 0usize;
+    let mut selected_by_signature = FxHashMap::<BundleSignature, TerminalBundle>::default();
+    for terminal_automaton in terminal_automata {
+        let summaries = build_state_summaries(terminal_automaton, num_terminals, templates);
+        let productive = compute_productive_terminal_states(&summaries);
+        let mut used = vec![false; summaries.unique_bundles.len()];
+        for (state_id, state) in summaries.states.iter().enumerate() {
+            if !productive[state_id] {
+                continue;
+            }
+            for branch in &state.branches {
+                let target_idx = branch.target as usize;
+                if productive.get(target_idx).copied().unwrap_or(false)
+                    && summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                    && summaries.unique_bundles[branch.bundle_id].len() > 1
+                {
+                    used[branch.bundle_id] = true;
+                }
+            }
+        }
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if !used[bundle_id]
+                || bundle.keys().any(|&terminal| {
+                    excluded_terminals
+                        .get(terminal as usize)
+                        .copied()
+                        .unwrap_or(true)
+                })
+            {
+                continue;
+            }
+            referenced += 1;
+            selected_by_signature
+                .entry(bundle_signature(bundle))
+                .or_insert_with(|| bundle.clone());
+        }
+    }
+    let selected = selected_by_signature.values().collect::<Vec<_>>();
+    let group_cache = templates.build_bundle_group_dfa_cache(&selected);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_global_bundle_group_cache] automata={} bundle_refs={} unique_bundles={} groups={} build_ms={:.3}",
+            terminal_automata.len(),
+            referenced,
+            selected.len(),
+            group_cache.len(),
+            elapsed_ms(started_at),
+        );
+    }
+    PrebuiltParserBundleCache {
+        by_signature: FxHashMap::default(),
+        group_cache: Some(Arc::new(group_cache)),
     }
 }
 
@@ -1763,6 +1877,7 @@ fn determinize_with_supports_mode(
     defer_edge_unions_override: Option<bool>,
     normalize_singletons_override: Option<bool>,
     normalize_subsets_override: Option<bool>,
+    first_label_range: Option<std::ops::Range<u32>>,
 ) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
@@ -1953,6 +2068,7 @@ fn determinize_with_supports_mode(
         };
 
     let mut dwa = DWA::new(0, 0);
+    let deterministic_start_state = dwa.start_state();
     let mut supports = vec![Vec::new()];
 
     let mut start_subset = FxHashMap::default();
@@ -2403,6 +2519,15 @@ fn determinize_with_supports_mode(
 
                 if let Some(row) = cached_row {
                     for (label, target, next_weight) in row.iter() {
+                        if from_state == deterministic_start_state
+                            && *label >= 0
+                            && (*label as u32) < dense_positive_label_limit.unwrap_or(u32::MAX)
+                            && first_label_range
+                                .as_ref()
+                                .is_some_and(|range| !range.contains(&(*label as u32)))
+                        {
+                            continue;
+                        }
                         let target_weights = if *label >= 0 && (*label as usize) < dense_label_limit {
                             let label_idx = *label as usize;
                             if !dense_label_touched[label_idx] {
@@ -2422,6 +2547,15 @@ fn determinize_with_supports_mode(
                 }
 
                 for (&label, targets) in &state.transitions {
+                    if from_state == deterministic_start_state
+                        && label >= 0
+                        && (label as u32) < dense_positive_label_limit.unwrap_or(u32::MAX)
+                        && first_label_range
+                            .as_ref()
+                            .is_some_and(|range| !range.contains(&(label as u32)))
+                    {
+                        continue;
+                    }
                     for (target, transition_weight) in targets {
                         if let Some(detail) = detail.as_mut() {
                             detail.outgoing_transitions_scanned += 1;
@@ -5178,8 +5312,15 @@ fn determinize_preconverted_small_boundary_output(
     }
     let determinize_ms = elapsed_ms(determinize_started_at);
     let compact_post_started_at = Instant::now();
-    let compact_fallback = std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_FALLBACK").is_some();
-    if compact_fallback
+    // A compact runtime artifact must be the *fully normalized* parser DWA,
+    // not merely the first support-determinized intermediate. The generic
+    // small-boundary caller performs DEFAULT optimization, final subtraction,
+    // and fallback determinization after this stage; compact output returns
+    // directly from here, so it must perform those same semantic passes itself.
+    let compact_fallback = compact_output
+        || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_FALLBACK").is_some();
+    if compact_output
+        || compact_fallback
         || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_POST").is_some()
     {
         let possible_started_at = Instant::now();
@@ -5258,6 +5399,9 @@ fn determinize_preconverted_small_boundary_output(
                 singleton_closure_cache.len(),
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
+        }
+        for state in &mut out_states {
+            state.transitions.sort_unstable_by_key(|(label, _, _)| *label);
         }
         return Some(SmallBoundaryDeterminizeOutput::Compact(SmallBoundaryDwa {
             states: out_states,
@@ -5926,7 +6070,22 @@ fn determinize_with_supports(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
 ) -> DeterminizedDwaWithSupports {
-    determinize_with_supports_mode(nwa, dense_positive_label_limit, None, None, None)
+    determinize_with_supports_mode(nwa, dense_positive_label_limit, None, None, None, None)
+}
+
+fn determinize_with_supports_first_label_range(
+    nwa: &NWA,
+    dense_positive_label_limit: u32,
+    first_label_range: std::ops::Range<u32>,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_mode(
+        nwa,
+        Some(dense_positive_label_limit),
+        None,
+        None,
+        None,
+        Some(first_label_range),
+    )
 }
 
 fn determinize_parser_dwa_with_fallbacks_impl(
@@ -6871,8 +7030,196 @@ fn append_weighted_template_redirecting_finals(
     template: &NWA,
     weight: &Weight,
     continuation_state: u32,
+    future_allowed_tops: Option<&[bool]>,
+    target_final_weight: Option<&Weight>,
 ) -> NwaBody {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BULK_FRAGMENT_APPEND").is_some() {
+    if let Some(allowed_tops) = future_allowed_tops {
+        let token_end_weight = target_final_weight.cloned().unwrap_or_else(Weight::empty);
+        let mut local_states = template.states().to_vec();
+        let mut restricted_edges = 0usize;
+        let mut removed_edges = 0usize;
+        for source in &mut local_states {
+            for (&label, targets) in &mut source.transitions {
+                targets.retain_mut(|(target, edge_weight)| {
+                    let source_target = *target as usize;
+                    let future_invalid = is_negative_label(label)
+                        && template
+                            .states()
+                            .get(source_target)
+                            .is_some_and(|state| state.final_weight.is_some())
+                        && {
+                            let top = negative_to_positive_label(label) as usize;
+                            top >= allowed_tops.len() || !allowed_tops[top]
+                        };
+                    *edge_weight = if future_invalid {
+                        let next = weight.intersection(&token_end_weight);
+                        if next != *weight {
+                            restricted_edges += 1;
+                        }
+                        next
+                    } else {
+                        weight.clone()
+                    };
+                    if edge_weight.is_empty() {
+                        removed_edges += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            source.transitions.retain(|_, targets| !targets.is_empty());
+            for (_, epsilon_weight) in &mut source.epsilons {
+                *epsilon_weight = weight.clone();
+            }
+        }
+
+        let n = local_states.len();
+        if removed_edges == 0 {
+            let offset = arena.states().len() as u32;
+            let starts = template
+                .start_states()
+                .iter()
+                .map(|state| offset + *state)
+                .collect::<Vec<_>>();
+            let states = arena.states_mut();
+            states.reserve(n);
+            for mut appended in local_states {
+                for targets in appended.transitions.values_mut() {
+                    for (target, _) in targets {
+                        *target += offset;
+                    }
+                }
+                for (target, _) in &mut appended.epsilons {
+                    *target += offset;
+                }
+                if appended.final_weight.take().is_some() && !weight.is_empty() {
+                    appended.epsilons.push((continuation_state, weight.clone()));
+                }
+                states.push(appended);
+            }
+            return NwaBody { start_states: starts };
+        }
+
+        // Removing a future-impossible accepting edge can disconnect a large
+        // parser-effect suffix. Keep only the exact reachable/productive slice
+        // before splicing this template into the enclosing parser NWA.
+        let mut reachable = vec![false; n];
+        let mut stack = template.start_states().to_vec();
+        while let Some(state_id) = stack.pop() {
+            let idx = state_id as usize;
+            if idx >= n || reachable[idx] {
+                continue;
+            }
+            reachable[idx] = true;
+            for targets in local_states[idx].transitions.values() {
+                for &(target, ref edge_weight) in targets {
+                    if !edge_weight.is_empty() {
+                        stack.push(target);
+                    }
+                }
+            }
+            for &(target, ref epsilon_weight) in &local_states[idx].epsilons {
+                if !epsilon_weight.is_empty() {
+                    stack.push(target);
+                }
+            }
+        }
+        let mut reverse = vec![Vec::<u32>::new(); n];
+        for (source_id, source) in local_states.iter().enumerate() {
+            if !reachable[source_id] {
+                continue;
+            }
+            for targets in source.transitions.values() {
+                for &(target, ref edge_weight) in targets {
+                    if !edge_weight.is_empty() && (target as usize) < n {
+                        reverse[target as usize].push(source_id as u32);
+                    }
+                }
+            }
+            for &(target, ref epsilon_weight) in &source.epsilons {
+                if !epsilon_weight.is_empty() && (target as usize) < n {
+                    reverse[target as usize].push(source_id as u32);
+                }
+            }
+        }
+        let mut productive = vec![false; n];
+        let mut queue = VecDeque::<u32>::new();
+        for (state_id, state) in local_states.iter().enumerate() {
+            if reachable[state_id] && state.final_weight.is_some() && !weight.is_empty() {
+                productive[state_id] = true;
+                queue.push_back(state_id as u32);
+            }
+        }
+        while let Some(target) = queue.pop_front() {
+            for &source in &reverse[target as usize] {
+                let idx = source as usize;
+                if !productive[idx] {
+                    productive[idx] = true;
+                    queue.push_back(source);
+                }
+            }
+        }
+
+        let kept = productive.iter().filter(|&&keep| keep).count();
+        let offset = arena.states().len() as u32;
+        let mut old_to_new = vec![u32::MAX; n];
+        let mut next = offset;
+        for (old, &keep) in productive.iter().enumerate() {
+            if keep {
+                old_to_new[old] = next;
+                next += 1;
+            }
+        }
+        let starts = template
+            .start_states()
+            .iter()
+            .filter_map(|&state| {
+                let mapped = old_to_new.get(state as usize).copied().unwrap_or(u32::MAX);
+                (mapped != u32::MAX).then_some(mapped)
+            })
+            .collect::<Vec<_>>();
+        let states = arena.states_mut();
+        states.reserve(kept);
+        for (old_id, source) in local_states.into_iter().enumerate() {
+            if !productive[old_id] {
+                continue;
+            }
+            let mut appended = source;
+            for targets in appended.transitions.values_mut() {
+                targets.retain_mut(|(target, _)| {
+                    let mapped = old_to_new.get(*target as usize).copied().unwrap_or(u32::MAX);
+                    if mapped == u32::MAX {
+                        false
+                    } else {
+                        *target = mapped;
+                        true
+                    }
+                });
+            }
+            appended.transitions.retain(|_, targets| !targets.is_empty());
+            appended.epsilons.retain_mut(|(target, _)| {
+                let mapped = old_to_new.get(*target as usize).copied().unwrap_or(u32::MAX);
+                if mapped == u32::MAX {
+                    false
+                } else {
+                    *target = mapped;
+                    true
+                }
+            });
+            if appended.final_weight.take().is_some() && !weight.is_empty() {
+                appended.epsilons.push((continuation_state, weight.clone()));
+            }
+            states.push(appended);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE_ACTIVE").is_some() {
+            eprintln!(
+                "[glrmask/profile][future_template_prune_active] kind=template states={}=>{} restricted_edges={} removed_edges={}",
+                n, kept, restricted_edges, removed_edges,
+            );
+        }
+        return NwaBody { start_states: starts };
+    }    if std::env::var_os("GLRMASK_EXPERIMENT_BULK_FRAGMENT_APPEND").is_some() {
         let offset = arena.states().len() as u32;
         let starts = template
             .start_states()
@@ -6930,8 +7277,236 @@ fn append_bundle_redirecting_finals(
     arena: &mut NWA,
     bundle: &NWA,
     continuation_state: u32,
+    future_allowed_tops: Option<&[bool]>,
+    target_final_weight: Option<&Weight>,
 ) -> NwaBody {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BULK_FRAGMENT_APPEND").is_some() {
+    if let Some(allowed_tops) = future_allowed_tops {
+        let token_end_weight = target_final_weight.cloned().unwrap_or_else(Weight::empty);
+        let mut local_states = bundle.states().to_vec();
+        let mut restricted_edges = 0usize;
+        let mut removed_edges = 0usize;
+        for source in &mut local_states {
+            for (&label, targets) in &mut source.transitions {
+                targets.retain_mut(|(target, edge_weight)| {
+                    let source_target = *target as usize;
+                    let future_invalid = is_negative_label(label) && {
+                        let top = negative_to_positive_label(label) as usize;
+                        top >= allowed_tops.len() || !allowed_tops[top]
+                    };
+                    if future_invalid {
+                        if let Some(bundle_final_weight) = bundle
+                            .states()
+                            .get(source_target)
+                            .and_then(|state| state.final_weight.as_ref())
+                        {
+                            // A determinized bundle state can be accepting for only
+                            // part of the edge's token domain. Restrict precisely
+                            // that accepting part; non-accepting alternatives still
+                            // need to survive to later parser-template symbols.
+                            let accepting = edge_weight.intersection(bundle_final_weight);
+                            if !accepting.is_empty() {
+                                let non_accepting = edge_weight.difference(&accepting);
+                                let ending_here = accepting.intersection(&token_end_weight);
+                                let next = non_accepting.union(&ending_here);
+                                if next != *edge_weight {
+                                    restricted_edges += 1;
+                                }
+                                *edge_weight = next;
+                            }
+                        }
+                    }
+                    if edge_weight.is_empty() {
+                        removed_edges += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            source.transitions.retain(|_, targets| !targets.is_empty());
+        }
+
+        if restricted_edges == 0 {
+            // The admission oracle made no semantic change. Avoid all graph
+            // trimming work and append the original shared bundle directly.
+            let offset = arena.states().len() as u32;
+            let body = arena.append_with_body(bundle);
+            let appended_len = bundle.states().len();
+            for state_id in offset as usize..offset as usize + appended_len {
+                let Some(final_weight) = arena.states_mut()[state_id].final_weight.take() else {
+                    continue;
+                };
+                if !final_weight.is_empty() {
+                    arena.add_epsilon(state_id as u32, continuation_state, final_weight);
+                }
+            }
+            return body;
+        }
+
+        if removed_edges == 0 {
+            // Token domains changed, but graph connectivity did not. Preserve
+            // the exact restricted weights without paying reachability /
+            // co-reachability scans that cannot remove a state.
+            let n = local_states.len();
+            let offset = arena.states().len() as u32;
+            let starts = bundle
+                .start_states()
+                .iter()
+                .map(|state| offset + *state)
+                .collect::<Vec<_>>();
+            let states = arena.states_mut();
+            states.reserve(n);
+            for mut appended in local_states {
+                for targets in appended.transitions.values_mut() {
+                    for (target, _) in targets {
+                        *target += offset;
+                    }
+                }
+                for (target, _) in &mut appended.epsilons {
+                    *target += offset;
+                }
+                if let Some(final_weight) = appended.final_weight.take()
+                    && !final_weight.is_empty()
+                {
+                    appended.epsilons.push((continuation_state, final_weight));
+                }
+                states.push(appended);
+            }
+            if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE_ACTIVE").is_some() {
+                eprintln!(
+                    "[glrmask/profile][future_template_prune_active] kind=bundle states={}=>{} restricted_edges={} removed_edges=0",
+                    n, n, restricted_edges,
+                );
+            }
+            return NwaBody { start_states: starts };
+        }
+
+        // Restriction can disconnect parser-effect suffixes. Do not copy those
+        // dead states into the enclosing parser NWA: keep only states reachable
+        // from a bundle start and graph-co-reachable to a nonempty final.
+        let n = local_states.len();
+        let mut reachable = vec![false; n];
+        let mut stack = bundle.start_states().to_vec();
+        while let Some(state_id) = stack.pop() {
+            let idx = state_id as usize;
+            if idx >= n || reachable[idx] {
+                continue;
+            }
+            reachable[idx] = true;
+            for targets in local_states[idx].transitions.values() {
+                for &(target, ref weight) in targets {
+                    if !weight.is_empty() {
+                        stack.push(target);
+                    }
+                }
+            }
+            for &(target, ref weight) in &local_states[idx].epsilons {
+                if !weight.is_empty() {
+                    stack.push(target);
+                }
+            }
+        }
+        let mut reverse = vec![Vec::<u32>::new(); n];
+        for (source_id, source) in local_states.iter().enumerate() {
+            if !reachable[source_id] {
+                continue;
+            }
+            for targets in source.transitions.values() {
+                for &(target, ref weight) in targets {
+                    if !weight.is_empty() && (target as usize) < n {
+                        reverse[target as usize].push(source_id as u32);
+                    }
+                }
+            }
+            for &(target, ref weight) in &source.epsilons {
+                if !weight.is_empty() && (target as usize) < n {
+                    reverse[target as usize].push(source_id as u32);
+                }
+            }
+        }
+        let mut productive = vec![false; n];
+        let mut queue = VecDeque::<u32>::new();
+        for (state_id, state) in local_states.iter().enumerate() {
+            if reachable[state_id]
+                && state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+            {
+                productive[state_id] = true;
+                queue.push_back(state_id as u32);
+            }
+        }
+        while let Some(target) = queue.pop_front() {
+            for &source in &reverse[target as usize] {
+                let idx = source as usize;
+                if !productive[idx] {
+                    productive[idx] = true;
+                    queue.push_back(source);
+                }
+            }
+        }
+
+        let kept = productive.iter().filter(|&&value| value).count();
+        let offset = arena.states().len() as u32;
+        let mut old_to_new = vec![u32::MAX; n];
+        let mut next = offset;
+        for (old, &keep) in productive.iter().enumerate() {
+            if keep {
+                old_to_new[old] = next;
+                next += 1;
+            }
+        }
+        let starts = bundle
+            .start_states()
+            .iter()
+            .filter_map(|&state| {
+                let mapped = old_to_new.get(state as usize).copied().unwrap_or(u32::MAX);
+                (mapped != u32::MAX).then_some(mapped)
+            })
+            .collect::<Vec<_>>();
+        let states = arena.states_mut();
+        states.reserve(kept);
+        for (old_id, source) in local_states.into_iter().enumerate() {
+            if !productive[old_id] {
+                continue;
+            }
+            let mut appended = source;
+            for targets in appended.transitions.values_mut() {
+                targets.retain_mut(|(target, _)| {
+                    let mapped = old_to_new.get(*target as usize).copied().unwrap_or(u32::MAX);
+                    if mapped == u32::MAX {
+                        false
+                    } else {
+                        *target = mapped;
+                        true
+                    }
+                });
+            }
+            appended.transitions.retain(|_, targets| !targets.is_empty());
+            appended.epsilons.retain_mut(|(target, _)| {
+                let mapped = old_to_new.get(*target as usize).copied().unwrap_or(u32::MAX);
+                if mapped == u32::MAX {
+                    false
+                } else {
+                    *target = mapped;
+                    true
+                }
+            });
+            if let Some(final_weight) = appended.final_weight.take()
+                && !final_weight.is_empty()
+            {
+                appended.epsilons.push((continuation_state, final_weight));
+            }
+            states.push(appended);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE_ACTIVE").is_some()
+            && (restricted_edges != 0 || kept != n)
+        {
+            eprintln!(
+                "[glrmask/profile][future_template_prune_active] kind=bundle states={}=>{} restricted_edges={} removed_edges={}",
+                n, kept, restricted_edges, removed_edges,
+            );
+        }
+        return NwaBody { start_states: starts };
+    }    if std::env::var_os("GLRMASK_EXPERIMENT_BULK_FRAGMENT_APPEND").is_some() {
         let offset = arena.states().len() as u32;
         let starts = bundle
             .start_states()
@@ -6985,6 +7560,8 @@ fn append_branch_fragment(
     continuation_state: u32,
     preserve_bundle_nondeterminism: bool,
     compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
+    future_allowed_tops: Option<&[bool]>,
+    target_final_weight: Option<&Weight>,
 ) -> Option<NwaBody> {
     let bundle = summaries.unique_bundles.get(bundle_id)?;
     if !summaries.bundle_accepts.get(bundle_id).copied().unwrap_or(false) {
@@ -7002,6 +7579,8 @@ fn append_branch_fragment(
             template,
             weight,
             continuation_state,
+            future_allowed_tops,
+            target_final_weight,
         ));
     }
 
@@ -7025,6 +7604,8 @@ fn append_branch_fragment(
                 template,
                 weight,
                 continuation_state,
+                future_allowed_tops,
+                target_final_weight,
             );
             starts.extend(body.start_states);
         }
@@ -7110,6 +7691,8 @@ fn append_branch_fragment(
         arena,
         bundle_nwa.as_ref(),
         continuation_state,
+        future_allowed_tops,
+        target_final_weight,
     ))
 }
 
@@ -7124,6 +7707,7 @@ fn build_parser_nwa_from_terminal_dwa(
         grammar.num_terminals,
         templates,
         Some(table),
+        None,
         false,
         None,
         true,
@@ -7135,6 +7719,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     num_terminals: u32,
     templates: &Templates,
     table: Option<&GLRTable>,
+    admission_rows: Option<&ParserTerminalAdmissionRows>,
     preserve_bundle_nondeterminism: bool,
     prebuilt_bundle_cache: Option<&PrebuiltParserBundleCache>,
     allow_parallel: bool,
@@ -7145,7 +7730,48 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
-    if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE").is_some()
+    let future_prune_enabled = std::env::var_os("GLRMASK_EXPERIMENT_FUTURE_TEMPLATE_PRUNE").is_some()
+        && (table.is_some() || admission_rows.is_some());
+    let mut future_allowed_tops_by_target = vec![None::<Vec<bool>>; states.len()];
+    if future_prune_enabled {
+        let parser_state_count = table
+            .map(|table| table.num_states)
+            .or_else(|| admission_rows.map(|rows| rows.state_count))
+            .expect("future prune requires parser admission source");
+        for (target_id, target) in states.iter().enumerate() {
+            if !target.epsilon_branches.is_empty() {
+                continue;
+            }
+            let mut future_terminals = BTreeSet::<TerminalID>::new();
+            for future_branch in &target.branches {
+                if let Some(bundle) = summaries.unique_bundles.get(future_branch.bundle_id) {
+                    future_terminals.extend(bundle.keys().copied());
+                }
+            }
+            if future_terminals.is_empty() {
+                continue;
+            }
+            let mut allowed_tops = vec![false; parser_state_count as usize];
+            if let Some(rows) = admission_rows {
+                for &terminal in &future_terminals {
+                    if let Some(states) = rows.by_terminal.get(terminal as usize) {
+                        for &state in states {
+                            if let Some(slot) = allowed_tops.get_mut(state as usize) {
+                                *slot = true;
+                            }
+                        }
+                    }
+                }
+            } else if let Some(table) = table {
+                for top in 0..table.num_states {
+                    allowed_tops[top as usize] = future_terminals
+                        .iter()
+                        .any(|&terminal| table.action(top, terminal).is_some());
+                }
+            }
+            future_allowed_tops_by_target[target_id] = Some(allowed_tops);
+        }
+    }    if std::env::var_os("GLRMASK_PROFILE_FUTURE_TEMPLATE_PRUNE").is_some()
         && let Some(table) = table
     {
         let mut contexts = 0usize;
@@ -7239,6 +7865,51 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
             restricted_outer_ranges,
         );
     }
+    if future_prune_enabled
+        && std::env::var_os("GLRMASK_PROFILE_FUTURE_CONTEXT_CLASSES").is_some()
+    {
+        let mut allowed_classes = FxHashMap::<Vec<bool>, u32>::default();
+        let mut target_classes = vec![u32::MAX; states.len()];
+        for (target, allowed) in future_allowed_tops_by_target.iter().enumerate() {
+            let Some(allowed) = allowed else { continue; };
+            let next = allowed_classes.len() as u32;
+            let class = *allowed_classes.entry(allowed.clone()).or_insert(next);
+            target_classes[target] = class;
+        }
+        let mut bundle_contexts = FxHashSet::<(usize, u32, usize)>::default();
+        let mut branch_contexts = 0usize;
+        let mut by_bundle = FxHashMap::<usize, FxHashSet<(u32, usize)>>::default();
+        for (state_id, state) in states.iter().enumerate() {
+            if !productive[state_id] { continue; }
+            for branch in &state.branches {
+                let target = branch.target as usize;
+                if !productive.get(target).copied().unwrap_or(false) { continue; }
+                let class = target_classes.get(target).copied().unwrap_or(u32::MAX);
+                if class == u32::MAX { continue; }
+                let final_key = states[target]
+                    .final_weight
+                    .as_ref()
+                    .map_or(0usize, Weight::ptr_key);
+                branch_contexts += 1;
+                bundle_contexts.insert((branch.bundle_id, class, final_key));
+                by_bundle.entry(branch.bundle_id).or_default().insert((class, final_key));
+            }
+        }
+        let mut bundle_rows = by_bundle
+            .into_iter()
+            .map(|(bundle, contexts)| (bundle, contexts.len(), summaries.unique_bundles[bundle].len()))
+            .collect::<Vec<_>>();
+        bundle_rows.sort_unstable_by_key(|row| (std::cmp::Reverse(row.1), std::cmp::Reverse(row.2), row.0));
+        eprintln!(
+            "[glrmask/profile][future_context_classes] targets={} allowed_classes={} branch_contexts={} bundle_contexts={} bundles={} top={:?}",
+            target_classes.iter().filter(|&&class| class != u32::MAX).count(),
+            allowed_classes.len(),
+            branch_contexts,
+            bundle_contexts.len(),
+            bundle_rows.len(),
+            bundle_rows.into_iter().take(16).collect::<Vec<_>>(),
+        );
+    }
     let compose_detail_enabled = parser_dwa_compose_detail_enabled();
     let hybrid_nondeterministic_min_terminals = std::env::var(
         "GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLE_MIN_TERMINALS",
@@ -7294,6 +7965,25 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     }
     compose_detail.state_init_ms = elapsed_ms(state_init_started_at);
 
+    if std::env::var_os("GLRMASK_PROFILE_BUNDLE_TARGET_COPIES").is_some() {
+        let mut targets_by_bundle = FxHashMap::<usize, FxHashSet<u32>>::default();
+        for (state_id, state) in states.iter().enumerate() {
+            if !productive[state_id] { continue; }
+            for branch in &state.branches {
+                let target_idx = branch.target as usize;
+                if productive.get(target_idx).copied().unwrap_or(false)
+                    && summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                {
+                    targets_by_bundle.entry(branch.bundle_id).or_default().insert(branch.target);
+                }
+            }
+        }
+        let mut rows = targets_by_bundle.into_iter().map(|(bundle_id, targets)| {
+            (bundle_id, summaries.unique_bundles[bundle_id].len(), targets.len(), targets.into_iter().collect::<Vec<_>>())
+        }).collect::<Vec<_>>();
+        rows.sort_unstable_by_key(|row| (std::cmp::Reverse(row.2), std::cmp::Reverse(row.1), row.0));
+        eprintln!("[glrmask/profile][bundle_target_copies] top={:?}", rows.into_iter().take(20).collect::<Vec<_>>());
+    }
     let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
     let mut used_multi_bundle = vec![false; summaries.unique_bundles.len()];
     for (state_id, state) in states.iter().enumerate() {
@@ -7332,7 +8022,12 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
     let mut repeated_group_cache_ms = 0.0f64;
     if !compose_detail_enabled && !preserve_bundle_nondeterminism {
         let repeated_group_cache_started_at = Instant::now();
-        let repeated_group_cache = {
+        let repeated_group_cache_owned;
+        let repeated_group_cache = if let Some(shared) = prebuilt_bundle_cache
+            .and_then(|cache| cache.group_cache.as_deref())
+        {
+            shared
+        } else {
             let used_bundles = summaries
                 .unique_bundles
                 .iter()
@@ -7342,7 +8037,8 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                         .then_some(bundle)
                 })
                 .collect::<Vec<_>>();
-            templates.build_bundle_group_dfa_cache(&used_bundles)
+            repeated_group_cache_owned = templates.build_bundle_group_dfa_cache(&used_bundles);
+            &repeated_group_cache_owned
         };
         repeated_group_cache_ms = elapsed_ms(repeated_group_cache_started_at);
         let coarse_parallel_bundle = if std::env::var_os(
@@ -7387,7 +8083,31 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                 return (None, 0.0f64);
             }
             let started = Instant::now();
-            let built = Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache));
+            let built = if profile_bundle_prebuild && bundle.len() >= 256 {
+                let (built, detail) = templates.build_bundle_profiled_cached(bundle, &repeated_group_cache);
+                eprintln!(
+                    "[glrmask/profile][parser_bundle_prebuild_large_detail] id={} terminals={} weight_groups={} singleton_groups={} multi_groups={} largest_group={} group_cache_hits={} group_cache_misses={} build_group_ms={:.3} union_group_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} dwa_to_nwa_ms={:.3} states={} transitions={} total_ms={:.3}",
+                    bundle_id,
+                    detail.input_terminals,
+                    detail.weight_groups,
+                    detail.singleton_groups,
+                    detail.multi_terminal_groups,
+                    detail.largest_weight_group,
+                    detail.group_dfa_cache_hits,
+                    detail.group_dfa_cache_misses,
+                    detail.build_group_dfas_ms,
+                    detail.union_groups_ms,
+                    detail.determinize_bundle_ms,
+                    detail.minimize_ms,
+                    detail.dwa_to_nwa_ms,
+                    detail.result_nwa_states,
+                    detail.result_nwa_transitions,
+                    detail.total_ms,
+                );
+                Arc::new(built)
+            } else {
+                Arc::new(templates.build_bundle_cached(bundle, &repeated_group_cache))
+            };
             let ms = elapsed_ms(started);
             (Some(built), ms)
         };
@@ -7448,6 +8168,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
         && !preserve_bundle_nondeterminism
         && hybrid_nondeterministic_min_terminals.is_none()
         && allow_parallel
+        && !future_prune_enabled
         && rayon::current_num_threads() > 1;
 
     let parallel_fragments_done = if parallel_fragment_assembly {
@@ -7694,6 +8415,8 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                     target_continuation,
                     preserve_bundle(summaries.unique_bundles[branch.bundle_id].len()),
                     compose_detail_enabled.then_some(&mut compose_detail),
+                    future_allowed_tops_by_target[target_idx].as_deref(),
+                    states[target_idx].final_weight.as_ref(),
                 ) else {
                     continue;
                 };
@@ -7810,6 +8533,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         num_terminals,
         templates,
         Some(table),
+        None,
         false,
         None,
         true,
@@ -7828,14 +8552,18 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
     templates: &Templates,
     preserve_bundle_nondeterminism: bool,
 ) -> Option<NWA> {
-    build_parser_nwa_from_terminal_dwa_for_terminal_count(
+    let allow_parallel = std::env::var_os(
+        "GLRMASK_EXPERIMENT_SERIAL_NO_TABLE_BUNDLE_BUILD",
+    )
+    .is_none();    build_parser_nwa_from_terminal_dwa_for_terminal_count(
         terminal_dwa,
         num_terminals,
         templates,
         None,
+        None,
         preserve_bundle_nondeterminism,
         None,
-        true,
+        allow_parallel,
     )
     .map(|(nwa, _)| nwa)
 }
@@ -7851,6 +8579,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         num_terminals,
         templates,
         None,
+        None,
         false,
         Some(prebuilt_bundle_cache),
         false,
@@ -7858,6 +8587,31 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
     .map(|(nwa, _)| nwa)
 }
 
+/// Table-free parser-NWA construction with an exact compile-time terminal
+/// admission relation. This is used by recursive static-boundary compilation to
+/// prune continuation-impossible parser effects without materializing a merged
+/// GLR table.
+pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table_with_admission(
+    terminal_dwa: &TerminalAutomaton,
+    num_terminals: u32,
+    templates: &Templates,
+    admission_rows: &ParserTerminalAdmissionRows,
+    prebuilt_bundle_cache: Option<&PrebuiltParserBundleCache>,
+) -> Option<NWA> {
+    let allow_parallel = prebuilt_bundle_cache.is_none_or(|cache| cache.by_signature.is_empty())
+        && std::env::var_os("GLRMASK_EXPERIMENT_SERIAL_NO_TABLE_BUNDLE_BUILD").is_none();
+    build_parser_nwa_from_terminal_dwa_for_terminal_count(
+        terminal_dwa,
+        num_terminals,
+        templates,
+        None,
+        Some(admission_rows),
+        false,
+        prebuilt_bundle_cache,
+        allow_parallel,
+    )
+    .map(|(nwa, _)| nwa)
+}
 pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
     terminal_dwa: &TerminalAutomaton,
     num_terminals: u32,
@@ -7869,6 +8623,7 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         num_terminals,
         templates,
         Some(table),
+        None,
         true,
         None,
         true,
@@ -7971,8 +8726,8 @@ fn determinize_boolean_domain_with_supports(domain: &NWA) -> DeterminizedDwaWith
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
-pub fn determinize_boolean_parser_stack_domain_nwa(
-    table: &GLRTable,
+pub fn determinize_boolean_parser_stack_domain_nwa_for_parser_state_count(
+    num_parser_states: u32,
     domain: &NWA,
 ) -> DWA {
     let determinized = determinize_boolean_domain_with_supports(domain);
@@ -7980,17 +8735,34 @@ pub fn determinize_boolean_parser_stack_domain_nwa(
     let possible_by_state = build_possible_outgoing_ids_by_state(
         domain,
         &determinized.supports,
-        table.num_states,
+        num_parser_states,
     );
     if std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_BOOLEAN_DOMAIN_DEFAULT_OPT").is_none() {
-        optimize_parser_dwa_defaults(&mut result, &possible_by_state, table.num_states);
+        optimize_parser_dwa_defaults(&mut result, &possible_by_state, num_parser_states);
     }
     subtract_final_weights_from_outgoing_dwa_impl(&mut result, false);
-    determinize_parser_dwa_with_fallbacks(&result, &possible_by_state, table.num_states)
+    determinize_parser_dwa_with_fallbacks(&result, &possible_by_state, num_parser_states)
+}
+
+pub fn determinize_boolean_parser_stack_domain_nwa(
+    table: &GLRTable,
+    domain: &NWA,
+) -> DWA {
+    determinize_boolean_parser_stack_domain_nwa_for_parser_state_count(table.num_states, domain)
+}
+
+pub fn normalize_parser_stack_domain_nwa_for_parser_state_count(
+    num_parser_states: u32,
+    domain: &NWA,
+) -> DWA {
+    minimize(&determinize_boolean_parser_stack_domain_nwa_for_parser_state_count(
+        num_parser_states,
+        domain,
+    ))
 }
 
 pub fn normalize_parser_stack_domain_nwa(table: &GLRTable, domain: &NWA) -> DWA {
-    minimize(&determinize_boolean_parser_stack_domain_nwa(table, domain))
+    normalize_parser_stack_domain_nwa_for_parser_state_count(table.num_states, domain)
 }
 
 /// Normalize a boolean parser-stack NWA while preserving its explicit rows.
@@ -8032,6 +8804,7 @@ fn normalize_weighted_parser_stack_nwa_impl(
     parser_nwa: &NWA,
     small_boundary_coordinate: Option<(usize, usize)>,
     source_tsid_map: Option<&[u32]>,
+    first_label_range: Option<std::ops::Range<u32>>,
 ) -> DWA {
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -8047,7 +8820,13 @@ fn normalize_weighted_parser_stack_nwa_impl(
                 source_tsid_map,
             )
         })
-        .unwrap_or_else(|| determinize_with_supports(parser_nwa, Some(num_parser_states)));
+        .unwrap_or_else(|| {
+            if let Some(range) = first_label_range.clone() {
+                determinize_with_supports_first_label_range(parser_nwa, num_parser_states, range)
+            } else {
+                determinize_with_supports(parser_nwa, Some(num_parser_states))
+            }
+        });
     let determinize_ms = elapsed_ms(determinize_started_at);
     let mut parser_dwa = determinized.dwa;
     let compact_fallback = small_boundary_coordinate.is_some()
@@ -8117,15 +8896,87 @@ fn normalize_weighted_parser_stack_nwa_impl(
     }
 }
 
+/// Normalize an already-positive weighted parser-stack NWA without synthesizing
+/// new DEFAULT rows.
+///
+/// This is the weighted counterpart of
+/// `normalize_parser_stack_domain_nwa_preserving_explicit`. It is required when
+/// independently supported exact parser domains have been assembled into one
+/// weighted NWA: DEFAULT edges already present in that NWA retain their wildcard
+/// meaning, but no additional fallback is inferred from the currently possible
+/// parser-state support. That preserves the support provenance of the explicit
+/// rows and avoids widening the represented stack relation.
+pub fn normalize_weighted_parser_stack_nwa_preserving_explicit_for_parser_state_count(
+    num_parser_states: u32,
+    parser_nwa: &NWA,
+) -> DWA {
+    let profile = std::env::var_os("GLRMASK_PROFILE_RETURN_EXACT_NORMALIZE").is_some();
+    let total_started_at = Instant::now();
+    let started_at = Instant::now();
+    let determinized = determinize_with_supports(parser_nwa, Some(num_parser_states));
+    let determinize_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut result = determinized.dwa;
+    let started_at = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    let possible_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let started_at = Instant::now();
+    subtract_final_weights_from_outgoing_dwa_impl(&mut result, false);
+    let subtract_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let started_at = Instant::now();
+    let result = determinize_parser_dwa_with_fallbacks(
+        &result,
+        &possible_by_state,
+        num_parser_states,
+    );
+    let fallback_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let started_at = Instant::now();
+    let minimized = minimize(&result);
+    let minimize_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if profile {
+        eprintln!(
+            "[glrmask/profile][return_exact_normalize] nwa_states={} nwa_transitions={} pre_min_states={} pre_min_transitions={} post_states={} post_transitions={} determinize_ms={:.3} possible_ms={:.3} subtract_ms={:.3} fallback_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            parser_nwa.num_states(), parser_nwa.num_transitions(), result.num_states(), result.num_transitions(), minimized.num_states(), minimized.num_transitions(), determinize_ms, possible_ms, subtract_ms, fallback_ms, minimize_ms, total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    minimized
+}
+
+pub fn normalize_weighted_parser_stack_nwa_preserving_explicit(
+    table: &GLRTable,
+    parser_nwa: &NWA,
+) -> DWA {
+    normalize_weighted_parser_stack_nwa_preserving_explicit_for_parser_state_count(
+        table.num_states,
+        parser_nwa,
+    )
+}
 pub fn normalize_weighted_parser_stack_nwa(table: &GLRTable, parser_nwa: &NWA) -> DWA {
-    normalize_weighted_parser_stack_nwa_impl(table.num_states, parser_nwa, None, None)
+    normalize_weighted_parser_stack_nwa_impl(table.num_states, parser_nwa, None, None, None)
 }
 
 pub fn normalize_weighted_parser_stack_nwa_for_parser_state_count(
     num_parser_states: u32,
     parser_nwa: &NWA,
 ) -> DWA {
-    normalize_weighted_parser_stack_nwa_impl(num_parser_states, parser_nwa, None, None)
+    normalize_weighted_parser_stack_nwa_impl(num_parser_states, parser_nwa, None, None, None)
+}
+
+pub fn normalize_weighted_parser_stack_nwa_for_parser_state_count_and_first_label_range(
+    num_parser_states: u32,
+    parser_nwa: &NWA,
+    first_label_range: std::ops::Range<u32>,
+) -> DWA {
+    normalize_weighted_parser_stack_nwa_impl(
+        num_parser_states,
+        parser_nwa,
+        None,
+        None,
+        Some(first_label_range),
+    )
 }
 
 pub fn normalize_weighted_parser_stack_nwa_small_boundary(
@@ -8139,11 +8990,13 @@ pub fn normalize_weighted_parser_stack_nwa_small_boundary(
         parser_nwa,
         Some((num_tsids, num_tokens)),
         None,
+        None,
     );
     if std::env::var_os("GLRMASK_VALIDATE_SMALL_BOUNDARY_WEIGHT_DETERMINIZER").is_some() {
         let reference = normalize_weighted_parser_stack_nwa_impl(
             table.num_states,
             parser_nwa,
+            None,
             None,
             None,
         );
@@ -8178,6 +9031,7 @@ pub fn normalize_weighted_parser_stack_nwa_small_boundary_with_tsid_map(
         parser_nwa,
         Some((num_tsids, num_tokens)),
         Some(source_tsid_map),
+        None,
     )
 }
 
@@ -8193,6 +9047,7 @@ pub fn normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count
         parser_nwa,
         Some((num_tsids, num_tokens)),
         source_tsid_map,
+        None,
     )
 }
 
@@ -8426,8 +9281,8 @@ fn direct_negative_suffix_residuals(
 /// state is the exact residual language. This is the relational composition
 /// performed by negative-code cancellation, but without materializing the
 /// concatenated graph or running a global fixpoint.
-pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled(
-    table: &GLRTable,
+pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+    num_parser_states: u32,
     bundle: &NWA,
     target_domain: &DWA,
 ) -> (Option<DWA>, ParserStackPreimageProfile) {
@@ -8513,17 +9368,31 @@ pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled(
     // Negative cancellation is now algebraic, but parser stack languages also
     // project finality backward through DEFAULT/epsilon edges. Preserve that
     // exact stack-prefix semantics before ordinary boolean determinization.
-    apply_finality_fixpoint(&mut result);
+    if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_DIRECT_PREIMAGE_FINALITY").is_none() {
+        apply_finality_fixpoint(&mut result);
+    }
     profile.concatenate_ms = elapsed_ms(build_started_at);
     profile.concatenated_states = result.states().len();
 
     let normalize_started_at = Instant::now();
-    let domain = normalize_parser_stack_domain_nwa(table, &result);
+    let domain = normalize_parser_stack_domain_nwa_for_parser_state_count(num_parser_states, &result);
     profile.normalize_ms = elapsed_ms(normalize_started_at);
     profile.result_states = domain.states().len();
     profile.total_ms = elapsed_ms(total_started_at);
 
     (Some(domain), profile)
+}
+
+pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled(
+    table: &GLRTable,
+    bundle: &NWA,
+    target_domain: &DWA,
+) -> (Option<DWA>, ParserStackPreimageProfile) {
+    build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+        table.num_states,
+        bundle,
+        target_domain,
+    )
 }
 
 
@@ -8785,10 +9654,10 @@ impl LazyBooleanParserDomains {
         bundle: &NWA,
         bundle_state: u32,
         target_root: u32,
-        memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        memo: &mut [Option<Option<u32>>],
     ) -> Option<u32> {
-        if let Some(cached) = memo.get(&(bundle_state, target_root)) {
-            return *cached;
+        if let Some(cached) = memo.get(bundle_state as usize).and_then(|entry| *entry) {
+            return cached;
         }
         let node = bundle.states().get(bundle_state as usize)?;
         let mut result = if node
@@ -8802,7 +9671,7 @@ impl LazyBooleanParserDomains {
         };
         for (&label, targets) in &node.transitions {
             if !is_negative_label(label) {
-                memo.insert((bundle_state, target_root), None);
+                memo[bundle_state as usize] = Some(None);
                 return None;
             }
             let parser_state = negative_to_positive_label(label) as u32;
@@ -8817,7 +9686,7 @@ impl LazyBooleanParserDomains {
                     target_root,
                     memo,
                 ) else {
-                    memo.insert((bundle_state, target_root), None);
+                    memo[bundle_state as usize] = Some(None);
                     return None;
                 };
                 let residual = self.advance(child, parser_state);
@@ -8830,12 +9699,12 @@ impl LazyBooleanParserDomains {
                 continue;
             }
             let Some(child) = self.negative_suffix_root(bundle, *target, target_root, memo) else {
-                memo.insert((bundle_state, target_root), None);
+                memo[bundle_state as usize] = Some(None);
                 return None;
             };
             result = self.union(result, child);
         }
-        memo.insert((bundle_state, target_root), Some(result));
+        memo[bundle_state as usize] = Some(Some(result));
         Some(result)
     }
 
@@ -8844,11 +9713,11 @@ impl LazyBooleanParserDomains {
         bundle: &NWA,
         bundle_state: u32,
         target_root: u32,
-        positive_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
-        negative_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        positive_memo: &mut [Option<Option<u32>>],
+        negative_memo: &mut [Option<Option<u32>>],
     ) -> Option<u32> {
-        if let Some(cached) = positive_memo.get(&(bundle_state, target_root)) {
-            return *cached;
+        if let Some(cached) = positive_memo.get(bundle_state as usize).and_then(|entry| *entry) {
+            return cached;
         }
         let node = bundle.states().get(bundle_state as usize)?;
         let mut result = if node
@@ -8874,7 +9743,7 @@ impl LazyBooleanParserDomains {
                         target_root,
                         negative_memo,
                     ) else {
-                        positive_memo.insert((bundle_state, target_root), None);
+                        positive_memo[bundle_state as usize] = Some(None);
                         return None;
                     };
                     self.advance(child, parser_state)
@@ -8886,7 +9755,7 @@ impl LazyBooleanParserDomains {
                         positive_memo,
                         negative_memo,
                     ) else {
-                        positive_memo.insert((bundle_state, target_root), None);
+                        positive_memo[bundle_state as usize] = Some(None);
                         return None;
                     };
                     self.read(label, child)
@@ -8906,18 +9775,18 @@ impl LazyBooleanParserDomains {
                 positive_memo,
                 negative_memo,
             ) else {
-                positive_memo.insert((bundle_state, target_root), None);
+                positive_memo[bundle_state as usize] = Some(None);
                 return None;
             };
             result = self.union(result, child);
         }
-        positive_memo.insert((bundle_state, target_root), Some(result));
+        positive_memo[bundle_state as usize] = Some(Some(result));
         Some(result)
     }
 
     pub fn preimage_bundle(&mut self, bundle: &NWA, target_root: u32) -> Option<u32> {
-        let mut positive_memo = FxHashMap::default();
-        let mut negative_memo = FxHashMap::default();
+        let mut positive_memo = vec![None; bundle.states().len()];
+        let mut negative_memo = vec![None; bundle.states().len()];
         let mut result = Self::EMPTY;
         for &start in bundle.start_states() {
             let root = self.preimage_state(
@@ -9210,23 +10079,18 @@ impl SharedBooleanParserDomains {
             (None, Some(right)) => Some(right),
             (None, None) => None,
         };
-        let mut labels = BTreeSet::new();
-        labels.extend(left_node.explicit.keys().copied());
-        labels.extend(right_node.explicit.keys().copied());
-        let mut explicit = BTreeMap::new();
-        for label in labels {
-            // Do not fold DEFAULT into explicit labels here.  DEFAULT is a
-            // symbolic wildcard NWA branch, so a concrete derivative unions
-            // the matching explicit branch with the wildcard branch later.
-            let left_child = left_node.explicit.get(&label).copied();
-            let right_child = right_node.explicit.get(&label).copied();
-            let child = match (left_child, right_child) {
-                (Some(left), Some(right)) => self.union(left, right),
-                (Some(left), None) => left,
-                (None, Some(right)) => right,
-                (None, None) => Self::EMPTY,
-            };
-            explicit.insert(label, child);
+        // Merge the two already-sorted explicit rows directly. This is the same
+        // pointwise union as collecting their key union first, but avoids an
+        // intermediate BTreeSet plus a second round of map lookups/allocations.
+        // DEFAULT remains an independent additive wildcard branch.
+        let mut explicit = left_node.explicit;
+        for (label, right_child) in right_node.explicit {
+            if let Some(left_child) = explicit.get(&label).copied() {
+                let child = self.union(left_child, right_child);
+                explicit.insert(label, child);
+            } else {
+                explicit.insert(label, right_child);
+            }
         }
         let result = self.make_node(explicit, default);
         self.union_memo.insert(key, result);
@@ -9352,10 +10216,10 @@ impl SharedBooleanParserDomains {
         bundle: &NWA,
         bundle_state: u32,
         target_root: u32,
-        memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        memo: &mut [Option<Option<u32>>],
     ) -> Option<u32> {
-        if let Some(cached) = memo.get(&(bundle_state, target_root)) {
-            return *cached;
+        if let Some(cached) = memo.get(bundle_state as usize).and_then(|entry| *entry) {
+            return cached;
         }
         let node = bundle.states().get(bundle_state as usize)?;
         let mut result = if node
@@ -9369,7 +10233,7 @@ impl SharedBooleanParserDomains {
         };
         for (&label, targets) in &node.transitions {
             if !is_negative_label(label) {
-                memo.insert((bundle_state, target_root), None);
+                memo[bundle_state as usize] = Some(None);
                 return None;
             }
             let parser_state = negative_to_positive_label(label) as u32;
@@ -9384,7 +10248,7 @@ impl SharedBooleanParserDomains {
                     target_root,
                     memo,
                 ) else {
-                    memo.insert((bundle_state, target_root), None);
+                    memo[bundle_state as usize] = Some(None);
                     return None;
                 };
                 let residual = self.advance(child, parser_state);
@@ -9397,12 +10261,12 @@ impl SharedBooleanParserDomains {
                 continue;
             }
             let Some(child) = self.negative_suffix_root(bundle, *target, target_root, memo) else {
-                memo.insert((bundle_state, target_root), None);
+                memo[bundle_state as usize] = Some(None);
                 return None;
             };
             result = self.union(result, child);
         }
-        memo.insert((bundle_state, target_root), Some(result));
+        memo[bundle_state as usize] = Some(Some(result));
         Some(result)
     }
 
@@ -9411,11 +10275,11 @@ impl SharedBooleanParserDomains {
         bundle: &NWA,
         bundle_state: u32,
         target_root: u32,
-        positive_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
-        negative_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        positive_memo: &mut [Option<Option<u32>>],
+        negative_memo: &mut [Option<Option<u32>>],
     ) -> Option<u32> {
-        if let Some(cached) = positive_memo.get(&(bundle_state, target_root)) {
-            return *cached;
+        if let Some(cached) = positive_memo.get(bundle_state as usize).and_then(|entry| *entry) {
+            return cached;
         }
         let node = bundle.states().get(bundle_state as usize)?;
         let mut result = if node
@@ -9441,7 +10305,7 @@ impl SharedBooleanParserDomains {
                         target_root,
                         negative_memo,
                     ) else {
-                        positive_memo.insert((bundle_state, target_root), None);
+                        positive_memo[bundle_state as usize] = Some(None);
                         return None;
                     };
                     self.advance(child, parser_state)
@@ -9453,7 +10317,7 @@ impl SharedBooleanParserDomains {
                         positive_memo,
                         negative_memo,
                     ) else {
-                        positive_memo.insert((bundle_state, target_root), None);
+                        positive_memo[bundle_state as usize] = Some(None);
                         return None;
                     };
                     self.prepend(label, child)
@@ -9473,18 +10337,18 @@ impl SharedBooleanParserDomains {
                 positive_memo,
                 negative_memo,
             ) else {
-                positive_memo.insert((bundle_state, target_root), None);
+                positive_memo[bundle_state as usize] = Some(None);
                 return None;
             };
             result = self.union(result, child);
         }
-        positive_memo.insert((bundle_state, target_root), Some(result));
+        positive_memo[bundle_state as usize] = Some(Some(result));
         Some(result)
     }
 
     pub fn preimage_bundle(&mut self, bundle: &NWA, target_root: u32) -> Option<u32> {
-        let mut positive_memo = FxHashMap::default();
-        let mut negative_memo = FxHashMap::default();
+        let mut positive_memo = vec![None; bundle.states().len()];
+        let mut negative_memo = vec![None; bundle.states().len()];
         let mut result = Self::EMPTY;
         for &start in bundle.start_states() {
             let root = self.preimage_state(
@@ -9502,6 +10366,72 @@ impl SharedBooleanParserDomains {
         Some(result)
     }
 
+    /// Export several support-weighted roots as one shared positive NWA.
+    ///
+    /// Each shared-domain node is materialized once even when it is reachable
+    /// from several roots. A fresh synthetic start carries the independent
+    /// support weights for each root; the shared body remains boolean. DEFAULT
+    /// is kept as the same additive wildcard edge used by `to_nwa`, so callers
+    /// can choose the exact parser-stack normalization after the complete
+    /// weighted relation has been assembled.
+    pub fn to_weighted_nwa(&self, roots: &[(u32, Weight)]) -> NWA {
+        let mut reachable = FxHashSet::<u32>::default();
+        let mut queue = roots
+            .iter()
+            .filter_map(|(root, weight)| {
+                (!weight.is_empty() && *root != Self::EMPTY).then_some(*root)
+            })
+            .collect::<VecDeque<_>>();
+        while let Some(source) = queue.pop_front() {
+            if !reachable.insert(source) {
+                continue;
+            }
+            let node = &self.nodes[source as usize];
+            queue.extend(node.explicit.values().copied());
+            if let Some(target) = node.default {
+                queue.push_back(target);
+            }
+        }
+
+        let mut ordered = reachable.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable();
+        let mut output = NWA::new(0, 0);
+        let global_start = output.add_state();
+        output.set_start_states(vec![global_start]);
+        let mut remap = FxHashMap::<u32, u32>::default();
+        for &node in &ordered {
+            remap.insert(node, output.add_state());
+        }
+
+        for (root, weight) in roots {
+            if weight.is_empty() || *root == Self::EMPTY {
+                continue;
+            }
+            if let Some(&target) = remap.get(root) {
+                output.add_epsilon(global_start, target, weight.clone());
+            }
+        }
+
+        for source in ordered {
+            let output_source = remap[&source];
+            let node = &self.nodes[source as usize];
+            if node.accepting {
+                output.set_final_weight(output_source, Weight::all());
+            }
+            for (&label, &target) in &node.explicit {
+                output.add_transition(output_source, label, remap[&target], Weight::all());
+            }
+            if let Some(target) = node.default {
+                output.add_transition(
+                    output_source,
+                    DEFAULT_LABEL,
+                    remap[&target],
+                    Weight::all(),
+                );
+            }
+        }
+        output
+    }
     pub fn to_dwa(&self, root: u32) -> DWA {
         let mut output = DWA::new(0, 0);
         let mut remap = FxHashMap::<u32, u32>::default();
@@ -9648,6 +10578,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             None,
             Some(false),
             Some(false),
+            None,
         );
         let difference = find_difference(&determinized.dwa, &reference.dwa)
             .expect("parser support singleton-normalization equivalence checker failed");
@@ -9670,6 +10601,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             None,
             Some(false),
             Some(false),
+            None,
         );
         let difference = find_difference(&determinized.dwa, &reference.dwa)
             .expect("parser support subset-normalization equivalence checker failed");
@@ -9690,6 +10622,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             &parser_nwa,
             Some(num_parser_states),
             Some(false),
+            None,
             None,
             None,
         );
@@ -9896,7 +10829,7 @@ mod tests {
     use crate::automata::weighted::nwa::NWA;
     use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::glr::labels::DEFAULT_LABEL;
+    use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label};
     use crate::compiler::glr::table::testing::build_test_table;
     use crate::compiler::glr::table::Action;
     use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
@@ -9933,6 +10866,97 @@ mod tests {
             .map_or_else(Weight::empty, |final_weight| {
                 accumulated.intersection(final_weight)
             })
+    }
+
+    #[test]
+    fn shared_boolean_domains_weighted_export_shares_body_and_preserves_support() {
+        let mut arena = super::SharedBooleanParserDomains::new();
+        let tail = arena.prepend(9, super::SharedBooleanParserDomains::UNIVERSAL);
+        let left = arena.prepend(3, tail);
+        let right = arena.prepend(4, tail);
+        let left_weight = weight(0..=1);
+        let right_weight = weight(2..=3);
+
+        let weighted = arena.to_weighted_nwa(&[
+            (left, left_weight.clone()),
+            (right, right_weight.clone()),
+        ]);
+        // global start + left + right + shared tail + universal
+        assert_eq!(weighted.states().len(), 5);
+
+        let determinized = super::determinize_with_supports(&weighted, None).dwa;
+        assert_eq!(determinized.eval_word(&[3, 9]), left_weight);
+        assert_eq!(determinized.eval_word(&[4, 9]), right_weight);
+        assert!(determinized.eval_word(&[3, 8]).is_empty());
+        assert!(determinized.eval_word(&[4, 8]).is_empty());
+    }
+    #[test]
+    fn terminal_preimage_replace_top_preserves_deep_target_dependency() {
+        const A: i32 = 1;
+        const B: u32 = 2;
+        const C: i32 = 3;
+        const D: i32 = 4;
+        const GOOD: i32 = 0;
+        const BAD: i32 = 5;
+        const NUM_STATES: u32 = 6;
+
+        // Relation: [A] + tail -> [B] + tail.
+        let mut bundle = NWA::new(0, 0);
+        let bundle_start = bundle.add_state();
+        bundle.set_start_states(vec![bundle_start]);
+        let read_a = bundle.add_state();
+        let pushed_b = bundle.add_state();
+        bundle.add_transition(bundle_start, A, read_a, Weight::all());
+        bundle.add_transition(read_a, encode_negative_label(B), pushed_b, Weight::all());
+        bundle.set_final_weight(pushed_b, Weight::all());
+
+        // Target accepts B,C,D,GOOD and rejects the otherwise identical BAD tail.
+        let mut target = DWA::new(0, 0);
+        let after_b = target.add_state();
+        let after_c = target.add_state();
+        let after_d = target.add_state();
+        let accepted = target.add_state();
+        target.add_transition(target.start_state(), B as i32, after_b, Weight::all());
+        target.add_transition(after_b, C, after_c, Weight::all());
+        target.add_transition(after_c, D, after_d, Weight::all());
+        target.add_transition(after_d, GOOD, accepted, Weight::all());
+        target.set_final_weight(accepted, Weight::all());
+
+        let good_source = [A, C, D, GOOD];
+        let bad_source = [A, C, D, BAD];
+        assert!(!target.eval_word(&[B as i32, C, D, GOOD]).is_empty());
+        assert!(target.eval_word(&[B as i32, C, D, BAD]).is_empty());
+
+        let (direct, _) = super::build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_for_parser_state_count_profiled(
+            NUM_STATES, &bundle, &target,
+        );
+        let direct = direct.expect("simple replace-top direct preimage must build");
+
+        // Reproduce the established generic bundle + target + negative-cancellation path.
+        let mut generic_nwa = NWA::new(0, 0);
+        let bundle_offset = generic_nwa.states().len() as u32;
+        let bundle_body = generic_nwa.append_with_body(&bundle);
+        let bundle_finals = bundle.states().iter().enumerate().filter_map(|(local, state)| {
+            state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+                .then_some(bundle_offset + local as u32)
+        }).collect::<Vec<_>>();
+        let target_nwa = target.to_nwa();
+        let target_body = generic_nwa.append_with_body(&target_nwa);
+        for source in bundle_finals {
+            let final_weight = generic_nwa.states_mut()[source as usize]
+                .final_weight.take().expect("bundle final must carry weight");
+            for &target_start in &target_body.start_states {
+                generic_nwa.add_epsilon(source, target_start, final_weight.clone());
+            }
+        }
+        generic_nwa.set_start_states(bundle_body.start_states);
+        resolve_negative_codes_in_nwa(&mut generic_nwa, false);
+        let generic = super::normalize_parser_stack_domain_nwa_for_parser_state_count(NUM_STATES, &generic_nwa);
+
+        assert!(!eval_with_default(&direct, &good_source).is_empty(), "direct preimage lost valid source");
+        assert!(eval_with_default(&direct, &bad_source).is_empty(), "direct preimage accepted rejected deep tail");
+        assert!(!eval_with_default(&generic, &good_source).is_empty(), "generic preimage lost valid source");
+        assert!(eval_with_default(&generic, &bad_source).is_empty(), "generic preimage accepted rejected deep tail");
     }
 
     #[test]

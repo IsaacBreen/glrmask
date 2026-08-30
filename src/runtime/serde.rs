@@ -2144,7 +2144,6 @@ struct SegmentedRuntimeArtifactV20Ref<'a> {
     materialized_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
     materialized_parser_state_domain_labels: Vec<i32>,
     boundary_parser: Option<SegmentedBoundaryParserV20Ref<'a>>,
-    boundary_terminal_trie: Option<&'a crate::runtime::artifact::SegmentedBoundaryTerminalTrie>,
 }
 
 #[derive(Deserialize)]
@@ -2152,7 +2151,6 @@ struct SegmentedRuntimeArtifactV20 {
     materialized_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
     materialized_parser_state_domain_labels: Vec<i32>,
     boundary_parser: Option<crate::runtime::artifact::SegmentedBoundaryParser>,
-    boundary_terminal_trie: Option<crate::runtime::artifact::SegmentedBoundaryTerminalTrie>,
 }
 
 #[derive(Serialize)]
@@ -2176,39 +2174,6 @@ struct SegmentedParserComponentV22 {
     global_to_local_parser_state: Vec<u32>,
 }
 
-#[derive(Serialize)]
-struct BoundaryTerminalTrieNodeV22Ref<'a> {
-    children: &'a [(u32, u32)],
-    outputs: &'a [u32],
-}
-
-#[derive(Deserialize)]
-#[cfg_attr(test, derive(Serialize))]
-struct BoundaryTerminalTrieNodeV22 {
-    children: Vec<(u32, u32)>,
-    outputs: Vec<u32>,
-}
-
-#[derive(Serialize)]
-struct SegmentedBoundaryTerminalTrieV22Ref<'a> {
-    nodes: Vec<BoundaryTerminalTrieNodeV22Ref<'a>>,
-    root_by_tsid: &'a [u32],
-    tokenizer_state_to_tsid: &'a [u32],
-    internal_token_to_originals: &'a [Vec<u32>],
-    symbolic_nwa: Option<&'a crate::runtime::artifact::BoundaryTerminalNwa>,
-}
-
-#[derive(Deserialize)]
-#[cfg_attr(test, derive(Serialize))]
-struct SegmentedBoundaryTerminalTrieV22 {
-    nodes: Vec<BoundaryTerminalTrieNodeV22>,
-    root_by_tsid: Vec<u32>,
-    tokenizer_state_to_tsid: Vec<u32>,
-    internal_token_to_originals: Vec<Vec<u32>>,
-    symbolic_nwa: Option<crate::runtime::artifact::BoundaryTerminalNwa>,
-}
-
-#[derive(Serialize)]
 struct SegmentedRuntimeArtifactV22Ref<'a> {
     materialized_static_component_parser: Option<crate::automata::weighted_u32::dwa::DWA>,
     materialized_static_parser_state_domain_labels: Vec<i32>,
@@ -2216,7 +2181,6 @@ struct SegmentedRuntimeArtifactV22Ref<'a> {
     segmented_mask_authoritative: bool,
     segmented_component_union_root_dispatch: &'a [u32],
     boundary_parser: Option<SegmentedBoundaryParserV20Ref<'a>>,
-    boundary_terminal_trie: Option<SegmentedBoundaryTerminalTrieV22Ref<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -2227,7 +2191,6 @@ struct SegmentedRuntimeArtifactV22 {
     segmented_mask_authoritative: bool,
     segmented_component_union_root_dispatch: Vec<u32>,
     boundary_parser: Option<crate::runtime::artifact::SegmentedBoundaryParser>,
-    boundary_terminal_trie: Option<SegmentedBoundaryTerminalTrieV22>,
 }
 
 #[derive(Serialize)]
@@ -2271,7 +2234,6 @@ enum SegmentedBoundaryShardScopeV23 {
 #[derive(Serialize)]
 enum SegmentedBoundaryShardBackendV23Ref<'a> {
     StaticParser(SegmentedBoundaryParserV23Ref<'a>),
-    DynamicTerminalTrie(SegmentedBoundaryTerminalTrieV22Ref<'a>),
     DynamicDirect,
 }
 
@@ -2279,7 +2241,6 @@ enum SegmentedBoundaryShardBackendV23Ref<'a> {
 #[cfg_attr(test, derive(Serialize))]
 enum SegmentedBoundaryShardBackendV23 {
     StaticParser(SegmentedBoundaryParserV23),
-    DynamicTerminalTrie(SegmentedBoundaryTerminalTrieV22),
     DynamicDirect,
 }
 
@@ -2590,25 +2551,6 @@ fn boundary_parser_v23_ref(
     }
 }
 
-fn boundary_terminal_trie_v22_ref(
-    boundary: &crate::runtime::artifact::SegmentedBoundaryTerminalTrie,
-) -> SegmentedBoundaryTerminalTrieV22Ref<'_> {
-    SegmentedBoundaryTerminalTrieV22Ref {
-        nodes: boundary
-            .nodes
-            .iter()
-            .map(|node| BoundaryTerminalTrieNodeV22Ref {
-                children: &node.children,
-                outputs: &node.outputs,
-            })
-            .collect(),
-        root_by_tsid: &boundary.root_by_tsid,
-        tokenizer_state_to_tsid: &boundary.tokenizer_state_to_tsid,
-        internal_token_to_originals: &boundary.internal_token_to_originals,
-        symbolic_nwa: boundary.symbolic_nwa.as_ref(),
-    }
-}
-
 fn serialized_component_root_entry_terminals(
     component: &crate::runtime::SegmentedParserComponent,
     global_terminal_count: usize,
@@ -2631,7 +2573,6 @@ fn segmented_runtime_artifact_v24_ref(
     if overlay.segmented_parser_components.is_empty()
         && overlay.segmented_boundary_shards.is_empty()
         && overlay.segmented_boundary_parser.is_none()
-        && overlay.segmented_boundary_terminal_trie.is_none()
     {
         return None;
     }
@@ -2669,11 +2610,6 @@ fn segmented_runtime_artifact_v24_ref(
                             boundary_parser_v23_ref(boundary),
                         )
                     }
-                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
-                        SegmentedBoundaryShardBackendV23Ref::DynamicTerminalTrie(
-                            boundary_terminal_trie_v22_ref(boundary),
-                        )
-                    }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                         SegmentedBoundaryShardBackendV23Ref::DynamicDirect
                     }
@@ -2688,15 +2624,6 @@ fn segmented_runtime_artifact_v24_ref(
                 candidate_tokens: None,
                 backend: SegmentedBoundaryShardBackendV23Ref::StaticParser(
                     boundary_parser_v23_ref(boundary),
-                ),
-            });
-        }
-        if let Some(boundary) = overlay.segmented_boundary_terminal_trie.as_deref() {
-            shards.push(SegmentedBoundaryShardV23Ref {
-                scope: SegmentedBoundaryShardScopeV23Ref::Global,
-                candidate_tokens: None,
-                backend: SegmentedBoundaryShardBackendV23Ref::DynamicTerminalTrie(
-                    boundary_terminal_trie_v22_ref(boundary),
                 ),
             });
         }
@@ -2740,10 +2667,17 @@ fn segmented_runtime_artifact_ref(
         .expect("validated recursive runtime must derive its parser layout before serialization")
         .expect("provider-native segmented runtime must have a recursive parser layout");
     let overlay = constraint.static_dynamic_overlay.as_ref()?;
+    // Provider-native recursive composition may be born directly as a grammar
+    // shell. In that representation there is intentionally no flattened LR
+    // compiler table: live execution and later provider-native composition use
+    // the retained component tree plus CALL/RETURN links. Keep the v27 field
+    // shape stable and use an empty byte slice as the pre-release sentinel for
+    // "no flattened compiler view" rather than manufacturing one solely so the
+    // artifact can be written.
     let recursive_compiler_table = overlay
         .recursive_compiler_table
         .get()
-        .expect("recursive runtime must retain its compiler table blob");
+        .map_or(&[][..], |blob| blob.as_ref());
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()
@@ -2796,11 +2730,6 @@ fn segmented_runtime_artifact_ref(
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                     RecursiveSegmentedBoundaryShardBackendV27Ref::DynamicDirect
                 }
-                crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
-                    unreachable!(
-                        "recursive provider-native runtime cannot carry a terminal-trie boundary"
-                    )
-                }
             };
             RecursiveSegmentedBoundaryShardV27Ref {
                 start_component: shard.start_component,
@@ -2814,162 +2743,13 @@ fn segmented_runtime_artifact_ref(
         RecursiveSegmentedRuntimeArtifactV27Ref {
             components,
             segmented_parser_links,
-            recursive_compiler_table: recursive_compiler_table.as_ref(),
+            recursive_compiler_table,
             recursive_tokenizer_internal_tsids:
                 recursive_tokenizer_internal_tsids.as_slice(),
             segmented_mask_authoritative: overlay.segmented_mask_authoritative,
             boundary_shards,
         },
     ))
-}
-
-fn restore_boundary_terminal_trie_v22(
-    boundary: SegmentedBoundaryTerminalTrieV22,
-    global_terminal_count: usize,
-) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryTerminalTrie> {
-    fn weight_within_boundary_domain(weight: &Weight, tsids: usize, tokens: usize) -> bool {
-        if weight.is_empty() || weight.is_full() {
-            return true;
-        }
-        weight.range_entries().all(|(_, end_tsid, token_set)| {
-            end_tsid < tsids as u32
-                && token_set
-                    .ranges()
-                    .all(|range| *range.end() < tokens as u32)
-        })
-    }
-
-    let node_count = boundary.nodes.len();
-    if boundary
-        .root_by_tsid
-        .iter()
-        .any(|&root| root != u32::MAX && root as usize >= node_count)
-    {
-        return Err(crate::GlrMaskError::Serialization(
-            "serialized boundary terminal trie references an invalid root node".to_owned(),
-        ));
-    }
-    if boundary
-        .tokenizer_state_to_tsid
-        .iter()
-        .any(|&tsid| tsid != u32::MAX && tsid as usize >= boundary.root_by_tsid.len())
-    {
-        return Err(crate::GlrMaskError::Serialization(
-            "serialized boundary terminal trie references an invalid TSID".to_owned(),
-        ));
-    }
-    let internal_token_count = boundary.internal_token_to_originals.len();
-    for (node_index, node) in boundary.nodes.iter().enumerate() {
-        if node
-            .children
-            .iter()
-            .any(|&(_, child)| child as usize >= node_count)
-        {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "serialized boundary terminal trie node {node_index} references an invalid child"
-            )));
-        }
-        if node
-            .outputs
-            .iter()
-            .any(|&token| token as usize >= internal_token_count)
-        {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "serialized boundary terminal trie node {node_index} references an invalid token class"
-            )));
-        }
-    }
-
-    if let Some(symbolic_nwa) = boundary.symbolic_nwa.as_ref() {
-        let symbolic_node_count = symbolic_nwa.nodes.len();
-        if symbolic_nwa.topological_order.len() != symbolic_node_count {
-            return Err(crate::GlrMaskError::Serialization(
-                "serialized boundary terminal NWA has an incomplete topological order".to_owned(),
-            ));
-        }
-        let mut position = vec![usize::MAX; symbolic_node_count];
-        for (index, &state) in symbolic_nwa.topological_order.iter().enumerate() {
-            let Some(slot) = position.get_mut(state as usize) else {
-                return Err(crate::GlrMaskError::Serialization(
-                    "serialized boundary terminal NWA topological order references an invalid state"
-                        .to_owned(),
-                ));
-            };
-            if *slot != usize::MAX {
-                return Err(crate::GlrMaskError::Serialization(
-                    "serialized boundary terminal NWA topological order contains a duplicate state"
-                        .to_owned(),
-                ));
-            }
-            *slot = index;
-        }
-        if symbolic_nwa
-            .start_states
-            .iter()
-            .any(|&state| state as usize >= symbolic_node_count)
-        {
-            return Err(crate::GlrMaskError::Serialization(
-                "serialized boundary terminal NWA references an invalid start state".to_owned(),
-            ));
-        }
-        for (source, node) in symbolic_nwa.nodes.iter().enumerate() {
-            if node.final_weight.as_ref().is_some_and(|weight| {
-                !weight_within_boundary_domain(
-                    weight,
-                    boundary.root_by_tsid.len(),
-                    internal_token_count,
-                )
-            }) {
-                return Err(crate::GlrMaskError::Serialization(format!(
-                    "serialized boundary terminal NWA state {source} has an out-of-domain final weight"
-                )));
-            }
-            for transition in &node.transitions {
-                if transition.terminal as usize >= global_terminal_count
-                    || transition.target as usize >= symbolic_node_count
-                    || position[source] >= position[transition.target as usize]
-                    || !weight_within_boundary_domain(
-                        &transition.weight,
-                        boundary.root_by_tsid.len(),
-                        internal_token_count,
-                    )
-                {
-                    return Err(crate::GlrMaskError::Serialization(format!(
-                        "serialized boundary terminal NWA state {source} has an invalid labeled transition"
-                    )));
-                }
-            }
-            for (target, weight) in &node.epsilons {
-                if *target as usize >= symbolic_node_count
-                    || position[source] >= position[*target as usize]
-                    || !weight_within_boundary_domain(
-                        weight,
-                        boundary.root_by_tsid.len(),
-                        internal_token_count,
-                    )
-                {
-                    return Err(crate::GlrMaskError::Serialization(format!(
-                        "serialized boundary terminal NWA state {source} has an invalid epsilon transition"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(crate::runtime::artifact::SegmentedBoundaryTerminalTrie {
-        nodes: boundary
-            .nodes
-            .into_iter()
-            .map(|node| crate::runtime::artifact::BoundaryTerminalTrieNode {
-                children: node.children,
-                outputs: node.outputs,
-            })
-            .collect(),
-        root_by_tsid: boundary.root_by_tsid,
-        tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
-        internal_token_to_originals: boundary.internal_token_to_originals,
-        symbolic_nwa: boundary.symbolic_nwa,
-    })
 }
 
 fn restore_segmented_runtime_v22(
@@ -3081,11 +2861,6 @@ fn restore_segmented_runtime_v22(
     overlay.segmented_component_union_root_dispatch =
         runtime.segmented_component_union_root_dispatch;
     overlay.segmented_boundary_parser = runtime.boundary_parser.map(Arc::new);
-    overlay.segmented_boundary_terminal_trie = runtime
-        .boundary_terminal_trie
-        .map(|boundary| restore_boundary_terminal_trie_v22(boundary, global_terminal_count))
-        .transpose()?
-        .map(Arc::new);
     // v22 stores one global B. Keep the new shard collection empty so runtime
     // deliberately takes the exact legacy/global fallback rather than
     // pretending the old wire format contained per-start-component roots.
@@ -3170,6 +2945,8 @@ fn restore_boundary_parser_v23(
         parser_dwa: boundary.parser_dwa,
         compact_parser_dwa: None,
         recursive_parser_dwa: None,
+        recursive_compact_parser_dwa: None,
+        recursive_compact_tsid_map: Vec::new(),
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
         tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
         internal_token_to_originals: boundary.internal_token_to_originals,
@@ -3262,6 +3039,8 @@ fn restore_recursive_boundary_parser_v27(
         parser_dwa: crate::automata::weighted_u32::dwa::DWA::new(0, 0),
         compact_parser_dwa: None,
         recursive_parser_dwa: Some(boundary.parser_dwa),
+        recursive_compact_parser_dwa: None,
+        recursive_compact_tsid_map: Vec::new(),
         uses_composed_tsid_coordinate: boundary.uses_composed_tsid_coordinate,
         tokenizer_state_to_tsid: boundary.tokenizer_state_to_tsid,
         internal_token_to_originals: boundary.internal_token_to_originals,
@@ -3290,7 +3069,6 @@ fn restore_segmented_runtime_v23(
             segmented_mask_authoritative,
             segmented_component_union_root_dispatch,
             boundary_parser: None,
-            boundary_terminal_trie: None,
         },
     )?;
 
@@ -3302,7 +3080,6 @@ fn restore_segmented_runtime_v23(
         .map_or(0, |overlay| overlay.segmented_parser_components.len());
     let mut seen_components = vec![false; component_count];
     let mut global_static = None;
-    let mut global_dynamic = None;
     let mut restored_shards = Vec::new();
 
     for (index, shard) in boundary_shards.into_iter().enumerate() {
@@ -3310,11 +3087,6 @@ fn restore_segmented_runtime_v23(
             SegmentedBoundaryShardBackendV23::StaticParser(boundary) => {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(Arc::new(
                     restore_boundary_parser_v23(constraint, boundary)?,
-                ))
-            }
-            SegmentedBoundaryShardBackendV23::DynamicTerminalTrie(boundary) => {
-                crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(Arc::new(
-                    restore_boundary_terminal_trie_v22(boundary, global_terminal_count)?,
                 ))
             }
             SegmentedBoundaryShardBackendV23::DynamicDirect => {
@@ -3333,14 +3105,6 @@ fn restore_segmented_runtime_v23(
                         if global_static.replace(boundary).is_some() {
                             return Err(crate::GlrMaskError::Serialization(
                                 "serialized v23 runtime contains multiple global static boundary shards"
-                                    .to_owned(),
-                            ));
-                        }
-                    }
-                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(boundary) => {
-                        if global_dynamic.replace(boundary).is_some() {
-                            return Err(crate::GlrMaskError::Serialization(
-                                "serialized v23 runtime contains multiple global dynamic boundary shards"
                                     .to_owned(),
                             ));
                         }
@@ -3398,7 +3162,7 @@ fn restore_segmented_runtime_v23(
             }
         }
     }
-    if !restored_shards.is_empty() && (global_static.is_some() || global_dynamic.is_some()) {
+    if !restored_shards.is_empty() && global_static.is_some() {
         return Err(crate::GlrMaskError::Serialization(
             "serialized v23 runtime mixes global and component-scoped boundary shards".to_owned(),
         ));
@@ -3419,7 +3183,6 @@ fn restore_segmented_runtime_v23(
     }
     overlay.segmented_boundary_shards = restored_shards;
     overlay.segmented_boundary_parser = global_static;
-    overlay.segmented_boundary_terminal_trie = global_dynamic;
     Ok(())
 }
 
@@ -3531,7 +3294,6 @@ fn restore_segmented_runtime_v24(
     // component projections. Historical v24 artifacts already carry the same
     // full-length sets, so this is a no-op for them.
     let has_legacy_boundary = overlay.segmented_boundary_parser.is_some()
-        || overlay.segmented_boundary_terminal_trie.is_some()
         || overlay.segmented_parser_components.iter().any(|component| {
             component.boundary.as_ref().is_some_and(|shard| {
                 !matches!(
@@ -3708,15 +3470,16 @@ fn restore_recursive_segmented_runtime_v27(
         overlay.segmented_component_union_root_dispatch.clear();
         overlay.segmented_boundary_shards.clear();
         overlay.segmented_boundary_parser = None;
-        overlay.segmented_boundary_terminal_trie = None;
-        overlay
-            .recursive_compiler_table
-            .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
-            .map_err(|_| {
-                crate::GlrMaskError::Serialization(
-                    "recursive compiler table was initialized twice".to_owned(),
-                )
-            })?;
+        if !recursive_compiler_table.is_empty() {
+            overlay
+                .recursive_compiler_table
+                .set(Arc::from(recursive_compiler_table.into_boxed_slice()))
+                .map_err(|_| {
+                    crate::GlrMaskError::Serialization(
+                        "recursive compiler table was initialized twice".to_owned(),
+                    )
+                })?;
+        }
     }
     let layout = constraint
         .recursive_parser_layout_for_pending_root()
@@ -3838,7 +3601,6 @@ fn restore_segmented_runtime_v20(
     overlay.segmented_parser_components.clear();
     overlay.segmented_component_union_root_dispatch.clear();
     overlay.segmented_boundary_parser = runtime.boundary_parser.map(Arc::new);
-    overlay.segmented_boundary_terminal_trie = runtime.boundary_terminal_trie.map(Arc::new);
     overlay.segmented_boundary_shards.clear();
     Ok(())
 }
@@ -7696,7 +7458,6 @@ mod tests {
         assert!(overlay.segmented_parser_components.is_empty());
         assert!(overlay.segmented_component_union_root_dispatch.is_empty());
         assert!(overlay.segmented_boundary_parser.is_none());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

@@ -864,6 +864,39 @@ impl RuntimeConstraint {
         )
     }
 
+    /// Consume a compiled parent and bind several already-compiled static
+    /// children in one recursive composition using static boundary shards.
+    ///
+    /// This avoids the repeated parent re-materialization inherent in a chain
+    /// of one-at-a-time late binds and preserves the supplied child artifacts
+    /// as the exact retained component runtimes.
+    #[doc(hidden)]
+    pub fn bind_grammars_owned(
+        self,
+        children: Vec<(String, RuntimeConstraint)>,
+    ) -> Result<Self> {
+        bind_static_parent_grammars_owned(
+            self,
+            children,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+    }
+
+    /// Consume a compiled parent and bind several already-compiled static
+    /// children in one recursive composition using the dynamic boundary
+    /// walker. Component-local masking remains static.
+    #[doc(hidden)]
+    pub fn bind_grammars_dynamic_boundary_owned(
+        self,
+        children: Vec<(String, RuntimeConstraint)>,
+    ) -> Result<Self> {
+        bind_static_parent_grammars_owned(
+            self,
+            children,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+    }
+
     /// Private compatibility hook for internal benchmark/composition callers.
     /// Public late binding no longer requires the caller to resupply `Vocab`,
     /// but old internal cached-parent probes still use this to eagerly prepare
@@ -875,6 +908,26 @@ impl RuntimeConstraint {
             .map_err(Error::Compilation)?;
         Ok(())
     }
+}
+
+fn bind_static_parent_grammars_owned(
+    parent: RuntimeConstraint,
+    children: Vec<(String, RuntimeConstraint)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<RuntimeConstraint> {
+    if children.is_empty() {
+        return Ok(parent);
+    }
+    for (name, _) in &children {
+        require_late_grammar_slot(std::slice::from_ref(&parent), name)?;
+    }
+    let vocab = constraint_vocab(&parent);
+    let compiled = children
+        .into_iter()
+        .map(|(name, constraint)| (name, CompiledChild::StaticOwned(constraint)))
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    compose_named_children(parent, &children, &vocab, boundary_backend)
 }
 
 impl DynamicConstraint {
@@ -1137,7 +1190,6 @@ mod tests {
             .as_ref()
             .expect("bound constraint must use the explicit segmented runtime");
         assert!(overlay.segmented_boundary_parser.is_none());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert!(
             !overlay.segmented_boundary_shards.is_empty(),
             "static boundary policy must publish component-owned shards",
@@ -1154,7 +1206,6 @@ mod tests {
             .as_ref()
             .expect("bound constraint must use the explicit segmented runtime");
         assert!(overlay.segmented_boundary_parser.is_none());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
@@ -1204,7 +1255,6 @@ mod tests {
             assert_eq!(component_backend_flags(&alternative), vec![true, false]);
             let overlay = alternative.static_dynamic_overlay.as_ref().unwrap();
             assert!(overlay.segmented_boundary_parser.is_none());
-            assert!(overlay.segmented_boundary_terminal_trie.is_none());
             assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
                 shard.backend,
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
@@ -2990,12 +3040,10 @@ mod tests {
             overlay.segmented_boundary_parser.is_none(),
             "partitioned static B must not retain a redundant global boundary parser",
         );
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
 
         let loaded = RuntimeConstraint::load(bound.save()).unwrap();
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(loaded_overlay.segmented_boundary_parser.is_none());
-        assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
         assert!(!loaded_overlay.segmented_boundary_shards.is_empty());
         let reference = RuntimeConstraint::compile(
             Grammar::ebnf(r#"start ::= "x" "y" "z""#),

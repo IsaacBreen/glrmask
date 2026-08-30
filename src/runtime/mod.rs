@@ -11,13 +11,11 @@ mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]
-pub(crate) use artifact::{
-    dynamic_mask_vocab_layout_class, BoundaryTerminalNwa, BoundaryTerminalNwaNode,
-    BoundaryTerminalNwaTransition, BoundaryTerminalTrieNode, BoundaryTrigger,
+pub(crate) use artifact::{    dynamic_mask_vocab_layout_class, BoundaryTrigger,
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
     DynamicMaskVocabArtifact, FastCommitTemplateDfas, FastTokenizerTransitions, LateGrammarSlot,
     SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,
-    SegmentedBoundaryTerminalTrie, SegmentedParserComponent, SegmentedParserComponentTables,
+    SegmentedParserComponent, SegmentedParserComponentTables,
     SegmentedParserLink, SpecialTokenTerminal, StaticDynamicOverlayMetadata,
 };
 pub(crate) use artifact::token_bytes_artifact_serde::PackedTokenBytes;

@@ -20,6 +20,8 @@ use crate::compiler::glr::parser::{
     DisjointComponentActionProvider, ParserComponentTableSource, ParserGSS, ScopedParserSymbol,
     advance_provider_control_closed_stacks, close_provider_control_stacks,
     materialize_control_eliminated_scoped_provider_table,
+    materialize_preselected_control_eliminated_scoped_provider_table,
+    materialize_selected_control_eliminated_scoped_provider_table,
     stack_may_advance_on_with_provider, stacks_finished_with_provider,
 };
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity, subgrammar_child_return_pop};
@@ -1009,6 +1011,191 @@ fn build_dynamic_reset_effect_rows(
 }
 
 impl Constraint {
+    fn boundary_token_trigger_candidates_naive(&self, relevant: &BitSet) -> Vec<u32> {
+        let all_states = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
+        let tokens = self.token_bytes_iter().collect::<Vec<_>>();
+        let mut candidates = tokens
+            .par_iter()
+            .filter_map(|(token_id, bytes)| {
+                if bytes.len() < 2 {
+                    return None;
+                }
+                let mut states = TokenizerStateSet::from_iter(all_states.iter().copied());
+                for &byte in &bytes[..bytes.len() - 1] {
+                    states = self.tokenizer.step_all(states.as_slice(), byte);
+                    if states.is_empty() {
+                        return None;
+                    }
+                    let mut matched_any = false;
+                    let mut matched_relevant = false;
+                    for state in states.iter().copied() {
+                        for terminal in self.tokenizer.matched_terminals_iter(state) {
+                            matched_any = true;
+                            matched_relevant |= relevant.contains(terminal as usize);
+                        }
+                    }
+                    if matched_relevant {
+                        return Some(*token_id);
+                    }
+                    if matched_any {
+                        let reset = self.runtime_commit_initial_state();
+                        if !states.contains(&reset) {
+                            states.push(reset);
+                            states.sort_unstable();
+                        }
+                    }
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+
+    fn boundary_token_trigger_candidates_trie(&self, relevant: &BitSet) -> Vec<u32> {
+        struct TriggerTrieBuild<'a> {
+            constraint: &'a Constraint,
+            vocab: &'a DynamicMaskVocab,
+            relevant: &'a BitSet,
+            reset: u32,
+            state_sets: Vec<Vec<u32>>,
+            state_set_ids: FxHashMap<Vec<u32>, u32>,
+            transition_cache: FxHashMap<(u32, u8), (u32, bool)>,
+            candidates: Vec<u32>,
+        }
+
+        impl TriggerTrieBuild<'_> {
+            fn intern_state_set(&mut self, states: Vec<u32>) -> u32 {
+                if let Some(&id) = self.state_set_ids.get(&states) {
+                    return id;
+                }
+                let id = self.state_sets.len() as u32;
+                self.state_set_ids.insert(states.clone(), id);
+                self.state_sets.push(states);
+                id
+            }
+
+            fn advance(&mut self, source_id: u32, byte: u8) -> (u32, bool) {
+                if let Some(&cached) = self.transition_cache.get(&(source_id, byte)) {
+                    return cached;
+                }
+                let source = self.state_sets[source_id as usize].clone();
+                let mut states = self.constraint.tokenizer.step_all(&source, byte);
+                let mut matched_any = false;
+                let mut matched_relevant = false;
+                for state in states.iter().copied() {
+                    for terminal in self.constraint.tokenizer.matched_terminals_iter(state) {
+                        matched_any = true;
+                        matched_relevant |= self.relevant.contains(terminal as usize);
+                    }
+                }
+                if matched_any && !states.contains(&self.reset) {
+                    states.push(self.reset);
+                    states.sort_unstable();
+                }
+                let target_id = self.intern_state_set(states.as_slice().to_vec());
+                let result = (target_id, matched_relevant);
+                self.transition_cache.insert((source_id, byte), result);
+                result
+            }
+
+            fn mark_subtree(&mut self, node: u32) {
+                self.candidates
+                    .extend_from_slice(self.vocab.subtree_original_tokens(node));
+            }
+
+            fn mark_proper_descendants(&mut self, node: u32) {
+                let children = self
+                    .vocab
+                    .trie
+                    .children(node)
+                    .iter()
+                    .map(|edge| edge.child)
+                    .collect::<Vec<_>>();
+                for child in children {
+                    self.mark_subtree(child);
+                }
+            }
+
+            fn visit(&mut self, node: u32, state_set_id: u32, strict_before: bool, at_node: bool) {
+                if strict_before {
+                    self.mark_subtree(node);
+                    return;
+                }
+                if at_node {
+                    // A match exactly at this trie node is not a proper prefix of
+                    // a token ending here, but it is a proper prefix of every
+                    // token in a non-empty descendant edge.
+                    self.mark_proper_descendants(node);
+                    return;
+                }
+                if self.state_sets[state_set_id as usize].is_empty() {
+                    return;
+                }
+
+                let children = self
+                    .vocab
+                    .trie
+                    .children(node)
+                    .iter()
+                    .map(|edge| (edge.child, self.vocab.trie.edge_bytes(edge).to_vec()))
+                    .collect::<Vec<_>>();
+                for (child, bytes) in children {
+                    // The partitioned runtime trie has zero-byte structural
+                    // root edges. They preserve the exact same consumed prefix.
+                    if bytes.is_empty() {
+                        self.visit(child, state_set_id, false, false);
+                        continue;
+                    }
+                    let mut current = state_set_id;
+                    let mut child_strict = false;
+                    let mut child_at = false;
+                    for (index, byte) in bytes.iter().copied().enumerate() {
+                        let (next, relevant_match) = self.advance(current, byte);
+                        current = next;
+                        if relevant_match {
+                            if index + 1 == bytes.len() {
+                                child_at = true;
+                            } else {
+                                child_strict = true;
+                            }
+                        }
+                        if self.state_sets[current as usize].is_empty() {
+                            break;
+                        }
+                    }
+                    self.visit(child, current, child_strict, child_at);
+                }
+            }
+        }
+
+        let vocab = self.dynamic_mask_vocab_for_runtime();
+        let initial = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
+        let mut build = TriggerTrieBuild {
+            constraint: self,
+            vocab,
+            relevant,
+            reset: self.runtime_commit_initial_state(),
+            state_sets: vec![initial.clone()],
+            state_set_ids: FxHashMap::from_iter([(initial, 0)]),
+            transition_cache: FxHashMap::default(),
+            candidates: Vec::new(),
+        };
+        build.visit(0, 0, false, false);
+        build.candidates.sort_unstable();
+        build.candidates.dedup();
+        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_TRIGGER_TRIE").is_some() {
+            eprintln!(
+                "[glrmask/profile][boundary_trigger_trie] candidates={} state_sets={} transitions={}",
+                build.candidates.len(),
+                build.state_sets.len(),
+                build.transition_cache.len(),
+            );
+        }
+        build.candidates
+    }
+
     /// Build the parser-state-independent trigger level used by dynamic
     /// composition. This is deliberately optional: ordinary Constraint and
     /// DynamicConstraint compilation never calls it, preserving zero trigger
@@ -1059,50 +1246,30 @@ impl Constraint {
             return Ok(());
         }
 
-        let all_states = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
-        let tokens = self.token_bytes_iter().collect::<Vec<_>>();
-        let mut candidates = tokens
-            .par_iter()
-            .filter_map(|(token_id, bytes)| {
-                if bytes.len() < 2 {
-                    return None;
-                }
-                let mut states = TokenizerStateSet::from_iter(all_states.iter().copied());
-                for &byte in &bytes[..bytes.len() - 1] {
-                    states = self.tokenizer.step_all(states.as_slice(), byte);
-                    if states.is_empty() {
-                        return None;
-                    }
-                    let mut matched_any = false;
-                    let mut matched_relevant = false;
-                    for state in states.iter().copied() {
-                        for terminal in self.tokenizer.matched_terminals_iter(state) {
-                            matched_any = true;
-                            matched_relevant |= relevant.contains(terminal as usize);
-                        }
-                    }
-                    if matched_relevant {
-                        return Some(*token_id);
-                    }
-                    if matched_any {
-                        // A real lexer commits only according to its exact
-                        // longest-match policy. Forking a reset continuation at
-                        // every match is deliberately broader: it preserves all
-                        // real multi-lexeme paths (including ignore -> reset ->
-                        // terminal -> boundary) while admitting only harmless
-                        // false-positive trigger tokens.
-                        let reset = self.runtime_commit_initial_state();
-                        if !states.contains(&reset) {
-                            states.push(reset);
-                            states.sort_unstable();
-                        }
-                    }
-                }
-                None
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        candidates.dedup();
+        let trie_requested = std::env::var_os("GLRMASK_EXPERIMENT_TRIE_BOUNDARY_TOKEN_TRIGGER").is_some();
+        let started_at = std::time::Instant::now();
+        let candidates = if trie_requested {
+            self.boundary_token_trigger_candidates_trie(&relevant)
+        } else {
+            self.boundary_token_trigger_candidates_naive(&relevant)
+        };
+        if trie_requested
+            && std::env::var_os("GLRMASK_VALIDATE_TRIE_BOUNDARY_TOKEN_TRIGGER").is_some()
+        {
+            let expected = self.boundary_token_trigger_candidates_naive(&relevant);
+            assert_eq!(
+                candidates, expected,
+                "trie boundary-token trigger differs from conservative reference scan",
+            );
+        }
+        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_TRIGGER_TRIE").is_some() {
+            eprintln!(
+                "[glrmask/profile][boundary_trigger_build] method={} candidates={} total_ms={:.3}",
+                if trie_requested { "trie" } else { "naive" },
+                candidates.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         self.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
             candidates.into_boxed_slice(),
         ));
@@ -1642,10 +1809,12 @@ impl Constraint {
             .as_ref()
             .ok_or_else(|| "recursive runtime is missing overlay metadata".to_owned())?;
         if overlay.recursive_compiler_table.get().is_none() {
-            if self.table.num_states == 0 || self.table.action.is_empty() {
-                return Err(
-                    "recursive grammar shell has no packed compiler table".to_owned(),
-                );
+            // Provider-native recursive composition may be constructed directly
+            // as a grammar shell. In that representation there is deliberately
+            // no flattened compiler table to retain: future recursive-native
+            // linking consumes the component tree and CALL/RETURN links instead.
+            if self.table.num_states == 0 && self.table.action.is_empty() && self.table.goto.is_empty() {
+                return Ok(false);
             }
             let packed = Arc::<[u8]>::from(
                 crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table),
@@ -1707,6 +1876,31 @@ impl Constraint {
         self.tokenizer_has_epsilon_transitions = tokenizer_has_epsilon_transitions;
         self.terminal_live_states.clear();
         Ok(true)
+    }
+
+    /// Whether this recursive coordinator has already discarded every temporary
+    /// compiler-flat parser/tokenizer view. This is read-only so a later
+    /// DynamicDirect parent can avoid Arc::make_mut (and a deep clone) merely to
+    /// invoke detach operations that would both be no-ops.
+    pub(crate) fn recursive_compiler_views_are_detached(&self) -> Result<bool, String> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return Ok(true);
+        }
+        if self.table.num_states != 0 || !self.table.action.is_empty() || !self.table.goto.is_empty() {
+            return Ok(false);
+        }
+        let layout = self
+            .recursive_parser_layout_for_pending_root()?
+            .ok_or_else(|| "recursive composition layout is unavailable".to_owned())?;
+        let root_leaf = layout
+            .leaves
+            .first()
+            .ok_or_else(|| "recursive composition has no tokenizer leaves".to_owned())?;
+        let root = self
+            .constraint_at_recursive_component_path(&root_leaf.component_path)
+            .ok_or_else(|| "recursive tokenizer root leaf does not resolve".to_owned())?;
+        Ok(self.tokenizer.num_states() == root.tokenizer.num_states()
+            && self.tokenizer.num_terminals() == root.tokenizer.num_terminals())
     }
 
     /// Exact zero-width pop depth for returning from this constraint when it is
@@ -2493,6 +2687,21 @@ impl Constraint {
             .then(|| self.internal_tsids_for_state(tokenizer_state).iter().copied().collect())
     }
 
+    #[inline]
+    pub(crate) fn recursive_internal_tsids_for_tokenizer_state(
+        &self,
+        tokenizer_state: u32,
+    ) -> Option<&[u32]> {
+        self.uses_compact_segmented_parser_runtime()
+            .then_some(())?;
+        self.static_dynamic_overlay
+            .as_ref()?
+            .recursive_tokenizer_internal_tsids
+            .get()?
+            .get(tokenizer_state as usize)
+            .map(Vec::as_slice)
+    }
+
     pub(crate) fn install_recursive_tokenizer_internal_tsids(
         &mut self,
         mut relation: Vec<Vec<u32>>,
@@ -2815,6 +3024,181 @@ impl Constraint {
         Ok(Some(Arc::new(table)))
     }
 
+    /// Exact recursive-provider parser view restricted to selected ordinary
+    /// terminals. Static B characterization never consumes unrelated terminal
+    /// rows, so avoid the full state x terminal materialization.
+    pub(crate) fn recursive_control_eliminated_selected_parser_table(
+        &self,
+        selected_terminals: &[bool],
+    ) -> Result<Option<Arc<GLRTable>>, String> {
+        let Some(layout) = self.recursive_parser_layout_for_pending_root()? else {
+            return Ok(None);
+        };
+        if selected_terminals.len() != layout.terminal_targets.len() {
+            return Err(format!(
+                "recursive selected-terminal mask has {} entries for {} terminals",
+                selected_terminals.len(), layout.terminal_targets.len(),
+            ));
+        }
+        let tables = RecursiveSegmentedParserTables { root: self, layout: &layout };
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables, &layout.links, &layout.leaf_state_offsets,
+        )?;
+        let terminal_symbols = layout.terminal_targets.iter().map(|targets| {
+            targets.iter().map(|&(component, terminal)| ScopedParserSymbol::Terminal { component, terminal })
+                .collect::<SmallVec<[ScopedParserSymbol; 4]>>()
+        }).collect::<Vec<_>>();
+        let table = materialize_selected_control_eliminated_scoped_provider_table(
+            &provider, &terminal_symbols, selected_terminals,
+        )?;
+        Ok(Some(Arc::new(table)))
+    }
+
+    /// Exact recursive-provider parser view for a small terminal subset. The
+    /// source table retains only those ordinary terminals plus global EOF while
+    /// preserving every zero-width linker control and every required goto.
+    /// This is intended for compiler-side linker-delta characterization, where
+    /// all unaffected terminal templates come from the retained leaf caches.
+    pub(crate) fn recursive_control_eliminated_preselected_parser_table(
+        &self,
+        selected_terminals: &[bool],
+    ) -> Result<Option<Arc<GLRTable>>, String> {
+        let Some(layout) = self.recursive_parser_layout_for_pending_root()? else {
+            return Ok(None);
+        };
+        if selected_terminals.len() != layout.terminal_targets.len() {
+            return Err(format!(
+                "recursive preselected-terminal mask has {} entries for {} terminals",
+                selected_terminals.len(), layout.terminal_targets.len(),
+            ));
+        }
+        let tables = RecursiveSegmentedParserTables { root: self, layout: &layout };
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables, &layout.links, &layout.leaf_state_offsets,
+        )?;
+        let terminal_symbols = layout
+            .terminal_targets
+            .iter()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .map(|&(component, terminal)| ScopedParserSymbol::Terminal {
+                        component,
+                        terminal,
+                    })
+                    .collect::<SmallVec<[ScopedParserSymbol; 4]>>()
+            })
+            .collect::<Vec<_>>();
+        let table = materialize_preselected_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+            selected_terminals,
+        )?;
+        Ok(Some(Arc::new(table)))
+    }
+
+    /// Conservative exact-link frontier for ordinary terminals whose parser
+    /// behavior can gain a leading CALL/RETURN continuation relative to the
+    /// transported standalone leaf characterization. A CALL can expose only a
+    /// child start state; a RETURN can expose only a parent continuation target
+    /// previously pushed by that CALL. Reductions on the zero-width control
+    /// symbol do not consume ordinary terminals, so scanning every shift-only
+    /// realization of the parent slot terminal covers all possible caller
+    /// continuation targets.
+    pub(crate) fn recursive_link_frontier_terminals(
+        &self,
+        selected_terminals: &[bool],
+    ) -> Result<Option<Vec<bool>>, String> {
+        let Some(layout) = self.recursive_parser_layout_for_pending_root()? else {
+            return Ok(None);
+        };
+        if selected_terminals.len() != layout.terminal_targets.len() {
+            return Err(format!(
+                "recursive link-frontier mask has {} entries for {} terminals",
+                selected_terminals.len(),
+                layout.terminal_targets.len(),
+            ));
+        }
+
+        let mut local_to_global = FxHashMap::<(u32, TerminalID), SmallVec<[u32; 2]>>::default();
+        for (global, targets) in layout.terminal_targets.iter().enumerate() {
+            if !selected_terminals[global] {
+                continue;
+            }
+            for &(component, terminal) in targets {
+                local_to_global
+                    .entry((component, terminal))
+                    .or_default()
+                    .push(global as u32);
+            }
+        }
+
+        let mut affected = vec![false; selected_terminals.len()];
+        let mark_state = |component: u32,
+                          local_state: u32,
+                          affected: &mut [bool]|
+         -> Result<(), String> {
+            let constraint = self.recursive_leaf_constraint(component as usize).ok_or_else(|| {
+                format!("recursive link-frontier component {component} does not resolve")
+            })?;
+            let row = constraint
+                .table
+                .action
+                .get(local_state as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "recursive link-frontier state {local_state} is invalid for component {component}"
+                    )
+                })?;
+            for terminal in row.keys() {
+                if let Some(globals) = local_to_global.get(&(component, terminal)) {
+                    for &global in globals {
+                        affected[global as usize] = true;
+                    }
+                }
+            }
+            if let Some(ignore) = constraint.ignore_terminal
+                && let Some(globals) = local_to_global.get(&(component, ignore))
+            {
+                for &global in globals {
+                    affected[global as usize] = true;
+                }
+            }
+            Ok(())
+        };
+
+        for link in &layout.links {
+            mark_state(link.child_component, link.child_start, &mut affected)?;
+
+            let parent = self
+                .recursive_leaf_constraint(link.parent_component as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "recursive link-frontier parent component {} does not resolve",
+                        link.parent_component
+                    )
+                })?;
+            for row in &parent.table.action {
+                let Some(action) = row.get(&link.slot_terminal) else {
+                    continue;
+                };
+                let target = match action {
+                    Action::Shift(target, _) if action.reduce_count() == 0 => Some(*target),
+                    Action::Split {
+                        shift: Some((target, _)),
+                        accept: false,
+                        ..
+                    } if action.reduce_count() == 0 => Some(*target),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    mark_state(link.parent_component, target, &mut affected)?;
+                }
+            }
+        }
+        Ok(Some(affected))
+    }
+
     /// Drop the materialized-table start-state ownership sets once recursive
     /// wrapper ownership is authoritative. v23 requires those bitsets on the
     /// wire; v24 recursive runtimes do not need them after load/build.
@@ -3001,7 +3385,6 @@ impl Constraint {
                         boundary.recursive_parser_dwa.is_some()
                     }
                     None => true,
-                    _ => false,
                 }
             });
             overlay.segmented_mask_authoritative
@@ -9085,7 +9468,12 @@ impl Constraint {
         // is not part of reconstructing its semantics. Do not charge it to
         // load; the first commit remains exact and will initialize lazily if
         // needed.
-        if self.packed_parser_dwa.is_none() {
+        if self.packed_parser_dwa.is_none() && !self.uses_compact_segmented_parser_runtime() {
+            // Recursive coordinators execute directly against the provider tree.
+            // Priming here would compute the full initial recursive mask during
+            // composition even when the broad mask cannot prime any commits.
+            // That is TTFM work, not a construction cache required for
+            // correctness, so leave it lazy for the first runtime mask request.
             self.prime_initial_commit_hot_path();
         }
         let initial_commit_prime_ms = initial_commit_prime_started_at

@@ -36,6 +36,10 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScopedParserSymbol {
     Terminal { component: u32, terminal: TerminalID },
+    /// Synthetic consuming identity scoped to one component. Compiler-side
+    /// factorization uses this as a probe for exact leading control closure
+    /// without requiring the grammar to expose an IGNORE terminal.
+    Identity { component: u32 },
     Entry { link: u32 },
     Finish { component: u32 },
 }
@@ -87,6 +91,53 @@ pub trait ParserActionProvider {
     /// union. Ordinary one-table parsing is the identity injection.
     fn scope_state(&self, scope: u32, local_state: u32) -> Option<u32>;
 
+    /// Number of local states owned by one scope, when the provider has an
+    /// explicit disjoint component layout.  Generic providers may leave this
+    /// unknown; scoped composition uses it to avoid probing unrelated state
+    /// ranges for a component-local terminal.
+    fn scope_state_count(&self, _scope: u32) -> Option<u32> {
+        None
+    }
+
+    /// Owning scope for one global provider state, when the provider exposes a
+    /// disjoint state layout. This only accelerates exact scoped queries;
+    /// callers must retain the generic fallback when unavailable.
+    fn state_scope(&self, _state: u32) -> Option<u32> {
+        None
+    }
+
+    /// Deterministic global nonterminal coordinate for one scope-local
+    /// nonterminal, when the provider has a disjoint nonterminal layout.
+    fn scope_nonterminal(&self, _scope: u32, _local: u32) -> Option<u32> {
+        None
+    }
+
+    /// Number of nonterminals owned by one scope when the provider exposes a
+    /// deterministic disjoint nonterminal coordinate.
+    fn scope_nonterminal_count(&self, _scope: u32) -> Option<u32> {
+        None
+    }
+
+    fn scope_goto_nonterminals(&self, _scope: u32, _out: &mut Vec<u32>) -> bool {
+        false
+    }
+
+    /// Optional exact bulk goto materialization for providers whose scoped
+    /// parser coordinate is a disjoint affine rebasing of intact component
+    /// tables. Generic providers fall back to `goto_target` probing.
+    fn materialize_goto_rows(
+        &self,
+        _nonterminals: &BTreeMap<(u32, u32), u32>,
+    ) -> Result<Option<Vec<GotoRow>>, String> {
+        Ok(None)
+    }
+
+    fn exact_control_predecessors(
+        &self,
+    ) -> Result<Option<super::table::RuntimePredecessors>, String> {
+        Ok(None)
+    }
+
     fn goto_target(
         &self,
         scope: u32,
@@ -99,12 +150,27 @@ pub trait ParserActionProvider {
     fn state_count_hint(&self) -> usize;
 }
 
-fn scoped_provider_nonterminal(
+fn scoped_provider_nonterminal<P: ParserActionProvider>(
+    provider: &P,
     ids: &mut BTreeMap<(u32, u32), u32>,
     scope: u32,
     local: u32,
 ) -> Result<u32, String> {
     if let Some(&id) = ids.get(&(scope, local)) {
+        return Ok(id);
+    }
+    if let Some(id) = provider.scope_nonterminal(scope, local) {
+        if ids
+            .iter()
+            .any(|(&(existing_scope, existing_local), &existing_id)| {
+                existing_id == id && (existing_scope != scope || existing_local != local)
+            })
+        {
+            return Err(format!(
+                "provider nonterminal coordinate collision for scope={scope} local={local} id={id}"
+            ));
+        }
+        ids.insert((scope, local), id);
         return Ok(id);
     }
     let id = u32::try_from(ids.len())
@@ -171,7 +237,7 @@ fn materialize_scoped_local_action<P: ParserActionProvider>(
                 .collect::<Result<Vec<_>, String>>()?,
         ),
         Action::Reduce(nonterminal, len) => Action::Reduce(
-            scoped_provider_nonterminal(nonterminals, scope, *nonterminal)?,
+            scoped_provider_nonterminal(provider, nonterminals, scope, *nonterminal)?,
             *len,
         ),
         Action::Split {
@@ -188,7 +254,7 @@ fn materialize_scoped_local_action<P: ParserActionProvider>(
                 .iter()
                 .map(|&(nonterminal, len)| {
                     Ok((
-                        scoped_provider_nonterminal(nonterminals, scope, nonterminal)?,
+                        scoped_provider_nonterminal(provider, nonterminals, scope, nonterminal)?,
                         len,
                     ))
                 })
@@ -232,6 +298,107 @@ fn materialize_scoped_provided_action<P: ParserActionProvider>(
     }
 }
 
+/// Materialize one provider symbol as a single ordinary synthetic terminal.
+///
+/// Unlike control elimination, this executes exactly the supplied symbol and
+/// nothing else. If the symbol reduces, the same synthetic terminal is looked
+/// up again after goto, so ordinary terminal characterization computes the full
+/// repeated-reduction relation. This is useful for compiler-side algebra over a
+/// specific zero-width semantic operation such as FINISH without admitting any
+/// other provider controls.
+pub fn materialize_scoped_provider_symbol_as_ordinary_table<P>(
+    provider: &P,
+    symbol: P::Symbol,
+) -> Result<GLRTable, String>
+where
+    P: ParserActionProvider,
+{
+    let state_count = provider.state_count_hint();
+    let num_states = u32::try_from(state_count)
+        .map_err(|_| "scoped provider state coordinate overflow".to_owned())?;
+    let mut nonterminals = BTreeMap::<(u32, u32), u32>::new();
+    let mut scopes = BTreeSet::new();
+    for state in 0..num_states {
+        let scope = provider.state_scope(state).ok_or_else(|| {
+            "ordinary provider-symbol materialization requires state scopes".to_owned()
+        })?;
+        scopes.insert(scope);
+    }
+    for scope in scopes {
+        let mut locals = Vec::new();
+        if !provider.scope_goto_nonterminals(scope, &mut locals) {
+            return Err(format!(
+                "ordinary provider-symbol materialization requires goto nonterminals for scope {scope}"
+            ));
+        }
+        locals.sort_unstable();
+        locals.dedup();
+        for local in locals {
+            scoped_provider_nonterminal(provider, &mut nonterminals, scope, local)?;
+        }
+    }
+
+    let mut rows = Vec::with_capacity(state_count);
+    for state in 0..num_states {
+        let row = if let Some(provided) = provider.action(state, symbol) {
+            ActionRow::from_iter(std::iter::once((
+                0,
+                materialize_scoped_provided_action(provider, &provided, &mut nonterminals)?,
+            )))
+        } else {
+            ActionRow::default()
+        };
+        rows.push(row);
+    }
+
+    let goto_pairs = nonterminals
+        .iter()
+        .map(|(&(scope, local), &global)| (global, scope, local))
+        .collect::<Vec<_>>();
+    let goto = if let Some(rows) = provider.materialize_goto_rows(&nonterminals)? {
+        if rows.len() != state_count {
+            return Err(format!(
+                "provider bulk goto materialization returned {} rows for {num_states} states",
+                rows.len(),
+            ));
+        }
+        rows
+    } else {
+        (0..num_states)
+            .map(|state| {
+                GotoRow::from_iter(goto_pairs.iter().filter_map(|&(global, scope, local)| {
+                    provider
+                        .goto_target(scope, state, local)
+                        .map(|target| (global, target))
+                }))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut table = GLRTable {
+        action: rows,
+        goto,
+        num_states,
+        num_terminals: 1,
+        num_rules: 0,
+        rules: Vec::new(),
+        nonterminal_display_names: Vec::new(),
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        control_terminals: BTreeSet::new(),
+        skip_terminals: BTreeSet::new(),
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_unconditional_advance_rows();
+    table.rebuild_guarded_shift_index();
+    Ok(table)
+}
+
 /// Materialize the exact stack semantics of a scoped action provider into a
 /// temporary ordinary GLR table, then eliminate the provider's zero-width
 /// controls. The resulting state alphabet is exactly the provider's `u32`
@@ -245,29 +412,96 @@ fn materialize_scoped_provided_action<P: ParserActionProvider>(
 /// can continue through goto on that same control. Additional nullable FINISH
 /// alternatives use private branch terminals, allowing them to coexist exactly
 /// with local EOF work without requiring a new `Action` variant.
-pub fn materialize_control_eliminated_scoped_provider_table<P>(
+fn materialize_control_eliminated_scoped_provider_table_impl<P>(
     provider: &P,
     terminal_symbols: &[SmallVec<[ScopedParserSymbol; 4]>],
+    selected_terminals: Option<&[bool]>,
+    preselect_before_control_elimination: bool,
 ) -> Result<GLRTable, String>
 where
     P: ParserActionProvider<Symbol = ScopedParserSymbol>,
 {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let total_started = profile.then(std::time::Instant::now);
     let state_count = provider.state_count_hint();
     let num_states = u32::try_from(state_count)
         .map_err(|_| "scoped provider state coordinate overflow".to_owned())?;
     let ordinary_terminals = u32::try_from(terminal_symbols.len())
         .map_err(|_| "scoped provider terminal coordinate overflow".to_owned())?;
+    if let Some(selected) = selected_terminals
+        && selected.len() != terminal_symbols.len()
+    {
+        return Err(format!(
+            "selected scoped-provider terminal mask has {} entries for {} terminals",
+            selected.len(),
+            terminal_symbols.len(),
+        ));
+    }
     let mut rows = (0..state_count)
         .map(|_| Vec::<(TerminalID, Action)>::new())
         .collect::<Vec<_>>();
     let mut nonterminals = BTreeMap::<(u32, u32), u32>::new();
+    if preselect_before_control_elimination {
+        // Control stack effects can pop beneath the currently executing
+        // control frame and reveal an arbitrary grammar nonterminal. Ordinary
+        // terminal *actions* may be pruned, but the goto/nonterminal coordinate
+        // must remain complete for exact predecessor traversal.
+        let mut scopes = BTreeSet::new();
+        for state in 0..num_states {
+            let scope = provider.state_scope(state).ok_or_else(|| {
+                "preselected provider materialization requires state scopes".to_owned()
+            })?;
+            scopes.insert(scope);
+        }
+        for scope in scopes {
+            let mut locals = Vec::new();
+            if !provider.scope_goto_nonterminals(scope, &mut locals) {
+                return Err(format!(
+                    "preselected provider materialization requires goto nonterminals for scope {scope}"
+                ));
+            }
+            locals.sort_unstable();
+            locals.dedup();
+            for local in locals {
+                scoped_provider_nonterminal(provider, &mut nonterminals, scope, local)?;
+            }
+        }
+    }
     let mut skip_terminals = BTreeSet::<TerminalID>::new();
+    let ordinary_started = profile.then(std::time::Instant::now);
 
-    for state in 0..num_states {
-        for (terminal, symbols) in terminal_symbols.iter().enumerate() {
-            let terminal = terminal as u32;
-            let mut materialized = None::<Action>;
-            for &symbol in symbols {
+    // Materialize the complete ordinary-terminal semantics before control
+    // elimination.  A terminal symbol is component-local, so probing every
+    // global parser state is a needless component cross product.  Query only
+    // the owning scope's contiguous state range when the provider exposes one;
+    // fall back to the full provider coordinate for generic implementations.
+    for (terminal, symbols) in terminal_symbols.iter().enumerate() {
+        let terminal = terminal as u32;
+        if preselect_before_control_elimination
+            && terminal != EOF
+            && !selected_terminals
+                .and_then(|selected| selected.get(terminal as usize))
+                .copied()
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let mut materialized_by_state = BTreeMap::<u32, Action>::new();
+        for &symbol in symbols {
+            let state_range = match symbol {
+                ScopedParserSymbol::Terminal { component, .. }
+                | ScopedParserSymbol::Identity { component } => {
+                    match (
+                        provider.scope_state(component, 0),
+                        provider.scope_state_count(component),
+                    ) {
+                        (Some(start), Some(count)) => start..start.saturating_add(count),
+                        _ => 0..num_states,
+                    }
+                }
+                _ => 0..num_states,
+            };
+            for state in state_range {
                 let Some(provided) = provider.action(state, symbol) else {
                     continue;
                 };
@@ -278,29 +512,33 @@ where
                 }
                 let action =
                     materialize_scoped_provided_action(provider, &provided, &mut nonterminals)?;
-                if let Some(existing) = materialized.as_ref() {
+                if let Some(existing) = materialized_by_state.get(&state) {
                     if existing != &action {
                         return Err(format!(
                             "ordinary terminal {terminal} has distinct provider actions in state {state}"
                         ));
                     }
                 } else {
-                    materialized = Some(action);
+                    materialized_by_state.insert(state, action);
                 }
-            }
-            if let Some(action) = materialized {
-                if matches!(action, Action::Skip) {
-                    skip_terminals.insert(terminal);
-                }
-                rows[state as usize].push((terminal, action));
             }
         }
+        for (state, action) in materialized_by_state {
+            if matches!(action, Action::Skip) {
+                skip_terminals.insert(terminal);
+            }
+            rows[state as usize].push((terminal, action));
+        }
     }
+    let ordinary_ms = ordinary_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // A semantic control symbol must keep one terminal ID across every state.
     // In particular, a FINISH/ENTRY reduction continues by looking up the same
     // terminal after its goto; assigning IDs per cell would cut that reduction
     // chain before the eventual RETURN/CALL action.
+    let controls_started = profile.then(std::time::Instant::now);
     let mut provider_controls = Vec::<ScopedParserSymbol>::new();
     for state in 0..num_states {
         let mut symbols = SmallVec::<[ScopedParserSymbol; 4]>::new();
@@ -337,21 +575,63 @@ where
             }
         }
     }
+    let controls_ms = controls_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
+    let goto_started = profile.then(std::time::Instant::now);
     let mut goto_pairs = nonterminals
         .iter()
         .map(|(&(scope, local), &global)| (global, scope, local))
         .collect::<Vec<_>>();
     goto_pairs.sort_unstable();
-    let goto = (0..num_states)
-        .map(|state| {
-            GotoRow::from_iter(goto_pairs.iter().filter_map(|&(global, scope, local)| {
-                provider
-                    .goto_target(scope, state, local)
-                    .map(|target| (global, target))
-            }))
-        })
-        .collect::<Vec<_>>();
+    let mut goto_pairs_by_scope = BTreeMap::<u32, Vec<(u32, u32)>>::new();
+    for &(global, scope, local) in &goto_pairs {
+        goto_pairs_by_scope
+            .entry(scope)
+            .or_default()
+            .push((global, local));
+    }
+    let goto = if let Some(rows) = provider.materialize_goto_rows(&nonterminals)? {
+        if rows.len() != num_states as usize {
+            return Err(format!(
+                "provider bulk goto materialization returned {} rows for {num_states} states",
+                rows.len(),
+            ));
+        }
+        rows
+    } else {
+        (0..num_states)
+            .map(|state| {
+                if let Some(scope) = provider.state_scope(state) {
+                    GotoRow::from_iter(
+                        goto_pairs_by_scope
+                            .get(&scope)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|&(global, local)| {
+                                provider
+                                    .goto_target(scope, state, local)
+                                    .map(|target| (global, target))
+                            }),
+                    )
+                } else {
+                    GotoRow::from_iter(goto_pairs.iter().filter_map(
+                        |&(global, scope, local)| {
+                            provider
+                                .goto_target(scope, state, local)
+                                .map(|target| (global, target))
+                        },
+                    ))
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let goto_ms = goto_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let rows_started = profile.then(std::time::Instant::now);
     let action = rows
         .into_iter()
         .map(ActionRow::from_iter)
@@ -377,7 +657,48 @@ where
     table.rebuild_advance_rows_from_actions();
     table.rebuild_unconditional_advance_rows();
     table.rebuild_guarded_shift_index();
-    table.eliminate_control_terminals_exact()?;
+    let rows_ms = rows_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let predecessor_started = profile.then(std::time::Instant::now);
+    let supplied_predecessors = if preselect_before_control_elimination {
+        Some(provider.exact_control_predecessors()?.ok_or_else(|| {
+            "preselected provider materialization requires exact predecessor metadata".to_owned()
+        })?)
+    } else {
+        None
+    };
+    let predecessor_ms = predecessor_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let eliminate_started = profile.then(std::time::Instant::now);
+    if let Some(predecessors) = supplied_predecessors {
+        table.eliminate_control_terminals_exact_with_predecessors(predecessors)?;
+    } else {
+        table.eliminate_control_terminals_exact()?;
+    }
+    let eliminate_ms = eliminate_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    // Selected-terminal callers still require the *complete* ordinary parser
+    // semantics during control elimination.  Restrict only after controls are
+    // gone, when terminal characterization is independent across terminals.
+    if let Some(selected) = selected_terminals {
+        table.action = table
+            .action
+            .iter()
+            .map(|row| {
+                ActionRow::from_iter(row.iter().filter_map(|(terminal, action)| {
+                    (terminal == EOF
+                        || selected.get(terminal as usize).copied().unwrap_or(false))
+                    .then(|| (terminal, action.clone()))
+                }))
+            })
+            .collect();
+        table.skip_terminals
+            .retain(|terminal| selected.get(*terminal as usize).copied().unwrap_or(false));
+    }
     // Private controls are gone from every action row. Shrink the externally
     // visible terminal domain back to the real composed terminal coordinate so
     // downstream parser-DWA compilation sees exactly its existing alphabet.
@@ -385,7 +706,65 @@ where
     table.rebuild_advance_rows_from_actions();
     table.rebuild_unconditional_advance_rows();
     table.rebuild_guarded_shift_index();
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][scoped_provider_materialize] states={} terminals={} controls={} nonterminals={} ordinary_ms={ordinary_ms:.3} controls_ms={controls_ms:.3} goto_ms={goto_ms:.3} rows_ms={rows_ms:.3} predecessor_ms={predecessor_ms:.3} eliminate_ms={eliminate_ms:.3} total_ms={:.3}",
+            num_states,
+            ordinary_terminals,
+            provider_controls.len(),
+            goto_pairs.len(),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Ok(table)
+}
+
+/// Materialize the complete ordinary-terminal view of a scoped provider.
+pub fn materialize_control_eliminated_scoped_provider_table<P>(
+    provider: &P,
+    terminal_symbols: &[SmallVec<[ScopedParserSymbol; 4]>],
+) -> Result<GLRTable, String>
+where
+    P: ParserActionProvider<Symbol = ScopedParserSymbol>,
+{
+    materialize_control_eliminated_scoped_provider_table_impl(provider, terminal_symbols, None, false)
+}
+
+/// Materialize only caller-selected ordinary terminal action rows while retaining
+/// exact zero-width CALL/RETURN semantics and goto closure. Unselected terminal
+/// IDs remain in the external domain but have no action rows.
+pub fn materialize_selected_control_eliminated_scoped_provider_table<P>(
+    provider: &P,
+    terminal_symbols: &[SmallVec<[ScopedParserSymbol; 4]>],
+    selected_terminals: &[bool],
+) -> Result<GLRTable, String>
+where
+    P: ParserActionProvider<Symbol = ScopedParserSymbol>,
+{
+    materialize_control_eliminated_scoped_provider_table_impl(
+        provider, terminal_symbols, Some(selected_terminals), false,
+    )
+}
+
+
+/// Exact selected-terminal provider view that keeps only caller-selected ordinary
+/// terminals plus global EOF in the source table before zero-width control
+/// elimination. EOF is retained because RETURN completion may traverse its
+/// reductions even when EOF itself is not selected for the final boundary.
+pub fn materialize_preselected_control_eliminated_scoped_provider_table<P>(
+    provider: &P,
+    terminal_symbols: &[SmallVec<[ScopedParserSymbol; 4]>],
+    selected_terminals: &[bool],
+) -> Result<GLRTable, String>
+where
+    P: ParserActionProvider<Symbol = ScopedParserSymbol>,
+{
+    materialize_control_eliminated_scoped_provider_table_impl(
+        provider,
+        terminal_symbols,
+        Some(selected_terminals),
+        true,
+    )
 }
 
 /// Zero-remap adapter for an ordinary standalone table.
@@ -415,6 +794,36 @@ impl ParserActionProvider for GLRTableActionProvider<'_> {
     #[inline]
     fn scope_state(&self, _scope: u32, local_state: u32) -> Option<u32> {
         (local_state < self.table.num_states).then_some(local_state)
+    }
+
+    #[inline]
+    fn scope_state_count(&self, scope: u32) -> Option<u32> {
+        (scope == 0).then_some(self.table.num_states)
+    }
+
+    #[inline]
+    fn state_scope(&self, state: u32) -> Option<u32> {
+        (state < self.table.num_states).then_some(0)
+    }
+
+    #[inline]
+    fn scope_nonterminal(&self, scope: u32, local: u32) -> Option<u32> {
+        (scope == 0 && (local as usize) < self.table.nonterminal_display_names.len()).then_some(local)
+    }
+
+    #[inline]
+    fn scope_nonterminal_count(&self, scope: u32) -> Option<u32> {
+        (scope == 0).then_some(self.table.nonterminal_display_names.len() as u32)
+    }
+
+    fn scope_goto_nonterminals(&self, scope: u32, out: &mut Vec<u32>) -> bool {
+        if scope != 0 {
+            return false;
+        }
+        for row in &self.table.goto {
+            out.extend(row.keys());
+        }
+        true
     }
 
     #[inline]
@@ -495,6 +904,7 @@ pub struct DisjointComponentActionProvider<'a, S: ParserComponentTableSource + ?
     components: &'a S,
     links: &'a [ScopedSubgrammarLink],
     state_offsets: ProviderStateOffsets<'a>,
+    nonterminal_offsets: Vec<u32>,
     total_states: u32,
 }
 
@@ -553,6 +963,17 @@ impl<'a, S: ParserComponentTableSource + ?Sized> DisjointComponentActionProvider
         state_offsets: ProviderStateOffsets<'a>,
         total_states: u32,
     ) -> Result<Self, String> {
+        let mut nonterminal_offsets = Vec::with_capacity(components.component_count());
+        let mut total_nonterminals = 0u32;
+        for component in 0..components.component_count() {
+            let table = components
+                .component_table(component as u32)
+                .ok_or_else(|| format!("missing parser component {component}"))?;
+            nonterminal_offsets.push(total_nonterminals);
+            total_nonterminals = total_nonterminals
+                .checked_add(table.nonterminal_display_names.len() as u32)
+                .ok_or_else(|| "scoped parser-nonterminal coordinate overflow".to_owned())?;
+        }
         for (index, link) in links.iter().enumerate() {
             let parent = components
                 .component_table(link.parent_component)
@@ -568,6 +989,7 @@ impl<'a, S: ParserComponentTableSource + ?Sized> DisjointComponentActionProvider
             components,
             links,
             state_offsets,
+            nonterminal_offsets,
             total_states,
         })
     }
@@ -600,6 +1022,130 @@ impl<'a, S: ParserComponentTableSource + ?Sized> DisjointComponentActionProvider
     fn table(&self, component: u32) -> Option<&GLRTable> {
         self.components.component_table(component)
     }
+
+    fn build_exact_control_predecessors(
+        &self,
+    ) -> Result<super::table::RuntimePredecessors, String> {
+        fn record_local_action_rewrites(
+            provider: &DisjointComponentActionProvider<'_, impl ParserComponentTableSource + ?Sized>,
+            equations: &mut super::table::ControlPredecessorEquationBuilder,
+            source: u32,
+            component: u32,
+            action: &Action,
+        ) -> Result<(), String> {
+            let mut record = |pop: u32, pushes: &[u32]| -> Result<(), String> {
+                if pushes.is_empty() {
+                    return Ok(());
+                }
+                let mut scoped = Vec::with_capacity(pushes.len());
+                for &state in pushes {
+                    scoped.push(provider.scoped_state(component, state).ok_or_else(|| {
+                        format!(
+                            "parser predecessor rewrite references invalid state {state} in component {component}"
+                        )
+                    })?);
+                }
+                equations.record_rewrite(source, pop, &scoped);
+                Ok(())
+            };
+            match action {
+                Action::Shift(target, replace) => {
+                    record(u32::from(*replace), std::slice::from_ref(target))?;
+                }
+                Action::ReplaceShifts(targets) => {
+                    for target in targets.iter() {
+                        record(1, std::slice::from_ref(target))?;
+                    }
+                }
+                Action::StackShifts(shifts) => {
+                    for shift in shifts {
+                        record(shift.pop, &shift.pushes)?;
+                    }
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    for shift in shifts {
+                        record(shift.pop, &shift.pushes)?;
+                    }
+                }
+                Action::Split { shift, .. } => {
+                    if let Some((target, replace)) = shift {
+                        record(u32::from(*replace), std::slice::from_ref(target))?;
+                    }
+                }
+                Action::Skip | Action::Reduce(..) | Action::Accept => {}
+            }
+            Ok(())
+        }
+
+        let mut equations = super::table::ControlPredecessorEquationBuilder::new(self.total_states);
+        for state in 0..self.total_states {
+            let (component, local_state) = self
+                .decode_state(state)
+                .ok_or_else(|| format!("invalid provider state {state}"))?;
+            let table = self
+                .table(component)
+                .ok_or_else(|| format!("missing parser component {component}"))?;
+
+            for local_action in table.action[local_state as usize].values() {
+                record_local_action_rewrites(
+                    self,
+                    &mut equations,
+                    state,
+                    component,
+                    local_action,
+                )?;
+            }
+            for &(target, replace) in table.goto[local_state as usize].values() {
+                let target = self.scoped_state(component, target).ok_or_else(|| {
+                    format!(
+                        "parser predecessor goto references invalid target {target} in component {component}"
+                    )
+                })?;
+                equations.record_rewrite(
+                    state,
+                    u32::from(replace),
+                    std::slice::from_ref(&target),
+                );
+            }
+
+            let mut controls = SmallVec::<[ScopedParserSymbol; 4]>::new();
+            self.control_symbols(state, &mut controls);
+            for symbol in controls {
+                let Some(provided) = self.action(state, symbol) else {
+                    continue;
+                };
+                match provided.action {
+                    ProvidedActionRef::Identity => {}
+                    ProvidedActionRef::Local { scope, action } => {
+                        record_local_action_rewrites(
+                            self,
+                            &mut equations,
+                            state,
+                            scope,
+                            action,
+                        )?;
+                    }
+                    ProvidedActionRef::Call {
+                        parent_target,
+                        child_start,
+                        replace,
+                    } => equations.record_rewrite(
+                        state,
+                        u32::from(replace),
+                        &[parent_target, child_start],
+                    ),
+                    ProvidedActionRef::Return { .. } => {}
+                }
+                for shift in provided.extra_stack_shifts {
+                    if !shift.pushes.is_empty() {
+                        equations.record_rewrite(state, shift.pop, &shift.pushes);
+                    }
+                }
+            }
+        }
+
+        equations.finish()
+    }
 }
 
 impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
@@ -628,6 +1174,15 @@ impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
                         scope: component,
                         action,
                     },
+                    reduction_scope: component,
+                    extra_stack_shifts: SmallVec::new(),
+                })
+            }
+            ScopedParserSymbol::Identity { component: symbol_component }
+                if symbol_component == component =>
+            {
+                Some(ProvidedAction {
+                    action: ProvidedActionRef::Identity,
                     reduction_scope: component,
                     extra_stack_shifts: SmallVec::new(),
                 })
@@ -709,8 +1264,86 @@ impl<S: ParserComponentTableSource + ?Sized> ParserActionProvider
     }
 
     #[inline]
+    fn scope_state_count(&self, scope: u32) -> Option<u32> {
+        self.table(scope).map(|table| table.num_states)
+    }
+
+    #[inline]
     fn scope_state(&self, scope: u32, local_state: u32) -> Option<u32> {
         self.scoped_state(scope, local_state)
+    }
+
+    #[inline]
+    fn state_scope(&self, state: u32) -> Option<u32> {
+        self.decode_state(state).map(|(scope, _)| scope)
+    }
+
+    #[inline]
+    fn scope_nonterminal(&self, scope: u32, local: u32) -> Option<u32> {
+        let table = self.table(scope)?;
+        if (local as usize) >= table.nonterminal_display_names.len() {
+            return None;
+        }
+        self.nonterminal_offsets
+            .get(scope as usize)?
+            .checked_add(local)
+    }
+
+    #[inline]
+    fn scope_nonterminal_count(&self, scope: u32) -> Option<u32> {
+        self.table(scope)
+            .map(|table| table.nonterminal_display_names.len() as u32)
+    }
+
+    fn scope_goto_nonterminals(&self, scope: u32, out: &mut Vec<u32>) -> bool {
+        let Some(table) = self.table(scope) else {
+            return false;
+        };
+        for row in &table.goto {
+            out.extend(row.keys());
+        }
+        true
+    }
+
+    fn materialize_goto_rows(
+        &self,
+        nonterminals: &BTreeMap<(u32, u32), u32>,
+    ) -> Result<Option<Vec<GotoRow>>, String> {
+        let mut rows = Vec::with_capacity(self.total_states as usize);
+        for component in 0..self.components.component_count() {
+            let component = component as u32;
+            let table = self
+                .table(component)
+                .ok_or_else(|| format!("missing parser component {component}"))?;
+            let state_offset = *self
+                .state_offsets
+                .as_slice()
+                .get(component as usize)
+                .ok_or_else(|| format!("missing parser-state offset for component {component}"))?;
+            for local_row in &table.goto {
+                let mut entries = Vec::with_capacity(local_row.len());
+                for (local_nonterminal, &(local_target, replace)) in local_row.iter() {
+                    let Some(&global_nonterminal) =
+                        nonterminals.get(&(component, *local_nonterminal))
+                    else {
+                        continue;
+                    };
+                    let global_target = state_offset.checked_add(local_target).ok_or_else(|| {
+                        "scoped parser goto target coordinate overflow".to_owned()
+                    })?;
+                    entries.push((global_nonterminal, (global_target, replace)));
+                }
+                entries.sort_unstable_by_key(|entry| entry.0);
+                rows.push(GotoRow::from_sorted_unique(entries));
+            }
+        }
+        Ok(Some(rows))
+    }
+
+    fn exact_control_predecessors(
+        &self,
+    ) -> Result<Option<super::table::RuntimePredecessors>, String> {
+        self.build_exact_control_predecessors().map(Some)
     }
 
     fn goto_target(
@@ -5713,6 +6346,7 @@ mod tests {
         ScopedSubgrammarLink, close_provider_control_stacks,
         advance_provider_control_closed_stacks,
         materialize_control_eliminated_scoped_provider_table,
+        materialize_selected_control_eliminated_scoped_provider_table,
         ParserActionProvider,
         advance_concrete_stacks_reference,
         advance_stacks_with_provider,
@@ -5900,6 +6534,89 @@ mod tests {
         assert!(!provider_finished.is_empty());
         assert!(!table_finished.is_empty());
         assert_eq!(table_finished.single_top_value(), Some(p2));
+    }
+
+    #[test]
+    fn selected_scoped_provider_table_is_exact_post_control_restriction() {
+        let slot = 0;
+        let parent_tail = 1;
+        let unused_parent = 2;
+        let child_token = 0;
+        let parent = build_test_table(
+            4,
+            3,
+            &[
+                &[(slot, Action::Shift(1, false)), (unused_parent, Action::Shift(3, false))],
+                &[(parent_tail, Action::Shift(2, false))],
+                &[],
+                &[],
+            ],
+            &[&[], &[], &[], &[]],
+        );
+        let child = build_test_table(
+            2,
+            1,
+            &[
+                &[(child_token, Action::Shift(1, false))],
+                &[(EOF, Action::Accept)],
+            ],
+            &[&[], &[]],
+        );
+        let components = [&parent, &child];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: slot,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 2,
+            child_start_nullable: false,
+        }];
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
+        let terminal_symbols = vec![
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 1,
+                terminal: child_token,
+            }]),
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: parent_tail,
+            }]),
+            SmallVec::from_slice(&[ScopedParserSymbol::Terminal {
+                component: 0,
+                terminal: unused_parent,
+            }]),
+        ];
+        let full = materialize_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+        )
+        .unwrap();
+        let selected_mask = [true, true, false];
+        let selected = materialize_selected_control_eliminated_scoped_provider_table(
+            &provider,
+            &terminal_symbols,
+            &selected_mask,
+        )
+        .unwrap();
+
+        assert_eq!(selected.num_states, full.num_states);
+        assert_eq!(selected.num_terminals, full.num_terminals);
+        assert_eq!(selected.goto, full.goto);
+        assert!(selected.control_terminals.is_empty());
+        for state in 0..full.num_states {
+            for terminal in 0..full.num_terminals {
+                if selected_mask[terminal as usize] {
+                    assert_eq!(
+                        selected.action(state, terminal),
+                        full.action(state, terminal),
+                        "selected terminal differs after exact control elimination: state={state} terminal={terminal}",
+                    );
+                } else {
+                    assert_eq!(selected.action(state, terminal), None);
+                }
+            }
+            assert_eq!(selected.action(state, EOF), full.action(state, EOF));
+        }
     }
 
     #[test]

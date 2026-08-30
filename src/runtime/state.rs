@@ -15,6 +15,11 @@ use super::constraint::Constraint;
 pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
 pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 64;
 
+pub(crate) type RecursiveDynamicBoundaryCacheKey = (
+    SmallVec<[(u32, u32); 4]>,
+    SmallVec<[u32; 8]>,
+);
+
 /// Parser paths grouped by tokenizer state, stored inline for the common small
 /// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat
 /// runtime may temporarily retain multiple single-stack entries with the same
@@ -290,6 +295,16 @@ pub(crate) struct MaskScratch {
     /// invoking its uncached mask engine through a synthetic shadow state.
     pub segmented_component_initial_states: Vec<ParserStateMap>,
     pub segmented_component_initial_masks: Vec<Vec<u32>>,
+    /// Lazily materialized exact-commit scratch for recursive DynamicDirect B.
+    /// Boundary probing is rare, but when it does occur the commit engine grows
+    /// queue/frontier/hash-table capacity substantially. Retain that capacity
+    /// across mask calls instead of allocating and dropping a fresh
+    /// `CommitBuffers` for every boundary-ready token position.
+    pub recursive_dynamic_boundary_commit_buffers: Option<Box<CommitBuffers>>,
+    pub recursive_dynamic_boundary_semantic_keys:
+        Option<GssSemanticKeyInterner<u32, TerminalsDisallowed>>,
+    pub recursive_dynamic_boundary_exact_cache:
+        FxHashMap<RecursiveDynamicBoundaryCacheKey, Arc<[u32]>>,
 }
 
 impl MaskScratch {
@@ -307,8 +322,16 @@ impl MaskScratch {
                 segmented_component_scratch.push(Arc::new(Mutex::new(
                     MaskScratch::for_constraint(source),
                 )));
-                segmented_component_initial_states.push(source.initial_state_map());
-                segmented_component_initial_masks.push(source.start().mask());
+                // These entry-state mask snapshots are consumed only by the
+                // legacy materialized-coordinate single-path evaluator. The
+                // compact recursive runtime dispatches through provider-native
+                // scoped states and never reads them; eagerly calling
+                // `source.start().mask()` here recursively computes every child
+                // mask while merely constructing the outer state.
+                if !constraint.uses_compact_segmented_parser_runtime() {
+                    segmented_component_initial_states.push(source.initial_state_map());
+                    segmented_component_initial_masks.push(source.start().mask());
+                }
             }
         }
         Self {
@@ -323,6 +346,9 @@ impl MaskScratch {
             segmented_component_scratch,
             segmented_component_initial_states,
             segmented_component_initial_masks,
+            recursive_dynamic_boundary_commit_buffers: None,
+            recursive_dynamic_boundary_semantic_keys: Some(GssSemanticKeyInterner::with_capacity(256)),
+            recursive_dynamic_boundary_exact_cache: FxHashMap::default(),
         }
     }
 }
@@ -396,12 +422,47 @@ impl Default for CommitBuffers {
 
 impl Clone for CommitBuffers {
     fn clone(&self) -> Self {
-        // Don't clone scratch buffers — start fresh
+        // Don't clone scratch buffers Ã¢â‚¬â€ start fresh
         Self::default()
     }
 }
 
 impl CommitBuffers {
+    /// Minimal scratch state for a temporary mask-only component view.
+    ///
+    /// Segmented mask evaluation constructs a short-lived `ConstraintState`
+    /// solely to reuse the component's mask machinery. The normal default
+    /// eagerly reserves the commit-path semantic interner for 256 entries,
+    /// which is useful for a real generation state but pure overhead here.
+    /// If a nested/dynamic mask path later performs exact speculative commits,
+    /// these empty containers grow normally on demand.
+    pub(crate) fn for_mask_shadow() -> Self {
+        Self {
+            advance_result_cache: FxHashMap::default(),
+            semantic_frontier_keys: GssSemanticKeyInterner::new(),
+            admission_cache: SmallVec::new(),
+            pending_state: FxHashMap::default(),
+            seen_matches: FxHashSet::default(),
+            terminal_result_cache: FxHashMap::default(),
+            exec_results: FxHashMap::default(),
+            small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult {
+                end_state: crate::automata::lexer::tokenizer::TokenizerStateSet::new(),
+                matches: Vec::new(),
+            },
+            reusable_tokenizer_exec:
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+            prune_tokenizer_exec:
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+            small_queue: crate::runtime::commit::SmallCommitQueueScratch::default(),
+            flat_frontier: crate::runtime::commit::FlatFrontierScratch::default(),
+            linear_stack_original: Vec::new(),
+            linear_stack_work: Vec::new(),
+            processing_queue: Vec::new(),
+            template_advance_runtime:
+                crate::runtime::commit::TemplateAdvanceRuntime::default(),
+        }
+    }
+
     pub fn clear_all(&mut self) {
         self.advance_result_cache.clear();
         self.semantic_frontier_keys.clear();
@@ -431,6 +492,55 @@ impl CommitBuffers {
     }
 }
 
+/// Commit-path scratch owned by a `ConstraintState`.
+///
+/// Ordinary generation states allocate it eagerly. Temporary mask-only
+/// component views can leave it absent, avoiding construction of the large
+/// flat-frontier scratch. Mutable dereference materializes normal buffers on demand.
+#[derive(Debug)]
+pub(crate) struct LazyCommitBuffers(Option<Box<CommitBuffers>>);
+
+impl LazyCommitBuffers {
+    #[inline]
+    pub(crate) fn mask_only() -> Self {
+        Self(None)
+    }
+}
+
+impl Default for LazyCommitBuffers {
+    fn default() -> Self {
+        Self(Some(Box::new(CommitBuffers::default())))
+    }
+}
+
+impl Clone for LazyCommitBuffers {
+    fn clone(&self) -> Self {
+        if self.0.is_some() {
+            Self::default()
+        } else {
+            Self::mask_only()
+        }
+    }
+}
+
+impl std::ops::Deref for LazyCommitBuffers {
+    type Target = CommitBuffers;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_deref()
+            .expect("mask-only commit buffers require mutable materialization")
+    }
+}
+
+impl std::ops::DerefMut for LazyCommitBuffers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+            .get_or_insert_with(|| Box::new(CommitBuffers::default()))
+            .as_mut()
+    }
+}
+
 /// Mutable parser state for one generated sequence.
 ///
 /// Obtain a mask, sample a permitted token, and commit it to advance the state.
@@ -438,12 +548,12 @@ impl CommitBuffers {
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: ParserStateMap,
-    pub(crate) buffers: CommitBuffers,
+    pub(crate) buffers: LazyCommitBuffers,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
     pub(crate) generation: u64,
     /// Cached fill_mask result: returned directly when state matches cached snapshot.
-    /// Not cloned — clone starts with empty cache.
+    /// Not cloned Ã¢â‚¬â€ clone starts with empty cache.
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Arc<Mutex<MaskScratch>>,

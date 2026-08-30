@@ -82,7 +82,9 @@ mod error;
 mod public_api;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
-pub(crate) mod programmatic_js;
+// BENCHMARK WORKTREE ONLY: temporarily public so the selected10 measurement
+// example can time the first-class PTC compiler's individual phases.
+pub mod programmatic_js;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
@@ -202,6 +204,30 @@ pub mod __private {
     use crate::{Constraint, ConstraintState, DynamicConstraint, Vocab};
 
     pub type Result<T> = std::result::Result<T, Error>;
+
+    /// Internal benchmark bridge for compiling an already-constructed named grammar
+    /// without serializing it through GLRM source.
+    pub fn compile_named_grammar_for_benchmark(
+        named: glrmask_grammar::NamedGrammar,
+        vocab: &Vocab,
+    ) -> Result<Constraint> {
+        let started = std::time::Instant::now();
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        eprintln!("[monolithic/bench] factor_ms={:.3} rules={}", started.elapsed().as_secs_f64() * 1000.0, factored.rules.len());
+        let started = std::time::Instant::now();
+        let grammar = crate::grammar::ast::lower(&factored)?;
+        eprintln!("[monolithic/bench] lower_ms={:.3} terminals={} nonterminals={}", started.elapsed().as_secs_f64() * 1000.0, grammar.terminals.len(), grammar.nonterminal_names.len());
+        let started = std::time::Instant::now();
+        let constraint = crate::error::catch_internal_invariant(|| {
+            crate::compiler::compile::compile_owned_with_table_construction(
+                grammar,
+                vocab,
+                crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+            )
+        })?;
+        eprintln!("[monolithic/bench] compile_owned_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+        Ok(constraint)
+    }
 
     /// Internal release-only benchmark for exact o21137 subgrammar decomposition.
     pub fn run_o21137_subgrammar_benchmark(mode: &str) {
