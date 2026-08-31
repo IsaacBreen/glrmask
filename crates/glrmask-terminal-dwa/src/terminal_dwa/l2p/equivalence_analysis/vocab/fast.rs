@@ -743,10 +743,18 @@ static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
     Lazy::new(|| !env_flag_enabled("GLRMASK_DISABLE_VOCAB_TRIE_TARGET_BITS"));
 static VOCAB_DENSE_TRIE_SUFFIX_DAG_ENABLED: Lazy<bool> =
     Lazy::new(|| env_flag_override("GLRMASK_VOCAB_DENSE_TRIE_SUFFIX_DAG").unwrap_or(true));
-
 #[inline]
 fn new_hasher() -> AHasher {
     HASH_RANDOM_STATE.build_hasher()
+}
+
+#[inline]
+fn intersect_disallowed(current: &mut BitSet, incoming: &BitSet) {
+    if super::super::super::vocab_inplace_disallowed_intersection_enabled() {
+        current.intersect_with(incoming);
+    } else {
+        *current = current.intersection(incoming);
+    }
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -1387,7 +1395,7 @@ fn intersect_node_disallowed(
 ) {
     ensure_position_slot(&mut scratch.dag_disallowed, pos);
     if let Some(existing) = scratch.dag_disallowed[pos].as_mut() {
-        *existing = existing.intersection(incoming);
+        intersect_disallowed(existing, incoming);
     } else {
         scratch.dag_disallowed[pos] = Some(incoming.clone());
     }
@@ -1962,7 +1970,7 @@ fn hash_suffixes(
         if let Some((&first_gid, rest)) = gids.split_first() {
             let mut combined = dfa.disallowed_for(first_gid).clone();
             for &gid in rest {
-                combined = combined.intersection(dfa.disallowed_for(gid));
+                intersect_disallowed(&mut combined, dfa.disallowed_for(gid));
             }
             ensure_position_slot(&mut scratch.dag_disallowed, pos);
             scratch.dag_disallowed[pos] = Some(combined);
@@ -2082,10 +2090,11 @@ fn trie_target_disallowed_at(
                 if gid >= scratch.num_groups {
                     continue;
                 }
-                combined = Some(match combined {
-                    Some(current) => current.intersection(dfa.disallowed_for(gid)),
-                    None => dfa.disallowed_for(gid).clone(),
-                });
+                if let Some(current) = combined.as_mut() {
+                    intersect_disallowed(current, dfa.disallowed_for(gid));
+                } else {
+                    combined = Some(dfa.disallowed_for(gid).clone());
+                }
             }
         }
     } else {
@@ -2094,10 +2103,11 @@ fn trie_target_disallowed_at(
             if scratch.trie_target_group_counts[base + gid] == 0 {
                 continue;
             }
-            combined = Some(match combined {
-                Some(current) => current.intersection(dfa.disallowed_for(gid)),
-                None => dfa.disallowed_for(gid).clone(),
-            });
+            if let Some(current) = combined.as_mut() {
+                intersect_disallowed(current, dfa.disallowed_for(gid));
+            } else {
+                combined = Some(dfa.disallowed_for(gid).clone());
+            }
         }
     }
     combined
@@ -2261,7 +2271,7 @@ fn hash_single_target_suffix_dense(dfa: &Dfa, slice: &[u8], scratch: &mut Scratc
     };
     let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
     for &gid in rest {
-        root_disallowed = root_disallowed.intersection(dfa.disallowed_for(gid));
+        intersect_disallowed(&mut root_disallowed, dfa.disallowed_for(gid));
     }
 
     let (end_state, edges) = run_suffix(
@@ -2381,7 +2391,7 @@ fn try_hash_single_target_suffix(
     let (&first_gid, rest) = scratch.single_target_gids.split_first()?;
     let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
     for &gid in rest {
-        root_disallowed = root_disallowed.intersection(dfa.disallowed_for(gid));
+        intersect_disallowed(&mut root_disallowed, dfa.disallowed_for(gid));
     }
 
     let (end_state, edges) = run_suffix(
