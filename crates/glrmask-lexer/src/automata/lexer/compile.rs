@@ -10080,6 +10080,9 @@ fn compile_product_component_with_options(
         }
     }
     match expr {
+        Expr::Dfa(dfa) if dfa.num_groups() == 1 && !dfa.has_epsilon_transitions() => {
+            ProductComponent::Materialized(Arc::clone(dfa))
+        }
         Expr::Shared(inner) => compile_product_component_with_options(
             inner,
             preserve_coordinates,
