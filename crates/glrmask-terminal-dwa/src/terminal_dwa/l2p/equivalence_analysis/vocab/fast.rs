@@ -725,6 +725,8 @@ struct Scratch {
     dag_nodes: Vec<Option<DagNode>>,
     dag_queue: Vec<usize>,
     dag_disallowed: Vec<Option<BitSet>>,
+    dense_dag_disallowed: Vec<BitSet>,
+    dense_dag_disallowed_active: Vec<bool>,
     single_target_hash_pos: usize,
     single_target_hash: u64,
     suffix_match_positions: Vec<u32>,
@@ -1443,6 +1445,8 @@ impl Scratch {
             dag_nodes: Vec::new(),
             dag_queue: Vec::new(),
             dag_disallowed: Vec::new(),
+            dense_dag_disallowed: Vec::new(),
+            dense_dag_disallowed_active: Vec::new(),
             single_target_hash_pos: usize::MAX,
             single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
@@ -2113,6 +2117,89 @@ fn trie_target_disallowed_at(
     combined
 }
 
+fn fill_trie_target_disallowed_at(
+    dfa: &Dfa,
+    trie_target_bits_enabled: bool,
+    dirty_words: usize,
+    num_groups: usize,
+    trie_target_group_bits: &[u64],
+    trie_target_group_counts: &[u32],
+    position: usize,
+    out: &mut BitSet,
+) -> bool {
+    out.clear_all();
+    let mut initialized = false;
+    let mut observe_gid = |gid: usize| {
+        if initialized {
+            out.intersect_with(dfa.disallowed_for(gid));
+        } else {
+            out.union_with(dfa.disallowed_for(gid));
+            initialized = true;
+        }
+    };
+
+    if trie_target_bits_enabled {
+        let bit_base = position * dirty_words;
+        for word_index in 0..dirty_words {
+            let mut bits = trie_target_group_bits[bit_base + word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let gid = word_index * 64 + bit;
+                if gid < num_groups {
+                    observe_gid(gid);
+                }
+            }
+        }
+    } else {
+        let base = position * num_groups;
+        for gid in 0..num_groups {
+            if trie_target_group_counts[base + gid] != 0 {
+                observe_gid(gid);
+            }
+        }
+    }
+    initialized
+}
+
+fn ensure_dense_disallowed_slots(scratch: &mut Scratch, len: usize) {
+    if scratch.dense_dag_disallowed.len() < len + 1 {
+        scratch
+            .dense_dag_disallowed
+            .resize_with(len + 1, || BitSet::new(scratch.num_groups));
+        scratch.dense_dag_disallowed_active.resize(len + 1, false);
+    }
+    scratch.dense_dag_disallowed_active[..len + 1].fill(false);
+}
+
+#[inline]
+fn dense_disallowed_ref(scratch: &Scratch, pos: usize) -> Option<&BitSet> {
+    scratch
+        .dense_dag_disallowed_active
+        .get(pos)
+        .copied()
+        .unwrap_or(false)
+        .then(|| &scratch.dense_dag_disallowed[pos])
+}
+
+#[inline]
+fn dense_node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
+    dense_disallowed_ref(scratch, pos)
+        .map(|bits| bits.contains(gid))
+        .unwrap_or(false)
+}
+
+fn dense_intersect_node_disallowed(scratch: &mut Scratch, pos: usize, incoming: &BitSet) {
+    if scratch.dense_dag_disallowed_active[pos] {
+        scratch.dense_dag_disallowed[pos].intersect_with(incoming);
+    } else {
+        let slot = &mut scratch.dense_dag_disallowed[pos];
+        slot.clear_all();
+        slot.union_with(incoming);
+        scratch.dense_dag_disallowed_active[pos] = true;
+    }
+}
+
 /// Hash suffix observations using the token-position axis directly.
 ///
 /// During a token suffix walk every emitted edge advances to a strictly later
@@ -2133,17 +2220,44 @@ fn hash_trie_suffixes_dense(
     scratch: &mut Scratch,
     precomputed_root: Option<PrecomputedDenseSuffixRoot>,
 ) -> usize {
+    hash_trie_suffixes_dense_impl(
+        dfa,
+        slice,
+        scratch,
+        precomputed_root,
+        super::super::super::vocab_reuse_dense_disallowed_slots_enabled(),
+    )
+}
+
+fn hash_trie_suffixes_dense_impl(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+    precomputed_root: Option<PrecomputedDenseSuffixRoot>,
+    reuse_disallowed_slots: bool,
+) -> usize {
     let len = slice.len();
     scratch.dag_nodes.clear();
     scratch.dag_nodes.resize_with(len + 1, || None);
-    scratch.dag_disallowed.clear();
-    scratch.dag_disallowed.resize_with(len + 1, || None);
+    if reuse_disallowed_slots {
+        ensure_dense_disallowed_slots(scratch, len);
+    } else {
+        scratch.dag_disallowed.clear();
+        scratch.dag_disallowed.resize_with(len + 1, || None);
+    }
 
     let mut precomputed_root_pos = None;
     if let Some(root) = precomputed_root {
         if root.pos < len {
             precomputed_root_pos = Some(root.pos);
-            scratch.dag_disallowed[root.pos] = Some(root.disallowed);
+            if reuse_disallowed_slots {
+                let slot = &mut scratch.dense_dag_disallowed[root.pos];
+                slot.clear_all();
+                slot.union_with(&root.disallowed);
+                scratch.dense_dag_disallowed_active[root.pos] = true;
+            } else {
+                scratch.dag_disallowed[root.pos] = Some(root.disallowed);
+            }
             scratch.dag_nodes[root.pos] = Some(DagNode {
                 hash: 0,
                 edges: root.edges,
@@ -2159,7 +2273,21 @@ fn hash_trie_suffixes_dense(
         if precomputed_root_pos == Some(pos) {
             continue;
         }
-        scratch.dag_disallowed[pos] = trie_target_disallowed_at(dfa, scratch, pos);
+        if reuse_disallowed_slots {
+            let initialized = fill_trie_target_disallowed_at(
+                dfa,
+                scratch.trie_target_bits_enabled,
+                scratch.dirty_words,
+                scratch.num_groups,
+                &scratch.trie_target_group_bits,
+                &scratch.trie_target_group_counts,
+                pos,
+                &mut scratch.dense_dag_disallowed[pos],
+            );
+            scratch.dense_dag_disallowed_active[pos] = initialized;
+        } else {
+            scratch.dag_disallowed[pos] = trie_target_disallowed_at(dfa, scratch, pos);
+        }
         scratch.dag_nodes[pos] = Some(DagNode {
             hash: 0,
             edges: EdgeList::new(),
@@ -2214,11 +2342,20 @@ fn hash_trie_suffixes_dense(
         };
         let edges = node.edges.clone();
         for &(gid, target) in &edges {
-            if node_disallows_gid(scratch, pos, gid) {
+            let disallows = if reuse_disallowed_slots {
+                dense_node_disallows_gid(scratch, pos, gid)
+            } else {
+                node_disallows_gid(scratch, pos, gid)
+            };
+            if disallows {
                 continue;
             }
             if target < len {
-                intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+                if reuse_disallowed_slots {
+                    dense_intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+                } else {
+                    intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+                }
             }
         }
     }
@@ -2232,10 +2369,19 @@ fn hash_trie_suffixes_dense(
         let mut h = new_hasher();
         h.write_u64(dfa.completion_with_disallowed(
             end_state,
-            scratch.dag_disallowed[pos].as_ref(),
+            if reuse_disallowed_slots {
+                dense_disallowed_ref(scratch, pos)
+            } else {
+                scratch.dag_disallowed[pos].as_ref()
+            },
         ));
         for &(gid, target) in &edges {
-            if node_disallows_gid(scratch, pos, gid) {
+            let disallows = if reuse_disallowed_slots {
+                dense_node_disallows_gid(scratch, pos, gid)
+            } else {
+                node_disallows_gid(scratch, pos, gid)
+            };
+            if disallows {
                 continue;
             }
             h.write_u64(gid as u64);
@@ -6824,6 +6970,14 @@ mod shared_base_tests {
         dense.targets.extend([1usize, 2]);
         hash_trie_suffixes_dense(&dfa, token, &mut dense, None);
 
+        let mut dense_reuse = Scratch::new(1, dfa.num_groups);
+        dense_reuse.trie_target_bits_enabled = true;
+        reset_trie_target_aggregate(&mut dense_reuse, token.len());
+        update_trie_target_aggregate(&mut dense_reuse, 0, NONE, 1);
+        update_trie_target_aggregate(&mut dense_reuse, 1, NONE, 2);
+        dense_reuse.targets.extend([1usize, 2]);
+        hash_trie_suffixes_dense_impl(&dfa, token, &mut dense_reuse, None, true);
+
         for pos in 1..token.len() {
             let generic_hash = generic
                 .dag_nodes
@@ -6836,6 +6990,15 @@ mod shared_base_tests {
                 .and_then(|node| node.as_ref())
                 .map(|node| node.hash);
             assert_eq!(dense_hash, generic_hash, "suffix position {pos}");
+            let dense_reuse_hash = dense_reuse
+                .dag_nodes
+                .get(pos)
+                .and_then(|node| node.as_ref())
+                .map(|node| node.hash);
+            assert_eq!(
+                dense_reuse_hash, generic_hash,
+                "reused-slot suffix position {pos}"
+            );
         }
 
         let root_pos = 1usize;
@@ -6869,6 +7032,31 @@ mod shared_base_tests {
             }),
         );
 
+        let mut reused_slots = Scratch::new(1, dfa.num_groups);
+        reused_slots.trie_target_bits_enabled = true;
+        reset_trie_target_aggregate(&mut reused_slots, token.len());
+        update_trie_target_aggregate(&mut reused_slots, 0, NONE, root_pos as u32);
+        reused_slots.targets.push(root_pos);
+        let (root_end_state2, root_edges2) = run_suffix(
+            &dfa,
+            &token[root_pos..],
+            root_pos,
+            &mut reused_slots.suffix_match_positions,
+            &mut reused_slots.suffix_dirty_groups,
+        );
+        hash_trie_suffixes_dense_impl(
+            &dfa,
+            token,
+            &mut reused_slots,
+            Some(PrecomputedDenseSuffixRoot {
+                pos: root_pos,
+                end_state: root_end_state2.unwrap_or(STATE_NONE),
+                edges: root_edges2,
+                disallowed: dfa.disallowed_for(0).clone(),
+            }),
+            true,
+        );
+
         let mut fresh = Scratch::new(1, dfa.num_groups);
         fresh.trie_target_bits_enabled = true;
         reset_trie_target_aggregate(&mut fresh, token.len());
@@ -6888,6 +7076,15 @@ mod shared_base_tests {
                 .and_then(|node| node.as_ref())
                 .map(|node| node.hash);
             assert_eq!(reused_hash, fresh_hash, "reused suffix position {pos}");
+            let reused_slots_hash = reused_slots
+                .dag_nodes
+                .get(pos)
+                .and_then(|node| node.as_ref())
+                .map(|node| node.hash);
+            assert_eq!(
+                reused_slots_hash, fresh_hash,
+                "reused-slot precomputed suffix position {pos}"
+            );
         }
     }
 

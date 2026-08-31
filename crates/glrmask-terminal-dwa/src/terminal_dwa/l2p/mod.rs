@@ -79,6 +79,7 @@ thread_local! {
     static FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static VOCAB_INPLACE_DISALLOWED_INTERSECTION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct SuppressTerminalInterchangeability;
@@ -87,6 +88,7 @@ struct SuppressGlobalTokenPosition;
 struct SuppressFirstByteVocabFactor;
 struct SuppressLocalSharedEquivBase;
 struct SuppressVocabInplaceDisallowedIntersection;
+struct SuppressVocabReuseDenseDisallowedSlots;
 
 impl SuppressTerminalInterchangeability {
     fn new() -> Self {
@@ -210,6 +212,27 @@ impl Drop for SuppressVocabInplaceDisallowedIntersection {
     }
 }
 
+impl SuppressVocabReuseDenseDisallowedSlots {
+    fn new() -> Self {
+        VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_SUPPRESS_DEPTH
+            .with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressVocabReuseDenseDisallowedSlots {
+    fn drop(&mut self) {
+        VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced vocab dense disallowed-slot reuse suppression"),
+            );
+        });
+    }
+}
+
 pub(crate) fn local_shared_equiv_base_enabled() -> bool {
     LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
         && std::env::var_os("GLRMASK_DISABLE_L2P_LOCAL_SHARED_EQUIV_BASE").is_none()
@@ -223,6 +246,26 @@ pub(crate) fn vocab_inplace_disallowed_intersection_enabled() -> bool {
                 !matches!(value.to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
             })
             .unwrap_or(true)
+}
+
+pub(crate) fn vocab_reuse_dense_disallowed_slots_enabled() -> bool {
+    VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && std::env::var("GLRMASK_VOCAB_REUSE_DENSE_DISALLOWED_SLOTS")
+            .map(|value| {
+                let value = value.trim();
+                !matches!(value.to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true)
+}
+
+fn vocab_reuse_dense_disallowed_slots_strict_reference_enabled(
+    partition_label: &str,
+) -> bool {
+    VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && l2p_partition_selector_enabled(
+            "GLRMASK_VOCAB_REUSE_DENSE_DISALLOWED_SLOTS_STRICT_REFERENCE",
+            partition_label,
+        )
 }
 
 fn vocab_inplace_disallowed_intersection_strict_reference_enabled(
@@ -711,6 +754,9 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             && l2p_strict_partition_matches(partition_label);
     let vocab_inplace_disallowed_intersection_strict_reference =
         vocab_inplace_disallowed_intersection_strict_reference_enabled(partition_label)
+            && l2p_strict_partition_matches(partition_label);
+    let vocab_reuse_dense_disallowed_slots_strict_reference =
+        vocab_reuse_dense_disallowed_slots_strict_reference_enabled(partition_label)
             && l2p_strict_partition_matches(partition_label);
     let analysis_active_terminals = terminal_partition
         .as_ref()
@@ -1567,6 +1613,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         || first_byte_vocab_factor_strict_reference
         || local_shared_equiv_base_strict_reference
         || vocab_inplace_disallowed_intersection_strict_reference
+        || vocab_reuse_dense_disallowed_slots_strict_reference
     {
         // Rebuild the local artifact under the appropriate suppressed feature
         // set, then compare completed weighted terminal languages in original
@@ -1587,6 +1634,9 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             let _suppress_vocab_inplace_disallowed_intersection =
                 vocab_inplace_disallowed_intersection_strict_reference
                     .then(SuppressVocabInplaceDisallowedIntersection::new);
+            let _suppress_vocab_reuse_dense_disallowed_slots =
+                vocab_reuse_dense_disallowed_slots_strict_reference
+                    .then(SuppressVocabReuseDenseDisallowedSlots::new);
             build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,
@@ -1623,12 +1673,13 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
         if ti_profile_timing {
             eprintln!(
-                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} first_byte_vocab_factor_reference={} vocab_inplace_disallowed_intersection_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} first_byte_vocab_factor_reference={} vocab_inplace_disallowed_intersection_reference={} vocab_reuse_dense_disallowed_slots_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
                 partition_label,
                 strict_reference,
                 global_token_position_strict_reference,
                 first_byte_vocab_factor_strict_reference,
                 vocab_inplace_disallowed_intersection_strict_reference,
+                vocab_reuse_dense_disallowed_slots_strict_reference,
                 strict_baseline_build_ms,
                 strict_compare_ms,
             );
