@@ -5,9 +5,11 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
+    build_partitioned_tokenizer_from_precompiled_terminal_dfas,
     build_exact_partitioned_runtime_tokenizer,
     build_virtual_unit_repeat_tokenizer,
     build_regex,
@@ -20,6 +22,7 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_profile_labels_and_residual_isolation,
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
+    compile_terminal_expr_dfa,
     compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     expression_contains_large_bounded_repeat,
@@ -1422,6 +1425,62 @@ fn build_tokenizer_from_exprs_partitioned_impl(
 ) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let started_at = Instant::now();
+    let direct_terminal_residuals = env_flag_enabled("GLRMASK_L1_DIRECT_TERMINAL_RESIDUALS");
+    let precompiled_exprs = direct_terminal_residuals.then(|| {
+        let wall_started_at = Instant::now();
+        let compiled = exprs
+            .par_iter()
+            .map(|expr| {
+                let started_at = Instant::now();
+                let dfa = compile_terminal_expr_dfa(expr);
+                (
+                    Expr::Dfa(Arc::new(dfa)),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let total_work_ms = compiled.iter().map(|(_, elapsed_ms)| *elapsed_ms).sum::<f64>();
+        let max_item_ms = compiled
+            .iter()
+            .map(|(_, elapsed_ms)| *elapsed_ms)
+            .fold(0.0f64, f64::max);
+        if profile_detail || std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            eprintln!(
+                "[glrmask/profile][precompiled_terminal_dfas] count={} total_work_ms={:.3} max_item_ms={:.3} wall_ms={:.3}",
+                compiled.len(),
+                total_work_ms,
+                max_item_ms,
+                wall_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        compiled
+            .into_iter()
+            .map(|(expr, _)| expr)
+            .collect::<Vec<_>>()
+    });
+    if let Some(precompiled_exprs) = precompiled_exprs.as_deref()
+        && let Some(tokenizer) = build_partitioned_tokenizer_from_precompiled_terminal_dfas(
+            precompiled_exprs,
+            partition_ids,
+            Arc::from(exprs.to_vec()),
+        )
+    {
+        if profile_detail {
+            eprintln!(
+                "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={} terminal_residual_coordinates=true",
+                exprs.len(),
+                partition_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                elapsed_ms(started_at),
+                tokenizer.num_states(),
+                tokenizer.transition_count(),
+            );
+        }
+        return tokenizer;
+    }
     let regex = match (
         adaptive_override,
         profile_labels,

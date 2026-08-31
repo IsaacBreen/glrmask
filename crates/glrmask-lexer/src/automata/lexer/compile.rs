@@ -17,7 +17,8 @@ use super::runtime_repeat_product::{
 };
 use super::runtime_unit_repeat::virtual_unit_repeat_state_ids_fit;
 use super::tokenizer::{
-    CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
+    CompressedTransitionEntries, CompressedTransitionSegment, Lexer,
+    TerminalResidualCoordinates, Tokenizer,
 };
 use super::dfa::DFA;
 use super::nfa::NFA;
@@ -4272,6 +4273,7 @@ impl Regex {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -4633,6 +4635,133 @@ pub fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_iso
             adaptive,
         ),
     }
+}
+
+/// Compile-time tokenizer construction from already-compiled single-terminal
+/// DFAs. Besides the exact tokenizer, retain for every raw
+/// tokenizer state the product coordinates `(terminal, terminal_dfa_state)`.
+///
+/// This deliberately bypasses adaptive component determinization: the retained
+/// coordinate is the point of this path, and adaptive products would need to
+/// carry the same trace explicitly rather than reconstructing it afterward.
+pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
+    exprs: &[Expr],
+    partitions: &[u32],
+    retained_exprs: Arc<[Expr]>,
+) -> Option<Tokenizer> {
+    if exprs.len() != partitions.len() || exprs.len() != retained_exprs.len() {
+        return None;
+    }
+    let terminal_dfas = exprs
+        .iter()
+        .map(|expr| match expr {
+            Expr::Dfa(dfa) => Some(Arc::clone(dfa)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+
+    struct ComponentWithCoordinates {
+        terminal_ids: Vec<usize>,
+        dfa: DFA,
+        rows: Vec<Vec<(u32, u32)>>,
+    }
+
+    let components = grouped
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(_, terminal_ids)| -> Option<ComponentWithCoordinates> {
+            if terminal_ids.len() == 1 {
+                let terminal = terminal_ids[0];
+                let dfa = terminal_dfas.get(terminal)?.as_ref().clone();
+                let rows = (0..dfa.num_states())
+                    .map(|state| vec![(terminal as u32, state as u32)])
+                    .collect();
+                return Some(ComponentWithCoordinates {
+                    terminal_ids,
+                    dfa,
+                    rows,
+                });
+            }
+
+            let local_exprs = terminal_ids
+                .iter()
+                .map(|&terminal| Expr::Dfa(Arc::clone(&terminal_dfas[terminal])))
+                .collect::<Vec<_>>();
+            let empty_ops = BTreeMap::<u32, BTreeSet<u32>>::new();
+            let (mut dfa, group_ops_applied, trace) = build_product_dfa(
+                &local_exprs,
+                None,
+                local_exprs.len(),
+                &empty_ops,
+                &empty_ops,
+                true,
+                true,
+                false,
+            );
+            if group_ops_applied {
+                return None;
+            }
+            dfa.ensure_group_capacity(local_exprs.len());
+            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+                dfa.set_group_u8set(
+                    local_group as u32,
+                    *terminal_dfas[terminal].group_id_to_u8set(0),
+                );
+            }
+            let trace = trace?;
+            if trace.state_tuples.len() != dfa.num_states() {
+                return None;
+            }
+            let mut rows = Vec::with_capacity(dfa.num_states());
+            for state in 0..dfa.num_states() {
+                let tuple = trace.state_tuples.tuple(state);
+                let mut row = Vec::with_capacity(tuple.len());
+                for (coordinate, residual_state) in tuple {
+                    let terminal = *terminal_ids.get(coordinate as usize)?;
+                    row.push((terminal as u32, residual_state));
+                }
+                row.sort_unstable();
+                rows.push(row);
+            }
+            Some(ComponentWithCoordinates {
+                terminal_ids,
+                dfa,
+                rows,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut combined = DFA::new(1);
+    combined.ensure_group_capacity(exprs.len());
+    let mut root_futures = BitSet::new(exprs.len());
+    let mut rows = vec![Vec::<(u32, u32)>::new()];
+    for component in components {
+        for local_group in component.dfa.possible_future_group_ids(0).iter() {
+            root_futures.set(component.terminal_ids[local_group]);
+        }
+        let offset = combined.append_rebased_component(component.dfa, &component.terminal_ids);
+        if offset as usize != rows.len() {
+            return None;
+        }
+        combined.add_epsilon_transition(0, offset);
+        rows.extend(component.rows);
+    }
+    combined.set_possible_future_group_ids(0, root_futures);
+
+    let mut tokenizer = Regex { dfa: combined }.into_tokenizer(
+        exprs.len() as u32,
+        Some(retained_exprs),
+    );
+    tokenizer.set_terminal_residual_coordinates(
+        TerminalResidualCoordinates::from_rows_and_dfas(rows, terminal_dfas),
+    );
+    Some(tokenizer)
 }
 
 /// Build an exact partitioned tokenizer while keeping very large pure binary
@@ -12880,6 +13009,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15118,6 +15248,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15169,6 +15300,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15220,6 +15352,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15293,6 +15426,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15441,6 +15575,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15511,6 +15646,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),
@@ -15670,6 +15806,7 @@ mod tests {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
             matched_terminals_cache: std::sync::OnceLock::new(),
             initial_byte_frontiers: std::sync::OnceLock::new(),

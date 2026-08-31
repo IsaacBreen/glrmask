@@ -499,6 +499,57 @@ impl TerminalProjectedQuotient {
 
 }
 
+#[derive(Debug, Clone)]
+pub struct TerminalResidualCoordinates {
+    offsets: Arc<[u32]>,
+    entries: Arc<[(u32, u32)]>,
+    terminal_dfas: Arc<[Arc<DFA>]>,
+}
+
+impl TerminalResidualCoordinates {
+    pub fn from_rows(rows: Vec<Vec<(u32, u32)>>) -> Self {
+        Self::from_rows_and_dfas(rows, Vec::new())
+    }
+
+    pub fn from_rows_and_dfas(rows: Vec<Vec<(u32, u32)>>, terminal_dfas: Vec<Arc<DFA>>) -> Self {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        let mut entries = Vec::with_capacity(rows.iter().map(Vec::len).sum());
+        offsets.push(0);
+        for row in rows {
+            entries.extend(row);
+            offsets.push(entries.len() as u32);
+        }
+        Self {
+            offsets: Arc::from(offsets.into_boxed_slice()),
+            entries: Arc::from(entries.into_boxed_slice()),
+            terminal_dfas: Arc::from(terminal_dfas.into_boxed_slice()),
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    #[inline]
+    pub fn row(&self, state: u32) -> Option<&[(u32, u32)]> {
+        let state = state as usize;
+        let start = *self.offsets.get(state)? as usize;
+        let end = *self.offsets.get(state + 1)? as usize;
+        Some(&self.entries[start..end])
+    }
+
+    #[inline]
+    pub fn terminal_dfa(&self, terminal: u32) -> Option<&DFA> {
+        self.terminal_dfas.get(terminal as usize).map(Arc::as_ref)
+    }
+
+    #[inline]
+    pub fn terminal_dfa_count(&self) -> usize {
+        self.terminal_dfas.len()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tokenizer {
     pub(super) dfa: DFA,
@@ -559,6 +610,12 @@ pub struct Tokenizer {
     /// compile-time simplification for active-terminal rebuilds.
     #[serde(default, skip)]
     pub(super) exprs: Option<Arc<[Expr]>>,
+    /// Compile-time-only exact mapping from tokenizer states to the residual
+    /// states of independently compiled terminal DFAs. This is populated only
+    /// by tokenizer builders that preserve product coordinates and is never
+    /// serialized into runtime artifacts.
+    #[serde(default, skip)]
+    pub(super) terminal_residual_coordinates: Option<Arc<TerminalResidualCoordinates>>,
     /// Derived epsilon closures are shared by compile-time analyses.  A
     /// partitioned lexer is queried by many concurrent compiler lanes; without
     /// this cache each lane independently walks the same epsilon DAG for every
@@ -1349,6 +1406,7 @@ pub mod artifact_serde {
                 virtual_repeat_intersections: Vec::new(),
                 virtual_residuals: Vec::new(),
                 exprs: None,
+                terminal_residual_coordinates: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
                 initial_byte_frontiers: OnceLock::new(),
@@ -1377,6 +1435,7 @@ pub mod artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -2089,6 +2148,7 @@ pub mod artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -3402,6 +3462,7 @@ pub mod artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -3757,6 +3818,7 @@ pub mod artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures,
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -4039,6 +4101,7 @@ pub mod compact_artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -4580,6 +4643,7 @@ mod packed_artifact_serde {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -6108,6 +6172,7 @@ impl Tokenizer {
                 virtual_repeat_intersections: Vec::new(),
                 virtual_residuals: Vec::new(),
                 exprs: self.exprs.clone(),
+                terminal_residual_coordinates: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -6391,6 +6456,7 @@ impl Tokenizer {
                 virtual_repeat_intersections: Vec::new(),
                 virtual_residuals: Vec::new(),
                 exprs: None,
+                terminal_residual_coordinates: None,
                 singleton_epsilon_closures: OnceLock::new(),
                 matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -6542,6 +6608,7 @@ impl Tokenizer {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs: None,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -6790,6 +6857,7 @@ impl Tokenizer {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -6822,6 +6890,7 @@ impl Tokenizer {
             virtual_repeat_intersections: Vec::new(),
             virtual_residuals: Vec::new(),
             exprs,
+            terminal_residual_coordinates: None,
             singleton_epsilon_closures: OnceLock::new(),
             matched_terminals_cache: OnceLock::new(),
             initial_byte_frontiers: OnceLock::new(),
@@ -7293,6 +7362,18 @@ impl Tokenizer {
     /// Compile-time terminal expressions, when retained by the artifact.
     pub fn terminal_exprs(&self) -> Option<&[Expr]> {
         self.exprs.as_deref()
+    }
+
+    pub fn terminal_residual_coordinates(&self) -> Option<&TerminalResidualCoordinates> {
+        self.terminal_residual_coordinates.as_deref()
+    }
+
+    pub fn set_terminal_residual_coordinates(
+        &mut self,
+        coordinates: TerminalResidualCoordinates,
+    ) {
+        debug_assert_eq!(coordinates.len(), self.num_states() as usize);
+        self.terminal_residual_coordinates = Some(Arc::new(coordinates));
     }
 
     #[doc(hidden)]
