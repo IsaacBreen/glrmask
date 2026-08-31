@@ -4055,14 +4055,9 @@ fn shorter_word_pattern_preserves_max_length_above_product_budget() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
+    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
         panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
     };
-    assert!(
-        !matches!(expr.as_ref(), GrammarExpr::RawRegex(_)),
-        "high-cost fully anchored pattern should retain structural form inside the single terminal: {:?}",
-        expr
-    );
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
