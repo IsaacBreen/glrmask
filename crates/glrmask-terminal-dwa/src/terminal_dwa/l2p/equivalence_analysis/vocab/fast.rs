@@ -727,6 +727,7 @@ struct Scratch {
     dag_disallowed: Vec<Option<BitSet>>,
     dense_dag_disallowed: Vec<BitSet>,
     dense_dag_disallowed_active: Vec<bool>,
+    single_target_disallowed: BitSet,
     single_target_hash_pos: usize,
     single_target_hash: u64,
     suffix_match_positions: Vec<u32>,
@@ -1447,6 +1448,7 @@ impl Scratch {
             dag_disallowed: Vec::new(),
             dense_dag_disallowed: Vec::new(),
             dense_dag_disallowed_active: Vec::new(),
+            single_target_disallowed: BitSet::new(num_groups),
             single_target_hash_pos: usize::MAX,
             single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
@@ -2400,6 +2402,20 @@ fn hash_trie_suffixes_dense_impl(
 }
 
 fn hash_single_target_suffix_dense(dfa: &Dfa, slice: &[u8], scratch: &mut Scratch) -> usize {
+    hash_single_target_suffix_dense_impl(
+        dfa,
+        slice,
+        scratch,
+        super::super::super::vocab_reuse_single_target_disallowed_enabled(),
+    )
+}
+
+fn hash_single_target_suffix_dense_impl(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+    reuse_root_disallowed: bool,
+) -> usize {
     let pos = scratch.single_target_pos;
     if pos == usize::MAX {
         return 0;
@@ -2415,10 +2431,24 @@ fn hash_single_target_suffix_dense(dfa: &Dfa, slice: &[u8], scratch: &mut Scratc
     let Some((&first_gid, rest)) = scratch.single_target_gids.split_first() else {
         return 0;
     };
-    let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
-    for &gid in rest {
-        intersect_disallowed(&mut root_disallowed, dfa.disallowed_for(gid));
-    }
+    let root_disallowed_owned = if reuse_root_disallowed {
+        scratch.single_target_disallowed.clear_all();
+        scratch
+            .single_target_disallowed
+            .union_with(dfa.disallowed_for(first_gid));
+        for &gid in rest {
+            scratch
+                .single_target_disallowed
+                .intersect_with(dfa.disallowed_for(gid));
+        }
+        None
+    } else {
+        let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
+        for &gid in rest {
+            intersect_disallowed(&mut root_disallowed, dfa.disallowed_for(gid));
+        }
+        Some(root_disallowed)
+    };
 
     let (end_state, edges) = run_suffix(
         dfa,
@@ -2428,6 +2458,8 @@ fn hash_single_target_suffix_dense(dfa: &Dfa, slice: &[u8], scratch: &mut Scratc
         &mut scratch.suffix_dirty_groups,
     );
     if edges.iter().any(|&(_, target)| target < len) {
+        let root_disallowed = root_disallowed_owned
+            .unwrap_or_else(|| scratch.single_target_disallowed.clone());
         return hash_trie_suffixes_dense(
             dfa,
             slice,
@@ -2440,6 +2472,10 @@ fn hash_single_target_suffix_dense(dfa: &Dfa, slice: &[u8], scratch: &mut Scratc
             }),
         );
     }
+
+    let root_disallowed = root_disallowed_owned
+        .as_ref()
+        .unwrap_or(&scratch.single_target_disallowed);
 
     let mut h = new_hasher();
     h.write_u64(dfa.completion_with_disallowed(
@@ -7085,6 +7121,68 @@ mod shared_base_tests {
                 reused_slots_hash, fresh_hash,
                 "reused-slot precomputed suffix position {pos}"
             );
+        }
+    }
+
+    #[test]
+    fn reusable_single_target_disallowed_matches_fresh_root_and_fallback() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+
+        // A one-byte suffix reaches a terminal only at the token end, so this
+        // exercises the direct single-target hash without entering the DAG.
+        let direct_token = b"ab";
+        let mut direct_fresh = Scratch::new(1, dfa.num_groups);
+        direct_fresh.single_target_pos = 1;
+        direct_fresh.single_target_gids.push(0);
+        let fresh_nodes =
+            hash_single_target_suffix_dense_impl(&dfa, direct_token, &mut direct_fresh, false);
+
+        let mut direct_reused = Scratch::new(1, dfa.num_groups);
+        direct_reused.single_target_pos = 1;
+        direct_reused.single_target_gids.push(0);
+        let reused_nodes =
+            hash_single_target_suffix_dense_impl(&dfa, direct_token, &mut direct_reused, true);
+        assert_eq!(reused_nodes, fresh_nodes);
+        assert_eq!(direct_reused.single_target_hash_pos, direct_fresh.single_target_hash_pos);
+        assert_eq!(direct_reused.single_target_hash, direct_fresh.single_target_hash);
+
+        // This longer suffix discovers an interior terminal and therefore
+        // exercises the precomputed-root fallback into the dense suffix DAG.
+        let fallback_token = b"abba";
+        let mut fallback_fresh = Scratch::new(1, dfa.num_groups);
+        fallback_fresh.single_target_pos = 1;
+        fallback_fresh.single_target_gids.push(0);
+        let fresh_nodes = hash_single_target_suffix_dense_impl(
+            &dfa,
+            fallback_token,
+            &mut fallback_fresh,
+            false,
+        );
+
+        let mut fallback_reused = Scratch::new(1, dfa.num_groups);
+        fallback_reused.single_target_pos = 1;
+        fallback_reused.single_target_gids.push(0);
+        let reused_nodes = hash_single_target_suffix_dense_impl(
+            &dfa,
+            fallback_token,
+            &mut fallback_reused,
+            true,
+        );
+        assert_eq!(reused_nodes, fresh_nodes);
+        for pos in 1..fallback_token.len() {
+            let fresh_hash = fallback_fresh
+                .dag_nodes
+                .get(pos)
+                .and_then(|node| node.as_ref())
+                .map(|node| node.hash);
+            let reused_hash = fallback_reused
+                .dag_nodes
+                .get(pos)
+                .and_then(|node| node.as_ref())
+                .map(|node| node.hash);
+            assert_eq!(reused_hash, fresh_hash, "fallback suffix position {pos}");
         }
     }
 
