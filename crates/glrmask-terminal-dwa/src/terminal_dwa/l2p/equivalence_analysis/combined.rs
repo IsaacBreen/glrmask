@@ -738,6 +738,7 @@ fn build_l2p_nfa_powerset_candidate(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
     active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
     max_states: usize,
 ) -> (Option<RelevantPowersetView>, Option<RelevantPowersetWork>) {
     match policy {
@@ -748,7 +749,7 @@ fn build_l2p_nfa_powerset_candidate(
                 tokenizer,
                 relevant_bytes,
                 active_groups,
-                None,
+                state_map,
             )),
             None,
         ),
@@ -762,7 +763,7 @@ fn build_l2p_nfa_powerset_candidate(
                 tokenizer,
                 relevant_bytes,
                 active_groups,
-                None,
+                state_map,
                 budget,
             ) {
                 Ok(view) => (Some(view), None),
@@ -2156,6 +2157,14 @@ fn analyze_equivalences_impl(
             active_language_byte_classes.as_ref(),
         );
         let prepass_powerset_started_at = Instant::now();
+        // The TI seed is already a stable restricted-observation right
+        // congruence for this exact active-terminal projection and vocabulary
+        // byte alphabet. Building the sparse relevant powerset over those
+        // certified classes is therefore exact and avoids reconstructing the
+        // same quotient topology over raw epsilon-NFA states.
+        let certified_powerset_seed_map = initial_state_map_has_stable_restricted_observation
+            .then_some(initial_state_map)
+            .flatten();
         let (mut prepass_powerset_candidate, prepass_powerset_aborted) =
             if should_probe_prepass_powerset {
                 build_l2p_nfa_powerset_candidate(
@@ -2163,6 +2172,7 @@ fn analyze_equivalences_impl(
                     tokenizer,
                     &prepass_relevant_bytes,
                     active_groups,
+                    certified_powerset_seed_map,
                     powerset_max_states,
                 )
             } else {
@@ -2317,6 +2327,7 @@ fn analyze_equivalences_impl(
                     tokenizer,
                     &relevant_bytes,
                     active_groups,
+                    certified_powerset_seed_map,
                     powerset_max_states,
                 )
             }
@@ -2326,6 +2337,7 @@ fn analyze_equivalences_impl(
                 tokenizer,
                 &relevant_bytes,
                 active_groups,
+                certified_powerset_seed_map,
                 powerset_max_states,
             )
         };
@@ -2415,7 +2427,18 @@ fn analyze_equivalences_impl(
         // only vocabulary-relevant byte trajectories. That pruning can split a
         // full-language byte class, so transition compression must use classes
         // computed from this exact view rather than reusing the earlier table.
-        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+        let local_vocab_dfa_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
+        let _ = local_vocab_dfa_cache.set(
+            vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
+                analysis_view.dfa(),
+                &relevant_bytes,
+            ),
+        );
+        let local_shared_base = local_vocab_dfa_cache
+            .get()
+            .expect("local equivalence DFA base was initialized above");
+        let local_shared_cache = Some(&local_vocab_dfa_cache);
+        let byte_to_class = local_shared_base.byte_to_class();
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let follows_normalize_started_at = Instant::now();
@@ -2513,7 +2536,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                     |preliminary_token_indices| {
                         let state_tokens = preliminary_token_indices
@@ -2533,7 +2556,7 @@ fn analyze_equivalences_impl(
                                 None,
                                 None,
                                 Some(true),
-                                None,
+                                Some(local_shared_base),
                             )
                         } else {
                             state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
@@ -2541,7 +2564,7 @@ fn analyze_equivalences_impl(
                                 &state_tokens,
                                 &query_view_states,
                                 &normalized_disallowed_follows,
-                                None,
+                                Some(local_shared_base),
                             )
                         };
                         staged_exact_state_equiv_ms =
@@ -2623,7 +2646,7 @@ fn analyze_equivalences_impl(
                             effective_disallowed,
                             Some(&byte_to_class),
                             None,
-                            None,
+                            local_shared_cache,
                             None,
                         );
                     assert_eq!(
@@ -2671,7 +2694,7 @@ fn analyze_equivalences_impl(
                         effective_disallowed,
                         Some(&byte_to_class),
                         None,
-                        None,
+                        local_shared_cache,
                         None,
                     );
                 let exact_scan_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2686,7 +2709,7 @@ fn analyze_equivalences_impl(
                             effective_disallowed,
                             Some(&byte_to_class),
                             None,
-                            None,
+                            local_shared_cache,
                             None,
                         );
                     assert_eq!(
@@ -2727,7 +2750,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                 )
             };
@@ -2761,7 +2784,7 @@ fn analyze_equivalences_impl(
                         None,
                         None,
                         Some(true),
-                        None,
+                        Some(local_shared_base),
                     )
                 } else {
                     state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
@@ -2769,7 +2792,7 @@ fn analyze_equivalences_impl(
                         &state_tokens,
                         &query_view_states,
                         &normalized_disallowed_follows,
-                        None,
+                        Some(local_shared_base),
                     )
                 };
                 (
@@ -2823,7 +2846,7 @@ fn analyze_equivalences_impl(
                         effective_disallowed,
                         Some(&byte_to_class),
                         None,
-                        None,
+                        local_shared_cache,
                         None,
                     );
                 (
@@ -2845,7 +2868,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                 );
             assert_eq!(
