@@ -183,6 +183,13 @@ fn compute_byte_classes_and_self_loops_relevant(
     relevant_bytes: &[bool; 256],
 ) -> ([u8; 256], Vec<U8Set>) {
     let relevant: Vec<usize> = (0..256usize).filter(|&byte| relevant_bytes[byte]).collect();
+    if relevant.len() == 256 {
+        // There is no irrelevant catch-all byte to reserve as class zero, and
+        // 256 distinct relevant columns cannot be represented as classes 1..=256
+        // in the u8 class table. The full exact builder already handles the
+        // all-bytes case with classes 0..=255.
+        return compute_byte_classes_and_self_loops(dfa);
+    }
     let mut hashes = [0u64; 256];
     let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
     for state in 0..dfa.states.len() {
@@ -205,10 +212,29 @@ fn compute_byte_classes_and_self_loops_relevant(
     sorted.sort_unstable_by_key(|&byte| hashes[byte]);
     let mut next_class = 0u8;
     for (index, &byte) in sorted.iter().enumerate() {
-        if index == 0 || hashes[byte] != hashes[sorted[index - 1]] {
-            next_class = next_class.wrapping_add(1);
+        let hash = hashes[byte];
+        let mut matching_class = None;
+        for &previous in sorted[..index].iter().rev() {
+            if hashes[previous] != hash {
+                break;
+            }
+            let same_column = (0..dfa.states.len()).all(|state| {
+                let base = state * 256;
+                dfa.transitions[base + byte] == dfa.transitions[base + previous]
+            });
+            if same_column {
+                matching_class = Some(byte_to_class[previous]);
+                break;
+            }
         }
-        byte_to_class[byte] = next_class;
+        if let Some(class) = matching_class {
+            byte_to_class[byte] = class;
+        } else {
+            next_class = next_class
+                .checked_add(1)
+                .expect("relevant byte classes must fit in the reserved u8 domain");
+            byte_to_class[byte] = next_class;
+        }
     }
     (byte_to_class, self_loop_bytes)
 }
@@ -6510,43 +6536,73 @@ mod shared_base_tests {
     }
 
     #[test]
-    fn relevant_shared_base_preserves_relevant_byte_equivalence_and_transitions() {
+    fn relevant_shared_base_preserves_every_relevant_transition_column() {
         let dfa = sample_dfa();
         let full_classes = compute_byte_classes(&dfa);
-        let mut relevant_bytes = [false; 256];
-        for byte in [b'a', b'b'] {
-            relevant_bytes[byte as usize] = true;
-        }
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        relevant[b'!' as usize] = true;
 
-        let base = SharedVocabDfaBase::build_from_dfa_relevant(&dfa, &relevant_bytes);
-        let relevant_classes = base.byte_to_class_ref();
+        let base = SharedVocabDfaBase::build_from_dfa_relevant(&dfa, &relevant);
+        let byte_to_class = base.byte_to_class_ref();
         let row_major = base.transitions_by_state_class();
 
-        for left in [b'a', b'b'] {
-            for right in [b'a', b'b'] {
-                assert_eq!(
-                    full_classes[left as usize] == full_classes[right as usize],
-                    relevant_classes[left as usize] == relevant_classes[right as usize],
-                );
-            }
-        }
-
         for state in 0..dfa.states.len() {
-            for byte in [b'a', b'b'] {
-                let class = relevant_classes[byte as usize] as usize;
+            for byte in 0..=255usize {
+                if !relevant[byte] {
+                    continue;
+                }
+                let class = byte_to_class[byte] as usize;
                 assert_eq!(
                     row_major[state * base.num_classes + class],
-                    dfa.trans(state, byte as usize),
-                    "state={state}, byte={byte}",
+                    dfa.trans(state, byte),
+                    "state={state}, byte={byte}"
                 );
             }
         }
 
-        for byte in 0..=255u8 {
-            if !relevant_bytes[byte as usize] {
-                assert_eq!(relevant_classes[byte as usize], 0);
+        for left in 0..=255usize {
+            if !relevant[left] {
+                assert_eq!(byte_to_class[left], 0);
+                continue;
+            }
+            for right in left + 1..=255usize {
+                if !relevant[right] {
+                    continue;
+                }
+                assert_eq!(
+                    full_classes[left] == full_classes[right],
+                    byte_to_class[left] == byte_to_class[right],
+                    "relevant byte equivalence must match the full exact columns"
+                );
+                if byte_to_class[left] == byte_to_class[right] {
+                    for state in 0..dfa.states.len() {
+                        assert_eq!(
+                            dfa.trans(state, left),
+                            dfa.trans(state, right),
+                            "relevant bytes sharing a class must have identical columns"
+                        );
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn relevant_shared_base_all_bytes_matches_full_exact_base() {
+        let dfa = sample_dfa();
+        let relevant = [true; 256];
+        let restricted = SharedVocabDfaBase::build_from_dfa_relevant(&dfa, &relevant);
+        let full = SharedVocabDfaBase::build_from_dfa(&dfa);
+
+        assert_eq!(restricted.byte_to_class_ref(), full.byte_to_class_ref());
+        assert_eq!(restricted.num_classes, full.num_classes);
+        assert_eq!(
+            restricted.transitions_by_state_class(),
+            full.transitions_by_state_class()
+        );
+        assert_eq!(restricted.self_loop_bytes, full.self_loop_bytes);
     }
 
     #[test]

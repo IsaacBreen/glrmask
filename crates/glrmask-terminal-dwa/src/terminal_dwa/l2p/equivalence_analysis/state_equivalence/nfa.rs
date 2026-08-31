@@ -4312,6 +4312,86 @@ mod tests {
     }
 
     #[test]
+    fn stable_restricted_observation_quotient_preserves_relevant_powerset_traces() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let active_groups = [true, true];
+        let mut relevant_bytes = [false; 256];
+        relevant_bytes[b'a' as usize] = true;
+        relevant_bytes[b'b' as usize] = true;
+        let stable_map = compute_state_map(
+            &tokenizer,
+            &relevant_bytes,
+            Some(&active_groups),
+            None,
+            RefinementDepth::Stable,
+        );
+        let raw_powerset = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant_bytes,
+            Some(&active_groups),
+            None,
+        );
+        let quotient_powerset = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant_bytes,
+            Some(&active_groups),
+            Some(&stable_map),
+        );
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let owned_tokens = [
+            Vec::new(),
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"ab".to_vec(),
+            b"ba".to_vec(),
+            b"aab".to_vec(),
+            b"bba".to_vec(),
+            b"abba".to_vec(),
+        ];
+        let tokens = owned_tokens.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let raw_bounded = build_bounded_analysis_view_from_relevant_powerset(
+            &raw_powerset,
+            &raw_start_states,
+            &tokens,
+        );
+        let quotient_bounded = build_bounded_analysis_view_from_relevant_powerset(
+            &quotient_powerset,
+            &raw_start_states,
+            &tokens,
+        );
+
+        for &raw_state in &raw_start_states {
+            let raw_start = raw_bounded.view_state_for_raw_start(raw_state);
+            let quotient_start = quotient_bounded.view_state_for_raw_start(raw_state);
+            for token in &tokens {
+                assert_eq!(
+                    view_trace(&raw_bounded.tokenizer_view, raw_start, token),
+                    view_trace(&quotient_bounded.tokenizer_view, quotient_start, token),
+                    "raw_state={raw_state} token={token:?}"
+                );
+            }
+        }
+        for token in &tokens {
+            for offset in 0..token.len() {
+                assert_eq!(
+                    view_trace(
+                        &raw_bounded.tokenizer_view,
+                        raw_bounded.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                    view_trace(
+                        &quotient_bounded.tokenizer_view,
+                        quotient_bounded.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                    "reset suffix={:?}",
+                    &token[offset..],
+                );
+            }
+        }
+    }
+
+    #[test]
     fn relevant_powerset_handles_fully_filtered_empty_configurations() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let relevant = [true; 256];

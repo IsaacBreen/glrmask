@@ -738,6 +738,7 @@ fn build_l2p_nfa_powerset_candidate(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
     active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
     max_states: usize,
 ) -> (Option<RelevantPowersetView>, Option<RelevantPowersetWork>) {
     match policy {
@@ -748,7 +749,7 @@ fn build_l2p_nfa_powerset_candidate(
                 tokenizer,
                 relevant_bytes,
                 active_groups,
-                None,
+                state_map,
             )),
             None,
         ),
@@ -762,7 +763,7 @@ fn build_l2p_nfa_powerset_candidate(
                 tokenizer,
                 relevant_bytes,
                 active_groups,
-                None,
+                state_map,
                 budget,
             ) {
                 Ok(view) => (Some(view), None),
@@ -2156,6 +2157,14 @@ fn analyze_equivalences_impl(
             active_language_byte_classes.as_ref(),
         );
         let prepass_powerset_started_at = Instant::now();
+        // The TI seed is already a stable restricted-observation right
+        // congruence for this exact active-terminal projection and vocabulary
+        // byte alphabet. Building the sparse relevant powerset over those
+        // certified classes is therefore exact and avoids reconstructing the
+        // same quotient topology over raw epsilon-NFA states.
+        let certified_powerset_seed_map = initial_state_map_has_stable_restricted_observation
+            .then_some(initial_state_map)
+            .flatten();
         let (mut prepass_powerset_candidate, prepass_powerset_aborted) =
             if should_probe_prepass_powerset {
                 build_l2p_nfa_powerset_candidate(
@@ -2163,6 +2172,7 @@ fn analyze_equivalences_impl(
                     tokenizer,
                     &prepass_relevant_bytes,
                     active_groups,
+                    certified_powerset_seed_map,
                     powerset_max_states,
                 )
             } else {
@@ -2317,6 +2327,7 @@ fn analyze_equivalences_impl(
                     tokenizer,
                     &relevant_bytes,
                     active_groups,
+                    certified_powerset_seed_map,
                     powerset_max_states,
                 )
             }
@@ -2326,6 +2337,7 @@ fn analyze_equivalences_impl(
                 tokenizer,
                 &relevant_bytes,
                 active_groups,
+                certified_powerset_seed_map,
                 powerset_max_states,
             )
         };
@@ -2547,7 +2559,7 @@ fn analyze_equivalences_impl(
                                 None,
                                 None,
                                 Some(true),
-                                None,
+                                local_shared_base,
                             )
                         } else {
                             state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
@@ -2555,7 +2567,7 @@ fn analyze_equivalences_impl(
                                 &state_tokens,
                                 &query_view_states,
                                 &normalized_disallowed_follows,
-                                None,
+                                local_shared_base,
                             )
                         };
                         staged_exact_state_equiv_ms =
@@ -2775,7 +2787,7 @@ fn analyze_equivalences_impl(
                         None,
                         None,
                         Some(true),
-                        None,
+                        local_shared_base,
                     )
                 } else {
                     state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
@@ -2783,7 +2795,7 @@ fn analyze_equivalences_impl(
                         &state_tokens,
                         &query_view_states,
                         &normalized_disallowed_follows,
-                        None,
+                        local_shared_base,
                     )
                 };
                 (
