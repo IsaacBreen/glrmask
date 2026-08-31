@@ -933,12 +933,15 @@ fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<
     })
 }
 
-pub fn factor_regex_expr(expr: Expr) -> Expr {
+fn factor_regex_expr_inner(
+    expr: Expr,
+    shared_cache: &mut Option<FxHashMap<usize, (Arc<Expr>, Arc<Expr>)>>,
+) -> Expr {
     match expr {
         Expr::Seq(parts) => {
             let mut out = Vec::new();
             for part in parts {
-                match factor_regex_expr(part) {
+                match factor_regex_expr_inner(part, shared_cache) {
                     Expr::Seq(inner) => out.extend(inner),
                     Expr::Epsilon => {}
                     other => out.push(other),
@@ -947,15 +950,15 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             seq_from_parts(out)
         }
         Expr::Choice(options) => {
-            let mut factored_options = options.into_iter().map(factor_regex_expr).collect::<Vec<_>>();
+            let mut factored_options = options
+                .into_iter()
+                .map(|option| factor_regex_expr_inner(option, shared_cache))
+                .collect::<Vec<_>>();
 
             if factored_options.len() == 1 {
                 return factored_options.pop().unwrap();
             }
 
-            // Prefix first handles A B1 C | A B2 C; suffix then handles
-            // B1 C | B2 C. Each helper probes through references and only
-            // clones a choice when it actually finds a factor.
             if let Some(factored) = factor_choice_literals(&factored_options) {
                 return factored;
             }
@@ -969,17 +972,17 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             Expr::Choice(factored_options)
         }
         Expr::Repeat { expr, min, max } => Expr::Repeat {
-            expr: Box::new(factor_regex_expr(*expr)),
+            expr: Box::new(factor_regex_expr_inner(*expr, shared_cache)),
             min,
             max,
         },
         Expr::Exclude { expr, exclude } => Expr::Exclude {
-            expr: Box::new(factor_regex_expr(*expr)),
-            exclude: Box::new(factor_regex_expr(*exclude)),
+            expr: Box::new(factor_regex_expr_inner(*expr, shared_cache)),
+            exclude: Box::new(factor_regex_expr_inner(*exclude, shared_cache)),
         },
         Expr::Intersect { expr, intersect } => {
-            let expr = factor_regex_expr(*expr);
-            let intersect = factor_regex_expr(*intersect);
+            let expr = factor_regex_expr_inner(*expr, shared_cache);
+            let intersect = factor_regex_expr_inner(*intersect, shared_cache);
             factor_same_body_delimited_literal_repeat_suffix_intersection(&expr, &intersect)
                 .or_else(|| factor_aligned_unit_repeat_intersection(&expr, &intersect))
                 .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
@@ -988,9 +991,44 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
                     intersect: Box::new(intersect),
                 })
         }
-        Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
+        Expr::Shared(inner) => {
+            if shared_cache.is_none() {
+                return factor_regex_expr_inner((*inner).clone(), shared_cache);
+            }
+            let key = Arc::as_ptr(&inner) as usize;
+            if let Some((source, cached)) = shared_cache
+                .as_ref()
+                .and_then(|cache| cache.get(&key))
+            {
+                debug_assert!(Arc::ptr_eq(source, &inner));
+                return Expr::Shared(Arc::clone(cached));
+            }
+            let factored = factor_regex_expr_inner((*inner).clone(), shared_cache);
+            let factored = Arc::new(factored);
+            shared_cache
+                .as_mut()
+                .expect("shared factor cache remains enabled")
+                // Retain the source Arc as part of the cache entry. Besides
+                // documenting the identity being memoized, this prevents its
+                // allocation from being freed and its address reused by a
+                // later unrelated Shared node during the same batch.
+                .insert(key, (Arc::clone(&inner), Arc::clone(&factored)));
+            Expr::Shared(factored)
+        }
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
+}
+
+pub fn factor_regex_expr(expr: Expr) -> Expr {
+    factor_regex_expr_inner(expr, &mut None)
+}
+
+pub fn factor_regex_exprs_preserving_shared(exprs: Vec<Expr>) -> Vec<Expr> {
+    let mut shared_cache = Some(FxHashMap::<usize, (Arc<Expr>, Arc<Expr>)>::default());
+    exprs
+        .into_iter()
+        .map(|expr| factor_regex_expr_inner(expr, &mut shared_cache))
+        .collect()
 }
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
@@ -12943,7 +12981,7 @@ mod tests {
         try_product_union_components,
     };
     use super::{compile_product_component_dfa, compile_product_component_dfa_direct};
-    use super::factor_regex_expr;
+    use super::{factor_regex_expr, factor_regex_exprs_preserving_shared};
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
@@ -12961,6 +12999,38 @@ mod tests {
 
     fn byte_choice(bytes: &[u8]) -> Expr {
         Expr::Choice(bytes.iter().copied().map(byte_expr).collect())
+    }
+
+    #[test]
+    fn shared_aware_batch_factoring_matches_individual_factoring() {
+        let shared = Arc::new(Expr::Choice(vec![
+            Expr::Seq(vec![byte_expr(b'a'), byte_expr(b'b')]),
+            Expr::Seq(vec![byte_expr(b'a'), byte_expr(b'c')]),
+            Expr::Seq(vec![byte_expr(b'a'), byte_expr(b'd')]),
+        ]));
+        let raw = vec![
+            Expr::Seq(vec![Expr::Shared(Arc::clone(&shared)), byte_expr(b'x')]),
+            Expr::Exclude {
+                expr: Box::new(Expr::Shared(Arc::clone(&shared))),
+                exclude: Box::new(Expr::U8Seq(b"ab".to_vec())),
+            },
+            Expr::Choice(vec![
+                Expr::Shared(Arc::clone(&shared)),
+                Expr::Seq(vec![Expr::Shared(shared), byte_expr(b'y')]),
+            ]),
+        ];
+        let individual = raw
+            .iter()
+            .cloned()
+            .map(factor_regex_expr)
+            .collect::<Vec<_>>();
+        let batch = factor_regex_exprs_preserving_shared(raw);
+        assert_eq!(individual.len(), batch.len());
+        for (individual, batch) in individual.iter().zip(&batch) {
+            let individual = build_regex(std::slice::from_ref(individual)).dfa;
+            let batch = build_regex(std::slice::from_ref(batch)).dfa;
+            assert_dfa_observation_equivalent(&individual, &batch);
+        }
     }
 
     #[test]

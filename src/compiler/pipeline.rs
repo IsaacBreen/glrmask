@@ -26,7 +26,7 @@ use crate::automata::lexer::compile::{
     expression_may_support_bounded_code_residual_runtime,
     expression_supports_bounded_code_residual_runtime,
     expression_supports_deferred_dense_runtime,
-    factor_regex_expr,
+    factor_regex_expr, factor_regex_exprs_preserving_shared,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
     virtual_binary_bounded_repeat_intersection_descriptor,
@@ -584,12 +584,8 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let factor_started_at = Instant::now();
-    let exprs: Vec<Expr> = grammar
-        .terminals
-        .iter()
-        .map(terminal_expr)
-        .map(factor_regex_expr)
-        .collect();
+    let raw_exprs = grammar.terminals.iter().map(terminal_expr).collect::<Vec<_>>();
+    let exprs: Vec<Expr> = factor_regex_exprs_preserving_shared(raw_exprs);
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] factor_terminals terminals={} elapsed_ms={:.3}",
