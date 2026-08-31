@@ -835,10 +835,20 @@ fn should_skip_max_length_for_partition(
 
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
 const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
+const VOCAB_FIRST_MIN_TOKENS: usize = 512;
+const VOCAB_FIRST_MIN_STATES: usize = 256;
+const VOCAB_FIRST_WORK_MIN_TOKENS: usize = 10_000;
+const VOCAB_FIRST_WORK_MIN_PAIRS: usize = 500_000;
 const RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS: usize = 16;
 const RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES: usize = 64;
 const RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_TOKENS: usize = 48;
 const RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_BYTES: usize = 256;
+
+fn prefer_vocab_first_equivalence(token_count: usize, state_count: usize) -> bool {
+    (token_count >= VOCAB_FIRST_MIN_TOKENS && state_count >= VOCAB_FIRST_MIN_STATES)
+        || (token_count >= VOCAB_FIRST_WORK_MIN_TOKENS
+            && token_count.saturating_mul(state_count) >= VOCAB_FIRST_WORK_MIN_PAIRS)
+}
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
@@ -2513,9 +2523,16 @@ fn analyze_equivalences_impl(
                     value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
                 })
                 .unwrap_or(true);
+        // Computing vocabulary equivalence first is exact: tokens merged here
+        // are indistinguishable from every query state, so one representative
+        // per vocabulary class is sufficient for the subsequent state scan.
+        // Keep the established large-state route, and also use vocab-first when
+        // the direct state×token scan is large enough to amortize the vocab pass.
         let vocab_first = p0_vocab_first
-            || (dedup.representative_token_bytes.len() >= 512
-                && query_view_states.len() >= 256);
+            || prefer_vocab_first_equivalence(
+                dedup.representative_token_bytes.len(),
+                query_view_states.len(),
+            );
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
                 "[glrmask/profile][epsilon_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -3305,6 +3322,18 @@ mod prepass_selection_tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
+
+    #[test]
+    fn vocab_first_selection_uses_large_state_or_large_pair_work() {
+        assert!(prefer_vocab_first_equivalence(512, 256));
+        assert!(prefer_vocab_first_equivalence(56_610, 40));
+        assert!(prefer_vocab_first_equivalence(47_171, 61));
+        assert!(prefer_vocab_first_equivalence(29_801, 31));
+
+        assert!(!prefer_vocab_first_equivalence(4_657, 182));
+        assert!(!prefer_vocab_first_equivalence(10_142, 40));
+        assert!(!prefer_vocab_first_equivalence(511, usize::MAX));
+    }
 
     #[test]
     fn adaptive_nfa_view_skips_powerset_probe_below_bounded_work_threshold() {
