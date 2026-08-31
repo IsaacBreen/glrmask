@@ -2487,7 +2487,16 @@ fn analyze_equivalences_impl(
                     value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
                 })
                 .unwrap_or(true);
-        let vocab_first = p0_vocab_first
+        // When the exact prequotient leaves only a few dozen p2 states but tens of
+        // thousands of vocabulary tokens, state-first proves those few state classes
+        // against every token. Vocab-first computes the same common refinement while
+        // reducing the token witness set before exact state refinement. The 16K/64
+        // boundary isolates this workload shape in the 128K corpus.
+        let small_state_p2_vocab_first = partition_label == "p2"
+            && dedup.representative_token_bytes.len() >= 16_000
+            && query_view_states.len() <= 64;
+        let vocab_first = small_state_p2_vocab_first
+            || p0_vocab_first
             || (dedup.representative_token_bytes.len() >= 512
                 && query_view_states.len() >= 256);
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
