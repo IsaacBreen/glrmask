@@ -2415,7 +2415,21 @@ fn analyze_equivalences_impl(
         // only vocabulary-relevant byte trajectories. That pruning can split a
         // full-language byte class, so transition compression must use classes
         // computed from this exact view rather than reusing the earlier table.
-        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+        let use_local_shared_base = super::super::local_shared_equiv_base_enabled();
+        let local_vocab_dfa_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
+        if use_local_shared_base {
+            let _ = local_vocab_dfa_cache.set(
+                vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
+                    analysis_view.dfa(),
+                    &relevant_bytes,
+                ),
+            );
+        }
+        let local_shared_base = local_vocab_dfa_cache.get();
+        let local_shared_cache = local_shared_base.map(|_| &local_vocab_dfa_cache);
+        let byte_to_class = local_shared_base
+            .map(vocab_equivalence_analysis::SharedVocabDfaBase::byte_to_class)
+            .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let follows_normalize_started_at = Instant::now();
@@ -2513,7 +2527,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                     |preliminary_token_indices| {
                         let state_tokens = preliminary_token_indices
@@ -2623,7 +2637,7 @@ fn analyze_equivalences_impl(
                             effective_disallowed,
                             Some(&byte_to_class),
                             None,
-                            None,
+                            local_shared_cache,
                             None,
                         );
                     assert_eq!(
@@ -2671,7 +2685,7 @@ fn analyze_equivalences_impl(
                         effective_disallowed,
                         Some(&byte_to_class),
                         None,
-                        None,
+                        local_shared_cache,
                         None,
                     );
                 let exact_scan_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2686,7 +2700,7 @@ fn analyze_equivalences_impl(
                             effective_disallowed,
                             Some(&byte_to_class),
                             None,
-                            None,
+                            local_shared_cache,
                             None,
                         );
                     assert_eq!(
@@ -2727,7 +2741,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                 )
             };
@@ -2823,7 +2837,7 @@ fn analyze_equivalences_impl(
                         effective_disallowed,
                         Some(&byte_to_class),
                         None,
-                        None,
+                        local_shared_cache,
                         None,
                     );
                 (
@@ -2845,7 +2859,7 @@ fn analyze_equivalences_impl(
                     effective_disallowed,
                     Some(&byte_to_class),
                     None,
-                    None,
+                    local_shared_cache,
                     None,
                 );
             assert_eq!(

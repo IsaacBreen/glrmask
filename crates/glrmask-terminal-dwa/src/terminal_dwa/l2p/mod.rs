@@ -77,12 +77,14 @@ thread_local! {
     static TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct SuppressTerminalInterchangeability;
 struct SuppressTerminalInterchangeabilityStrictReference;
 struct SuppressGlobalTokenPosition;
 struct SuppressFirstByteVocabFactor;
+struct SuppressLocalSharedEquivBase;
 
 impl SuppressTerminalInterchangeability {
     fn new() -> Self {
@@ -163,6 +165,36 @@ impl Drop for SuppressFirstByteVocabFactor {
             );
         });
     }
+}
+
+impl SuppressLocalSharedEquivBase {
+    fn new() -> Self {
+        LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressLocalSharedEquivBase {
+    fn drop(&mut self) {
+        LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced local shared equivalence-base suppression"),
+            );
+        });
+    }
+}
+
+pub(crate) fn local_shared_equiv_base_enabled() -> bool {
+    LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && std::env::var_os("GLRMASK_DISABLE_L2P_LOCAL_SHARED_EQUIV_BASE").is_none()
+}
+
+fn local_shared_equiv_base_strict_reference_enabled() -> bool {
+    LOCAL_SHARED_EQUIV_BASE_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && l2p_env_enabled("GLRMASK_L2P_LOCAL_SHARED_EQUIV_BASE_STRICT_REFERENCE")
 }
 
 fn l2p_env_enabled(name: &str) -> bool {
@@ -631,6 +663,9 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         && l2p_strict_partition_matches(partition_label);
     let first_byte_vocab_factor_strict_reference =
         l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(partition_label);
+    let local_shared_equiv_base_strict_reference =
+        local_shared_equiv_base_strict_reference_enabled()
+            && l2p_strict_partition_matches(partition_label);
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -1484,6 +1519,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     if strict_reference
         || global_token_position_strict_reference
         || first_byte_vocab_factor_strict_reference
+        || local_shared_equiv_base_strict_reference
     {
         // Rebuild the local artifact under the appropriate suppressed feature
         // set, then compare completed weighted terminal languages in original
@@ -1499,6 +1535,8 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 .then(SuppressGlobalTokenPosition::new);
             let _suppress_first_byte_vocab_factor = first_byte_vocab_factor_strict_reference
                 .then(SuppressFirstByteVocabFactor::new);
+            let _suppress_local_shared_equiv_base = local_shared_equiv_base_strict_reference
+                .then(SuppressLocalSharedEquivBase::new);
             build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,

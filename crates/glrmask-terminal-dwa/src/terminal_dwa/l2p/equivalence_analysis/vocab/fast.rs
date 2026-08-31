@@ -6510,6 +6510,46 @@ mod shared_base_tests {
     }
 
     #[test]
+    fn relevant_shared_base_preserves_relevant_byte_equivalence_and_transitions() {
+        let dfa = sample_dfa();
+        let full_classes = compute_byte_classes(&dfa);
+        let mut relevant_bytes = [false; 256];
+        for byte in [b'a', b'b'] {
+            relevant_bytes[byte as usize] = true;
+        }
+
+        let base = SharedVocabDfaBase::build_from_dfa_relevant(&dfa, &relevant_bytes);
+        let relevant_classes = base.byte_to_class_ref();
+        let row_major = base.transitions_by_state_class();
+
+        for left in [b'a', b'b'] {
+            for right in [b'a', b'b'] {
+                assert_eq!(
+                    full_classes[left as usize] == full_classes[right as usize],
+                    relevant_classes[left as usize] == relevant_classes[right as usize],
+                );
+            }
+        }
+
+        for state in 0..dfa.states.len() {
+            for byte in [b'a', b'b'] {
+                let class = relevant_classes[byte as usize] as usize;
+                assert_eq!(
+                    row_major[state * base.num_classes + class],
+                    dfa.trans(state, byte as usize),
+                    "state={state}, byte={byte}",
+                );
+            }
+        }
+
+        for byte in 0..=255u8 {
+            if !relevant_bytes[byte as usize] {
+                assert_eq!(relevant_classes[byte as usize], 0);
+            }
+        }
+    }
+
+    #[test]
     fn state_signature_blocks_recombine_to_monolithic_polynomial() {
         let observations = [3u64, 11, u64::MAX - 7, 19, 23, 29, 31];
         let fold = |values: &[u64]| {
