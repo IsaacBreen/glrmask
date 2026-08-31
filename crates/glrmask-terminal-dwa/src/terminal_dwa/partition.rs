@@ -26,6 +26,23 @@ use crate::Vocab;
 
 use super::build_branch_active_state_map;
 
+const AUTO_SEPARATE_L1_SINGLE_MAX_FRACTION_DENOMINATOR: usize = 16;
+const AUTO_SEPARATE_L1_SINGLE_MIN_AVOIDED_PAIRS: usize = 1_500_000;
+
+fn automatic_combine_l1_single(
+    vocab_tokens: usize,
+    split_single_tokens: usize,
+    l2p_terminal_count: usize,
+) -> bool {
+    let non_single_tokens = vocab_tokens.saturating_sub(split_single_tokens);
+    let avoided_full_vocab_pairs = non_single_tokens.saturating_mul(l2p_terminal_count);
+    let single_side_is_small = split_single_tokens
+        .saturating_mul(AUTO_SEPARATE_L1_SINGLE_MAX_FRACTION_DENOMINATOR)
+        <= vocab_tokens;
+    !(single_side_is_small
+        && avoided_full_vocab_pairs >= AUTO_SEPARATE_L1_SINGLE_MIN_AVOIDED_PAIRS)
+}
+
 fn structural_branch_tokenizer_selected(
     branch_label: &str,
     vocab_tokens: usize,
@@ -689,6 +706,28 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     // any L2P-terminal single path on a boundary token is already contained in
     // the exact boundary L2P relation, so including it here does not change the
     // union.  Keep a kill switch for same-binary validation.
+    // Folding the split-off L2P-single relation into the ordinary L1 pass
+    // avoids a second L1 artifact, but it also adds every active L2P terminal
+    // to a full-vocabulary scan.  When the split-single vocabulary is tiny,
+    // that can be far more work than building the exact small relation
+    // separately.  Estimate the work avoided by separation in token-terminal
+    // pairs: every non-single token no longer participates in the extra L2P
+    // terminal coordinates of the full L1 pass.
+    //
+    // Keep combining when the single side is not genuinely small, or when the
+    // avoided work is modest.  In particular this protects grammars where
+    // nearly the whole vocabulary is single-only: separating those would just
+    // move the full scan into a nested L1 branch.
+    let l2p_terminal_count = l2p_mask.iter().filter(|&&active| active).count();
+    let split_single_tokens = l2p_vocab_split.as_ref().map_or(0, |split| split.single_tokens);
+    let non_single_tokens = vocab.entries_map().len().saturating_sub(split_single_tokens);
+    let avoided_full_vocab_pairs = non_single_tokens.saturating_mul(l2p_terminal_count);
+    let combine_l1_single_default = automatic_combine_l1_single(
+        vocab.entries_map().len(),
+        split_single_tokens,
+        l2p_terminal_count,
+    );
+    let auto_separate_l1_single = has_split_l1 && !combine_l1_single_default;
     let combine_l1_single = partition_label == "p1"
         && has_l1
         && has_split_l1
@@ -697,7 +736,18 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(true);
+            .unwrap_or(combine_l1_single_default);
+    if compile_profile_enabled() && partition_label == "p1" && has_l1 && has_split_l1 {
+        eprintln!(
+            "[glrmask/profile][combine_l1_single] combined={} auto_separate={} vocab_tokens={} single_tokens={} l2p_terminals={} avoided_pairs={}",
+            combine_l1_single,
+            auto_separate_l1_single,
+            vocab.entries_map().len(),
+            split_single_tokens,
+            l2p_terminal_count,
+            avoided_full_vocab_pairs,
+        );
+    }
     let combined_l1_mask = combine_l1_single.then(|| {
         l1_mask
             .iter()
@@ -1233,7 +1283,16 @@ fn build_partition_id_map_and_terminal_dwa_impl(
 
 #[cfg(test)]
 mod tests {
-    use super::automatic_structural_branch_tokenizer_selected;
+    use super::{automatic_combine_l1_single, automatic_structural_branch_tokenizer_selected};
+
+    #[test]
+    fn combines_large_split_single_vocab_and_separates_high_avoided_work() {
+        assert!(!automatic_combine_l1_single(15_224, 64, 239));
+        assert!(!automatic_combine_l1_single(15_224, 64, 121));
+
+        assert!(automatic_combine_l1_single(15_518, 15_505, 291));
+        assert!(automatic_combine_l1_single(15_518, 64, 73));
+    }
 
     #[test]
     fn wide_text_l1_materialization_is_structurally_bounded() {
