@@ -2264,6 +2264,35 @@ pub fn build_bounded_analysis_view_from_combined_starts_with_trie(
     .materialize(tokenizer, active_groups)
 }
 
+/// Build the combined-start bounded view needed for exact L2P prefix scans.
+/// Unlike the general bounded view, this does not materialize reset-state
+/// transitions for every token suffix; callers must evaluate reset suffixes
+/// separately.
+pub fn build_bounded_analysis_view_from_combined_starts_prefix_only_with_trie(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        None,
+        raw_start_states,
+        tokens,
+        true,
+        true,
+        false,
+        false,
+        None,
+        None,
+        prebuilt_token_trie,
+    )
+    .expect("unbounded prefix-only token analysis topology build")
+    .0
+    .materialize(tokenizer, active_groups)
+}
+
 pub fn build_token_bounded_analysis_topology(
     tokenizer: &Tokenizer,
     raw_start_states: &[usize],
