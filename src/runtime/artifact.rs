@@ -2839,17 +2839,23 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(tokenizer);
     }
 
-    /// Determinize only the already-finite mask projection. The exact source
-    /// lexer may remain symbolic/lazy and arbitrarily large; this operation is
-    /// bounded by the one-model-token projection that masking can observe.
-    pub(crate) fn try_determinize_mask_projection(
-        &mut self,
-        state_limit: usize,
-        transition_limit: usize,
-    ) -> bool {
-        let Some(source) = self.mask_tokenizer.as_deref() else {
+    /// Prepare a deterministic execution representation for the exact finite
+    /// lexer coordinate used by mask generation. The source constraint lexer
+    /// remains unchanged; this is analogous to choosing Flat16 versus Flat32
+    /// for the strict mask walk. If the derived representation does not fit,
+    /// the strict walker executes the epsilon-NFA coordinate directly.
+    pub(crate) fn prepare_mask_execution(&mut self, source_tokenizer: &Tokenizer) -> bool {
+        // Bound eager work by the same memory budget that decides whether the
+        // result can use Flat32. This avoids introducing an independent
+        // state-count determinization policy on top of lexer compilation.
+        const CELL_BYTES: usize = std::mem::size_of::<u32>();
+        const ALPHABET: usize = 256;
+        let state_limit = Self::FULL_WALK_DENSE_TRANSITION_BYTES / (CELL_BYTES * ALPHABET);
+        let transition_limit = state_limit.saturating_mul(ALPHABET);
+        let source = self.mask_tokenizer.as_deref().unwrap_or(source_tokenizer);
+        if source.has_any_virtual_runtime() {
             return false;
-        };
+        }
         if !source.has_epsilon_transitions() {
             self.mask_determinized_tokenizer = None;
             self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
@@ -2861,10 +2867,20 @@ impl DynamicMaskVocab {
         else {
             return false;
         };
+        let source_subsets = built.source_subsets;
         let deterministic = built.tokenizer;
         let Some(fast) = Self::build_full_walk_fast_transitions(&deterministic) else {
             return false;
         };
+        if self.mask_tokenizer.is_none() {
+            // Directly-derived source execution coordinate. Represent it as
+            // the ordinary source->mask quotient so all existing runtime
+            // metadata sees the same coordinate, and retain exact subset
+            // provenance for root/branch unions.
+            self.set_mask_tokenizer_quotient(deterministic, source_to_determinized);
+            self.set_mask_tokenizer_source_subsets(source_subsets);
+            return true;
+        }
         self.mask_determinized_tokenizer = Some(Arc::new(deterministic));
         self.mask_projection_to_determinized = Arc::from(source_to_determinized);
         self.mask_tokenizer_fast_transitions = Some(fast);
@@ -3386,7 +3402,7 @@ impl DynamicMaskVocab {
         &mut self,
         source_subsets: Vec<Box<[u32]>>,
     ) {
-        let Some(tokenizer) = self.mask_tokenizer.as_ref() else {
+        let Some(tokenizer) = self.mask_runtime_tokenizer() else {
             self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
             self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
             return;
@@ -3412,6 +3428,12 @@ impl DynamicMaskVocab {
     #[inline]
     pub(crate) fn has_mask_tokenizer_source_subsets(&self) -> bool {
         !self.mask_source_subset_to_state.is_empty()
+            // A derivative of an intermediate mask projection records subsets
+            // in projection-state coordinates, not exact source-tokenizer
+            // coordinates. It remains useful for unioning execution states in
+            // the strict walker, but must not be queried with ConstraintState
+            // source lexer states.
+            && !(self.mask_tokenizer.is_some() && self.mask_determinized_tokenizer.is_some())
     }
 
     pub(crate) fn mask_projection_state_for_source_states(
@@ -3519,6 +3541,8 @@ impl DynamicMaskVocab {
         self.mask_determinized_tokenizer = None;
         self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
         self.virtual_unit_repeat_projection = None;
         self.virtual_repeat_intersection_projections.clear();
         self.virtual_residual_projections = projections;
@@ -3601,6 +3625,17 @@ impl DynamicMaskVocab {
     #[inline]
     pub(crate) fn mask_projection_fast_transitions(&self) -> Option<&FastTokenizerTransitions> {
         self.mask_tokenizer_fast_transitions.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_prepared_mask_execution_for_test(&mut self) {
+        self.mask_tokenizer = None;
+        self.mask_determinized_tokenizer = None;
+        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
+        self.mask_tokenizer_fast_transitions = None;
+        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
+        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
+        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
     }
 
     #[inline]

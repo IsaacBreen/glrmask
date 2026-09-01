@@ -6747,66 +6747,9 @@ impl Constraint {
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
-        const FULL_WALK_RAW_STATE_LIMIT: u32 = 3_300;
-        const FULL_WALK_MASK_STATE_LIMIT: usize = 8_192;
-        const FULL_WALK_TRANSITION_LIMIT: usize = 500_000;
-        if dynamic_mask_vocab.mask_projection_tokenizer().is_none()
-            && self.tokenizer.num_states() <= FULL_WALK_RAW_STATE_LIMIT
-            && self.tokenizer.has_epsilon_transitions()
-            && !self.tokenizer.has_any_virtual_runtime()
-        {
-            let started_at = profile.then(std::time::Instant::now);
-            if let Some((built, full_to_mask_state)) = self
-                .tokenizer
-                .try_full_determinization_all_starts(
-                    FULL_WALK_MASK_STATE_LIMIT,
-                    FULL_WALK_TRANSITION_LIMIT,
-                )
-            {
-                if profile {
-                    eprintln!(
-                        "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=full_determinized full_states={} mask_states={} transitions={} elapsed_ms={:.3}",
-                        self.tokenizer.num_states(),
-                        built.tokenizer.num_states(),
-                        (0..built.tokenizer.num_states())
-                            .map(|state| built.tokenizer.transitions_from(state).count())
-                            .sum::<usize>(),
-                        started_at
-                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
-                    );
-                }
-                let source_subsets = built.source_subsets.clone();
-                dynamic_mask_vocab
-                    .set_mask_tokenizer_quotient(built.tokenizer, full_to_mask_state);
-                dynamic_mask_vocab.set_mask_tokenizer_source_subsets(source_subsets);
-            }
-        }
-        // Dynamic compile-transfer persists the deterministic mask tokenizer
-        // and dense singleton-entry map, but source-subset provenance is
-        // derived runtime metadata. Reconstruct it after load rather than
-        // extending the transfer/save format: the same exact builder is
-        // deterministic, and the dense raw-state map proves
-        // that its state numbering matches the transferred tokenizer.
-        if dynamic_mask_vocab.has_dense_mask_tokenizer_projection()
-            && !dynamic_mask_vocab.has_mask_tokenizer_source_subsets()
-            && self.tokenizer.num_states() <= FULL_WALK_RAW_STATE_LIMIT
-            && self.tokenizer.has_epsilon_transitions()
-            && !self.tokenizer.has_any_virtual_runtime()
-            && let Some((rebuilt, full_to_mask_state)) = self
-                .tokenizer
-                .try_full_determinization_all_starts(
-                    FULL_WALK_MASK_STATE_LIMIT,
-                    FULL_WALK_TRANSITION_LIMIT,
-                )
-            && dynamic_mask_vocab
-                .mask_projection_tokenizer()
-                .is_some_and(|mask| mask.num_states() == rebuilt.tokenizer.num_states())
-            && full_to_mask_state.iter().enumerate().all(|(raw, &mask)| {
-                dynamic_mask_vocab.mask_projection_state(raw as u32) == mask
-            })
-        {
-            dynamic_mask_vocab.set_mask_tokenizer_source_subsets(rebuilt.source_subsets);
-        }
+        // The strict vocabulary walker now executes epsilon-NFA configurations
+        // directly. Do not second-guess the lexer's adaptive determinization
+        // policy by fully determinizing the runtime tokenizer again for masks.
         if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
             let max_token_len = self.max_token_byte_len();
             if let Some((mask_tokenizer, projections)) = self
@@ -6854,22 +6797,18 @@ impl Constraint {
                     .set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
             }
         }
-        if self.tokenizer.has_virtual_residual_runtime()
-            && dynamic_mask_vocab.mask_projection_tokenizer().is_some()
+        let mask_execution_source = dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        if mask_execution_source.has_epsilon_transitions()
+            && !mask_execution_source.has_any_virtual_runtime()
         {
-            const FULL_WALK_RESIDUAL_MASK_STATE_LIMIT: usize = 65_536;
-            const FULL_WALK_RESIDUAL_TRANSITION_LIMIT: usize = 4_000_000;
-            let source_states = dynamic_mask_vocab
-                .mask_projection_tokenizer()
-                .map_or(0, Tokenizer::num_states);
+            let source_states = mask_execution_source.num_states();
             let started_at = profile.then(std::time::Instant::now);
-            let prepared = dynamic_mask_vocab.try_determinize_mask_projection(
-                FULL_WALK_RESIDUAL_MASK_STATE_LIMIT,
-                FULL_WALK_RESIDUAL_TRANSITION_LIMIT,
-            );
+            let prepared = dynamic_mask_vocab.prepare_mask_execution(&self.tokenizer);
             if profile {
                 eprintln!(
-                    "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_residual_determinized prepared={} source_states={} deterministic_states={} elapsed_ms={:.3}",
+                    "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=deterministic_execution prepared={} source_states={} execution_states={} elapsed_ms={:.3}",
                     prepared,
                     source_states,
                     dynamic_mask_vocab
@@ -8841,23 +8780,21 @@ impl Constraint {
                     .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
             }
         }
-        if self.tokenizer.has_virtual_residual_runtime()
-            && self.dynamic_mask_vocab.mask_projection_tokenizer().is_some()
+        let mask_execution_source = self
+            .dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        if mask_execution_source.has_epsilon_transitions()
+            && !mask_execution_source.has_any_virtual_runtime()
         {
-            const FULL_WALK_RESIDUAL_MASK_STATE_LIMIT: usize = 65_536;
-            const FULL_WALK_RESIDUAL_TRANSITION_LIMIT: usize = 4_000_000;
-            let source_states = self
-                .dynamic_mask_vocab
-                .mask_projection_tokenizer()
-                .map_or(0, Tokenizer::num_states);
+            let source_states = mask_execution_source.num_states();
             let started_at = profile.then(std::time::Instant::now);
-            let prepared = self.dynamic_mask_vocab.try_determinize_mask_projection(
-                FULL_WALK_RESIDUAL_MASK_STATE_LIMIT,
-                FULL_WALK_RESIDUAL_TRANSITION_LIMIT,
-            );
+            let prepared = self
+                .dynamic_mask_vocab
+                .prepare_mask_execution(&self.tokenizer);
             if profile {
                 eprintln!(
-                    "[glrmask/profile][static_runtime_finalize] mask_lexer=virtual_residual_determinized prepared={} source_states={} deterministic_states={} elapsed_ms={:.3}",
+                    "[glrmask/profile][static_runtime_finalize] mask_lexer=deterministic_execution prepared={} source_states={} execution_states={} elapsed_ms={:.3}",
                     prepared,
                     source_states,
                     self.dynamic_mask_vocab
@@ -8867,7 +8804,6 @@ impl Constraint {
                 );
             }
         }
-
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             if self.table.num_rules == 0 {
