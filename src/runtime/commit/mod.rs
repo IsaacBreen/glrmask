@@ -8774,7 +8774,6 @@ mod tests {
             std::env::set_var("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR_MAX_DEPTH", "2");
             std::env::set_var("GLRMASK_EXPERIMENT_SCOPED_IGNORE_EXACT_OVERLAY", "1");
             std::env::remove_var("GLRMASK_EXPERIMENT_STATIC_DYNAMIC_OVERLAY");
-            std::env::remove_var("GLRMASK_EXPERIMENT_LAZY_REPAIR_PARSER");
         }
         let prefixes: &[&[u8]] = &[
             b"",
