@@ -21,7 +21,8 @@ use crate::grammar::flat::TerminalID;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -5009,7 +5010,7 @@ fn v21_sections(
 fn constraint_serialized_weight_pool_with_ids(
     constraint: &Constraint,
 ) -> (Vec<Weight>, Vec<u32>, usize) {
-    let mut by_ptr = HashMap::<usize, u32>::new();
+    let mut by_ptr = FxHashMap::<usize, u32>::default();
     let mut weights = Vec::new();
     let mut ids = Vec::new();
     let mut total_ranges = 0usize;
@@ -5050,6 +5051,48 @@ fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
     constraint_serialized_weight_pool_with_ids(constraint).0
 }
 
+fn constraint_serialized_weight_ranges_at_least(
+    constraint: &Constraint,
+    min_weight_ranges: usize,
+) -> bool {
+    if min_weight_ranges == 0 {
+        return true;
+    }
+    let mut seen = FxHashSet::<usize>::default();
+    let mut total_ranges = 0usize;
+    let mut crosses_threshold = |weight: &Weight| {
+        if !seen.insert(weight.ptr_key()) || weight.is_full() {
+            return false;
+        }
+        total_ranges = total_ranges.saturating_add(weight.num_ranges());
+        total_ranges >= min_weight_ranges
+    };
+
+    for weight in constraint.parser_top_accept.values() {
+        if crosses_threshold(weight) {
+            return true;
+        }
+    }
+    for parts in constraint.parser_top_accept_parts.values() {
+        for weight in parts {
+            if crosses_threshold(weight) {
+                return true;
+            }
+        }
+    }
+    for weight in constraint.direct_regular_l1_complete_by_terminal.values() {
+        if crosses_threshold(weight) {
+            return true;
+        }
+    }
+    for weight in constraint.possible_matches.values() {
+        if crosses_threshold(weight) {
+            return true;
+        }
+    }
+    false
+}
+
 fn compact_non_dwa_weight_runtime_if_at_least(
     constraint: &mut Constraint,
     min_weight_ranges: usize,
@@ -5057,10 +5100,10 @@ fn compact_non_dwa_weight_runtime_if_at_least(
     if constraint.packed_non_dwa_weights.is_some() {
         return false;
     }
-    let (weights, ids, total_ranges) = constraint_serialized_weight_pool_with_ids(constraint);
-    if total_ranges < min_weight_ranges {
+    if !constraint_serialized_weight_ranges_at_least(constraint, min_weight_ranges) {
         return false;
     }
+    let (weights, ids, _) = constraint_serialized_weight_pool_with_ids(constraint);
     let wire = crate::ds::weight::pack_pooled_weights(&weights);
     let pool = crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(&wire)
         .expect("fresh packed non-DWA Weight runtime should decode");

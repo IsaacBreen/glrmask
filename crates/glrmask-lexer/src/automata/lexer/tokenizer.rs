@@ -2540,6 +2540,15 @@ pub mod artifact_serde {
         {
             return false;
         }
+        // A byte DFA has at most 256 labeled byte transitions per state.
+        // Avoid an O(states + transitions) count for the common small-tokenizer
+        // case when the threshold is impossible to reach.
+        const MAX_BYTE_TRANSITIONS_PER_STATE: usize = 256;
+        if tokenizer.dfa.num_states()
+            < MIN_TRANSITIONS.div_ceil(MAX_BYTE_TRANSITIONS_PER_STATE)
+        {
+            return false;
+        }
         let transition_count = tokenizer.dfa.transition_count();
         if transition_count < MIN_TRANSITIONS {
             return false;
