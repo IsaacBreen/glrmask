@@ -874,9 +874,70 @@ enum BoundedCodeOracleSlot {
     Ambiguous,
 }
 
+#[derive(Debug, Clone)]
+struct SparseBoolRelation {
+    state_count: usize,
+    row_offsets: Arc<[u32]>,
+    targets: Arc<[u16]>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BoolRelation {
+    // `sparse` is an in-memory representation for current compact artifacts.
+    // Skipping it preserves the historical bincode shape (`rows` only), so old
+    // oracle payloads continue to deserialize unchanged.
     rows: Vec<BitSet>,
+    #[serde(skip)]
+    sparse: Option<Arc<SparseBoolRelation>>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SparseBoolRelationWire {
+    state_count: u32,
+    row_offsets: Vec<u32>,
+    targets: Vec<u16>,
+}
+
+impl SparseBoolRelationWire {
+    fn from_relation(relation: &BoolRelation) -> Option<Self> {
+        let state_count = relation.state_count();
+        if state_count > u16::MAX as usize + 1 {
+            return None;
+        }
+        let mut row_offsets = Vec::with_capacity(state_count + 1);
+        let mut targets = Vec::new();
+        row_offsets.push(0);
+        for state in 0..state_count {
+            relation.for_each_target(state, |target| targets.push(target as u16))?;
+            row_offsets.push(u32::try_from(targets.len()).ok()?);
+        }
+        Some(Self {
+            state_count: u32::try_from(state_count).ok()?,
+            row_offsets,
+            targets,
+        })
+    }
+
+    fn into_relation(self, expected_states: usize) -> Option<BoolRelation> {
+        let state_count = self.state_count as usize;
+        if state_count != expected_states
+            || self.row_offsets.len() != state_count + 1
+            || self.row_offsets.first().copied() != Some(0)
+            || self.row_offsets.last().copied()? as usize != self.targets.len()
+            || self.row_offsets.windows(2).any(|pair| pair[0] > pair[1])
+            || self.targets.iter().any(|&target| target as usize >= state_count)
+        {
+            return None;
+        }
+        Some(BoolRelation {
+            rows: Vec::new(),
+            sparse: Some(Arc::new(SparseBoolRelation {
+                state_count,
+                row_offsets: Arc::from(self.row_offsets.into_boxed_slice()),
+                targets: Arc::from(self.targets.into_boxed_slice()),
+            })),
+        })
+    }
 }
 
 impl BoolRelation {
@@ -887,11 +948,67 @@ impl BoolRelation {
             row.set(state);
             rows.push(row);
         }
-        Self { rows }
+        Self { rows, sparse: None }
+    }
+
+    #[inline]
+    fn state_count(&self) -> usize {
+        self.sparse.as_ref().map_or(self.rows.len(), |sparse| sparse.state_count)
+    }
+
+    fn for_each_target(&self, state: usize, mut visit: impl FnMut(usize)) -> Option<()> {
+        if let Some(sparse) = &self.sparse {
+            let start = *sparse.row_offsets.get(state)? as usize;
+            let end = *sparse.row_offsets.get(state + 1)? as usize;
+            for &target in sparse.targets.get(start..end)? {
+                visit(target as usize);
+            }
+            return Some(());
+        }
+        for target in self.rows.get(state)?.iter() {
+            visit(target);
+        }
+        Some(())
+    }
+
+    fn row_bitset(&self, state: usize) -> Option<BitSet> {
+        if self.sparse.is_none() {
+            return self.rows.get(state).cloned();
+        }
+        let mut row = BitSet::new(self.state_count());
+        self.for_each_target(state, |target| row.set(target))?;
+        Some(row)
+    }
+
+    fn valid_for(&self, states: usize) -> bool {
+        if self.state_count() != states {
+            return false;
+        }
+        if let Some(sparse) = &self.sparse {
+            return sparse.row_offsets.len() == states + 1
+                && sparse.row_offsets.first().copied() == Some(0)
+                && sparse.row_offsets.last().copied().map(|value| value as usize)
+                    == Some(sparse.targets.len())
+                && sparse.row_offsets.windows(2).all(|pair| pair[0] <= pair[1])
+                && sparse.targets.iter().all(|&state| (state as usize) < states);
+        }
+        self.rows
+            .iter()
+            .all(|row| row.iter().all(|state| state < states))
     }
 
     fn apply(&self, states: &BitSet) -> BitSet {
-        let mut out = BitSet::new(self.rows.len());
+        let mut out = BitSet::new(self.state_count());
+        if let Some(sparse) = &self.sparse {
+            for state in states.iter() {
+                let Some(&start) = sparse.row_offsets.get(state) else { continue };
+                let Some(&end) = sparse.row_offsets.get(state + 1) else { continue };
+                for &target in &sparse.targets[start as usize..end as usize] {
+                    out.set(target as usize);
+                }
+            }
+            return out;
+        }
         for state in states.iter() {
             out.union_with(&self.rows[state]);
         }
@@ -900,24 +1017,23 @@ impl BoolRelation {
 
     /// Relation composition in execution order: first `self`, then `next`.
     fn then(&self, next: &Self) -> Self {
-        debug_assert_eq!(self.rows.len(), next.rows.len());
-        let rows = self
-            .rows
-            .iter()
-            .map(|row| next.apply(row))
+        debug_assert_eq!(self.state_count(), next.state_count());
+        let rows = (0..self.state_count())
+            .map(|state| next.apply(&self.row_bitset(state).expect("valid relation row")))
             .collect::<Vec<_>>();
-        Self { rows }
+        Self { rows, sparse: None }
     }
 
     fn union(&self, other: &Self) -> Self {
-        debug_assert_eq!(self.rows.len(), other.rows.len());
-        let rows = self
-            .rows
-            .iter()
-            .zip(&other.rows)
-            .map(|(left, right)| left.union(right))
+        debug_assert_eq!(self.state_count(), other.state_count());
+        let rows = (0..self.state_count())
+            .map(|state| {
+                let mut row = self.row_bitset(state).expect("valid relation row");
+                row.union_with(&other.row_bitset(state).expect("valid relation row"));
+                row
+            })
             .collect::<Vec<_>>();
-        Self { rows }
+        Self { rows, sparse: None }
     }
 }
 
@@ -993,6 +1109,91 @@ struct BoundedCodeIntersectionOracle {
     completion_relations: Vec<Option<BoolRelation>>,
     exact_powers: Vec<BoolRelation>,
     prefix_sums: Vec<BoolRelation>,
+}
+
+const SPARSE_BOUNDED_CODE_ORACLE_MAGIC: [u8; 4] = *b"BCO2";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SparseBoundedCodeOracleWire {
+    pattern: Arc<DFA>,
+    body: Arc<DFA>,
+    body_productive: Box<[bool]>,
+    prefix: Arc<[u8]>,
+    suffix: Arc<[u8]>,
+    min: usize,
+    max: usize,
+    suffix_accepting: BitSet,
+    completion_relations: Vec<Option<SparseBoolRelationWire>>,
+    exact_powers: Vec<SparseBoolRelationWire>,
+    prefix_sums: Vec<SparseBoolRelationWire>,
+}
+
+impl SparseBoundedCodeOracleWire {
+    fn from_oracle(oracle: &BoundedCodeIntersectionOracle) -> Option<Self> {
+        Some(Self {
+            pattern: Arc::clone(&oracle.pattern),
+            body: Arc::clone(&oracle.body),
+            body_productive: oracle.body_productive.clone(),
+            prefix: Arc::clone(&oracle.prefix),
+            suffix: Arc::clone(&oracle.suffix),
+            min: oracle.min,
+            max: oracle.max,
+            suffix_accepting: oracle.suffix_accepting.clone(),
+            completion_relations: oracle
+                .completion_relations
+                .iter()
+                .map(|relation| match relation {
+                    Some(relation) => Some(Some(SparseBoolRelationWire::from_relation(relation)?)),
+                    None => Some(None),
+                })
+                .collect::<Option<Vec<_>>>()?,
+            exact_powers: oracle
+                .exact_powers
+                .iter()
+                .map(SparseBoolRelationWire::from_relation)
+                .collect::<Option<Vec<_>>>()?,
+            prefix_sums: oracle
+                .prefix_sums
+                .iter()
+                .map(SparseBoolRelationWire::from_relation)
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+
+    fn into_oracle(self) -> Option<BoundedCodeIntersectionOracle> {
+        let pattern_states = self.pattern.num_states();
+        let completion_relations = self
+            .completion_relations
+            .into_iter()
+            .map(|relation| match relation {
+                Some(relation) => Some(Some(relation.into_relation(pattern_states)?)),
+                None => Some(None),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let exact_powers = self
+            .exact_powers
+            .into_iter()
+            .map(|relation| relation.into_relation(pattern_states))
+            .collect::<Option<Vec<_>>>()?;
+        let prefix_sums = self
+            .prefix_sums
+            .into_iter()
+            .map(|relation| relation.into_relation(pattern_states))
+            .collect::<Option<Vec<_>>>()?;
+        Some(BoundedCodeIntersectionOracle {
+            pattern: self.pattern,
+            body: self.body,
+            body_productive: self.body_productive,
+            prefix: self.prefix,
+            suffix: self.suffix,
+            min: self.min,
+            max: self.max,
+            suffix_accepting: self.suffix_accepting,
+            completion_relations,
+            exact_powers,
+            prefix_sums,
+        })
+    }
 }
 
 fn canonicalize_bounded_code_oracle_dfa(dfa: DFA) -> DFA {
@@ -1329,7 +1530,7 @@ impl BoundedCodeIntersectionOracle {
                 }
                 rows.push(targets);
             }
-            self.completion_relations[index] = Some(BoolRelation { rows });
+            self.completion_relations[index] = Some(BoolRelation { rows, sparse: None });
         }
         self.completion_relations[index].as_ref().unwrap()
     }
@@ -1550,6 +1751,8 @@ pub struct VirtualResidualMaskProjectionArtifact {
     compiled_mask_max: usize,
     #[serde(skip)]
     compiled_crossed_boundaries: usize,
+    #[serde(skip)]
+    validated_component_state_count: Option<u32>,
 }
 
 #[derive(serde::Serialize)]
@@ -1601,6 +1804,25 @@ impl VirtualResidualMaskProjectionArtifact {
         Self {
             terminal, state_offset, local_to_mask_state, oracle_bytes, runtime_expr_bytes,
             compiled_mask_max, compiled_crossed_boundaries,
+            validated_component_state_count: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn from_validated_wire(
+        terminal: TerminalID,
+        state_offset: u32,
+        local_to_mask_state: Vec<u32>,
+        oracle_bytes: Vec<u8>,
+        runtime_expr_bytes: Vec<u8>,
+        compiled_mask_max: usize,
+        compiled_crossed_boundaries: usize,
+        component_state_count: u32,
+    ) -> Self {
+        Self {
+            terminal, state_offset, local_to_mask_state, oracle_bytes, runtime_expr_bytes,
+            compiled_mask_max, compiled_crossed_boundaries,
+            validated_component_state_count: Some(component_state_count),
         }
     }
 }
@@ -2519,7 +2741,13 @@ impl VirtualResidualRuntime {
             .liveness_oracle
             .as_ref()
             .expect("Static residual projection requires bounded-code oracle");
-        bincode::serialize(oracle).expect("bounded-code oracle serialization should succeed")
+        let sparse = SparseBoundedCodeOracleWire::from_oracle(oracle)
+            .expect("bounded-code oracle is within sparse wire limits");
+        let mut out = Vec::new();
+        out.extend_from_slice(&SPARSE_BOUNDED_CODE_ORACLE_MAGIC);
+        bincode::serialize_into(&mut out, &sparse)
+            .expect("bounded-code sparse oracle serialization should succeed");
+        out
     }
 
     pub(super) fn new_preserving_oracle_coordinate_from_oracle_bytes(
@@ -2541,8 +2769,15 @@ impl VirtualResidualRuntime {
             return None;
         }
         let (mut arena, root) = ResidualArena::from_expr(expr)?;
-        let liveness_oracle: BoundedCodeIntersectionOracle =
-            bincode::deserialize(oracle_bytes).ok()?;
+        let liveness_oracle: BoundedCodeIntersectionOracle = if let Some(body) =
+            oracle_bytes.strip_prefix(&SPARSE_BOUNDED_CODE_ORACLE_MAGIC)
+        {
+            bincode::deserialize::<SparseBoundedCodeOracleWire>(body)
+                .ok()?
+                .into_oracle()?
+        } else {
+            bincode::deserialize(oracle_bytes).ok()?
+        };
         let root_oracle_coordinate = liveness_oracle.root_coordinate();
         // Structural checks sufficient for compiled-artifact restoration. The
         // exact residual derivative remains authoritative for transitions and
@@ -2559,10 +2794,7 @@ impl VirtualResidualRuntime {
             return None;
         }
         let pattern_states = liveness_oracle.pattern.num_states();
-        let relation_valid = |relation: &BoolRelation| {
-            relation.rows.len() == pattern_states
-                && relation.rows.iter().all(|row| row.iter().all(|state| state < pattern_states))
-        };
+        let relation_valid = |relation: &BoolRelation| relation.valid_for(pattern_states);
         if liveness_oracle
             .completion_relations
             .iter()
@@ -2706,7 +2938,9 @@ impl VirtualResidualRuntime {
                 artifact.local_to_mask_state.len(), expected_dense_states,
             ));
         }
-        if artifact.local_to_mask_state.iter().any(|&state| state != u32::MAX && state >= component_state_count) {
+        if artifact.validated_component_state_count != Some(component_state_count)
+            && artifact.local_to_mask_state.iter().any(|&state| state != u32::MAX && state >= component_state_count)
+        {
             return Err(format!(
                 "compiled virtual residual projection references state outside component width {}",
                 component_state_count,
@@ -3561,6 +3795,83 @@ mod tests {
                     let mut next_prefix = prefix.clone();
                     next_prefix.push(byte);
                     queue.push_back((next_prefix, residual_target, materialized_target));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_code_sparse_oracle_wire_preserves_runtime_liveness() {
+        let expr = Expr::Intersect {
+            expr: Box::new(Expr::Choice(vec![
+                exact_code_count_pattern(1),
+                exact_code_count_pattern(3),
+                exact_code_count_pattern(4),
+            ])),
+            intersect: Box::new(bounded_code_envelope_expr(1, 4)),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
+        let original = VirtualResidualRuntime::new(
+            &expr,
+            0,
+            0,
+            1,
+            2,
+            1,
+            Arc::clone(&allocator),
+            Arc::clone(&owners),
+        )
+        .unwrap();
+        assert!(original.has_bounded_code_liveness_oracle());
+        let wire = original.serialized_bounded_code_oracle();
+        assert!(wire.starts_with(&SPARSE_BOUNDED_CODE_ORACLE_MAGIC));
+
+        let loaded = VirtualResidualRuntime::new_preserving_oracle_coordinate_from_oracle_bytes(
+            &expr,
+            &wire,
+            0,
+            0,
+            1,
+            2,
+            1,
+            allocator,
+            owners,
+        )
+        .expect("BCO2 oracle should restore without rebuilding dense relations");
+        assert!(loaded.has_bounded_code_liveness_oracle());
+
+        let alphabet = [b'<', b'>', b'a', b'b', b'c'];
+        let mut queue = VecDeque::from([(Vec::<u8>::new(), 1u32, 1u32)]);
+        let mut seen = FxHashSet::<(u32, u32)>::default();
+        seen.insert((1, 1));
+        while let Some((prefix, original_state, loaded_state)) = queue.pop_front() {
+            assert_eq!(
+                loaded.exact_has_future(loaded_state).unwrap(),
+                original.exact_has_future(original_state).unwrap(),
+                "BCO2 future mismatch after {:?}",
+                String::from_utf8_lossy(&prefix),
+            );
+            if prefix.len() >= 10 {
+                continue;
+            }
+            for &byte in &alphabet {
+                let original_next = original.step(original_state, byte);
+                let loaded_next = loaded.step(loaded_state, byte);
+                assert_eq!(
+                    loaded_next.is_some(),
+                    original_next.is_some(),
+                    "BCO2 transition mismatch after {:?} + {:?}",
+                    String::from_utf8_lossy(&prefix),
+                    byte as char,
+                );
+                let (Some(original_next), Some(loaded_next)) = (original_next, loaded_next) else {
+                    continue;
+                };
+                if seen.insert((original_next, loaded_next)) {
+                    let mut next_prefix = prefix.clone();
+                    next_prefix.push(byte);
+                    queue.push_back((next_prefix, original_next, loaded_next));
                 }
             }
         }

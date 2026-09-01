@@ -1798,6 +1798,105 @@ pub mod artifact_serde {
         write_fast_bytes_for_dfa(tokenizer, &tokenizer.dfa, layout, out)
     }
 
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct FastPackedMetadataArtifact {
+        finalizer_rows: Vec<Box<[u32]>>,
+        finalizer_row_ids: Vec<u32>,
+        future_rows: Vec<Box<[u32]>>,
+        future_row_ids: Vec<u32>,
+        epsilon_states: Vec<u32>,
+        epsilon_offsets: Vec<u32>,
+        epsilon_targets: Vec<u32>,
+    }
+
+    fn fast_packed_metadata_artifact(dfa: &DFA) -> FastPackedMetadataArtifact {
+        let states = dfa.states();
+        let pack_rows = |futures: bool| {
+            let mut row_map = FxHashMap::<Box<[u32]>, u32>::default();
+            let mut rows = Vec::<Box<[u32]>>::new();
+            let mut row_ids = Vec::<u32>::with_capacity(states.len());
+            for state in states {
+                let sparse = if futures {
+                    state
+                        .possible_future_group_ids
+                        .iter()
+                        .map(|terminal| terminal as u32)
+                        .collect::<Vec<_>>()
+                } else {
+                    state
+                        .finalizers
+                        .iter()
+                        .map(|terminal| terminal as u32)
+                        .collect::<Vec<_>>()
+                };
+                let row = if let Some(&row) = row_map.get(sparse.as_slice()) {
+                    row
+                } else {
+                    let row = rows.len() as u32;
+                    let boxed = sparse.into_boxed_slice();
+                    row_map.insert(boxed.clone(), row);
+                    rows.push(boxed);
+                    row
+                };
+                row_ids.push(row);
+            }
+            (rows, row_ids)
+        };
+        let (finalizer_rows, finalizer_row_ids) = pack_rows(false);
+        let (future_rows, future_row_ids) = pack_rows(true);
+        let mut epsilon_states = Vec::new();
+        let mut epsilon_offsets = vec![0u32];
+        let mut epsilon_targets = Vec::new();
+        for (state_index, state) in states.iter().enumerate() {
+            if state.epsilon_transitions.is_empty() {
+                continue;
+            }
+            epsilon_states.push(state_index as u32);
+            epsilon_targets.extend_from_slice(&state.epsilon_transitions);
+            epsilon_offsets.push(epsilon_targets.len() as u32);
+        }
+        FastPackedMetadataArtifact {
+            finalizer_rows,
+            finalizer_row_ids,
+            future_rows,
+            future_row_ids,
+            epsilon_states,
+            epsilon_offsets,
+            epsilon_targets,
+        }
+    }
+
+    /// TKF3 keeps TKF2's directly-backed transition arrays, but persists the
+    /// already-interned state metadata rows used by the loaded runtime. This is
+    /// used for giant finite residual mask tokenizers where rebuilding those
+    /// rows on every load is measurable.
+    pub fn to_fast_bytes_with_packed_metadata(tokenizer: &Tokenizer) -> Vec<u8> {
+        let materialized;
+        let dfa = if tokenizer.compressed_transition_segments.is_empty()
+            && tokenizer.packed_compressed_transition_segments.is_empty()
+            && tokenizer.packed_runtime_transitions.is_none()
+            && tokenizer.packed_runtime_transition_segments.is_empty()
+        {
+            &tokenizer.dfa
+        } else {
+            materialized = tokenizer.materialized_dfa();
+            &materialized
+        };
+        let layout = fast_layout(tokenizer, dfa);
+        let mut out = to_fast_bytes(tokenizer);
+        let transition_end = 32usize
+            + layout.terminal_count * 32
+            + (layout.state_count + 1) * 4
+            + layout.transition_count
+            + layout.transition_count * layout.state_id_width;
+        out.truncate(transition_end);
+        out[..4].copy_from_slice(b"TKF3");
+        let metadata = fast_packed_metadata_artifact(dfa);
+        bincode::serialize_into(&mut out, &metadata)
+            .expect("TKF3 packed metadata serialization should succeed");
+        out
+    }
+
     /// Runtime-native current-format tokenizer wire. Unlike the older packed
     /// serializer this does no row hashing and no per-row varint target
     /// encoding: the compiler already owns the exact DFA, so save is a linear
@@ -3532,8 +3631,9 @@ pub mod artifact_serde {
         if input.starts_with(SEGMENT_WIRE_MAGIC) {
             return from_segment_bytes(input);
         }
+        let tkf3 = input.starts_with(b"TKF3");
         let tkf2 = input.starts_with(b"TKF2");
-        if input.len() < 28 || (!tkf2 && !input.starts_with(b"TKF1")) {
+        if input.len() < 28 || (!tkf3 && !tkf2 && !input.starts_with(b"TKF1")) {
             return Err("invalid fast tokenizer header".to_owned());
         }
         let mut pos = 4usize;
@@ -3552,7 +3652,7 @@ pub mod artifact_serde {
         if state_count == 0 {
             return Err("fast tokenizer has no states".to_owned());
         }
-        let (state_id_width, terminal_id_width) = if tkf2 {
+        let (state_id_width, terminal_id_width) = if tkf3 || tkf2 {
             let state_width = *input
                 .get(pos)
                 .ok_or_else(|| "truncated fast tokenizer state-id width".to_owned())?
@@ -3707,10 +3807,24 @@ pub mod artifact_serde {
                 let bytes = input
                     .get(start..end)
                     .ok_or_else(|| "truncated fast tokenizer targets".to_owned())?;
-                if bytes.chunks_exact(4).any(|word| {
-                    u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize
-                        >= state_count
-                }) {
+                let validate_chunk = |chunk: &[u8]| {
+                    debug_assert_eq!(chunk.len() % 4, 0);
+                    chunk.chunks_exact(4).all(|word| {
+                        (u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize)
+                            < state_count
+                    })
+                };
+                let targets_valid = if transition_count >= 100_000
+                    && rayon::current_num_threads() > 1
+                {
+                    const WORDS_PER_CHUNK: usize = 262_144;
+                    bytes
+                        .par_chunks(WORDS_PER_CHUNK * 4)
+                        .all(validate_chunk)
+                } else {
+                    validate_chunk(bytes)
+                };
+                if !targets_valid {
                     return Err("fast tokenizer transition target out of range".to_owned());
                 }
                 pos = end;
@@ -3732,6 +3846,116 @@ pub mod artifact_serde {
         };
         let transitions_ms = transitions_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        if tkf3 {
+            let metadata_started = profile.then(std::time::Instant::now);
+            let metadata: FastPackedMetadataArtifact = bincode::deserialize(&input[pos..])
+                .map_err(|err| format!("invalid TKF3 metadata: {err}"))?;
+            if metadata.finalizer_row_ids.len() != state_count
+                || metadata.future_row_ids.len() != state_count
+                || metadata.epsilon_offsets.len() != metadata.epsilon_states.len() + 1
+                || metadata.epsilon_offsets.first().copied() != Some(0)
+                || metadata.epsilon_offsets.last().copied().map(|value| value as usize)
+                    != Some(metadata.epsilon_targets.len())
+                || metadata.epsilon_offsets.windows(2).any(|pair| pair[0] > pair[1])
+                || metadata.epsilon_states.windows(2).any(|pair| pair[0] >= pair[1])
+                || metadata.epsilon_states.iter().any(|&state| state as usize >= state_count)
+                || metadata.epsilon_targets.iter().any(|&state| state as usize >= state_count)
+                || metadata.finalizer_row_ids.iter().any(|&row| row as usize >= metadata.finalizer_rows.len())
+                || metadata.future_row_ids.iter().any(|&row| row as usize >= metadata.future_rows.len())
+                || metadata
+                    .finalizer_rows
+                    .iter()
+                    .chain(&metadata.future_rows)
+                    .any(|row| {
+                        row.windows(2).any(|pair| pair[0] >= pair[1])
+                            || row.iter().any(|&terminal| terminal >= num_terminals)
+                    })
+            {
+                return Err("invalid TKF3 packed metadata".to_owned());
+            }
+            let build_rows = |rows: Vec<Box<[u32]>>| {
+                rows.into_iter()
+                    .map(|row| {
+                        let mut bits = BitSet::new(num_terminals as usize);
+                        for terminal in row.iter().copied() {
+                            bits.set(terminal as usize);
+                        }
+                        bits
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let finalizer_rows = build_rows(metadata.finalizer_rows);
+            let finalizer_lists = finalizer_rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|terminal| terminal as TerminalID)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect::<Vec<_>>();
+            let future_rows = build_rows(metadata.future_rows);
+            let packed_metadata = Arc::new(PackedTokenizerMetadata {
+                state_count: state_count as u32,
+                finalizer_row_ids: packed_row_ids_from_u32(
+                    metadata.finalizer_row_ids,
+                    finalizer_rows.len(),
+                ),
+                finalizer_rows: Arc::from(finalizer_rows.into_boxed_slice()),
+                finalizer_lists: Arc::from(finalizer_lists.into_boxed_slice()),
+                future_row_ids: packed_row_ids_from_u32(
+                    metadata.future_row_ids,
+                    future_rows.len(),
+                ),
+                future_rows: Arc::from(future_rows.into_boxed_slice()),
+                epsilon_states: Arc::from(metadata.epsilon_states.into_boxed_slice()),
+                epsilon_offsets: Arc::from(metadata.epsilon_offsets.into_boxed_slice()),
+                epsilon_targets: Arc::from(metadata.epsilon_targets.into_boxed_slice()),
+            });
+            let mut dfa = DFA::new(1);
+            dfa.ensure_group_capacity(num_terminals as usize);
+            for (terminal, group) in group_id_to_u8set.into_iter().enumerate() {
+                dfa.set_group_u8set(terminal as u32, group);
+            }
+            if let Some(started) = metadata_started {
+                eprintln!(
+                    "[glrmask/profile][tokenizer_tkf3_decode] states={} transitions={} final_rows={} future_rows={} metadata_ms={:.3} total_ms={:.3}",
+                    state_count,
+                    transition_count,
+                    packed_metadata.finalizer_rows.len(),
+                    packed_metadata.future_rows.len(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+            return Ok(Tokenizer {
+                dfa,
+                num_terminals,
+                packed_runtime_transitions: Some(Arc::new(PackedRuntimeTransitions {
+                    byte_offsets: Arc::from(transition_offsets.into_boxed_slice()),
+                    bytes: transition_bytes,
+                    targets: transition_targets,
+                })),
+                packed_runtime_transition_segments: Arc::from([]),
+                compressed_transition_segments: Arc::from([]),
+                packed_runtime_metadata: Some(packed_metadata),
+                packed_runtime_metadata_segments: Arc::from([]),
+                packed_compressed_transition_segments: Arc::from([]),
+                virtual_unit_repeat: None,
+                virtual_repeat_intersections: Vec::new(),
+                virtual_residuals: Vec::new(),
+                exprs: None,
+                terminal_residual_coordinates: None,
+                singleton_epsilon_closures: OnceLock::new(),
+                matched_terminals_cache: OnceLock::new(),
+                initial_byte_frontiers: OnceLock::new(),
+                all_self_loop_bytes_cache: OnceLock::new(),
+                transition_count_cache: OnceLock::new(),
+                forced_minimized_state_count_cache: OnceLock::new(),
+                scalar_deterministic_dispatch_cache: OnceLock::new(),
+            });
+        }
 
         let metadata_wire_started = profile.then(std::time::Instant::now);
         let mut read_state_values =
@@ -11138,6 +11362,54 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn fast_wire_with_packed_metadata_roundtrips_execution() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(2);
+        dfa.add_transition(0, b'a', 1);
+        dfa.add_transition(0, b'b', 2);
+        dfa.add_transition(1, b'b', 3);
+        let mut final_a = BitSet::new(2);
+        final_a.set(0);
+        dfa.overwrite_state_metadata(1, final_a, BitSet::new(2));
+        let mut final_ab = BitSet::new(2);
+        final_ab.set(1);
+        dfa.overwrite_state_metadata(3, final_ab, BitSet::new(2));
+        dfa.recompute_possible_futures();
+
+        let original = Tokenizer::from_parts(dfa, 2, None);
+        let wire = artifact_serde::to_fast_bytes_with_packed_metadata(&original);
+        assert!(wire.starts_with(b"TKF3"));
+        let loaded = artifact_serde::from_fast_bytes(&wire).expect("TKF3 tokenizer roundtrip");
+        assert!(loaded.has_packed_runtime_transitions());
+        assert!(loaded.has_packed_runtime_metadata());
+        assert_eq!(loaded.num_states(), original.num_states());
+        assert_eq!(loaded.transition_count(), original.transition_count());
+
+        for input in [
+            b"".as_slice(),
+            b"a".as_slice(),
+            b"b".as_slice(),
+            b"ab".as_slice(),
+            b"abb".as_slice(),
+        ] {
+            for state in 0..original.num_states() {
+                assert_eq!(
+                    normalized_exec(&loaded, input, state),
+                    normalized_exec(&original, input, state),
+                    "TKF3 mismatch from state {state} on {input:?}",
+                );
+            }
+        }
+
+        let mut corrupted = wire;
+        corrupted[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(
+            artifact_serde::from_fast_bytes(&corrupted).is_err(),
+            "invalid TKF3 state count must fail closed",
+        );
     }
 
     #[test]

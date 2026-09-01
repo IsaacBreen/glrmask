@@ -900,32 +900,43 @@ impl FastTokenizerTransitions {
             return None;
         }
         let mut flat = vec![u16::MAX; num_states as usize * 256];
-        for state in 0..num_states {
-            let row_start = state as usize * 256;
-            for (byte, target) in tokenizer.transitions_from(state) {
+        let fill_row = |(state, row): (usize, &mut [u16])| {
+            for (byte, target) in tokenizer.transitions_from(state as u32) {
                 let mut encoded = u16::try_from(target)
                     .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
                 if !tokenizer.matched_terminals_slice(target).is_empty() {
                     encoded |= 0x8000;
                 }
-                flat[row_start + byte as usize] = encoded;
+                row[byte as usize] = encoded;
             }
+        };
+        if num_states >= 1_024 && rayon::current_num_threads() > 1 {
+            flat.par_chunks_mut(256).enumerate().for_each(fill_row);
+        } else {
+            flat.chunks_mut(256).enumerate().for_each(fill_row);
         }
         const NONE: u32 = u32::MAX;
         const MULTI: u32 = u32::MAX - 1;
-        let finalizer_code = (0..num_states)
-            .map(|state| match tokenizer.matched_terminals_slice(state) {
+        let state_metadata = |state: u32| {
+            let finalizers = tokenizer.matched_terminals_slice(state);
+            let code = match finalizers {
                 [] => NONE,
                 [terminal] => *terminal,
                 _ => MULTI,
-            })
-            .collect::<Vec<_>>();
-        let single_finalizer_continues = (0..num_states)
-            .map(|state| match tokenizer.matched_terminals_slice(state) {
+            };
+            let continues = match finalizers {
                 [terminal] if tokenizer.possible_future_terminals(state).contains(*terminal as usize) => 1u8,
                 _ => 0u8,
-            })
-            .collect::<Vec<_>>();
+            };
+            (code, continues)
+        };
+        let metadata = if num_states >= 1_024 && rayon::current_num_threads() > 1 {
+            (0..num_states).into_par_iter().map(state_metadata).collect::<Vec<_>>()
+        } else {
+            (0..num_states).map(state_metadata).collect::<Vec<_>>()
+        };
+        let (finalizer_code, single_finalizer_continues): (Vec<_>, Vec<_>) =
+            metadata.into_iter().unzip();
         Some(Self::Flat16 {
             transitions: Arc::from(flat),
             finalizer_code: Arc::from(finalizer_code),
