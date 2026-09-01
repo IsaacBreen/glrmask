@@ -3456,8 +3456,6 @@ impl<'a> ConstraintState<'a> {
             .any(|component| component.boundary.is_some())
         {
             let mut needs_direct_dynamic = false;
-            let mut direct_candidates = vec![0u32; self.constraint.mask_len()];
-            let mut direct_candidates_complete = true;
             for (component_index, component) in
                 overlay.segmented_parser_components.iter().enumerate()
             {
@@ -3488,42 +3486,6 @@ impl<'a> ConstraintState<'a> {
                             continue;
                         }
                         needs_direct_dynamic = true;
-                        if let Some(tokens) = shard.candidate_tokens.as_deref() {
-                            // The boundary-discovery set is the exact outer
-                            // domain of B for this start component: tokens in
-                            // A never need the composed walker, and tokens not
-                            // in this set cannot cross a linker boundary.
-                            // TriggerDetail is only an accelerator inside that
-                            // domain, so a missing trigger must not broaden B
-                            // to the whole composed mask (which is unsound for
-                            // scoped ignores).
-                            for &token in tokens {
-                                set_original_mask_bit(&mut direct_candidates, token);
-                            }
-                            continue;
-                        }
-                        let trigger = &component.constraint.boundary_trigger;
-                        match trigger {
-                            crate::runtime::BoundaryTrigger::Tokens(tokens) => {
-                                for &token in tokens.iter() {
-                                    set_original_mask_bit(&mut direct_candidates, token);
-                                }
-                            }
-                            crate::runtime::BoundaryTrigger::Exact(dwa) => {
-                                if !self.or_exact_component_trigger_candidates(
-                                    component,
-                                    shard,
-                                    &dwa,
-                                    &mut direct_candidates,
-                                ) {
-                                    direct_candidates_complete = false;
-                                }
-                            }
-                            crate::runtime::BoundaryTrigger::None => {
-                                // Required zero-build-cost conservative level.
-                                direct_candidates_complete = false;
-                            }
-                        }
                         true
                     }
                 };
@@ -3533,23 +3495,11 @@ impl<'a> ConstraintState<'a> {
             }
             if needs_direct_dynamic {
                 if self.constraint.uses_compact_segmented_parser_runtime() {
-                    self.or_recursive_dynamic_boundary_candidates_exact(
-                        buf,
-                        direct_candidates_complete.then_some(&direct_candidates),
-                    );
-                } else if direct_candidates_complete {
-                    // Legacy/materialized coordinate: retain the optimized
-                    // composed dynamic recognizer and restrict it to the
-                    // conservative union of component-owned candidates.
-                    super::dynamic_mask::or_mask_dynamic_candidate_additions(
-                        self,
-                        buf,
-                        &direct_candidates,
-                    );
+                    self.or_recursive_dynamic_boundary_full_walk_exact(buf);
                 } else {
-                    // Conservative `TriggerDetail::None` semantics: run the
-                    // exact dynamic recognizer once over the composed state.
-                    // It adds only language not already covered by retained A.
+                    // The unified strict walker evaluates the complete exact
+                    // composed language and ORs it with the already-computed A
+                    // baseline. No B-domain candidate discovery is needed.
                     super::dynamic_mask::or_mask_dynamic_additions(self, buf);
                 }
             }
@@ -3571,89 +3521,79 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Validate recursive DynamicDirect B through the same scoped runtime that
-    /// will commit the selected model token. This removes the final correctness
-    /// dependency on interpreting recursive tokenizer-state keys as states of
-    /// the transitional outer/composed tokenizer.
-    ///
-    /// When boundary discovery supplied an exact candidate domain, only those
-    /// tokens are probed. The `None` fallback is deliberately correctness-first:
-    /// enumerate real vocabulary/special-token IDs and probe every token not
-    /// already admitted by component A/static B.
-    fn or_recursive_dynamic_boundary_candidates_exact(
-        &self,
-        buf: &mut [u32],
-        candidates: Option<&[u32]>,
-    ) {
+    /// Complete-vocabulary strict walk for recursive DynamicDirect composition.
+    /// Recursive runtime state uses scoped leaf tokenizer/parser coordinates,
+    /// so it cannot be interpreted by the ordinary `(lexer state, parser GSS)`
+    /// full-walk backend. Instead walk every byte-backed vocabulary token
+    /// through the exact recursive commit prefix engine, sharing common
+    /// prefixes, and probe every special-token ID through the same exact commit
+    /// semantics. The result is the complete composed language and is simply
+    /// ORed with the already-computed static/component baseline.
+    fn or_recursive_dynamic_boundary_full_walk_exact(&self, buf: &mut [u32]) {
         let mut buffers = CommitBuffers::default();
-        let mut byte_candidates = Vec::<(u32, &[u8])>::new();
-        let mut pointwise_candidates = Vec::<u32>::new();
-        let mut collect = |token_id: u32| {
-            if original_mask_contains(buf, token_id) {
+        let vocab = self.constraint.dynamic_mask_vocab_for_runtime();
+        let trie = vocab.trie.as_ref();
+        let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
+        let mut state_stack = vec![None; stack_len.max(1)];
+        state_stack[0] = Some(self.state.clone());
+
+        let mark_node = |node: u32, live: bool, buf: &mut [u32]| {
+            if !live {
                 return;
             }
-            if self.constraint.has_special_token_id(token_id) {
-                pointwise_candidates.push(token_id);
-            } else if let Some(bytes) = self.constraint.token_bytes_for_id(token_id) {
-                byte_candidates.push((token_id, bytes));
-            } else {
-                // Malformed/stale trigger metadata cannot create a false
-                // positive. The exact pointwise probe will simply reject an
-                // unknown token id.
-                pointwise_candidates.push(token_id);
+            let Some(canonical) = trie.node(node).token_id else {
+                return;
+            };
+            let Some(token_ids) = vocab.token_ids(canonical) else {
+                return;
+            };
+            for &token_id in token_ids {
+                // A token id with explicit special-token semantics denotes the
+                // union of its byte and special routes. Probe it once through
+                // authoritative token commit below rather than accepting from
+                // only the byte route here.
+                if !self.constraint.has_special_token_id(token_id) {
+                    set_original_mask_bit(buf, token_id);
+                }
             }
         };
 
-        if let Some(candidates) = candidates {
-            for (word_index, &candidate_word) in candidates.iter().enumerate() {
-                let already = buf.get(word_index).copied().unwrap_or(0);
-                let mut remaining = candidate_word & !already;
-                while remaining != 0 {
-                    let bit = remaining.trailing_zeros();
-                    collect((word_index as u32) * 32 + bit);
-                    remaining &= remaining - 1;
-                }
-            }
-        } else {
-            // TriggerDetail::None is intentionally rare. Avoid probing sparse
-            // ID holes (especially with high-valued model special tokens)
-            // while still covering every token the public runtime can consume.
-            for (token_id, _) in self.constraint.token_bytes_iter() {
-                collect(token_id);
-            }
-            for special in &self.constraint.special_token_terminals {
-                if !self
-                    .constraint
-                    .is_late_grammar_placeholder_terminal(special.terminal_id)
-                {
-                    collect(special.token_id);
-                }
-            }
-        }
-
-        // Byte-backed candidates share the same exact commit state along their
-        // common prefixes. Evaluate that radix tree once instead of replaying
-        // the complete model-token spelling independently for every candidate.
-        let mut admitted = Vec::with_capacity(byte_candidates.len());
-        crate::runtime::commit::admissible_byte_token_candidates_from_state_exact(
-            self.constraint,
-            &self.state,
-            &mut buffers,
-            &mut byte_candidates,
-            &mut admitted,
-        );
-        for token_id in admitted {
-            set_original_mask_bit(buf, token_id);
+        mark_node(0, !self.state.is_empty(), buf);
+        for edge in trie.walk_edges() {
+            let parent_depth = edge.parent_depth as usize;
+            let child_depth = parent_depth + 1;
+            let child_state = state_stack[parent_depth].as_ref().and_then(|parent| {
+                crate::runtime::commit::advance_bytes_from_state_exact(
+                    self.constraint,
+                    parent,
+                    &mut buffers,
+                    trie.walk_edge_bytes(edge),
+                )
+            });
+            let live = child_state.is_some();
+            state_stack[child_depth] = child_state;
+            // Deliberately inspect every vocabulary endpoint even after a dead
+            // prefix; unlike the retired candidate walker there is no subtree
+            // jump based on liveness or boundary metadata.
+            mark_node(edge.child, live, buf);
         }
 
         // Special-token semantics can add a parser path independent of the
         // token's byte spelling, so those ids deliberately stay pointwise.
+        let mut pointwise_candidates = self
+            .constraint
+            .special_token_terminals
+            .iter()
+            .filter(|special| {
+                !self
+                    .constraint
+                    .is_late_grammar_placeholder_terminal(special.terminal_id)
+            })
+            .map(|special| special.token_id)
+            .collect::<Vec<_>>();
         pointwise_candidates.sort_unstable();
         pointwise_candidates.dedup();
         for token_id in pointwise_candidates {
-            if original_mask_contains(buf, token_id) {
-                continue;
-            }
             if crate::runtime::commit::token_admissible_from_state_exact(
                 self.constraint,
                 &self.state,

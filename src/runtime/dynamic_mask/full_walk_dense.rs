@@ -1112,9 +1112,6 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
 ) -> Result<bool, String> {
-    if root_branches.iter().any(|root| root.fresh_reset) {
-        return Ok(false);
-    }
     debug_assert!(trie.full_walk_max_parent_depth() < 255);
 
     let initial_lexer_state = lexer_scan_cache

@@ -38,10 +38,9 @@ use super::artifact::{
     DenseBufMaskRows, DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
-    DynamicBoundedObservationSets,
-    DynamicConfigSubtreeCertificate,
     DynamicFirstMatchPostRow,
     DynamicFirstMatchSecondRow,
+    DynamicBoundedObservationSets, DynamicConfigSubtreeCertificate,
     DynamicSelfLoopProjection,
     DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
@@ -6657,11 +6656,11 @@ impl Constraint {
             .set_terminal_observation_classes(classes);
     }
 
-    /// Build the exact single-terminal projected lexer quotients needed by the
-    /// dynamic mask accelerator without materializing the rest of the runtime
-    /// cache set. Serialized dynamic compilation uses this before emitting its
-    /// transfer artifact so the execution process can reuse the exact compile-
-    /// time proof coordinate rather than reconstructing it after transport.
+    /// Preserve the exact projected-terminal proof coordinate for future mask
+    /// acceleration work without making it part of ordinary runtime
+    /// finalization. This used to be eagerly prepared for the retired general
+    /// walker; callers should opt into the cost explicitly if/when the strict
+    /// full walker learns to consume it again.
     pub(crate) fn prepare_dynamic_projected_terminal_quotients_for_artifact(&mut self) {
         if self
             .dynamic_mask_vocab
@@ -6674,6 +6673,23 @@ impl Constraint {
             .build_shared_component_terminal_projected_quotients(256);
         self.dynamic_mask_vocab
             .set_projected_terminal_quotients(quotients);
+    }
+
+    /// Materialize the exact H16/H64 observation-stability certificates that
+    /// powered bounded subtree accelerators in the previous dynamic walker.
+    /// Kept as dormant infrastructure for later strict-full-walk P50 work;
+    /// ordinary runtime finalization deliberately does not call this today.
+    pub(crate) fn prepare_dynamic_bounded_observation_sets(&mut self) {
+        let observation_tokenizer = self
+            .dynamic_mask_vocab
+            .mask_projection_tokenizer()
+            .unwrap_or(&self.tokenizer);
+        let (bounded16, bounded64) =
+            observation_tokenizer.precompute_bounded_observation_safe_byte_sets();
+        self.dynamic_mask_vocab
+            .set_bounded_observation_sets(DynamicBoundedObservationSets::from_raw(
+                bounded16, bounded64,
+            ));
     }
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
@@ -6823,72 +6839,8 @@ impl Constraint {
         // exact mask-time coordinate selected above (or the source tokenizer
         // when no projection was needed).
         dynamic_mask_vocab.prepare_full_walk_fast_transitions(&self.tokenizer);
-        if !dynamic_mask_vocab.has_dense_mask_tokenizer_projection()
-            && !dynamic_mask_vocab.projected_terminal_quotients_prepared()
-        {
-            let quotients = self
-                .tokenizer
-                .build_shared_component_terminal_projected_quotients(256);
-            dynamic_mask_vocab.set_projected_terminal_quotients(quotients);
-        }
-        let has_virtual_residual_runtime = self.tokenizer.has_virtual_residual_runtime();
         let has_dense_mask_projection =
             dynamic_mask_vocab.has_dense_mask_tokenizer_projection();
-        let bounded_sets_started_at = profile.then(std::time::Instant::now);
-        let observation_tokenizer = dynamic_mask_vocab
-            .mask_projection_tokenizer()
-            .unwrap_or(&self.tokenizer);
-        let (bounded16, bounded64) = if has_virtual_residual_runtime || has_dense_mask_projection {
-            // General residual states are created lazily outside the physical
-            // DFA domain, and dynamic traversal deliberately does not consume
-            // physical observation certificates for this runtime family. A
-            // complete dense mask projection likewise takes the direct full
-            // walker before these older subtree accelerators, so preparing
-            // them over the expanded deterministic coordinate is redundant.
-            (
-                Vec::<U8Set>::new().into_boxed_slice(),
-                Vec::<U8Set>::new().into_boxed_slice(),
-            )
-        } else {
-            observation_tokenizer.precompute_bounded_observation_safe_byte_sets()
-        };
-        let bounded_sets = DynamicBoundedObservationSets::from_raw(bounded16, bounded64);
-        let bounded_state_count = bounded_sets.state_count();
-        let bounded_unique_set_count = bounded_sets.unique_set_count();
-        dynamic_mask_vocab.set_bounded_observation_sets(bounded_sets);
-        let bounded_sets_ms = bounded_sets_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let projection_started_at = profile.then(std::time::Instant::now);
-        let build_self_loop_projections = !has_virtual_residual_runtime
-            && !has_dense_mask_projection
-            && std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
-                .map(|value| {
-                    let value = value.trim();
-                    value.is_empty()
-                        || (value != "0"
-                            && !value.eq_ignore_ascii_case("false")
-                            && !value.eq_ignore_ascii_case("no")
-                            && !value.eq_ignore_ascii_case("off"))
-                })
-                .unwrap_or(true);
-        let (self_loop_projections, projection_alias_vocab) = if build_self_loop_projections {
-            self.build_dynamic_self_loop_projections(
-                &dynamic_mask_vocab,
-                &tokenizer_fast_transitions,
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let projection_ms = projection_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let projection_count = self_loop_projections.len();
-        let projection_alias_h64 = if !has_virtual_residual_runtime
-            && std::env::var_os("GLRMASK_DYNAMIC_FUTURE_ALIAS_H64").is_some()
-        {
-            self.build_dynamic_projection_alias_h64(&dynamic_mask_vocab, &self_loop_projections)
-        } else {
-            Vec::new()
-        };
         let terminal_observation_classes = if has_dense_mask_projection {
             dynamic_mask_vocab.terminal_observation_classes_cloned()
         } else if dynamic_mask_vocab.has_terminal_observation_classes() {
@@ -6896,9 +6848,6 @@ impl Constraint {
         } else {
             self.build_dynamic_terminal_observation_classes()
         };
-        dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
-        dynamic_mask_vocab.set_projection_alias_vocab(projection_alias_vocab);
-        dynamic_mask_vocab.set_projection_alias_h64(projection_alias_h64);
         dynamic_mask_vocab.set_terminal_observation_classes(terminal_observation_classes);
         let hot_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_dynamic_hot_frontiers = self
@@ -6912,16 +6861,11 @@ impl Constraint {
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} bounded_sets_ms={:.3} bounded_states={} bounded_unique_sets={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 tokenizer_fast_ms,
                 support_ms,
-                projection_ms,
-                projection_count,
-                bounded_sets_ms,
-                bounded_state_count,
-                bounded_unique_set_count,
                 hot_frontier_ms,
                 hot_frontier_count,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
