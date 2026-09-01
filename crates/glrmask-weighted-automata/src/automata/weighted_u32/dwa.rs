@@ -4706,12 +4706,10 @@ impl PackedRuntimeDwa {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let weights_started = profile.then(std::time::Instant::now);
-        let token_table_capacity = (weight_refs.len().saturating_mul(4))
-            .max(65_536)
-            .next_power_of_two();
-        let token_table_mask = token_table_capacity - 1;
-        let mut token_keys = vec![0usize; token_table_capacity];
-        let mut token_values = vec![0u32; token_table_capacity];
+        // Keep this identity interner growable: distinct token sets are not bounded by
+        // the number of weights, because one weight can reference many different sets.
+        let mut token_id_by_ptr = FxHashMap::<usize, u32>::default();
+        token_id_by_ptr.reserve(weight_refs.len().saturating_mul(4).max(65_536));
         let mut token_sets = Vec::<Arc<RangeSetBlaze<u32>>>::new();
         let mut geometries = vec![Vec::<(u32, u32)>::new()];
         let mut geometry_ids = FxHashMap::<Vec<(u32, u32)>, u32>::default();
@@ -4733,22 +4731,14 @@ impl PackedRuntimeDwa {
             for (range, tokens) in weight.raw_range_values() {
                 geometry.push((*range.start(), *range.end()));
                 let ptr = Arc::as_ptr(tokens) as usize;
-                let mut slot = ((ptr >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15usize))
-                    & token_table_mask;
-                let token_id = loop {
-                    let key = token_keys[slot];
-                    if key == ptr {
-                        break token_values[slot];
-                    }
-                    if key == 0 {
-                        let id = u32::try_from(token_sets.len())
-                            .map_err(|_| "packed runtime DWA has too many token sets".to_owned())?;
-                        token_keys[slot] = ptr;
-                        token_values[slot] = id;
-                        token_sets.push(Arc::clone(tokens));
-                        break id;
-                    }
-                    slot = (slot + 1) & token_table_mask;
+                let token_id = if let Some(&id) = token_id_by_ptr.get(&ptr) {
+                    id
+                } else {
+                    let id = u32::try_from(token_sets.len())
+                        .map_err(|_| "packed runtime DWA has too many token sets".to_owned())?;
+                    token_id_by_ptr.insert(ptr, id);
+                    token_sets.push(Arc::clone(tokens));
+                    id
                 };
                 weight_token_ids.push(token_id);
             }
@@ -8899,6 +8889,25 @@ mod cache_tests {
         let transition_ids = loaded.transition_token_set_ids();
         assert!(transition_ids.contains(&transition_id));
         assert!(!transition_ids.contains(&final_id));
+    }
+
+    #[test]
+    fn packed_runtime_supports_more_than_65536_distinct_token_sets() {
+        const TOKEN_SET_COUNT: u32 = 65_537;
+        let weight = Weight::from_per_tsid_token_sets((0..TOKEN_SET_COUNT).map(|tsid| {
+            (
+                tsid,
+                RangeSetBlaze::from_iter(std::iter::once(tsid..=tsid)),
+            )
+        }));
+        let mut dwa = DWA::new(TOKEN_SET_COUNT, TOKEN_SET_COUNT);
+        let accept = dwa.add_state();
+        dwa.add_transition(0, 7, accept, weight);
+        let dwa = dwa.share_exact_transition_rows_owned();
+
+        let packed = PackedRuntimeDwa::from_dwa(&dwa).unwrap();
+        assert_eq!(packed.token_set_count(), TOKEN_SET_COUNT as usize);
+        assert!(packed.transition(0, 7).is_some());
     }
 
     #[test]
