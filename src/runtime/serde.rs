@@ -8127,18 +8127,20 @@ mod tests {
     }
 
     #[test]
-    fn public_compile_primes_first_save_artifact() {
+    fn small_public_compile_defers_first_save_artifact() {
         let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::compile(
             crate::Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
             &vocab,
         )
         .unwrap();
-        let cached = constraint
-            .serialized_artifact_cache
-            .as_ref()
-            .expect("public static compile should prime the canonical artifact");
-        assert_eq!(constraint.save().as_slice(), cached.as_slice());
+        assert!(
+            constraint.serialized_artifact_cache.is_none(),
+            "ordinary small compiles should not prepay a complete save artifact",
+        );
+        let saved = constraint.save();
+        let loaded = Constraint::load(saved).unwrap();
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 
     #[test]

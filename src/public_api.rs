@@ -200,12 +200,12 @@ impl<'a> ConstraintSpec<'a> {
         if !constraint.late_grammar_slots.is_empty() {
             constraint.ensure_composition_reset_tokens_by_terminal();
         }
-        // Encoding a segmented dynamic leaf into the ordinary static artifact
-        // format must not turn compilation itself into an eager dynamic -> DWA
-        // materialization. Preserve the live hybrid and defer that work until
-        // an explicit `save()` call. Purely static results keep the cheap
-        // cached-save behavior.
-        if !retains_dynamic_component(&constraint) {
+        // Keep first-save latency bounded without charging serialization to
+        // every ordinary compile. Static virtual-residual constraints can carry
+        // very large runtime sections, while exceptionally large parser-template
+        // caches are expensive to encode on demand. Prime only those structural
+        // tails; ordinary constraints serialize when save() is actually called.
+        if should_prime_first_save_artifact(&constraint) {
             constraint.cache_serialized_artifact_for_save();
         }
         Ok(constraint)
@@ -933,6 +933,29 @@ fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
         .clone()
 }
 
+const FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD: usize = 100_000;
+
+fn should_prime_first_save_artifact(constraint: &RuntimeConstraint) -> bool {
+    if retains_dynamic_component(constraint) {
+        return false;
+    }
+    if constraint.tokenizer.has_virtual_residual_runtime() {
+        return true;
+    }
+    let mut template_states = 0usize;
+    for template in constraint
+        .composition_parser_templates_by_terminal
+        .iter()
+        .flatten()
+    {
+        template_states = template_states.saturating_add(template.states.len());
+        if template_states >= FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD {
+            return true;
+        }
+    }
+    false
+}
+
 fn retains_dynamic_component(constraint: &RuntimeConstraint) -> bool {
     if constraint.uses_dynamic_runtime() {
         return true;
@@ -1072,6 +1095,24 @@ where
 mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::Lexer;
+
+    #[test]
+    fn first_save_priming_threshold_tracks_large_composition_cache() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let mut constraint = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
+            &vocab,
+        )
+        .unwrap();
+        assert!(!should_prime_first_save_artifact(&constraint));
+
+        let mut large = crate::automata::unweighted_u32::dfa::DFA::new();
+        large
+            .states
+            .resize_with(FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD, Default::default);
+        constraint.composition_parser_templates_by_terminal = vec![Some(large)];
+        assert!(should_prime_first_save_artifact(&constraint));
+    }
 
     fn component_backend_flags(constraint: &RuntimeConstraint) -> Vec<bool> {
         constraint
