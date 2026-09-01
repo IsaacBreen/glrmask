@@ -33,6 +33,97 @@ use super::artifact::{
 use super::state::ConstraintState;
 
 type ParserStacks = LeveledGSS<u32, ()>;
+
+trait FullWalkTransitionTable {
+    type Cell: Copy;
+
+    fn cell(&self, state: u32, byte: u8) -> Self::Cell;
+
+    fn cell_is_dead(cell: Self::Cell) -> bool;
+
+    fn cell_has_finalizer(cell: Self::Cell) -> bool;
+
+    fn cell_target(cell: Self::Cell) -> u32;
+
+    #[inline(always)]
+    fn transition(&self, state: u32, byte: u8) -> u32 {
+        let cell = self.cell(state, byte);
+        if Self::cell_is_dead(cell) {
+            u32::MAX
+        } else {
+            Self::cell_target(cell)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FullWalkFlat16<'a> {
+    transitions: &'a [u16],
+}
+
+impl FullWalkTransitionTable for FullWalkFlat16<'_> {
+    type Cell = u16;
+
+    #[inline(always)]
+    fn cell(&self, state: u32, byte: u8) -> u16 {
+        unsafe {
+            *self
+                .transitions
+                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+        }
+    }
+
+    #[inline(always)]
+    fn cell_is_dead(cell: u16) -> bool {
+        cell == u16::MAX
+    }
+
+    #[inline(always)]
+    fn cell_has_finalizer(cell: u16) -> bool {
+        cell & 0x8000 != 0
+    }
+
+    #[inline(always)]
+    fn cell_target(cell: u16) -> u32 {
+        u32::from(cell & 0x7fff)
+    }
+
+}
+
+#[derive(Clone, Copy)]
+struct FullWalkFlat32<'a> {
+    transitions: &'a [u32],
+}
+
+impl FullWalkTransitionTable for FullWalkFlat32<'_> {
+    type Cell = u32;
+
+    #[inline(always)]
+    fn cell(&self, state: u32, byte: u8) -> u32 {
+        unsafe {
+            *self
+                .transitions
+                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+        }
+    }
+
+    #[inline(always)]
+    fn cell_is_dead(cell: u32) -> bool {
+        cell == u32::MAX
+    }
+
+    #[inline(always)]
+    fn cell_has_finalizer(cell: u32) -> bool {
+        cell & 0x8000_0000 != 0
+    }
+
+    #[inline(always)]
+    fn cell_target(cell: u32) -> u32 {
+        cell & 0x7fff_ffff
+    }
+
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum FullWalkPruneGuard {
     Passed,
@@ -47,7 +138,7 @@ impl FullWalkPruneGuard {
                 Self::Pending(
                     memories
                         .iter()
-                        .map(|&(state, terminal)| (vocab.mask_projection_state(state), terminal))
+                        .map(|&(state, terminal)| (vocab.mask_runtime_state(state), terminal))
                         .collect(),
                 )
             }
@@ -62,10 +153,10 @@ impl FullWalkPruneGuard {
     /// Advance the maximal-munch guard in the same deterministic lexer
     /// coordinate as the direct full walk. This is only exercised by the slow
     /// side branch; the dominant scalar path always has `Passed`.
-    fn advance(
+    fn advance<T: FullWalkTransitionTable>(
         &self,
         tokenizer: &Tokenizer,
-        flat16: &[u16],
+        transitions: &T,
         byte: u8,
     ) -> Option<Self> {
         let Self::Pending(memories) = self else {
@@ -73,7 +164,7 @@ impl FullWalkPruneGuard {
         };
         let mut next = SmallVec::<[(u32, TerminalID); 2]>::new();
         for &(lexer_state, terminal) in memories {
-            let target = full_walk_flat16_transition(flat16, lexer_state, byte);
+            let target = transitions.transition(lexer_state, byte);
             if target == u32::MAX {
                 continue;
             }
@@ -354,18 +445,6 @@ fn full_walk_push_unique(
     }
 }
 
-
-#[inline(always)]
-fn full_walk_flat16_transition_cell(flat: &[u16], state: u32, byte: u8) -> u16 {
-    unsafe { *flat.get_unchecked((state as usize).wrapping_mul(256) + byte as usize) }
-}
-
-#[inline(always)]
-fn full_walk_flat16_transition(flat: &[u16], state: u32, byte: u8) -> u32 {
-    let cell = full_walk_flat16_transition_cell(flat, state, byte);
-    if cell == u16::MAX { u32::MAX } else { u32::from(cell & 0x7fff) }
-}
-
 enum FullWalkScalarFinalizerOutcome {
     Scalar(FullWalkBranch),
     Two(FullWalkBranch, FullWalkBranch),
@@ -381,43 +460,44 @@ enum FullWalkTwoStepOutcome {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn full_walk_step_two(
+fn full_walk_step_two<T: FullWalkTransitionTable>(
     branches: ((u32, u32), (u32, u32)),
     byte: u8,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
-    flat16: &[u16],
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkTwoStepOutcome {
-    let first_cell = full_walk_flat16_transition_cell(flat16, branches.0.0, byte);
-    let second_cell = full_walk_flat16_transition_cell(flat16, branches.1.0, byte);
+    let first_cell = transitions.cell(branches.0.0, byte);
+    let second_cell = transitions.cell(branches.1.0, byte);
 
     // Dominant correlated-parser case: both deterministic lexer branches stay
     // alive without finalizing, while their exact parser identities differ.
     // Keep the correlation tuple intact and skip the general option/collapse
     // classification below.
     if branches.0.1 != branches.1.1
-        && first_cell != u16::MAX
-        && second_cell != u16::MAX
-        && (first_cell | second_cell) & 0x8000 == 0
+        && !T::cell_is_dead(first_cell)
+        && !T::cell_is_dead(second_cell)
+        && !T::cell_has_finalizer(first_cell)
+        && !T::cell_has_finalizer(second_cell)
     {
         return FullWalkTwoStepOutcome::Two(
-            (u32::from(first_cell), branches.0.1),
-            (u32::from(second_cell), branches.1.1),
+            (T::cell_target(first_cell), branches.0.1),
+            (T::cell_target(second_cell), branches.1.1),
         );
     }
 
     // Dominant two-branch case: neither branch finalizes. Keep the whole byte
     // step as two table loads plus a tiny collapse; only the rare finalizer
     // case below constructs general branch values.
-    if first_cell & 0x8000 == 0 && second_cell & 0x8000 == 0 {
-        let first = (first_cell != u16::MAX)
-            .then_some((u32::from(first_cell & 0x7fff), branches.0.1));
-        let second = (second_cell != u16::MAX)
-            .then_some((u32::from(second_cell & 0x7fff), branches.1.1));
+    if !T::cell_has_finalizer(first_cell) && !T::cell_has_finalizer(second_cell) {
+        let first = (!T::cell_is_dead(first_cell))
+            .then_some((T::cell_target(first_cell), branches.0.1));
+        let second = (!T::cell_is_dead(second_cell))
+            .then_some((T::cell_target(second_cell), branches.1.1));
         return match (first, second) {
             (None, None) => FullWalkTwoStepOutcome::Dead,
             (Some(branch), None) | (None, Some(branch)) => FullWalkTwoStepOutcome::One(branch),
@@ -426,7 +506,7 @@ fn full_walk_step_two(
         };
     }
 
-    full_walk_step_two_finalizing(
+    full_walk_step_two_finalizing::<T>(
         branches,
         first_cell,
         second_cell,
@@ -442,10 +522,10 @@ fn full_walk_step_two(
 #[allow(clippy::too_many_arguments)]
 #[cold]
 #[inline(never)]
-fn full_walk_step_two_finalizing(
+fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
     branches: ((u32, u32), (u32, u32)),
-    first_cell: u16,
-    second_cell: u16,
+    first_cell: T::Cell,
+    second_cell: T::Cell,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
@@ -457,11 +537,11 @@ fn full_walk_step_two_finalizing(
     for (cell, (source_lexer, parser_node)) in
         [(first_cell, branches.0), (second_cell, branches.1)]
     {
-        if cell == u16::MAX {
+        if T::cell_is_dead(cell) {
             continue;
         }
-        let target = u32::from(cell & 0x7fff);
-        if cell & 0x8000 == 0 {
+        let target = T::cell_target(cell);
+        if !T::cell_has_finalizer(cell) {
             full_walk_push_unique(
                 &mut next,
                 FullWalkBranch {
@@ -537,12 +617,10 @@ fn full_walk_scalar_finalizer(
                 parser_node: next_parser,
                 prune_guard: if Some(code) == constraint.ignore_terminal {
                     FullWalkPruneGuard::Passed
+                } else if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
+                    FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
                 } else {
-                    if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
-                        FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
-                    } else {
-                        FullWalkPruneGuard::Passed
-                    }
+                    FullWalkPruneGuard::Passed
                 },
             };
             let continuing = FullWalkBranch {
@@ -562,26 +640,23 @@ fn full_walk_scalar_finalizer(
         });
     }
 
-
     let mut next = FullWalkBranches::new();
-    if code == MULTI {
-        for &terminal in tokenizer.matched_terminals_slice(target) {
-            if let Some(next_parser) = parser_cache.advance(constraint, parser_node, terminal) {
-                full_walk_push_unique(
-                    &mut next,
-                    FullWalkBranch {
-                        lexer_state: initial_lexer_state,
-                        parser_node: next_parser,
-                        prune_guard: if Some(terminal) == constraint.ignore_terminal {
-                            FullWalkPruneGuard::Passed
-                        } else {
-                            FullWalkPruneGuard::Passed.remember_terminal_match(
-                                tokenizer, target, terminal,
-                            )
-                        },
+    for &terminal in tokenizer.matched_terminals_slice(target) {
+        if let Some(next_parser) = parser_cache.advance(constraint, parser_node, terminal) {
+            full_walk_push_unique(
+                &mut next,
+                FullWalkBranch {
+                    lexer_state: initial_lexer_state,
+                    parser_node: next_parser,
+                    prune_guard: if Some(terminal) == constraint.ignore_terminal {
+                        FullWalkPruneGuard::Passed
+                    } else {
+                        FullWalkPruneGuard::Passed.remember_terminal_match(
+                            tokenizer, target, terminal,
+                        )
                     },
-                );
-            }
+                },
+            );
         }
     }
 
@@ -610,14 +685,121 @@ fn full_walk_scalar_finalizer(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn full_walk_scalar_finalizer_hot_single(
+    target: u32,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+    tokenizer: &Tokenizer,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+) -> FullWalkScalarFinalizerOutcome {
+    const MULTI: u32 = u32::MAX - 1;
+    let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    if code == MULTI {
+        return full_walk_scalar_finalizer(
+            target,
+            parser_node,
+            initial_lexer_state,
+            finalizer_code,
+            single_finalizer_continues,
+            tokenizer,
+            parser_cache,
+            constraint,
+        );
+    }
+    if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
+        let reset = FullWalkBranch {
+            lexer_state: initial_lexer_state,
+            parser_node: next_parser,
+            prune_guard: if Some(code) == constraint.ignore_terminal {
+                FullWalkPruneGuard::Passed
+            } else if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
+                FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
+            } else {
+                FullWalkPruneGuard::Passed
+            },
+        };
+        let continuing = FullWalkBranch {
+            lexer_state: target,
+            parser_node,
+            prune_guard: FullWalkPruneGuard::Passed,
+        };
+        if reset == continuing {
+            FullWalkScalarFinalizerOutcome::Scalar(continuing)
+        } else {
+            FullWalkScalarFinalizerOutcome::Two(reset, continuing)
+        }
+    } else {
+        FullWalkScalarFinalizerOutcome::Scalar(FullWalkBranch {
+            lexer_state: target,
+            parser_node,
+            prune_guard: FullWalkPruneGuard::Passed,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn full_walk_try_apply_plain_single_finalizer(
+    target: u32,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    two_distinct_marker: u32,
+    scalar_lexer: &mut u32,
+    scalar_parser: &mut u32,
+    current_two: &mut ((u32, u32), (u32, u32)),
+) -> bool {
+    const MULTI: u32 = u32::MAX - 1;
+    let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    if code == MULTI
+        || (Some(code) != constraint.ignore_terminal
+            && unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0)
+    {
+        return false;
+    }
+
+    let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) else {
+        *scalar_lexer = target;
+        *scalar_parser = parser_node;
+        return true;
+    };
+
+    if next_parser != parser_node {
+        *scalar_lexer = two_distinct_marker;
+        *current_two = (
+            (initial_lexer_state, next_parser),
+            (target, parser_node),
+        );
+        return true;
+    }
+
+    // If both exact coordinates are identical there is only one branch. When
+    // the parser is the same but lexer coordinates differ, leave the rare case
+    // to the existing exact union logic below.
+    if initial_lexer_state == target {
+        *scalar_lexer = target;
+        *scalar_parser = parser_node;
+        return true;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn full_walk_step_many(
+fn full_walk_step_many<T: FullWalkTransitionTable>(
     branches: &FullWalkBranches,
     byte: u8,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     tokenizer: &Tokenizer,
-    flat16: &[u16],
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkBranches {
@@ -625,10 +807,13 @@ fn full_walk_step_many(
     const MULTI: u32 = u32::MAX - 1;
     let mut next = FullWalkBranches::new();
     for branch in branches {
-        let Some(advanced_guard) = branch.prune_guard.advance(tokenizer, flat16, byte) else {
+        let Some(advanced_guard) = branch
+            .prune_guard
+            .advance(tokenizer, transitions, byte)
+        else {
             continue;
         };
-        let target = full_walk_flat16_transition(flat16, branch.lexer_state, byte);
+        let target = transitions.transition(branch.lexer_state, byte);
         if target == u32::MAX {
             continue;
         }
@@ -814,13 +999,13 @@ fn full_walk_many_state_from_branches(branches: FullWalkBranches) -> FullWalkMan
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-fn full_walk_step_many_state(
+fn full_walk_step_many_state<T: FullWalkTransitionTable>(
     state: &FullWalkManyState,
     byte: u8,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     tokenizer: &Tokenizer,
-    flat16: &[u16],
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkManyState {
@@ -832,7 +1017,7 @@ fn full_walk_step_many_state(
                 initial_lexer_state,
                 finalizer_code,
                 tokenizer,
-                flat16,
+                transitions,
                 parser_cache,
                 constraint,
             ),
@@ -841,14 +1026,20 @@ fn full_walk_step_many_state(
             lexers,
             parser_node,
         } => {
-            let first = full_walk_flat16_transition_cell(flat16, lexers.0, byte);
-            let second = full_walk_flat16_transition_cell(flat16, lexers.1, byte);
-            let third = full_walk_flat16_transition_cell(flat16, lexers.2, byte);
-            if first & 0x8000 == 0 && second & 0x8000 == 0 && third & 0x8000 == 0 {
+            let first = transitions.cell(lexers.0, byte);
+            let second = transitions.cell(lexers.1, byte);
+            let third = transitions.cell(lexers.2, byte);
+            if !T::cell_has_finalizer(first)
+                && !T::cell_has_finalizer(second)
+                && !T::cell_has_finalizer(third)
+                && !T::cell_is_dead(first)
+                && !T::cell_is_dead(second)
+                && !T::cell_is_dead(third)
+            {
                 let next = (
-                    u32::from(first & 0x7fff),
-                    u32::from(second & 0x7fff),
-                    u32::from(third & 0x7fff),
+                    T::cell_target(first),
+                    T::cell_target(second),
+                    T::cell_target(third),
                 );
                 if next.0 != next.1 && next.0 != next.2 && next.1 != next.2 {
                     return FullWalkManyState::ThreeSameParser {
@@ -872,7 +1063,7 @@ fn full_walk_step_many_state(
                 initial_lexer_state,
                 finalizer_code,
                 tokenizer,
-                flat16,
+                transitions,
                 parser_cache,
                 constraint,
             ))
@@ -905,29 +1096,100 @@ fn try_full_walk_mask(
     if lexer_scan_cache.tokenizer().has_any_virtual_runtime() {
         return Ok(false);
     }
-    if trie.subtree_max_total_byte_len(0) >= 255 {
+    // The inline DFS stacks are indexed by radix-edge depth, not consumed byte
+    // length. Long compressed vocabulary edges are therefore safe; only a
+    // genuinely >255-edge-deep trie needs the general walker for now.
+    if trie.full_walk_max_parent_depth() >= 255 {
         return Ok(false);
     }
     if root_branches.is_empty() {
         return Ok(false);
     }
-    // Special-token terminals are not represented by vocabulary bytes. Keep
-    // those grammars on the existing exact path until the direct full walker
-    // has an explicit non-byte terminal lane.
-    if !state.constraint.special_token_terminals.is_empty() {
-        return Ok(false);
-    }
-    let fast_transitions = if lexer_scan_cache.use_constraint_fast_transitions {
-        Some(&state.constraint.tokenizer_fast_transitions)
-    } else {
-        vocab.mask_projection_fast_transitions()
-    };
-    let (flat16, finalizer_code, single_finalizer_continues) = match fast_transitions {
-        Some(FastTokenizerTransitions::Flat16 { transitions, finalizer_code, single_finalizer_continues }) => {
-            (transitions.as_ref(), finalizer_code.as_ref(), single_finalizer_continues.as_ref())
+    match vocab.mask_projection_fast_transitions() {
+        Some(FastTokenizerTransitions::Flat16 {
+            transitions,
+            finalizer_code,
+            single_finalizer_continues,
+        }) => {
+            let table = FullWalkFlat16 {
+                transitions: transitions.as_ref(),
+            };
+            if root_branches.len() == 1 {
+                try_full_walk_mask_with_table::<_, true>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    table,
+                    finalizer_code.as_ref(),
+                    single_finalizer_continues.as_ref(),
+                )
+            } else {
+                try_full_walk_mask_with_table::<_, false>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    table,
+                    finalizer_code.as_ref(),
+                    single_finalizer_continues.as_ref(),
+                )
+            }
         }
-        Some(_) | None => return Ok(false),
-    };
+        Some(FastTokenizerTransitions::Flat32 {
+            transitions,
+            finalizer_code,
+            single_finalizer_continues,
+        }) => {
+            let table = FullWalkFlat32 {
+                transitions: transitions.as_ref(),
+            };
+            if root_branches.len() == 1 {
+                try_full_walk_mask_with_table::<_, true>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    table,
+                    finalizer_code.as_ref(),
+                    single_finalizer_continues.as_ref(),
+                )
+            } else {
+                try_full_walk_mask_with_table::<_, false>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    table,
+                    finalizer_code.as_ref(),
+                    single_finalizer_continues.as_ref(),
+                )
+            }
+        }
+        Some(_) | None => Ok(false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_ROOT: bool>(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_branches: &DynamicBranches,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    buf: &mut [u32],
+    transitions: T,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+) -> Result<bool, String> {
     if root_branches.iter().any(|root| !root.pending_terminals.is_empty()) {
         return Ok(false);
     }
@@ -936,7 +1198,7 @@ fn try_full_walk_mask(
     }
 
     let initial_lexer_state = lexer_scan_cache
-        .config_for_raw_start(vocab.mask_projection_state(state.constraint.tokenizer.initial_state()))?;
+        .config_for_raw_start(vocab.mask_runtime_state(state.constraint.tokenizer.initial_state()))?;
 
     let all_words = vocab.all_original_token_words();
     let copy_len = buf.len().min(all_words.len());
@@ -949,7 +1211,8 @@ fn try_full_walk_mask(
     );
     // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
     // lexer-state coordinate so the common DFS path needs no separate kind
-    // load/store. Real lexer states are < 0x8000 in this Flat16 lane.
+    // load/store. Full-walk lexer states are bounded far below these u32
+    // sentinels by the dense-transition memory budget.
     const FULL_WALK_LEXER_TWO_DISTINCT: u32 = u32::MAX - 3;
     const FULL_WALK_LEXER_TWO: u32 = u32::MAX - 2;
     const FULL_WALK_LEXER_MULTI: u32 = u32::MAX - 1;
@@ -957,9 +1220,11 @@ fn try_full_walk_mask(
     let mut stack_lexer = [FULL_WALK_LEXER_DEAD; 256];
     let mut stack_parser = [0u32; 256];
     let mut stack_two = [((0u32, 0u32), (0u32, 0u32)); 256];
-    let mut stack_many: [FullWalkManyState; 256] = std::array::from_fn(|_| {
-        FullWalkManyState::Branches(FullWalkBranches::new())
-    });
+    // Multi-branch stack states are uncommon, and `FullWalkManyState` embeds a
+    // SmallVec. Do not eagerly construct/drop 256 empty SmallVec values on
+    // every complete vocabulary walk; materialize only the depths that
+    // actually carry a multi state.
+    let mut stack_many: [Option<FullWalkManyState>; 256] = std::array::from_fn(|_| None);
     let mut pair_union_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
     let mut triple_union_cache = FxHashMap::<(u32, u32, u32), Option<u32>>::default();
     if root_branches.len() == 1 && root_branches[0].initial_prune_guard.is_passed() {
@@ -1006,13 +1271,13 @@ fn try_full_walk_mask(
             stack_lexer[0] = lexer_state;
             stack_parser[0] = parser_node;
         } else {
-            stack_many[0] = full_walk_many_state_from_branches(roots);
+            stack_many[0] = Some(full_walk_many_state_from_branches(roots));
         }
     }
 
     let walk_ops = trie.full_walk_ops();
-    let token_nodes = trie.full_walk_token_nodes();
-    let mut token_node_index = 0usize;
+    let token_markers = vocab.full_walk_token_markers();
+    let mut token_marker_index = 0usize;
     let tokenizer = lexer_scan_cache.tokenizer();
 
     let mut scalar_lexer = FULL_WALK_LEXER_DEAD;
@@ -1029,7 +1294,12 @@ fn try_full_walk_mask(
             } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                 current_two = unsafe { *stack_two.get_unchecked(parent_depth) };
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                current_many.clone_from(unsafe { stack_many.get_unchecked(parent_depth) });
+                current_many.clone_from(unsafe {
+                    stack_many
+                        .get_unchecked(parent_depth)
+                        .as_ref()
+                        .unwrap_unchecked()
+                });
             }
         }
 
@@ -1037,24 +1307,53 @@ fn try_full_walk_mask(
             let byte = op.byte();
             if scalar_lexer == FULL_WALK_LEXER_DEAD {
             } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
-                let cell = full_walk_flat16_transition_cell(flat16, scalar_lexer, byte);
-                if cell == u16::MAX {
+                let cell = transitions.cell(scalar_lexer, byte);
+                if T::cell_is_dead(cell) {
                     scalar_lexer = FULL_WALK_LEXER_DEAD;
                 } else {
-                    let target = u32::from(cell & 0x7fff);
-                    if cell & 0x8000 == 0 {
+                    let target = T::cell_target(cell);
+                    if !T::cell_has_finalizer(cell) {
                         scalar_lexer = target;
                     } else {
-                        match full_walk_scalar_finalizer(
-                            target,
-                            scalar_parser,
-                            initial_lexer_state,
-                            finalizer_code,
-            single_finalizer_continues,
-                            tokenizer,
-                            &mut parser_cache,
-                            state.constraint,
-                        ) {
+                        let direct_applied = HOT_SINGLE_ROOT
+                            && full_walk_try_apply_plain_single_finalizer(
+                                target,
+                                scalar_parser,
+                                initial_lexer_state,
+                                finalizer_code,
+                                single_finalizer_continues,
+                                &mut parser_cache,
+                                state.constraint,
+                                FULL_WALK_LEXER_TWO_DISTINCT,
+                                &mut scalar_lexer,
+                                &mut scalar_parser,
+                                &mut current_two,
+                            );
+                        if !direct_applied {
+                            let outcome = if HOT_SINGLE_ROOT {
+                                full_walk_scalar_finalizer_hot_single(
+                                    target,
+                                    scalar_parser,
+                                    initial_lexer_state,
+                                    finalizer_code,
+                                    single_finalizer_continues,
+                                    tokenizer,
+                                    &mut parser_cache,
+                                    state.constraint,
+                                )
+                            } else {
+                                full_walk_scalar_finalizer(
+                                    target,
+                                    scalar_parser,
+                                    initial_lexer_state,
+                                    finalizer_code,
+                                    single_finalizer_continues,
+                                    tokenizer,
+                                    &mut parser_cache,
+                                    state.constraint,
+                                )
+                            };
+                            match outcome {
                             FullWalkScalarFinalizerOutcome::Scalar(branch) => {
                                 scalar_lexer = branch.lexer_state;
                                 scalar_parser = branch.parser_node;
@@ -1133,27 +1432,29 @@ fn try_full_walk_mask(
                                     current_many = full_walk_many_state_from_branches(next);
                                 }
                             }
+                            }
                         }
                     }
                 }
             } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT {
-                let first_cell = full_walk_flat16_transition_cell(flat16, current_two.0.0, byte);
-                let second_cell = full_walk_flat16_transition_cell(flat16, current_two.1.0, byte);
-                if first_cell != u16::MAX
-                    && second_cell != u16::MAX
-                    && (first_cell | second_cell) & 0x8000 == 0
+                let first_cell = transitions.cell(current_two.0.0, byte);
+                let second_cell = transitions.cell(current_two.1.0, byte);
+                if !T::cell_is_dead(first_cell)
+                    && !T::cell_is_dead(second_cell)
+                    && !T::cell_has_finalizer(first_cell)
+                    && !T::cell_has_finalizer(second_cell)
                 {
-                    current_two.0.0 = u32::from(first_cell);
-                    current_two.1.0 = u32::from(second_cell);
+                    current_two.0.0 = T::cell_target(first_cell);
+                    current_two.1.0 = T::cell_target(second_cell);
                 } else {
-                    match full_walk_step_two(
+                    match full_walk_step_two::<T>(
                         current_two,
                         byte,
                         initial_lexer_state,
                         finalizer_code,
                         single_finalizer_continues,
                         tokenizer,
-                        flat16,
+                        &transitions,
                         &mut parser_cache,
                         state.constraint,
                     ) {
@@ -1201,14 +1502,14 @@ fn try_full_walk_mask(
                     }
                 }
             } else if scalar_lexer == FULL_WALK_LEXER_TWO {
-                match full_walk_step_two(
+                match full_walk_step_two::<T>(
                         current_two,
                         byte,
                         initial_lexer_state,
                         finalizer_code,
                         single_finalizer_continues,
                         tokenizer,
-                        flat16,
+                        &transitions,
                         &mut parser_cache,
                         state.constraint,
                     ) {
@@ -1261,7 +1562,7 @@ fn try_full_walk_mask(
                     initial_lexer_state,
                     finalizer_code,
                     tokenizer,
-                    flat16,
+                    &transitions,
                     &mut parser_cache,
                     state.constraint,
                 );
@@ -1338,8 +1639,8 @@ fn try_full_walk_mask(
 
         if op.ends_edge() {
             if op.child_is_token() {
-                let token_node = unsafe { *token_nodes.get_unchecked(token_node_index) };
-                token_node_index += 1;
+                let token_marker = unsafe { *token_markers.get_unchecked(token_marker_index) };
+                token_marker_index += 1;
                 let allowed = if scalar_lexer == FULL_WALK_LEXER_DEAD {
                     false
                 } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
@@ -1401,7 +1702,7 @@ fn try_full_walk_mask(
                     false
                 };
                 if !allowed {
-                    clear_dynamic_token_marker(vocab, vocab.node_token_marker(token_node), buf);
+                    clear_dynamic_token_marker(vocab, token_marker, buf);
                 }
             }
 
@@ -1413,13 +1714,22 @@ fn try_full_walk_mask(
                 } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                     *stack_two.get_unchecked_mut(parent_depth + 1) = current_two;
                 } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                    stack_many
-                        .get_unchecked_mut(parent_depth + 1)
-                        .clone_from(&current_many);
+                    let slot = stack_many.get_unchecked_mut(parent_depth + 1);
+                    if let Some(existing) = slot.as_mut() {
+                        existing.clone_from(&current_many);
+                    } else {
+                        *slot = Some(current_many.clone());
+                    }
                 }
             }
         }
     }
+    // Ordinary vocabulary bytes and exact special-token-ID paths are a union.
+    // The strict walk above computes the byte-language contribution for every
+    // model token; the existing special-token routine then ORs in token-ID-only
+    // paths. This also handles a token ID that is valid through both routes.
+    update_special_token_mask(state, buf);
+    state.clear_late_grammar_placeholder_mask(buf);
     Ok(true)
 }
 
@@ -2379,7 +2689,7 @@ impl<'a> DynamicNfaScanCache<'a> {
         deadline: Option<Instant>,
     ) -> Self {
         let tokenizer = vocab
-            .mask_projection_tokenizer()
+            .mask_runtime_tokenizer()
             .unwrap_or(&constraint.tokenizer);
         let use_constraint_fast_transitions = std::ptr::eq(tokenizer, &constraint.tokenizer);
         Self::new_with_tokenizer(
@@ -2828,7 +3138,7 @@ impl InitialPruneGuard {
     ) -> Self {
         let mut memories = Vec::new();
         for (&lexer_state, terminals) in terminals_disallowed.iter() {
-            let lexer_state = vocab.mask_projection_state(lexer_state);
+            let lexer_state = vocab.mask_runtime_state(lexer_state);
             for &terminal in terminals.iter() {
                 memories.push((lexer_state, terminal));
             }
@@ -5527,7 +5837,7 @@ fn fill_mask_dynamic_impl(
         buf.fill(0);
     }
     let exact_initial_tsid = state.constraint.tokenizer.initial_state();
-    let initial_tsid = vocab.mask_projection_state(exact_initial_tsid);
+    let initial_tsid = vocab.mask_runtime_state(exact_initial_tsid);
     let mut root_branches = DynamicBranches::new();
     let mut sole_root_source_state = None::<u32>;
     let mut raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
@@ -5593,7 +5903,7 @@ fn fill_mask_dynamic_impl(
                 seed_entries.push((states[0], projected, gss));
             } else {
                 for raw_state in states {
-                    seed_entries.push((raw_state, vocab.mask_projection_state(raw_state), gss));
+                    seed_entries.push((raw_state, vocab.mask_runtime_state(raw_state), gss));
                 }
             }
         }
@@ -5601,7 +5911,7 @@ fn fill_mask_dynamic_impl(
         for (&tokenizer_state, gss) in &state.state {
             seed_entries.push((
                 tokenizer_state,
-                vocab.mask_projection_state(tokenizer_state),
+                vocab.mask_runtime_state(tokenizer_state),
                 gss,
             ));
         }
@@ -5841,6 +6151,7 @@ fn fill_mask_dynamic_impl(
             };
     }
 
+    let full_walk_started_at = profile.then(std::time::Instant::now);
     let full_walk_used = if !additive_static_baseline && candidate_mask.is_none() {
         try_full_walk_mask(
             state,
@@ -5854,6 +6165,21 @@ fn fill_mask_dynamic_impl(
         false
     };
     if full_walk_used {
+        if profile {
+            let full_walk_layout = match vocab.mask_projection_fast_transitions() {
+                Some(FastTokenizerTransitions::Flat16 { .. }) => "flat16",
+                Some(FastTokenizerTransitions::Flat32 { .. }) => "flat32",
+                _ => "unknown",
+            };
+            eprintln!(
+                "[glrmask/profile][dynamic_mask] generation={} full_walk=true layout={} tokenizer_states={} full_walk_ms={:.3}",
+                state.generation,
+                full_walk_layout,
+                lexer_scan_cache.tokenizer().num_states(),
+                full_walk_started_at
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            );
+        }
         if let Some(cache_key) = cache_key.as_ref() {
             vocab.cache_mask(cache_key.clone(), buf);
         }
@@ -7003,6 +7329,33 @@ nt start ::= A C | B D;
         state.commit_token(1).unwrap();
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
+    }
+
+    #[test]
+    fn dynamic_full_walk_accepts_long_compressed_vocab_edge() {
+        let vocab = Vocab::new(vec![
+            (0, vec![b'a'; 300]),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+        ]);
+        let grammar = r#"
+start start;
+t A ::= 'a'+;
+nt start ::= A;
+"#;
+        let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mask_vocab = dynamic.inner.dynamic_mask_vocab_for_runtime();
+        assert!(mask_vocab.trie.subtree_max_total_byte_len(0) >= 300);
+        assert!(
+            mask_vocab.trie.full_walk_max_parent_depth() < 255,
+            "a long compressed edge must not consume one DFS stack slot per byte",
+        );
+        assert!(mask_vocab.mask_projection_fast_transitions().is_some());
+
+        let mask = dynamic.start().mask();
+        assert!(token_allowed(&mask, 0));
+        assert!(token_allowed(&mask, 1));
+        assert!(!token_allowed(&mask, 2));
     }
 
     #[test]
