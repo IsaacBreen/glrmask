@@ -282,20 +282,24 @@ impl FullWalkParserCache {
         )
     }
 
-    #[inline]
+    #[inline(always)]
     fn advance(
         &mut self,
         constraint: &Constraint,
         node: u32,
         terminal: TerminalID,
     ) -> Option<u32> {
+        let node_index = node as usize;
+        let (last_child_terminal, last_child_target) = unsafe {
+            let cached_node = self.nodes.get_unchecked(node_index);
+            (cached_node.last_child_terminal, cached_node.last_child_target)
+        };
+        if last_child_terminal == terminal {
+            let cached = last_child_target;
+            return (cached != Self::DEAD).then_some(cached);
+        }
         if Some(terminal) == constraint.ignore_terminal {
             return Some(node);
-        }
-        let node_index = node as usize;
-        if self.nodes[node_index].last_child_terminal == terminal {
-            let cached = self.nodes[node_index].last_child_target;
-            return (cached != Self::DEAD).then_some(cached);
         }
         if let Some(&(_, cached)) = self.nodes[node_index]
             .children
