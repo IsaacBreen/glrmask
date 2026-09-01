@@ -2226,12 +2226,6 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
-    if constraint.packed_token_bytes.is_none() {
-        constraint.packed_token_bytes = Some(std::sync::Arc::new(
-            crate::runtime::PackedTokenBytes::from_runtime_entries(&constraint.token_bytes)
-            .expect("compiler-produced token bytes should form a valid indexed runtime vocabulary"),
-        ));
-    }
     constraint.rebuild_runtime_caches();
     constraint
 }
@@ -4885,6 +4879,7 @@ fn compile_prepared_with_profile_and_table_construction(
 
         let finalize_started_at = Instant::now();
         let token_bytes = vocab.entries_arc();
+        let packed_token_bytes = Some(super::compile::vocab_packed_token_bytes(vocab));
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let ignore_expr = prepared_grammar
             .ignore_terminal
@@ -4993,7 +4988,7 @@ fn compile_prepared_with_profile_and_table_construction(
             template_dfas_by_terminal,
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
-            packed_token_bytes: None,
+            packed_token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
