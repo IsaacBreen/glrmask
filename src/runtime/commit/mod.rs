@@ -1384,6 +1384,24 @@ pub(crate) fn token_admissible_from_state_exact(
     commit_token_impl(constraint, &mut probe, buffers, token_id).is_ok()
 }
 
+/// Advance an exact runtime state through one byte prefix without committing a
+/// model-token boundary. Recursive composition masking retains the returned
+/// frontier at vocabulary-trie nodes and reuses it for all child edges.
+pub(crate) fn advance_bytes_from_state_exact(
+    constraint: &Constraint,
+    source: &ParserStateMap,
+    buffers: &mut CommitBuffers,
+    bytes: &[u8],
+) -> Option<ParserStateMap> {
+    if bytes.is_empty() {
+        return Some(source.clone());
+    }
+    buffers.reset_all();
+    let mut next = source.clone();
+    commit_bytes_impl(constraint, &mut next, bytes, buffers).ok()?;
+    (!next.is_empty()).then_some(next)
+}
+
 /// Exact batched admission for ordinary byte-backed model tokens.
 ///
 /// Candidates are sorted by byte string and evaluated as a radix tree.  Each
@@ -1409,21 +1427,6 @@ pub(crate) fn admissible_byte_token_candidates_from_state_exact<'a>(
         left.cmp(right).then_with(|| left_id.cmp(right_id))
     });
 
-    fn advance_segment(
-        constraint: &Constraint,
-        source: &ParserStateMap,
-        buffers: &mut CommitBuffers,
-        bytes: &[u8],
-    ) -> Option<ParserStateMap> {
-        if bytes.is_empty() {
-            return Some(source.clone());
-        }
-        buffers.reset_all();
-        let mut next = source.clone();
-        commit_bytes_impl(constraint, &mut next, bytes, buffers).ok()?;
-        (!next.is_empty()).then_some(next)
-    }
-
     fn walk<'a>(
         constraint: &Constraint,
         source: &ParserStateMap,
@@ -1442,7 +1445,7 @@ pub(crate) fn admissible_byte_token_candidates_from_state_exact<'a>(
             common_end += 1;
         }
 
-        let Some(frontier) = advance_segment(
+        let Some(frontier) = advance_bytes_from_state_exact(
             constraint,
             source,
             buffers,
