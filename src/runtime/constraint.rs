@@ -13099,7 +13099,7 @@ impl<'a> ConstraintState<'a> {
     /// parser DWA.
     pub(crate) fn fill_mask_dynamic(&self, buf: &mut [u32]) {
         if self.constraint.uses_compact_segmented_parser_runtime() {
-            self.fill_recursive_mask_by_exact_commits(buf);
+            self.fill_recursive_mask_by_exact_full_walk(buf);
             return;
         }
         super::dynamic_mask::fill_mask_dynamic(self, buf);

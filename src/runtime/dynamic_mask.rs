@@ -3151,9 +3151,9 @@ pub(crate) fn fill_mask_dynamic_bounded(
 }
 
 
-/// OR only the dynamic language contribution not already covered by a static
-/// mask. The baseline is used solely as a trie-pruning certificate; all
-/// surviving leaves are still validated by the ordinary exact dynamic walker.
+/// OR the complete exact dynamic language into an existing static/component
+/// baseline. The baseline does not prune traversal: the strict walker still
+/// visits the complete vocabulary and combines the exact result afterward.
 pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
     assert!(
         !state.constraint.uses_compact_segmented_parser_runtime(),
@@ -3163,10 +3163,9 @@ pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [
         .expect("unbounded additive dynamic mask generation cannot time out");
 }
 
-/// Validate only the requested additive candidates with the exact dynamic
-/// recognizer. `buf` is both the static baseline and the output; additions not
-/// present in `candidate_mask` are discarded even if an internal subtree
-/// certificate marked them while validating a candidate-bearing subtree.
+/// OR only requested candidate bits from the complete exact dynamic result
+/// into `buf`. `candidate_mask` filters the result after traversal; it never
+/// restricts which vocabulary prefixes/endpoints the strict walker visits.
 pub(crate) fn or_mask_dynamic_candidate_additions(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
