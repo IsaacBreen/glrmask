@@ -1613,22 +1613,29 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
 ) -> ManyToOneIdMap {
     use rayon::prelude::*;
 
+    let profile = compile_profile_enabled();
+    let setup_started = Instant::now();
     let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
     let token_path_disallowed_follows = Arc::new(ignore_transparent_disallowed_follows(
         disallowed_follows,
         ignore_terminal,
     ));
     let shared_classify_cache = classify::SharedClassifyCache::new();
+    let prewarm_started = Instant::now();
     classify::prewarm_shared_classify_cache(
         tokenizer,
         tokenizer.num_terminals(),
         &shared_classify_cache,
     );
+    let prewarm_ms = prewarm_started.elapsed().as_secs_f64() * 1000.0;
+    let sub_vocab_started = Instant::now();
     let sub_vocabs = build_char_type_sub_vocabs(
         vocab,
         partition_local_synthesis_plan.is_some(),
         automatic_p2_overflow_threshold(tokenizer.num_states()),
     );
+    let sub_vocab_ms = sub_vocab_started.elapsed().as_secs_f64() * 1000.0;
+    let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
 
     let build_one = |idx: usize, sub_vocab: &Vocab| {
         if sub_vocab.is_empty() {
@@ -1649,6 +1656,7 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
         )
     };
 
+    let branches_started = Instant::now();
     let partition_maps: Vec<Option<ManyToOneIdMap>> = if macro_parallelism_disabled() {
         sub_vocabs
             .iter()
@@ -1662,10 +1670,12 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
             .map(|(idx, sub_vocab)| build_one(idx, sub_vocab))
             .collect()
     };
+    let branches_ms = branches_started.elapsed().as_secs_f64() * 1000.0;
 
     // Character-type vocabulary partitions are disjoint by original token ID,
     // so concatenating their local class domains is already the exact common
     // refinement. Avoid a global hash join over every token and every branch.
+    let merge_started = Instant::now();
     let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
     let mut class_offset = 0u32;
     for (sub_vocab, map) in sub_vocabs.iter().zip(partition_maps.iter()) {
@@ -1687,10 +1697,19 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
             class_offset += 1;
         }
     }
-    ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+    let result = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
         original_to_internal,
         class_offset,
-    )
+    );
+    let merge_ms = merge_started.elapsed().as_secs_f64() * 1000.0;
+    if profile {
+        eprintln!(
+            "[glrmask/profile][vocab_partition_outer] setup_ms={setup_ms:.3} prewarm_ms={prewarm_ms:.3} sub_vocab_ms={sub_vocab_ms:.3} branches_ms={branches_ms:.3} merge_ms={merge_ms:.3} sub_vocabs={} classes={}",
+            sub_vocabs.len(),
+            result.num_internal_ids(),
+        );
+    }
+    result
 }
 
 pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
