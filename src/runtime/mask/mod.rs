@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_exact_commit_mask_fallback_ignores_outer_table_and_tokenizer() {
+    fn recursive_exact_full_walk_ignores_outer_table_and_tokenizer() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
             (1, b"a".to_vec()),
@@ -1194,7 +1194,7 @@ mod tests {
                 expected.commit_token(token).unwrap();
             }
             let mut fallback = vec![0u32; poisoned.mask_len()];
-            actual.fill_recursive_mask_by_exact_commits(&mut fallback);
+            actual.fill_recursive_mask_by_exact_full_walk(&mut fallback);
             let expected_mask = expected.mask();
             assert_eq!(fallback, expected_mask);
 
@@ -3495,7 +3495,7 @@ impl<'a> ConstraintState<'a> {
             }
             if needs_direct_dynamic {
                 if self.constraint.uses_compact_segmented_parser_runtime() {
-                    self.or_recursive_dynamic_boundary_full_walk_exact(buf);
+                    self.or_recursive_dynamic_full_walk_exact(buf);
                 } else {
                     // The unified strict walker evaluates the complete exact
                     // composed language and ORs it with the already-computed A
@@ -3521,15 +3521,15 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Complete-vocabulary strict walk for recursive DynamicDirect composition.
+    /// Complete-vocabulary strict walk for recursive composition.
     /// Recursive runtime state uses scoped leaf tokenizer/parser coordinates,
     /// so it cannot be interpreted by the ordinary `(lexer state, parser GSS)`
-    /// full-walk backend. Instead walk every byte-backed vocabulary token
-    /// through the exact recursive commit prefix engine, sharing common
-    /// prefixes, and probe every special-token ID through the same exact commit
-    /// semantics. The result is the complete composed language and is simply
-    /// ORed with the already-computed static/component baseline.
-    fn or_recursive_dynamic_boundary_full_walk_exact(&self, buf: &mut [u32]) {
+    /// full-walk backend. Walk every byte-backed vocabulary token through the
+    /// exact recursive commit prefix engine while sharing common prefixes;
+    /// special-token IDs remain pointwise because their semantics need not be
+    /// determined by their byte spelling. The result is the complete exact
+    /// recursive language and can either fill a mask or be ORed into a baseline.
+    fn or_recursive_dynamic_full_walk_exact(&self, buf: &mut [u32]) {
         let mut buffers = CommitBuffers::default();
         let vocab = self.constraint.dynamic_mask_vocab_for_runtime();
         let trie = vocab.trie.as_ref();
@@ -3605,43 +3605,14 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    /// Correctness fallback for a recursive authoritative A/B state whose GSS
-    /// shape cannot be projected by the bounded segmented-mask evaluator.
-    /// Probe every consumable model token through the same scoped commit engine
-    /// used by the live runtime. This is intentionally rare/slow, but unlike
-    /// the historical unified-dynamic fallback it has no dependency on the
-    /// transitional outer composed tokenizer or GLR table.
-    pub(crate) fn fill_recursive_mask_by_exact_commits(&self, buf: &mut [u32]) {
+    /// Fill the complete exact recursive mask through the same shared-prefix
+    /// vocabulary walk used by DynamicDirect boundary additions. This is the
+    /// authoritative fallback when the bounded segmented evaluator cannot
+    /// project a recursive GSS; it stays entirely in scoped provider
+    /// coordinates and does not use the transitional outer tokenizer/table.
+    pub(crate) fn fill_recursive_mask_by_exact_full_walk(&self, buf: &mut [u32]) {
         buf.fill(0);
-        let mut buffers = CommitBuffers::default();
-        let mut token_ids = self
-            .constraint
-            .token_bytes_iter()
-            .map(|(token_id, _)| token_id)
-            .collect::<Vec<_>>();
-        token_ids.extend(
-            self.constraint
-                .special_token_terminals
-                .iter()
-                .filter(|special| {
-                    !self
-                        .constraint
-                        .is_late_grammar_placeholder_terminal(special.terminal_id)
-                })
-                .map(|special| special.token_id),
-        );
-        token_ids.sort_unstable();
-        token_ids.dedup();
-        for token_id in token_ids {
-            if crate::runtime::commit::token_admissible_from_state_exact(
-                self.constraint,
-                &self.state,
-                &mut buffers,
-                token_id,
-            ) {
-                set_original_mask_bit(buf, token_id);
-            }
-        }
+        self.or_recursive_dynamic_full_walk_exact(buf);
     }
 
     fn or_segmented_boundary_terminal_trie_mask(
@@ -6740,15 +6711,32 @@ impl<'a> ConstraintState<'a> {
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
-        let authoritative_segmented = self
-            .constraint
-            .static_dynamic_overlay
-            .as_ref()
-            .is_some_and(|overlay| {
-                overlay.segmented_mask_authoritative
-                    && (!overlay.segmented_parser_components.is_empty()
-                        || overlay.segmented_static_baseline)
-            });
+        let overlay = self.constraint.static_dynamic_overlay.as_ref();
+        let authoritative_segmented = overlay.is_some_and(|overlay| {
+            overlay.segmented_mask_authoritative
+                && (!overlay.segmented_parser_components.is_empty()
+                    || overlay.segmented_static_baseline)
+        });
+        let authoritative_dynamic_direct = overlay.is_some_and(|overlay| {
+            overlay.segmented_mask_authoritative
+                && !overlay.segmented_parser_components.is_empty()
+                && overlay.segmented_parser_components.iter().all(|component| {
+                    component.boundary.as_ref().is_some_and(|shard| {
+                        matches!(
+                            shard.backend,
+                            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                        )
+                    })
+                })
+        });
+        if authoritative_dynamic_direct {
+            // DynamicDirect already computes the complete exact composed
+            // language. Do not first construct component A masks only to OR the
+            // same full language over them again.
+            self.fill_mask_dynamic(mask);
+            self.clear_late_grammar_placeholder_mask(mask);
+            return;
+        }
         if authoritative_segmented {
             if self.try_fill_mask_segmented_single_paths(mask) {
                 self.update_control_special_token_mask(mask);
@@ -6757,11 +6745,12 @@ impl<'a> ConstraintState<'a> {
             }
             // Segmented projection is the common authoritative A/B path. A
             // recursive exceptional GSS must stay in the same scoped provider
-            // coordinate: exact-commit real model tokens rather than escaping
-            // to the transitional outer parser/tokenizer. Historical
-            // materialized segmented runtimes retain their old fallback.
+            // coordinate, so fall back to the complete-vocabulary recursive
+            // radix walk rather than escaping to the transitional outer
+            // parser/tokenizer. Historical materialized segmented runtimes use
+            // the ordinary strict dynamic full walker.
             if self.constraint.uses_compact_segmented_parser_runtime() {
-                self.fill_recursive_mask_by_exact_commits(mask);
+                self.fill_recursive_mask_by_exact_full_walk(mask);
             } else {
                 self.fill_mask_dynamic(mask);
             }

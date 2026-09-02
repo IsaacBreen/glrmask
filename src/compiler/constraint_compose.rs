@@ -19920,8 +19920,10 @@ pub(crate) fn compose_constraints_owned_parent(
 
 /// Boundary policy for the exact segmented composition runtime. Component
 /// masks remain independently backed by their source constraints in both
-/// modes. `StaticParserDwa` compiles crossing shards; `Dynamic` stores no B
-/// artifact and lets component triggers gate the exact composed walker.
+/// modes. `StaticParserDwa` compiles crossing shards; `Dynamic` stores no
+/// required B artifact and uses the exact composed full-vocabulary walker.
+/// Boundary triggers remain available as dormant acceleration metadata rather
+/// than restricting correctness traversal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SegmentedBoundaryBackend {
     StaticParserDwa,

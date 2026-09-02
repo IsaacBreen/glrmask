@@ -5800,11 +5800,13 @@ pub(crate) struct SegmentedBoundaryShard {
 #[derive(Debug, Clone)]
 pub(crate) enum SegmentedBoundaryShardBackend {
     StaticParser(Arc<SegmentedBoundaryParser>),
+    /// Preserved terminal-language/NWA crossing accelerator used by historical
+    /// artifacts and the explicit experimental runtime path. Normal current
+    /// dynamic composition publishes `DynamicDirect` instead.
     DynamicTerminalTrie(Arc<SegmentedBoundaryTerminalTrie>),
-    /// Exact dynamic crossing fallback with no composition-specific boundary
-    /// automaton. Recursive runtimes validate the component-owned candidate
-    /// token domain by exact scoped commits; legacy/materialized runtimes keep
-    /// using the ordinary composed dynamic recognizer.
+    /// Exact dynamic crossing with no required composition-specific B artifact.
+    /// Materialized runtimes use the strict dynamic full-vocabulary walker;
+    /// recursive runtimes use the scoped shared-prefix vocabulary walker.
     DynamicDirect,
 }
 
