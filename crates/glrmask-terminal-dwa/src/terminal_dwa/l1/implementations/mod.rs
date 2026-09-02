@@ -1,4 +1,4 @@
-//! Swappable L1 builders and exact cross-checking machinery.
+﻿//! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
 //! - `GLRMASK_L1_IMPLEMENTATION=projected|quotient|auto|scalar|trie|bulk|dense|frontier`
@@ -14,7 +14,7 @@ mod common;
 mod dense;
 mod frontier;
 mod projected;
-pub(super) use projected::prepare_finite_vocab_projection;
+pub(crate) use projected::{build_projected_vocab_equivalence, prepare_finite_vocab_projection};
 mod quotient;
 pub mod scalar;
 mod support;
@@ -171,3 +171,4 @@ pub fn build_from_env(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     // contains shape selectors that silently route p1/p2 elsewhere.
     build_with_plan(input, Plan::from_env(input.partition_label))
 }
+

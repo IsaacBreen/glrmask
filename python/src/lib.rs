@@ -613,6 +613,72 @@ impl PyVocab {
 }
 
 // ---------------------------------------------------------------------------
+// PyVocabPartition
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "VocabPartition")]
+#[derive(Clone)]
+pub struct PyVocabPartition {
+    inner: glrmask::VocabPartition,
+}
+
+impl PyVocabPartition {
+    fn from_result(result: glrmask::Result<glrmask::VocabPartition>) -> PyResult<Self> {
+        result
+            .map(|inner| Self { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+#[pymethods]
+impl PyVocabPartition {
+    #[staticmethod]
+    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_result(glrmask::VocabPartition::compile(
+            glrmask::Grammar::json_schema(schema),
+            &vocab.inner,
+        ))
+    }
+
+    #[staticmethod]
+    fn from_ebnf(source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_result(glrmask::VocabPartition::compile(
+            glrmask::Grammar::ebnf(source),
+            &vocab.inner,
+        ))
+    }
+
+    #[staticmethod]
+    fn from_lark(source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_result(glrmask::VocabPartition::compile(
+            glrmask::Grammar::lark(source),
+            &vocab.inner,
+        ))
+    }
+
+    #[staticmethod]
+    fn from_glrm(source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_result(glrmask::VocabPartition::compile(
+            glrmask::Grammar::glrm(source),
+            &vocab.inner,
+        ))
+    }
+
+    #[getter]
+    fn num_classes(&self) -> usize { self.inner.num_classes() }
+
+    fn class_of(&self, token_id: u32) -> Option<u32> { self.inner.class_of(token_id) }
+
+    fn representative(&self, class_id: u32) -> Option<u32> {
+        self.inner.representative(class_id)
+    }
+
+    fn classes(&self) -> Vec<Vec<u32>> { self.inner.classes().to_vec() }
+
+    fn original_to_class(&self) -> Vec<u32> { self.inner.original_to_class().to_vec() }
+}
+
+// ---------------------------------------------------------------------------
 // PyConstraint
 // ---------------------------------------------------------------------------
 
@@ -1663,6 +1729,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
+    m.add_class::<PyVocabPartition>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
     m.add_class::<PyDynamicConstraint>()?;
@@ -1672,6 +1739,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Vocab",
+            "VocabPartition",
             "Constraint",
             "ConstraintState",
             "DynamicConstraint",

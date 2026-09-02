@@ -1,0 +1,28 @@
+﻿{
+  "source_result": "CFA results/cfa_full_report_20260901_140008 glrmask_native.build_seconds",
+  "successful_builds": 8825,
+  "percentiles_ms": {"p50": 11.100125266239047, "p90": 73.91691696830094, "p99": 264.8147512227297},
+  "bands": {
+    "P50": [
+      {"problem_id":"jsb/data/Glaiveai2K---calculate_area_85a67a7e","rank":4413,"cfa_static_ms":11.100125266239047},
+      {"problem_id":"jsb/data/Kubernetes---kb_216_Normalized","rank":4412,"cfa_static_ms":11.099792085587978},
+      {"problem_id":"jsb/data/Github_medium---o25939","rank":4415,"cfa_static_ms":11.100957868620753},
+      {"problem_id":"jsb/data/JsonSchemaStore---unist","rank":4410,"cfa_static_ms":11.097833048552275},
+      {"problem_id":"jsb/data/WashingtonPost---wp_80_Normalized","rank":4416,"cfa_static_ms":11.100959032773972}
+    ],
+    "P90": [
+      {"problem_id":"jsb/data/Github_trivial---o48162","rank":7943,"cfa_static_ms":73.91691696830094},
+      {"problem_id":"jsb/data/Kubernetes---kb_496_Normalized","rank":7941,"cfa_static_ms":73.746666777879},
+      {"problem_id":"jsb/data/Snowplow---sp_40_Normalized","rank":7940,"cfa_static_ms":73.7189999781549},
+      {"problem_id":"jsb/data/Github_hard---o19353","rank":7939,"cfa_static_ms":73.70950095355511},
+      {"problem_id":"jsb/data/Github_ultra---o6353","rank":7947,"cfa_static_ms":74.91120812483132}
+    ],
+    "P99": [
+      {"problem_id":"jsb/data/Kubernetes---kb_1008_Normalized","rank":8736,"cfa_static_ms":264.7707499563694},
+      {"problem_id":"jsb/data/Github_medium---o9944","rank":8741,"cfa_static_ms":266.719332896173},
+      {"problem_id":"jsb/data/Github_ultra---o57878","rank":8742,"cfa_static_ms":268.2684580795467},
+      {"problem_id":"jsb/data/Github_hard---o77403","rank":8746,"cfa_static_ms":274.54741625115275},
+      {"problem_id":"jsb/data/JsonSchemaStore---transcend-yml-schema-v4","rank":8752,"cfa_static_ms":289.50591711327434}
+    ]
+  }
+}

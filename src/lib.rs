@@ -92,7 +92,7 @@ pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{BoundaryTriggerDetail, Constraint, ConstraintState};
 pub use glrmask_vocab::Vocab;
 pub use error::{Error, Result};
-pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar};
+pub use public_api::{ConstraintSpec, ConstraintSpecBuilder, Grammar, VocabPartition};
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -228,6 +228,8 @@ pub mod __private {
         fn num_tokenizer_states(&self) -> usize;
         fn compute_forced_minimized_tokenizer_state_count(&self) -> usize;
         fn max_original_token_id(&self) -> Option<u32>;
+        fn final_internal_token_count(&self) -> usize;
+        fn final_original_token_map(&self) -> Vec<u32>;
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity>;
         fn table_has_ambiguity(&self) -> bool;
         fn terminal_display_names(&self) -> &[String];
@@ -450,6 +452,14 @@ pub mod __private {
 
         fn max_original_token_id(&self) -> Option<u32> {
             Constraint::max_original_token_id(self)
+        }
+
+        fn final_internal_token_count(&self) -> usize {
+            self.internal_token_count()
+        }
+
+        fn final_original_token_map(&self) -> Vec<u32> {
+            self.original_token_map().to_vec()
         }
 
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {

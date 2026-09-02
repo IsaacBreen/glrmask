@@ -344,7 +344,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
         .ok()
 });
 
-fn run_with_compile_thread_pool<F, R>(f: F) -> R
+pub(crate) fn run_with_compile_thread_pool<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send,
     R: Send,
@@ -2141,6 +2141,113 @@ fn prepare_structural_tokenizer_pair(
             full_to_synthesized,
         },
     ))
+}
+
+
+/// Build exactly the tokenizer coordinate needed by the vocabulary-partition
+/// analysis, stopping before terminal/parser automata are constructed.
+pub(crate) fn build_vocab_partition_compile_context(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> (
+    Tokenizer,
+    Option<ManyToOneIdMap>,
+    Option<Arc<crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan>>,
+) {
+    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
+        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
+    );
+    let plan = plan_synthetic_tokenizer(grammar, vocab);
+    let partition_local_synthesis_plan = plan.as_ref().map(|plan| {
+        Arc::new(
+            crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
+                expressions: Arc::from(plan.synthesized_expressions.clone().into_boxed_slice()),
+                partition_ids: Arc::from(plan.partition_ids.clone().into_boxed_slice()),
+                residual_isolation_classes: Arc::from(
+                    plan.residual_isolation_classes.clone().into_boxed_slice(),
+                ),
+                protected_terminal_ids: Arc::from(
+                    plan.changed_terminal_ids.clone().into_boxed_slice(),
+                ),
+                labels: Arc::from(
+                    grammar
+                        .terminals
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                adaptive: lexer_adaptive_enabled(),
+                global_max_token_len: vocab
+                    .entries_map()
+                    .values()
+                    .map(Vec::len)
+                    .max()
+                    .unwrap_or(0),
+            },
+        )
+    });
+
+    if static_virtual_residual_candidate(grammar, plan.is_none()) {
+        if let Ok(Some(exact)) = build_dynamic_virtual_tokenizer(grammar, true) {
+            if let Some((mask, _projections)) = exact
+                .virtual_residuals_mask_tokenizer_with_vocab(vocab.max_token_byte_len(), Some(vocab))
+            {
+                return (mask, None, partition_local_synthesis_plan);
+            }
+        }
+    }
+
+    let select_pair = |plan: &SyntheticTokenizerPlan| {
+        prepare_structural_tokenizer_pair(grammar, plan, vocab, None, true).and_then(
+            |(synthesized, full, certified)| {
+                structural_state_reduction_is_profitable(
+                    full.num_states(),
+                    synthesized.num_states() as usize,
+                )
+                .then_some((synthesized, full, certified))
+            },
+        )
+    };
+
+    if let Some(plan) = plan.as_ref() {
+        if let Some((synthesized, deferred_full, certified)) = select_pair(plan) {
+            let direct_token_quotient_compile =
+                env_flag_enabled_by_default("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE");
+            if direct_token_quotient_compile {
+                return (synthesized, None, partition_local_synthesis_plan);
+            }
+
+            let synthesized_states = synthesized.num_states() as usize;
+            let mut quotient_id_by_synthesized = vec![u32::MAX; synthesized_states];
+            let mut quotient_states = 0u32;
+            let mut full_to_quotient = certified.full_to_synthesized;
+            for state in &mut full_to_quotient {
+                let slot = quotient_id_by_synthesized
+                    .get_mut(*state as usize)
+                    .expect("certified synthesized state is in range");
+                if *slot == u32::MAX {
+                    *slot = quotient_states;
+                    quotient_states += 1;
+                }
+                *state = *slot;
+            }
+            let initial_state_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                full_to_quotient,
+                quotient_states,
+            );
+            return (
+                deferred_full.finish(),
+                Some(initial_state_map),
+                partition_local_synthesis_plan,
+            );
+        }
+    }
+
+    let mut tokenizer = build_ordinary_compile_tokenizer(grammar, None);
+    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    (tokenizer, None, partition_local_synthesis_plan)
 }
 
 fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {

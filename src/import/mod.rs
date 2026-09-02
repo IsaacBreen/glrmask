@@ -179,6 +179,31 @@ fn lower_factored_named_grammar(
     Ok(grammar?)
 }
 
+
+pub(crate) fn lower_source_for_vocab_partition(
+    source_kind: &str,
+    source: &str,
+) -> crate::Result<GrammarDef> {
+    match source_kind {
+        "ebnf" => lower_factored_named_grammar(source, parse_ebnf_to_named, None, &[]),
+        "lark" => lower_factored_named_grammar(source, parse_lark_to_named, None, &[]),
+        "json_schema" => lower_factored_named_grammar(
+            source,
+            parse_json_schema_to_named,
+            Some(prepare_json_schema_named),
+            &[],
+        ),
+        "glrm" => {
+            let named = parse_glrm_with_external_terminal_bindings(source, &[])?;
+            let factored = factor_named_grammar(named);
+            Ok(ast::lower(&factored)?)
+        }
+        other => Err(crate::Error::GrammarParse(format!(
+            "unsupported grammar source kind {other:?}"
+        ))),
+    }
+}
+
 fn compile_from_source(
     source: &str,
     vocab: &crate::Vocab,

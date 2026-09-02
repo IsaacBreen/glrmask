@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use crate::automata::lexer::{DFA, Lexer};
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
@@ -4552,6 +4553,630 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
     }
     Some(finished.artifact)
 }
+
+
+#[derive(Clone, Debug)]
+pub struct L1VocabEquivResult {
+    pub vocab_map: ManyToOneIdMap,
+    pub state_classes: usize,
+    pub token_classes: usize,
+    pub prep_ms: f64,
+    pub prep_cpu_ms: f64,
+    pub scan_ms: f64,
+    pub scan_cpu_ms: f64,
+    pub compact_ms: f64,
+    pub compact_cpu_ms: f64,
+    pub total_wall_ms: f64,
+    pub total_cpu_ms: f64,
+    pub run_sweep_events: usize,
+    pub referenced_runs: usize,
+    pub kernel: &'static str,
+}
+
+pub fn build_projected_vocab_equivalence(input: BuildInput<'_>) -> Option<L1VocabEquivResult> {
+    let active_terminals = input.active_terminals.iter().filter(|&&active| active).count();
+    // Vocab-only equivalence has a different cost model from Static: there is
+    // no downstream DWA construction to amortize an expensive finite scan.
+    // Wide L1 families benefit from the finite trie scan; narrow families can
+    // be much cheaper through residual projection even when Static's adaptive
+    // residual path would switch back to finite for downstream reasons.
+    if input.subset_parent_order.is_none()
+        && input.partition_label == "p1"
+        && active_terminals <= 64
+        && input.vocab.len() >= 10_000
+    {
+        return build_binary_vocab_only_forced(input);
+    }
+    if input.subset_parent_order.is_none()
+        && input.partition_label == "p2"
+        && active_terminals <= 500
+        && input.vocab.len() >= 50_000
+    {
+        // Static's residual->finite handoff is tuned for the downstream DWA
+        // build. For vocab-only equivalence, medium-width p2 families can be
+        // dramatically cheaper as residual projections even when they cross
+        // that handoff. Use the existing cheap root-membership probe to keep
+        // genuinely explosive residuals on the finite path.
+        const VOCAB_ONLY_P2_RESIDUAL_MAX_ROOT_MEMBERSHIPS: usize = 20_000;
+        let (memberships, exceeded) = projected_root_membership_precheck(
+            input,
+            VOCAB_ONLY_P2_RESIDUAL_MAX_ROOT_MEMBERSHIPS,
+        );
+        if !exceeded && memberships <= VOCAB_ONLY_P2_RESIDUAL_MAX_ROOT_MEMBERSHIPS {
+            return build_binary_vocab_only_forced(input);
+        }
+    }
+    if input.subset_parent_order.is_none() && input.partition_label == "p4" {
+        return if active_terminals >= 120 {
+            build_finite_projected_vocab_only(input, false)
+        } else {
+            build_binary_vocab_only_forced(input)
+        };
+    }
+    let kernel = projected_kernel(input);
+    match kernel {
+        ProjectedKernel::Finite => build_finite_projected_vocab_only(input, false),
+        ProjectedKernel::Residual => build_binary_vocab_only(input),
+    }
+}
+
+fn build_finite_projected_vocab_only(
+    input: BuildInput<'_>,
+    bypass_adaptive_budget: bool,
+) -> Option<L1VocabEquivResult> {
+    if input.vocab.is_empty() {
+        return None;
+    }
+    let total_timer = Instant::now();
+    let prep_timer = Instant::now();
+    let (finite_vocab, _finite_vocab_cache_hit, _prep_ms) = finite_vocab_projection(input);
+    let prep_wall_ms = prep_timer.elapsed().as_secs_f64() * 1000.0;
+    let prep_cpu_ms = 0.0;
+    let aliases = finite_vocab.aliases.as_slice();
+    let tokens = finite_vocab.tokens.as_slice();
+    let trie = &finite_vocab.trie;
+
+    let scan_timer = Instant::now();
+    let mut scanner = Scanner::new(input);
+    let mut starts = BTreeMap::<u32, Vec<u32>>::new();
+    if let Some(state_map) = input.initial_state_map {
+        for (class, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            if representative == u32::MAX {
+                continue;
+            }
+            let start = scanner.start(representative);
+            starts
+                .entry(start)
+                .or_default()
+                .extend_from_slice(&state_map.internal_to_originals[class]);
+        }
+        for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
+            if class == u32::MAX {
+                starts
+                    .entry(scanner.start(raw as u32))
+                    .or_default()
+                    .push(raw as u32);
+            }
+        }
+    } else {
+        for raw in 0..input.tokenizer.num_states() {
+            starts.entry(scanner.start(raw)).or_default().push(raw);
+        }
+    }
+
+    let root_token = trie.nodes[0].token;
+    let root_children = trie.nodes[0].children.clone();
+    let mut state_class = vec![0u32; input.tokenizer.num_states() as usize];
+    let mut class_fingerprints = Vec::<Vec<u32>>::new();
+    let mut class_ids = FxHashMap::<Vec<u32>, u32>::default();
+
+    let mut profiles = vec![Arc::<[ProfileRun]>::from([])];
+    let mut profile_ids = FxHashMap::<Arc<[ProfileRun]>, u32>::default();
+    let mut bucket_cache = FxHashMap::<(u32, u32), u32>::default();
+    let mut cache_hits = 0usize;
+    let mut pair_visits = 0usize;
+    let mut uniform_subtrees = 0usize;
+    let mut uniform_tokens = 0usize;
+    let self_loops = input.tokenizer.all_self_loop_bytes();
+    let adaptive_budget = !bypass_adaptive_budget
+        && input.subset_parent_order.is_none()
+        && matches!(input.partition_label, "p1" | "p2");
+    let (profile_run_budget, pair_visit_budget) = if adaptive_budget {
+        let (runs_env, pairs_env, default_pairs) = if input.partition_label == "p1" {
+            ("GLRMASK_P1_FINITE_MAX_PROFILE_RUNS", "GLRMASK_P1_FINITE_MAX_PAIR_VISITS", 50_000)
+        } else {
+            ("GLRMASK_P2_FINITE_MAX_PROFILE_RUNS", "GLRMASK_P2_FINITE_MAX_PAIR_VISITS", 150_000)
+        };
+        (
+            std::env::var(runs_env).ok().and_then(|v| v.parse().ok()).unwrap_or(2_048),
+            std::env::var(pairs_env).ok().and_then(|v| v.parse().ok()).unwrap_or(default_pairs),
+        )
+    } else {
+        (usize::MAX, usize::MAX)
+    };
+    let mut profile_run_count = 0usize;
+
+    let parallel_profile_override = std::env::var("GLRMASK_L1_FINITE_PARALLEL_PROFILES").ok();
+    let force_parallel_profiles = parallel_profile_override
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("force"));
+    let parallel_profiles_enabled = parallel_profile_override
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty()
+                || value.eq_ignore_ascii_case("force")
+                || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let parallel_profiles = (bypass_adaptive_budget || force_parallel_profiles)
+        && input.subset_parent_order.is_none()
+        && input.vocab.len() >= 10_000
+        && input.tokenizer.num_states() >= 10_000
+        && rayon::current_num_threads() > 1
+        && parallel_profiles_enabled;
+
+    if parallel_profiles {
+        let frozen = FrozenFiniteScanner::build(&mut scanner, input);
+        let mut key_ids = FxHashMap::<(u32, u32), usize>::default();
+        let mut keys = Vec::<(u32, u32)>::new();
+        let mut work = Vec::<(u32, Vec<u32>, Vec<usize>)>::with_capacity(starts.len());
+        for (start, raw_states) in starts {
+            let mut ids = Vec::with_capacity(root_children.len());
+            for &child in &root_children {
+                let target = frozen.step_bytes(start, trie.edge(child, tokens));
+                if target == DEAD {
+                    ids.push(usize::MAX);
+                    continue;
+                }
+                let key = (child, target);
+                let id = if let Some(&id) = key_ids.get(&key) {
+                    cache_hits += 1;
+                    id
+                } else {
+                    let id = keys.len();
+                    key_ids.insert(key, id);
+                    keys.push(key);
+                    id
+                };
+                ids.push(id);
+            }
+            work.push((start, raw_states, ids));
+        }
+
+        let results = keys
+            .par_iter()
+            .map(|&(child, target)| {
+                let mut values = Vec::<ProfileRun>::new();
+                let mut visits = 0usize;
+                let mut uniform = 0usize;
+                let mut uniform_token_count = 0usize;
+                collect_finite_profile_frozen(
+                    &frozen,
+                    trie,
+                    tokens,
+                    child,
+                    target,
+                    &mut values,
+                    &mut visits,
+                    &mut uniform,
+                    &mut uniform_token_count,
+                );
+                (Arc::<[ProfileRun]>::from(values), visits, uniform, uniform_token_count)
+            })
+            .collect::<Vec<_>>();
+
+        let mut key_profile = vec![0u32; keys.len()];
+        for (key, (values, visits, uniform, uniform_token_count)) in results.into_iter().enumerate() {
+            pair_visits += visits;
+            uniform_subtrees += uniform;
+            uniform_tokens += uniform_token_count;
+            let profile = if values.is_empty() {
+                0
+            } else if let Some(&profile) = profile_ids.get(&values) {
+                profile
+            } else {
+                let profile = profiles.len() as u32;
+                profile_ids.insert(Arc::clone(&values), profile);
+                profiles.push(values);
+                profile
+            };
+            key_profile[key] = profile;
+            bucket_cache.insert(keys[key], profile);
+        }
+
+        for (start, raw_states, ids) in work {
+            let mut fingerprint =
+                Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
+            if root_token.is_some() {
+                fingerprint.push(frozen.signature(start));
+            }
+            for id in ids {
+                fingerprint.push(if id == usize::MAX { 0 } else { key_profile[id] });
+            }
+            let next = class_fingerprints.len() as u32;
+            let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
+                class_fingerprints.push(fingerprint);
+                next
+            });
+            for raw in raw_states {
+                state_class[raw as usize] = class;
+            }
+        }
+    } else {
+        for (start, raw_states) in starts {
+            let mut fingerprint =
+                Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
+            if root_token.is_some() {
+                fingerprint.push(scanner.signature(start));
+            }
+            for &child in &root_children {
+                let target = scanner.step_bytes(start, trie.edge(child, tokens));
+                if target == DEAD {
+                    fingerprint.push(0);
+                    continue;
+                }
+                let key = (child, target);
+                let profile = if let Some(&profile) = bucket_cache.get(&key) {
+                    cache_hits += 1;
+                    profile
+                } else {
+                    let mut values = Vec::new();
+                    let remaining_runs = profile_run_budget.saturating_sub(profile_run_count);
+                    if !collect_finite_profile(
+                        &mut scanner,
+                        trie,
+                        tokens,
+                        self_loops.as_ref(),
+                        child,
+                        target,
+                        &mut values,
+                        &mut pair_visits,
+                        &mut uniform_subtrees,
+                        &mut uniform_tokens,
+                        remaining_runs,
+                        pair_visit_budget,
+                    ) {
+                        return build_binary_vocab_only(input);
+                    }
+                    let values: Arc<[ProfileRun]> = Arc::from(values);
+                    let profile = if values.is_empty() {
+                        0
+                    } else if let Some(&profile) = profile_ids.get(&values) {
+                        profile
+                    } else {
+                        let profile = profiles.len() as u32;
+                        profile_run_count += values.len();
+                        profile_ids.insert(Arc::clone(&values), profile);
+                        profiles.push(values);
+                        profile
+                    };
+                    if profile_run_count > profile_run_budget {
+                        return build_binary_vocab_only(input);
+                    }
+                    bucket_cache.insert(key, profile);
+                    profile
+                };
+                fingerprint.push(profile);
+            }
+
+            let next = class_fingerprints.len() as u32;
+            let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
+                class_fingerprints.push(fingerprint);
+                next
+            });
+            for raw in raw_states {
+                state_class[raw as usize] = class;
+            }
+        }
+    }
+    let scan_wall_ms = scan_timer.elapsed().as_secs_f64() * 1000.0;
+    let scan_cpu_ms = 0.0;
+    let _ = (cache_hits, pair_visits, uniform_subtrees, uniform_tokens);
+
+    let compact_timer = Instant::now();
+    let (token_class, _token_reps, _compact_rows, run_sweep_events, referenced_runs) =
+        finite_compact_runs(
+            root_token,
+            &class_fingerprints,
+            &profiles,
+            aliases.len(),
+        );
+    let preordered_vocab = preordered_vocab_map_enabled(input)
+        .then(|| finite_vocab.original_order.as_deref())
+        .flatten();
+    let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
+    let vocab_tokens = common::direct_vocab_id_map(
+        input.vocab.max_token_id(),
+        aliases,
+        &token_class,
+        token_classes,
+        preordered_vocab,
+    );
+    let compact_wall_ms = compact_timer.elapsed().as_secs_f64() * 1000.0;
+    let compact_cpu_ms = 0.0;
+    let total_wall_ms = total_timer.elapsed().as_secs_f64() * 1000.0;
+    let total_cpu_ms = 0.0;
+
+    Some(L1VocabEquivResult {
+        vocab_map: vocab_tokens,
+        state_classes: class_fingerprints.len(),
+        token_classes: token_classes as usize,
+        prep_ms: prep_wall_ms,
+        prep_cpu_ms,
+        scan_ms: scan_wall_ms,
+        scan_cpu_ms,
+        compact_ms: compact_wall_ms,
+        compact_cpu_ms,
+        total_wall_ms,
+        total_cpu_ms,
+        run_sweep_events,
+        referenced_runs,
+        kernel: "finite_projected",
+    })
+}
+
+fn build_binary_vocab_only(input: BuildInput<'_>) -> Option<L1VocabEquivResult> {
+    build_binary_vocab_only_with_switch(input, residual_finite_switch_states(input))
+}
+
+fn build_binary_vocab_only_forced(input: BuildInput<'_>) -> Option<L1VocabEquivResult> {
+    build_binary_vocab_only_with_switch(input, usize::MAX)
+}
+
+fn build_binary_vocab_only_with_switch(
+    input: BuildInput<'_>,
+    finite_switch_states: usize,
+) -> Option<L1VocabEquivResult> {
+    if input.vocab.is_empty() {
+        return None;
+    }
+    let total_timer = Instant::now();
+    let setup_timer = Instant::now();
+    let (prepared_vocab, _, _) =
+        if input.subset_parent_order.is_none() && input.vocab.len() >= 10_000 {
+            let (projection, hit, ms) = finite_vocab_projection(input);
+            (Some(projection), hit, ms)
+        } else {
+            (None, false, 0.0)
+        };
+    let (aliases_storage, tokens_storage);
+    let (aliases, tokens) = if let Some(prepared) = prepared_vocab.as_ref() {
+        (prepared.aliases.as_slice(), prepared.tokens.as_slice())
+    } else {
+        let (a, t) = unique_vocab(input);
+        aliases_storage = a;
+        tokens_storage = t;
+        (aliases_storage.as_slice(), tokens_storage.as_slice())
+    };
+    let byte_setup_started = Instant::now();
+    let vocab_bytes = {
+        let mut relevant = [false; 256];
+        for token in tokens {
+            for &byte in token.iter() {
+                relevant[byte as usize] = true;
+            }
+        }
+        relevant
+            .iter()
+            .enumerate()
+            .filter_map(|(byte, &used)| used.then_some(byte as u8))
+            .collect::<Vec<_>>()
+    };
+    let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
+    let prep_wall_ms = setup_timer.elapsed().as_secs_f64() * 1000.0;
+    let prep_cpu_ms = 0.0;
+
+    let scan_timer = Instant::now();
+    let mut projected = Projected::new(input);
+    let root_rows = if let Some(state_map) = input.initial_state_map {
+        let representative_rows = state_map
+            .representative_original_ids
+            .iter()
+            .map(|&raw| {
+                assert_ne!(raw, u32::MAX, "L1 state quotient has an unmapped representative");
+                projected.root_sparse_row(raw)
+            })
+            .collect::<Vec<_>>();
+        state_map
+            .original_to_internal
+            .iter()
+            .enumerate()
+            .map(|(raw, &class)| {
+                if class == u32::MAX {
+                    projected.root_sparse_row(raw as u32)
+                } else {
+                    representative_rows[class as usize].clone()
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        (0..input.tokenizer.num_states())
+            .map(|raw| projected.root_sparse_row(raw))
+            .collect::<Vec<_>>()
+    };
+    let mut roots = SparseRoots::from_rows(root_rows);
+    if projected.configs.len() > finite_switch_states {
+        return build_finite_projected_vocab_only(input, true);
+    }
+    let limit = std::env::var("GLRMASK_L1_SINGLE_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2_000_000usize);
+    if projected_limit_exceeded(input, projected.configs.len(), limit) {
+        return build_finite_projected_vocab_only(input, true);
+    }
+    let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
+    while let Some(state) = queue.pop_front() {
+        let mut row = Vec::new();
+        for (symbol, &byte) in bytes.iter().enumerate() {
+            let before = projected.configs.len();
+            let target = projected.step(state, byte, &roots);
+            if target != DEAD {
+                row.push((symbol as u8, target));
+            }
+            if projected.configs.len() > before {
+                queue.extend(before as u32..projected.configs.len() as u32);
+                if projected.configs.len() > finite_switch_states {
+                    return build_finite_projected_vocab_only(input, true);
+                }
+                if projected_limit_exceeded(input, projected.configs.len(), limit) {
+                    return build_finite_projected_vocab_only(input, true);
+                }
+            }
+        }
+        projected.transitions[state as usize] = row;
+    }
+    let groups = projected
+        .configs
+        .iter()
+        .map(|(group, _)| *group)
+        .collect::<Vec<_>>();
+    let use_grouped_minimize = std::env::var("GLRMASK_L1_PROJECTED_GROUPED_MINIMIZE")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let (mut minimized, _) = if use_grouped_minimize {
+        let (minimized, stats) = minimize_grouped(&projected.transitions, &groups, &bytes);
+        (minimized, Some(stats))
+    } else {
+        (minimize(&projected.transitions, &bytes), None)
+    };
+    for &byte in &vocab_bytes {
+        minimized.byte_class[byte as usize] =
+            minimized.byte_class[input_byte_representative[byte as usize] as usize];
+    }
+    roots.remap_states(&minimized.classes);
+
+    let force_source_scan = false;
+    let mut reverse = ReverseSubsets::new(&minimized.columns, &minimized.byte_class, minimized.state_count, force_source_scan);
+    let mut final_subset_to_class = Vec::<u32>::new();
+    let mut class_subsets = Vec::<u32>::new();
+    let mut token_class = vec![0u32; aliases.len()];
+    let dense_reverse_enabled = std::env::var("GLRMASK_L1_RESIDUAL_DENSE_REVERSE")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(input.partition_label == "p2" && input.subset_parent_order.is_none());
+    let use_reverse_trie = std::env::var("GLRMASK_L1_RESIDUAL_REVERSE_TRIE")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let reverse_trie = use_reverse_trie
+        .then_some(())
+        .and_then(|()| prepared_vocab.as_ref())
+        .and_then(|prepared| prepared.reverse_trie.as_ref());
+    let dense_reverse_max_states = std::env::var("GLRMASK_L1_RESIDUAL_DENSE_REVERSE_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(64usize);
+    let dense_reverse = dense_reverse_enabled
+        .then(|| reverse.try_complete_dense(dense_reverse_max_states))
+        .flatten();
+
+    match (dense_reverse.as_ref(), reverse_trie) {
+        (Some(dense), Some(trie)) => {
+            debug_assert_eq!(trie.parents.len(), trie.bytes.len());
+            let symbols = reverse.symbol_count;
+            let mut subset_at_node = vec![0u32; trie.parents.len()];
+            for node in 1..trie.parents.len() {
+                let parent = trie.parents[node] as usize;
+                let symbol = reverse.byte_class[trie.bytes[node] as usize] as usize;
+                subset_at_node[node] = dense[subset_at_node[parent] as usize * symbols + symbol];
+            }
+            for (token_index, &node) in trie.token_node.iter().enumerate() {
+                let subset = subset_at_node[node as usize];
+                token_class[token_index] = intern_dense_subset_class(
+                    subset,
+                    &mut final_subset_to_class,
+                    &mut class_subsets,
+                );
+            }
+        }
+        (Some(dense), None) => {
+            let symbols = reverse.symbol_count;
+            for (token_index, token) in tokens.iter().enumerate() {
+                let subset = token.iter().rev().fold(0u32, |subset, &byte| {
+                    let symbol = reverse.byte_class[byte as usize] as usize;
+                    dense[subset as usize * symbols + symbol]
+                });
+                token_class[token_index] = intern_dense_subset_class(
+                    subset,
+                    &mut final_subset_to_class,
+                    &mut class_subsets,
+                );
+            }
+        }
+        (None, Some(trie)) => {
+            debug_assert_eq!(trie.parents.len(), trie.bytes.len());
+            let mut subset_at_node = vec![0u32; trie.parents.len()];
+            for node in 1..trie.parents.len() {
+                let parent = trie.parents[node] as usize;
+                subset_at_node[node] = reverse.prepend(subset_at_node[parent], trie.bytes[node]);
+            }
+            for (token_index, &node) in trie.token_node.iter().enumerate() {
+                let subset = subset_at_node[node as usize];
+                token_class[token_index] = intern_dense_subset_class(
+                    subset,
+                    &mut final_subset_to_class,
+                    &mut class_subsets,
+                );
+            }
+        }
+        (None, None) => {
+            for (token_index, token) in tokens.iter().enumerate() {
+                let subset = reverse.token(token);
+                token_class[token_index] = intern_dense_subset_class(
+                    subset,
+                    &mut final_subset_to_class,
+                    &mut class_subsets,
+                );
+            }
+        }
+    }
+    let scan_wall_ms = scan_timer.elapsed().as_secs_f64() * 1000.0;
+    let scan_cpu_ms = 0.0;
+
+    let compact_timer = Instant::now();
+    let preordered_vocab = preordered_vocab_map_enabled(input)
+        .then(|| prepared_vocab.as_ref().and_then(|p| p.original_order.as_deref()))
+        .flatten();
+    let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
+    let vocab_tokens = common::direct_vocab_id_map(
+        input.vocab.max_token_id(),
+        aliases,
+        &token_class,
+        token_classes,
+        preordered_vocab,
+    );
+    let compact_wall_ms = compact_timer.elapsed().as_secs_f64() * 1000.0;
+    let compact_cpu_ms = 0.0;
+    let total_wall_ms = total_timer.elapsed().as_secs_f64() * 1000.0;
+    let total_cpu_ms = 0.0;
+
+    Some(L1VocabEquivResult {
+        vocab_map: vocab_tokens,
+        state_classes: minimized.state_count,
+        token_classes: token_classes as usize,
+        prep_ms: prep_wall_ms,
+        prep_cpu_ms,
+        scan_ms: scan_wall_ms,
+        scan_cpu_ms,
+        compact_ms: compact_wall_ms,
+        compact_cpu_ms,
+        total_wall_ms,
+        total_cpu_ms,
+        run_sweep_events: 0,
+        referenced_runs: 0,
+        kernel: "residual_projected",
+    })
+}
+
 
 #[cfg(test)]
 mod finite_run_sweep_tests {

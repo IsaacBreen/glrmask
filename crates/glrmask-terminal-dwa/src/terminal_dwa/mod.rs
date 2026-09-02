@@ -1592,6 +1592,107 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
     )
 }
 
+
+/// Compute an exact conservative partition of model-vocabulary tokens by their
+/// grammar/lexer behavior, without constructing terminal or parser automata.
+///
+/// The result is intentionally permitted to be finer than Static's final token
+/// quotient. In particular, tokens capable of crossing an L2+ terminal boundary
+/// are kept singleton in the fast path. Every merge performed here is therefore
+/// proved by the same exact L1 relation used by Static; omitted expensive proofs
+/// only lose merging opportunities, never correctness.
+pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
+) -> ManyToOneIdMap {
+    use rayon::prelude::*;
+
+    let terminal_coloring = TerminalColoring::identity(grammar.num_terminals as usize);
+    let token_path_disallowed_follows = Arc::new(ignore_transparent_disallowed_follows(
+        disallowed_follows,
+        ignore_terminal,
+    ));
+    let shared_classify_cache = classify::SharedClassifyCache::new();
+    classify::prewarm_shared_classify_cache(
+        tokenizer,
+        tokenizer.num_terminals(),
+        &shared_classify_cache,
+    );
+    let sub_vocabs = build_char_type_sub_vocabs(
+        vocab,
+        partition_local_synthesis_plan.is_some(),
+        automatic_p2_overflow_threshold(tokenizer.num_states()),
+    );
+
+    let build_one = |idx: usize, sub_vocab: &Vocab| {
+        if sub_vocab.is_empty() {
+            return None;
+        }
+        let label = format!("p{idx}");
+        partition::build_partition_vocab_equivalence(
+            &label,
+            tokenizer,
+            sub_vocab,
+            &terminal_coloring,
+            ignore_terminal,
+            grammar,
+            &token_path_disallowed_follows,
+            &flat_trans,
+            Some(global_max_length_state_map),
+            Some(&shared_classify_cache),
+        )
+    };
+
+    let partition_maps: Vec<Option<ManyToOneIdMap>> = if macro_parallelism_disabled() {
+        sub_vocabs
+            .iter()
+            .enumerate()
+            .map(|(idx, sub_vocab)| build_one(idx, sub_vocab))
+            .collect()
+    } else {
+        sub_vocabs
+            .par_iter()
+            .enumerate()
+            .map(|(idx, sub_vocab)| build_one(idx, sub_vocab))
+            .collect()
+    };
+
+    // Character-type vocabulary partitions are disjoint by original token ID,
+    // so concatenating their local class domains is already the exact common
+    // refinement. Avoid a global hash join over every token and every branch.
+    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    let mut class_offset = 0u32;
+    for (sub_vocab, map) in sub_vocabs.iter().zip(partition_maps.iter()) {
+        let Some(map) = map.as_ref() else {
+            continue;
+        };
+        for &token_id in sub_vocab.entries_map().keys() {
+            let local = map.original_to_internal[token_id as usize];
+            assert_ne!(local, u32::MAX, "vocab partition left a token unmapped");
+            original_to_internal[token_id as usize] = class_offset + local;
+        }
+        class_offset += map.num_internal_ids();
+    }
+    // Empty/unusual partition routes should not silently merge tokens. Any
+    // vocabulary token not covered above becomes its own conservative class.
+    for &token_id in vocab.entries_map().keys() {
+        if original_to_internal[token_id as usize] == u32::MAX {
+            original_to_internal[token_id as usize] = class_offset;
+            class_offset += 1;
+        }
+    }
+    ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+        original_to_internal,
+        class_offset,
+    )
+}
+
 pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
