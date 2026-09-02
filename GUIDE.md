@@ -72,31 +72,7 @@ prompt = "Classify this review: The story dragged badly. Sentiment: "
 input_tokens = llm.tokenize(prompt.encode())
 
 MAX_OUTPUT_TOKENS = 64
-```
 
-### Without constraints
-
-```python
-llm.reset()
-llm.eval(input_tokens)
-
-generated = []
-
-for _ in range(MAX_OUTPUT_TOKENS):
-    logits = get_logits()
-    token = sample(logits)
-    llm.eval([token])
-    generated.append(token)
-
-    if token in end_tokens:
-        break
-
-print(llm.detokenize(generated).decode())
-```
-
-### With GLRMask
-
-```python
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
 constraint = glrmask.Constraint.from_json_schema(schema, vocab)
 
@@ -122,6 +98,24 @@ for _ in range(MAX_OUTPUT_TOKENS):
     state.commit_token(token)
 
 print(llm.detokenize(generated).decode())
+```
+
+For comparison, here's what a decoding loop might look like without GLRMask:
+
+```python
+llm.reset()
+llm.eval(input_tokens)
+
+generated = []
+
+for _ in range(MAX_OUTPUT_TOKENS):
+    logits = get_logits()
+    token = sample(logits)
+    llm.eval([token])
+    generated.append(token)
+
+    if token in end_tokens:
+        break
 ```
 
 ## Rust quickstart
@@ -301,7 +295,13 @@ blob = constraint.save()
 constraint = glrmask.Constraint.load(blob, vocab)
 ```
 
-Load an artifact only with the exact vocabulary it was compiled against. `Constraint::load()` currently does not verify a vocabulary supplied separately by the caller. Composed constraints are saved as one artifact, including their child constraints.
+Load the artifact with the same vocabulary it was compiled against; otherwise it will crash.
+
+## Recommended serving architecture
+
+In production, decouple constraint compilation from model inference. Dedicated compilation workers own constraint construction and the shared cache or artifact store, while inference nodes only consume constraints.
+
+On a cache hit, inference gets a static `Constraint`. On a cache miss, a `DynamicConstraint` is produced for that request so generation can begin immediately, while static compilation proceeds asynchronously and is cached for future requests.
 
 ## How it works
 
