@@ -1720,11 +1720,11 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     let mut partition_slicer_tokens = 0usize;
     let mut partition_root_slot = 0usize;
     let root_edges = trie.children(0);
-    let mut partition_slicer_disabled = dynamic_partition_slicer_disabled();
     #[cfg(test)]
-    {
-        partition_slicer_disabled |= TEST_PARTITION_SLICER_DISABLED.with(std::cell::Cell::get);
-    }
+    let partition_slicer_disabled = dynamic_partition_slicer_disabled()
+        || TEST_PARTITION_SLICER_DISABLED.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let partition_slicer_disabled = dynamic_partition_slicer_disabled();
     let mut remaining_ops = walk_ops.iter();
 
     while let Some(&op) = remaining_ops.next() {
