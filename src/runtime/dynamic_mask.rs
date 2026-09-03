@@ -1748,11 +1748,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 let root_slot = partition_root_slot;
                 partition_root_slot += 1;
                 if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
-                    let statically_certified =
-                        vocab.transparent_partition_is_certified(scalar_lexer, root_slot);
-                    let directly_certified = if statically_certified {
-                        false
-                    } else if let Some(edge) = root_edges.get(root_slot) {
+                    let directly_certified = if let Some(edge) = root_edges.get(root_slot) {
                         transitions
                             .virtual_residual_partition_is_transparent(
                                 scalar_lexer,
@@ -1763,7 +1759,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                     } else {
                         false
                     };
-                    if (statically_certified || directly_certified)
+                    if directly_certified
                         && parser_cache.token_boundary_allowed_sparse(
                             state.constraint,
                             transitions,
@@ -4491,11 +4487,12 @@ nt start ::= A C | B D;
         let schema = r#"{"type":"string","maxLength":1000000000000}"#;
         let accelerated = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         assert!(
-            !accelerated
+            accelerated
                 .inner
                 .dynamic_mask_vocab
-                .has_transparent_partition_certificates(),
-            "current virtual-residual policy should skip the finite certificate table",
+                .mask_projection_fast_transitions()
+                .is_none(),
+            "test must exercise the virtual-residual path without a finite mask projection",
         );
 
         let mut accelerated_state = accelerated.inner.start();
