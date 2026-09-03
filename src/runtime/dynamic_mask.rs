@@ -4489,8 +4489,11 @@ nt start ::= A C | B D;
             (13, b"}".to_vec()),
             (14, b":".to_vec()),
             (15, b"x".to_vec()),
-            // Keep the finite mask-only bounded-repeat horizon well beyond H64.
-            (16, vec![b'z'; 128]),
+            // Keep the finite mask-only bounded-repeat horizon well beyond H64
+            // and beyond the production projection-work budget. The test is
+            // specifically for the direct virtual-residual slicer path, so it
+            // must not depend on the current default projection threshold.
+            (16, vec![b'z'; 1024]),
         ];
         // Make one ordinary alphabetic layout partition large enough that the
         // profitability gate exercises the direct virtual-residual slicer.

@@ -6792,7 +6792,13 @@ impl Constraint {
         )
         .ok()
         .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
-        const DEFAULT_VIRTUAL_RESIDUAL_PROJECTION_MAX_DENSE_STATES: usize = 16 * 1024;
+        // This is a conservative work estimate, not the size of the resulting
+        // mask projection. Real bounded-code schemas can substantially
+        // overestimate here (for example, ~160K estimated states can collapse
+        // to ~11K projected states), and falling back to the generic virtual
+        // residual walker is much more expensive on every mask miss. Keep a
+        // hard build-work guard, but bias the default toward runtime latency.
+        const DEFAULT_VIRTUAL_RESIDUAL_PROJECTION_MAX_DENSE_STATES: usize = 160 * 1024;
         let virtual_residual_projection_max_dense_states = std::env::var(
             "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION_MAX_DENSE_STATES",
         )
