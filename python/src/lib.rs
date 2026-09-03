@@ -891,7 +891,9 @@ impl PyDynamicConstraint {
     }
 
     fn save(&self) -> Vec<u8> {
-        self.inner.save()
+        // DynamicConstraint.load() already requires the vocabulary, so Python
+        // persistence need not duplicate vocabulary bytes in the artifact.
+        self.inner.save_with_external_vocab()
     }
 
     fn mask_len(&self) -> usize {

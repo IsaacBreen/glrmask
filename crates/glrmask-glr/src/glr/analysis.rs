@@ -273,6 +273,27 @@ impl AnalyzedGrammar {
         }
     }
 
+    /// The dynamic GLR runtime does not run terminal characterization. Its
+    /// table builder requires epsilon-free reachable productions, but ordinary
+    /// CFG right/indirect-left recursion is parser language structure rather
+    /// than a characterization-boundedness requirement. Keep this separate
+    /// from the static normal form so experiments cannot silently weaken the
+    /// characterization contract.
+    pub fn check_dynamic_table_build_normal_form(&self) -> Result<(), String> {
+        let mut violations = Vec::new();
+        if let Err(msg) = self.check_no_nullable_nonterminals() {
+            violations.push(msg);
+        }
+        if let Err(msg) = self.check_no_reachable_zero_length_productions() {
+            violations.push(msg);
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations.join("\n"))
+        }
+    }
+
     pub fn debug_check_grammar_preconditions(&self) -> Result<(), String> {
         self.check_table_build_normal_form()
     }
@@ -2903,6 +2924,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     }
 }
 
+/// Minimal normalization required by the dynamic GLR runtime: remove epsilon
+/// productions, prune unreachable rules, and deduplicate. Unlike the static
+/// characterization normalizer this intentionally preserves right recursion
+/// and indirect left recursion as CFG structure.
+pub fn normalize_dynamic_glr_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
+    let num_nt = max_nt_id(rules) + 1;
+    *rules = inline_null_productions(rules, num_nt);
+    *rules = remove_unreachable_rules(rules, start);
+    dedup_rules(rules);
+}
+
 fn replace_rules_with_resync(
     rules: &mut Vec<Rule>,
     next_nt: &std::cell::Cell<u32>,
@@ -2927,21 +2959,61 @@ fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {
 }
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
+    use std::collections::VecDeque;
+
+    let n = num_nt as usize;
+    let mut remaining = vec![usize::MAX; rules.len()];
+    let mut dependents = vec![Vec::<usize>::new(); n];
     let mut nullable = BTreeSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for rule in rules {
-            if rule.lhs >= num_nt {
+    let mut queue = VecDeque::new();
+
+    for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.lhs as usize >= n {
+            continue;
+        }
+        if rule.rhs.is_empty() {
+            remaining[rule_index] = 0;
+            if nullable.insert(rule.lhs) {
+                queue.push_back(rule.lhs);
+            }
+            continue;
+        }
+        let mut count = 0usize;
+        let mut possible = true;
+        for symbol in &rule.rhs {
+            match symbol {
+                Symbol::Terminal(_) => {
+                    possible = false;
+                    break;
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    let idx = *nonterminal as usize;
+                    if idx >= n {
+                        possible = false;
+                        break;
+                    }
+                    dependents[idx].push(rule_index);
+                    count += 1;
+                }
+            }
+        }
+        if possible {
+            remaining[rule_index] = count;
+        }
+    }
+
+    while let Some(nonterminal) = queue.pop_front() {
+        for &rule_index in &dependents[nonterminal as usize] {
+            let left = &mut remaining[rule_index];
+            if *left == usize::MAX || *left == 0 {
                 continue;
             }
-            let rhs_nullable = rule.rhs.is_empty()
-                || rule.rhs.iter().all(|symbol| match symbol {
-                    Symbol::Terminal(_) => false,
-                    Symbol::Nonterminal(nonterminal) => nullable.contains(nonterminal),
-                });
-            if rhs_nullable && nullable.insert(rule.lhs) {
-                changed = true;
+            *left -= 1;
+            if *left == 0 {
+                let lhs = rules[rule_index].lhs;
+                if nullable.insert(lhs) {
+                    queue.push_back(lhs);
+                }
             }
         }
     }
@@ -2954,34 +3026,64 @@ fn compute_first(
     num_terminals: u32,
     nullable: &BTreeSet<NonterminalID>,
 ) -> Vec<BitSet> {
+    use std::collections::VecDeque;
+
+    let n = num_nt as usize;
     let set_len = num_terminals as usize + 1;
-    let mut first = vec![BitSet::new(set_len); num_nt as usize];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for rule in rules {
-            let lhs = rule.lhs as usize;
-            for symbol in &rule.rhs {
-                match symbol {
-                    Symbol::Terminal(terminal) => {
-                        let bit = terminal_bit(*terminal, num_terminals);
-                        if !first[lhs].contains(bit) {
-                            first[lhs].set(bit);
-                            changed = true;
-                        }
+    let mut first = vec![BitSet::new(set_len); n];
+    // FIRST(source) changes must propagate to every lhs that can reach source
+    // through a nullable prefix.
+    let mut dependents = vec![Vec::<usize>::new(); n];
+
+    for rule in rules {
+        let lhs = rule.lhs as usize;
+        if lhs >= n {
+            continue;
+        }
+        for symbol in &rule.rhs {
+            match symbol {
+                Symbol::Terminal(terminal) => {
+                    first[lhs].set(terminal_bit(*terminal, num_terminals));
+                    break;
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    let source = *nonterminal as usize;
+                    if source >= n {
                         break;
                     }
-                    Symbol::Nonterminal(nonterminal) => {
-                        let additions = first[*nonterminal as usize].difference(&first[lhs]);
-                        if !additions.is_empty() {
-                            first[lhs].union_with(&additions);
-                            changed = true;
-                        }
-                        if !nullable.contains(nonterminal) {
-                            break;
-                        }
+                    dependents[source].push(lhs);
+                    if !nullable.contains(nonterminal) {
+                        break;
                     }
                 }
+            }
+        }
+    }
+    for targets in &mut dependents {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+
+    let mut queue = VecDeque::new();
+    let mut queued = vec![false; n];
+    for index in 0..n {
+        if !first[index].is_empty() {
+            queue.push_back(index);
+            queued[index] = true;
+        }
+    }
+    while let Some(source) = queue.pop_front() {
+        queued[source] = false;
+        let source_first = first[source].clone();
+        for &target in &dependents[source] {
+            let delta = source_first.difference(&first[target]);
+            if delta.is_empty() {
+                continue;
+            }
+            first[target].union_with(&delta);
+            if !queued[target] {
+                queued[target] = true;
+                queue.push_back(target);
             }
         }
     }
@@ -2996,57 +3098,87 @@ fn compute_follow(
     first: &[BitSet],
     nullable: &BTreeSet<NonterminalID>,
 ) -> Vec<BitSet> {
+    use std::collections::VecDeque;
+
+    let n = num_nt as usize;
     let set_len = num_terminals as usize + 1;
-    let mut follow = vec![BitSet::new(set_len); num_nt as usize];
+    let mut follow = vec![BitSet::new(set_len); n];
+    // FOLLOW(source) changes must propagate to targets whose occurrence is
+    // followed only by nullable symbols in a source production.
+    let mut dependents = vec![Vec::<usize>::new(); n];
+
     if let Some(start_follow) = follow.get_mut(start as usize) {
         start_follow.set(terminal_bit(EOF, num_terminals));
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for rule in rules {
-            let mut lhs_follow = None;
-            for (index, symbol) in rule.rhs.iter().enumerate() {
-                let Symbol::Nonterminal(nonterminal) = symbol else {
-                    continue;
-                };
-
-                let suffix = &rule.rhs[index + 1..];
-                let mut additions = BitSet::new(set_len);
-                let mut suffix_nullable = true;
-                for suffix_symbol in suffix {
-                    match suffix_symbol {
-                        Symbol::Terminal(terminal) => {
-                            additions.set(terminal_bit(*terminal, num_terminals));
+    for rule in rules {
+        let lhs = rule.lhs as usize;
+        if lhs >= n {
+            continue;
+        }
+        for (index, symbol) in rule.rhs.iter().enumerate() {
+            let Symbol::Nonterminal(nonterminal) = symbol else {
+                continue;
+            };
+            let target = *nonterminal as usize;
+            if target >= n {
+                continue;
+            }
+            let mut suffix_nullable = true;
+            for suffix_symbol in &rule.rhs[index + 1..] {
+                match suffix_symbol {
+                    Symbol::Terminal(terminal) => {
+                        follow[target].set(terminal_bit(*terminal, num_terminals));
+                        suffix_nullable = false;
+                        break;
+                    }
+                    Symbol::Nonterminal(next_nonterminal) => {
+                        let next = *next_nonterminal as usize;
+                        if next >= n {
                             suffix_nullable = false;
                             break;
                         }
-                        Symbol::Nonterminal(next_nonterminal) => {
-                            additions.union_with(&first[*next_nonterminal as usize]);
-                            if !nullable.contains(next_nonterminal) {
-                                suffix_nullable = false;
-                                break;
-                            }
+                        follow[target].union_with(&first[next]);
+                        if !nullable.contains(next_nonterminal) {
+                            suffix_nullable = false;
+                            break;
                         }
                     }
                 }
-                if suffix_nullable {
-                    let lhs_follow = lhs_follow
-                        .get_or_insert_with(|| follow[rule.lhs as usize].clone());
-                    additions.union_with(lhs_follow);
-                }
-
-                let target = &mut follow[*nonterminal as usize];
-                let delta = additions.difference(target);
-                if !delta.is_empty() {
-                    target.union_with(&delta);
-                    changed = true;
-                }
+            }
+            if suffix_nullable {
+                dependents[lhs].push(target);
             }
         }
     }
+    for targets in &mut dependents {
+        targets.sort_unstable();
+        targets.dedup();
+    }
 
+    let mut queue = VecDeque::new();
+    let mut queued = vec![false; n];
+    for index in 0..n {
+        if !follow[index].is_empty() {
+            queue.push_back(index);
+            queued[index] = true;
+        }
+    }
+    while let Some(source) = queue.pop_front() {
+        queued[source] = false;
+        let source_follow = follow[source].clone();
+        for &target in &dependents[source] {
+            let delta = source_follow.difference(&follow[target]);
+            if delta.is_empty() {
+                continue;
+            }
+            follow[target].union_with(&delta);
+            if !queued[target] {
+                queued[target] = true;
+                queue.push_back(target);
+            }
+        }
+    }
     follow
 }
 

@@ -12,7 +12,7 @@ use super::ast::{
 };
 use super::combinators::{
     all_of_schema, merge_two_objects, open_object_any_of_covers_json_object,
-    try_merge_all_of_objects,
+    simplify_finite_string_allof_schema, try_merge_all_of_objects,
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
@@ -598,13 +598,19 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let total_started = profile.then(std::time::Instant::now);
         if branches.len() < 2 {
             return Ok(None);
         }
+        let recursive_started = profile.then(std::time::Instant::now);
         if self.has_duplicate_recursive_ref_branches(branches)? {
             return Ok(None);
         }
+        let recursive_ms = recursive_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+        let collect_started = profile.then(std::time::Instant::now);
         let mut variants = Vec::with_capacity(branches.len());
         let mut include_untyped_non_object_alts = false;
         for branch in branches {
@@ -616,11 +622,26 @@ impl<'a> Lowerer<'a> {
             include_untyped_non_object_alts |= branch_requires_untyped_non_object_alts;
             variants.push(variant);
         }
+        let collect_ms = collect_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-        self.lower_open_any_of_object_variants_expr_nfa(
+        let lower_started = profile.then(std::time::Instant::now);
+        let result = self.lower_open_any_of_object_variants_expr_nfa(
             &variants,
             include_untyped_non_object_alts,
-        )
+        )?;
+        if let Some(total_started) = total_started {
+            eprintln!(
+                "[glrmask/profile][json_schema_open_anyof] branches={} recursive_check_ms={:.3} collect_ms={:.3} lower_ms={:.3} total_ms={:.3} success={}",
+                branches.len(),
+                recursive_ms,
+                collect_ms,
+                lower_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+                result.is_some(),
+            );
+        }
+        Ok(result)
     }
 
     fn has_duplicate_recursive_ref_branches(&self, branches: &[Schema]) -> ImportResult<bool> {
@@ -1466,12 +1487,12 @@ impl<'a> Lowerer<'a> {
                 return Ok(None);
             }
             let normalized = normalize_local_ref(pointer)?;
-            let target = self.resolve_ref_target(pointer)?.clone();
+            let target = self.resolve_ref_target(pointer)?;
             if !self.object_variant_ref_stack.insert(normalized.clone()) {
                 return Ok(None);
             }
             let result =
-                self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1, profile);
+                self.collect_closed_any_of_object_variant_inner(target, ref_depth + 1, profile);
             self.object_variant_ref_stack.remove(&normalized);
             return result;
         }
@@ -1539,18 +1560,21 @@ impl<'a> Lowerer<'a> {
 
         let mut items = Vec::with_capacity(object.properties.len());
         for property in &object.properties {
+            let simplified_schema = simplify_finite_string_allof_schema(&property.schema);
+            let effective_schema = simplified_schema.as_ref().unwrap_or(&property.schema);
             let lower_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let value_expr = self.lower_value_schema(&property.schema)?;
+            let value_expr = self.lower_value_schema(effective_schema)?;
             if let (Some(lower_started_at), Some(profile)) = (lower_started_at, profile.as_deref_mut()) {
-                profile.lower_property_ms += lower_started_at.elapsed().as_secs_f64() * 1000.0;
+                let elapsed_ms = lower_started_at.elapsed().as_secs_f64() * 1000.0;
+                profile.lower_property_ms += elapsed_ms;
             }
             let identity_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let value_identity = exact_property_value_identity(&property.schema);
+            let value_identity = exact_property_value_identity(effective_schema);
             if let (Some(identity_started_at), Some(profile)) = (identity_started_at, profile.as_deref_mut()) {
                 profile.identity_ms += identity_started_at.elapsed().as_secs_f64() * 1000.0;
             }
             let clone_started_at = profile.as_ref().map(|_| std::time::Instant::now());
-            let item_schema = property.schema.clone();
+            let item_schema = effective_schema.clone();
             if let (Some(clone_started_at), Some(profile)) = (clone_started_at, profile.as_deref_mut()) {
                 profile.schema_clone_ms += clone_started_at.elapsed().as_secs_f64() * 1000.0;
             }
@@ -1616,11 +1640,11 @@ impl<'a> Lowerer<'a> {
                 return Ok(None);
             }
             let normalized = normalize_local_ref(pointer)?;
-            let target = self.resolve_ref_target(pointer)?.clone();
+            let target = self.resolve_ref_target(pointer)?;
             if !self.object_variant_ref_stack.insert(normalized.clone()) {
                 return Ok(None);
             }
-            let result = self.collect_open_any_of_object_variant_inner(&target, ref_depth + 1);
+            let result = self.collect_open_any_of_object_variant_inner(target, ref_depth + 1);
             self.object_variant_ref_stack.remove(&normalized);
             return result;
         }
@@ -2345,6 +2369,8 @@ impl<'a> Lowerer<'a> {
             .collect::<Vec<_>>();
         let mut state_ids = BTreeMap::<AnyOfObjectState, u32>::new();
         let mut queue = VecDeque::<AnyOfObjectState>::new();
+        let profile_open = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let graph_started = profile_open.then(std::time::Instant::now);
         for (variant_idx, _) in variants.iter().enumerate() {
             let shadow_owner = shadow_owners[variant_idx]
                 .map(|owner_idx| ShadowOwnerState::Possible {
@@ -2673,8 +2699,19 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        let graph_ms = graph_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        let determinize_started = profile_open.then(std::time::Instant::now);
+        let expr_nfa = builder.build().into_determinized_and_minimized();
+        let body = GrammarExpr::ExprNFA(Box::new(expr_nfa));
+        if let Some(started) = determinize_started {
+            eprintln!(
+                "[glrmask/profile][json_schema_open_anyof_build] graph_ms={:.3} determinize_minimize_ms={:.3}",
+                graph_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         self.add_nonterminal_rule(&rule_name, body);
 
         let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);

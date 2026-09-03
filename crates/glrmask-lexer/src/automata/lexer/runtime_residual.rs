@@ -6,6 +6,8 @@
 //! proportion to `max`.
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -23,6 +25,31 @@ use crate::Vocab;
 
 pub(crate) type ResidualId = u32;
 
+#[derive(Debug, Clone)]
+struct ResidualDfa(Arc<DFA>);
+
+impl PartialEq for ResidualDfa {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ResidualDfa {}
+
+impl Hash for ResidualDfa {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.0), state);
+    }
+}
+
+impl Deref for ResidualDfa {
+    type Target = DFA;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ResidualNode {
     Empty,
@@ -30,7 +57,7 @@ enum ResidualNode {
     SigmaStar,
     Literal { bytes: Arc<[u8]>, offset: u32 },
     Class(U8Set),
-    Dfa { dfa: Arc<DFA>, states: Box<[u32]> },
+    Dfa { dfa: ResidualDfa, states: Box<[u32]> },
     Seq(Box<[ResidualId]>),
     Choice(Box<[ResidualId]>),
     Intersect(ResidualId, ResidualId),
@@ -160,7 +187,7 @@ impl ResidualArena {
                 if dfa.num_states() == 0 {
                     return None;
                 }
-                self.dfa(Arc::clone(dfa), &[0])
+                self.dfa(ResidualDfa(Arc::clone(dfa)), &[0])
             }
             Expr::Intersect { expr, intersect } => {
                 let left = self.compile_expr(expr)?;
@@ -223,7 +250,7 @@ impl ResidualArena {
         }
     }
 
-    fn dfa(&mut self, dfa: Arc<DFA>, roots: &[u32]) -> Option<ResidualId> {
+    fn dfa(&mut self, dfa: ResidualDfa, roots: &[u32]) -> Option<ResidualId> {
         if roots.iter().any(|&state| state as usize >= dfa.num_states()) {
             return Some(self.empty);
         }
@@ -1093,11 +1120,11 @@ pub(crate) fn expression_may_support_bounded_code_liveness_oracle(expr: &Expr) -
 /// that would otherwise be eagerly materialized below the generic giant-repeat
 /// threshold.
 pub(crate) fn expression_supports_bounded_code_liveness_oracle(expr: &Expr) -> bool {
-    BoundedCodeIntersectionOracle::from_expr(expr).is_some()
+    build_bounded_code_liveness_oracle(expr).is_some()
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct BoundedCodeIntersectionOracle {
+pub(super) struct BoundedCodeIntersectionOracle {
     pattern: Arc<DFA>,
     body: Arc<DFA>,
     body_productive: Box<[bool]>,
@@ -1109,6 +1136,12 @@ struct BoundedCodeIntersectionOracle {
     completion_relations: Vec<Option<BoolRelation>>,
     exact_powers: Vec<BoolRelation>,
     prefix_sums: Vec<BoolRelation>,
+}
+
+pub(super) fn build_bounded_code_liveness_oracle(
+    expr: &Expr,
+) -> Option<BoundedCodeIntersectionOracle> {
+    BoundedCodeIntersectionOracle::from_dynamic_expr(expr)
 }
 
 const SPARSE_BOUNDED_CODE_ORACLE_MAGIC: [u8; 4] = *b"BCO2";
@@ -1346,6 +1379,19 @@ fn expand_exact_byte_classes(dfa: &mut DFA, class_members: &[Vec<u8>]) {
 
 impl BoundedCodeIntersectionOracle {
     fn from_expr(expr: &Expr) -> Option<Self> {
+        Self::from_expr_with_coordinate_policy(expr, true)
+    }
+
+    fn from_dynamic_expr(expr: &Expr) -> Option<Self> {
+        Self::from_expr_with_coordinate_policy(expr, false)
+    }
+
+    fn from_expr_with_coordinate_policy(
+        expr: &Expr,
+        canonicalize_coordinates: bool,
+    ) -> Option<Self> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_RESIDUAL").is_some();
+        let total_started = profile.then(std::time::Instant::now);
         let mut operands = Vec::new();
         flatten_intersection_operands(expr, &mut operands);
         if operands.len() < 2 {
@@ -1399,12 +1445,26 @@ impl BoundedCodeIntersectionOracle {
         {
             return None;
         }
-        let pattern = Arc::new(canonicalize_bounded_code_oracle_dfa(
-            compile_terminal_expr_dfa(&pattern_expr),
-        ));
-        let body = Arc::new(canonicalize_bounded_code_oracle_dfa(
-            compile_terminal_expr_dfa(&body_expr),
-        ));
+        let pattern_started = profile.then(std::time::Instant::now);
+        let pattern_raw = compile_terminal_expr_dfa(&pattern_expr);
+        let pattern_precanonical_states = pattern_raw.num_states();
+        let pattern = Arc::new(if canonicalize_coordinates {
+            canonicalize_bounded_code_oracle_dfa(pattern_raw)
+        } else {
+            pattern_raw
+        });
+        let pattern_ms = pattern_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let body_started = profile.then(std::time::Instant::now);
+        let body_raw = compile_terminal_expr_dfa(&body_expr);
+        let body_precanonical_states = body_raw.num_states();
+        let body = Arc::new(if canonicalize_coordinates {
+            canonicalize_bounded_code_oracle_dfa(body_raw)
+        } else {
+            body_raw
+        });
+        let body_ms = body_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if pattern.num_states() == 0
             || pattern.num_states() > MAX_BOUNDED_CODE_ORACLE_PATTERN_STATES
             || pattern
@@ -1480,12 +1540,37 @@ impl BoundedCodeIntersectionOracle {
             exact_powers: Vec::new(),
             prefix_sums: Vec::new(),
         };
+        let one_code_started = profile.then(std::time::Instant::now);
         let one_code = oracle.completion_relation(0).clone();
+        let one_code_ms = one_code_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         oracle.exact_powers.push(one_code);
         oracle
             .prefix_sums
             .push(BoolRelation::identity(pattern_states));
+        let powers_started = profile.then(std::time::Instant::now);
         oracle.ensure_power(bits.saturating_sub(1));
+        let powers_ms = powers_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][bounded_code_oracle] canonical={} pattern_states={} pattern_precanonical_states={} body_states={} body_precanonical_states={} min={} max={} bits={} relation_bytes={} pattern_ms={:.3} body_ms={:.3} one_code_ms={:.3} powers_ms={:.3} total_ms={:.3}",
+                canonicalize_coordinates,
+                pattern_states,
+                pattern_precanonical_states,
+                body_states,
+                body_precanonical_states,
+                min,
+                max,
+                bits,
+                relation_bytes,
+                pattern_ms,
+                body_ms,
+                one_code_ms,
+                powers_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         Some(oracle)
     }
 
@@ -2358,6 +2443,27 @@ pub(super) struct VirtualResidualRuntime {
 }
 
 impl VirtualResidualRuntime {
+    pub(super) fn finite_mask_projection_dense_state_count(
+        &self,
+        max_token_len: usize,
+    ) -> Option<usize> {
+        let store = self.store.lock().unwrap();
+        let oracle = store.liveness_oracle.as_ref()?;
+        let minimum_body_width = oracle.body.min_match_byte_len()?.max(1);
+        let crossed_boundaries = max_token_len
+            .div_ceil(minimum_body_width)
+            .saturating_add(1);
+        if oracle.min > crossed_boundaries.saturating_add(1) {
+            return None;
+        }
+        let desired_mask_max = oracle
+            .min
+            .checked_add(crossed_boundaries)?
+            .checked_add(1)?;
+        let mask_max = oracle.max.min(desired_mask_max);
+        oracle.finite_mask_dense_state_count(mask_max)
+    }
+
     pub(super) fn new(
         expr: &Expr,
         runtime_index: u32,
@@ -2378,6 +2484,64 @@ impl VirtualResidualRuntime {
             state_allocator,
             state_owners,
             false,
+            false,
+            None,
+        )
+    }
+
+    /// Construct the exact derivative runtime without eagerly building the
+    /// optional bounded-code liveness oracle. This is used by serialized
+    /// dynamic compilation: the producer needs the physical proxy/root
+    /// metadata for the transfer artifact, but the execution process will
+    /// reconstruct the runtime (and its liveness oracle) after load.
+    pub(super) fn new_without_liveness_oracle(
+        expr: &Expr,
+        runtime_index: u32,
+        terminal: TerminalID,
+        num_terminals: u32,
+        physical_state_count: u32,
+        root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
+    ) -> Option<Self> {
+        Self::new_impl(
+            expr,
+            runtime_index,
+            terminal,
+            num_terminals,
+            physical_state_count,
+            root_state,
+            state_allocator,
+            state_owners,
+            false,
+            true,
+            None,
+        )
+    }
+
+    pub(super) fn new_with_liveness_oracle(
+        expr: &Expr,
+        liveness_oracle: BoundedCodeIntersectionOracle,
+        runtime_index: u32,
+        terminal: TerminalID,
+        num_terminals: u32,
+        physical_state_count: u32,
+        root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
+    ) -> Option<Self> {
+        Self::new_impl(
+            expr,
+            runtime_index,
+            terminal,
+            num_terminals,
+            physical_state_count,
+            root_state,
+            state_allocator,
+            state_owners,
+            false,
+            false,
+            Some(liveness_oracle),
         )
     }
 
@@ -2401,6 +2565,8 @@ impl VirtualResidualRuntime {
             state_allocator,
             state_owners,
             true,
+            false,
+            None,
         )
     }
 
@@ -2414,6 +2580,8 @@ impl VirtualResidualRuntime {
         state_allocator: Arc<VirtualStateAllocator>,
         state_owners: Arc<VirtualRuntimeStateOwners>,
         preserve_oracle_coordinate: bool,
+        suppress_dynamic_liveness_oracle: bool,
+        prebuilt_liveness_oracle: Option<BoundedCodeIntersectionOracle>,
     ) -> Option<Self> {
         if terminal >= num_terminals
             || physical_state_count == 0
@@ -2422,8 +2590,41 @@ impl VirtualResidualRuntime {
         {
             return None;
         }
+        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_RESIDUAL").is_some();
+        let arena_started = profile.then(std::time::Instant::now);
         let (mut arena, root) = ResidualArena::from_expr(expr)?;
-        let liveness_oracle = BoundedCodeIntersectionOracle::from_expr(expr);
+        let arena_ms = arena_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let arena_states = arena.state_count();
+        let build_dynamic_liveness_oracle = !suppress_dynamic_liveness_oracle
+            && std::env::var("GLRMASK_DYNAMIC_RESIDUAL_LIVENESS_ORACLE")
+                .ok()
+                .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
+        let oracle_started = profile.then(std::time::Instant::now);
+        let liveness_oracle = if prebuilt_liveness_oracle.is_some() {
+            prebuilt_liveness_oracle
+        } else if preserve_oracle_coordinate || build_dynamic_liveness_oracle {
+            if preserve_oracle_coordinate {
+                BoundedCodeIntersectionOracle::from_expr(expr)
+            } else {
+                BoundedCodeIntersectionOracle::from_dynamic_expr(expr)
+            }
+        } else {
+            None
+        };
+        let oracle_ms = oracle_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_residual_new] terminal={} preserve_coordinate={} arena_states={} arena_ms={:.3} oracle={} oracle_ms={:.3}",
+                terminal,
+                preserve_oracle_coordinate,
+                arena_states,
+                arena_ms,
+                liveness_oracle.is_some(),
+                oracle_ms,
+            );
+        }
         let root_oracle_coordinate = liveness_oracle
             .as_ref()
             .map(BoundedCodeIntersectionOracle::root_coordinate);
@@ -2752,6 +2953,36 @@ impl VirtualResidualRuntime {
         bincode::serialize_into(&mut out, &sparse)
             .expect("bounded-code sparse oracle serialization should succeed");
         out
+    }
+
+    pub(super) fn new_from_oracle_bytes(
+        expr: &Expr,
+        oracle_bytes: &[u8],
+        runtime_index: u32,
+        terminal: TerminalID,
+        num_terminals: u32,
+        physical_state_count: u32,
+        root_state: u32,
+        state_allocator: Arc<VirtualStateAllocator>,
+        state_owners: Arc<VirtualRuntimeStateOwners>,
+    ) -> Option<Self> {
+        let mut runtime = Self::new_preserving_oracle_coordinate_from_oracle_bytes(
+            expr,
+            oracle_bytes,
+            runtime_index,
+            terminal,
+            num_terminals,
+            physical_state_count,
+            root_state,
+            state_allocator,
+            state_owners,
+        )?;
+        runtime.preserve_oracle_coordinate = false;
+        let store = runtime.store.get_mut().ok()?;
+        store.state_by_residual_coordinate.clear();
+        store.coordinate_by_state.clear();
+        store.oracle_future_by_state.clear();
+        Some(runtime)
     }
 
     pub(super) fn new_preserving_oracle_coordinate_from_oracle_bytes(

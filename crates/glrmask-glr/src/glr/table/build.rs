@@ -1611,11 +1611,172 @@ impl Item {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PendingAction {
     pub(super) shift: Option<(u32, bool)>,
     pub(super) reduces: Vec<(NonterminalID, u32)>,
     pub(super) accept: bool,
+}
+
+fn pending_identity_row_fingerprint(
+    pending: &FxHashMap<TerminalID, PendingAction>,
+    goto: &FxHashMap<NonterminalID, (u32, bool)>,
+) -> u64 {
+    // Hash-map iteration order is deliberately irrelevant. Combine strong
+    // per-entry Fx hashes commutatively, then include row cardinalities. Any
+    // fingerprint collision is verified by exact map equality before merging.
+    let mut action_sum = 0u64;
+    let mut action_xor = 0u64;
+    for (&terminal, action) in pending {
+        let mut hasher = FxHasher::default();
+        0xA1u8.hash(&mut hasher);
+        terminal.hash(&mut hasher);
+        action.hash(&mut hasher);
+        let hash = hasher.finish();
+        action_sum = action_sum.wrapping_add(hash);
+        action_xor ^= hash.rotate_left((hash >> 58) as u32);
+    }
+    let mut goto_sum = 0u64;
+    let mut goto_xor = 0u64;
+    for (&nonterminal, &(target, replace)) in goto {
+        let mut hasher = FxHasher::default();
+        0xB2u8.hash(&mut hasher);
+        nonterminal.hash(&mut hasher);
+        target.hash(&mut hasher);
+        replace.hash(&mut hasher);
+        let hash = hasher.finish();
+        goto_sum = goto_sum.wrapping_add(hash);
+        goto_xor ^= hash.rotate_left((hash >> 58) as u32);
+    }
+    let mut hasher = FxHasher::default();
+    pending.len().hash(&mut hasher);
+    action_sum.hash(&mut hasher);
+    action_xor.hash(&mut hasher);
+    goto.len().hash(&mut hasher);
+    goto_sum.hash(&mut hasher);
+    goto_xor.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn finish_table_with_early_identity_quotient(
+    grammar: &AnalyzedGrammar,
+    pending: Vec<FxHashMap<TerminalID, PendingAction>>,
+    goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
+    forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+    construction: GlrTableConstruction,
+    admission_policy: AdmissionPolicy,
+    fixed_point: bool,
+) -> GLRTable {
+    let mut pending = pending;
+    let mut goto = goto;
+    let mut forwarded_shifts = forwarded_shifts;
+    for row in &mut pending {
+        for action in row.values_mut() {
+            action.reduces.sort_unstable();
+            action.reduces.dedup();
+        }
+    }
+    loop {
+        let old_state_count = pending.len();
+        let mut first_by_fingerprint = FxHashMap::<u64, Vec<u32>>::default();
+        let mut representative = (0..old_state_count as u32).collect::<Vec<_>>();
+        for state in 0..old_state_count {
+            let fingerprint = pending_identity_row_fingerprint(&pending[state], &goto[state]);
+            let candidates = first_by_fingerprint.entry(fingerprint).or_default();
+            if let Some(&existing) = candidates.iter().find(|&&candidate| {
+                pending[candidate as usize] == pending[state]
+                    && goto[candidate as usize] == goto[state]
+            }) {
+                representative[state] = existing;
+            } else {
+                candidates.push(state as u32);
+            }
+        }
+
+        if representative
+            .iter()
+            .enumerate()
+            .all(|(state, &rep)| rep == state as u32)
+        {
+            break;
+        }
+
+        let mut rep_to_new = vec![u32::MAX; old_state_count];
+        let mut kept = Vec::new();
+        for state in 0..old_state_count {
+            if representative[state] == state as u32 {
+                rep_to_new[state] = kept.len() as u32;
+                kept.push(state);
+            }
+        }
+        let mapping = representative
+            .iter()
+            .map(|&rep| rep_to_new[rep as usize])
+            .collect::<Vec<_>>();
+
+        let mut next_pending = Vec::with_capacity(kept.len());
+        let mut next_goto = Vec::with_capacity(kept.len());
+        for (state, (mut by_terminal, mut by_nonterminal)) in
+            pending.into_iter().zip(goto).enumerate()
+        {
+            if representative[state] != state as u32 {
+                continue;
+            }
+            for pending in by_terminal.values_mut() {
+                if let Some((target, replace)) = pending.shift {
+                    pending.shift = Some((mapping[target as usize], replace));
+                }
+            }
+            for (target, _) in by_nonterminal.values_mut() {
+                *target = mapping[*target as usize];
+            }
+            next_pending.push(by_terminal);
+            next_goto.push(by_nonterminal);
+        }
+        forwarded_shifts = forwarded_shifts
+            .into_iter()
+            .map(|(state, terminal)| (mapping[state as usize], terminal))
+            .collect();
+        pending = next_pending;
+        goto = next_goto;
+        if !fixed_point {
+            break;
+        }
+    }
+
+    let mut action = Vec::with_capacity(pending.len());
+    let mut new_goto = Vec::with_capacity(goto.len());
+    for (by_terminal, by_nonterminal) in pending.into_iter().zip(goto) {
+        let mut action_entries = by_terminal.into_iter().collect::<Vec<_>>();
+        action_entries.sort_unstable_by_key(|(terminal, _)| *terminal);
+        action.push(ActionRow::Sparse(SparseRow::from_sorted_unique(
+            action_entries
+                .into_iter()
+                .map(|(terminal, pending)| (terminal, pending.finish()))
+                .collect(),
+        )));
+        new_goto.push(SparseRow::from_hash_map(by_nonterminal));
+    }
+
+    let num_states = action.len() as u32;
+    GLRTable {
+        action,
+        goto: new_goto,
+        num_states,
+        num_terminals: grammar.num_terminals,
+        num_rules: grammar.rules.len() as u32,
+        rules: grammar.rules.clone(),
+        nonterminal_display_names: grammar.nonterminal_display_names.clone(),
+        construction,
+        admission_policy,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts,
+        control_terminals: Default::default(),
+        skip_terminals: Default::default(),
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    }
 }
 
 impl PendingAction {
@@ -1771,12 +1932,84 @@ fn lr0_closure(grammar: &AnalyzedGrammar, kernel: &BTreeSet<Item>) -> Vec<Item> 
     result.into_iter().collect()
 }
 
+struct Lr0ClosureScratch {
+    nonterminal_marks: Vec<u32>,
+    generation: u32,
+    queue: VecDeque<NonterminalID>,
+}
+
+impl Lr0ClosureScratch {
+    fn new(grammar: &AnalyzedGrammar) -> Self {
+        Self {
+            nonterminal_marks: vec![0; grammar.rules_by_lhs.len()],
+            generation: 0,
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn begin(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.nonterminal_marks.fill(0);
+            self.generation = 1;
+        }
+        self.queue.clear();
+    }
+
+    #[inline]
+    fn enqueue_once(&mut self, nonterminal: NonterminalID) {
+        let index = nonterminal as usize;
+        let Some(mark) = self.nonterminal_marks.get_mut(index) else {
+            return;
+        };
+        if *mark == self.generation {
+            return;
+        }
+        *mark = self.generation;
+        self.queue.push_back(nonterminal);
+    }
+}
+
+fn lr0_closure_fast(
+    grammar: &AnalyzedGrammar,
+    kernel: &BTreeSet<Item>,
+    scratch: &mut Lr0ClosureScratch,
+) -> Vec<Item> {
+    scratch.begin();
+    let mut result = Vec::with_capacity(kernel.len().saturating_add(8));
+    result.extend(kernel.iter().copied());
+
+    for item in kernel {
+        if let Some(Symbol::Nonterminal(nonterminal)) = item_next_symbol(item, &grammar.rules) {
+            scratch.enqueue_once(*nonterminal);
+        }
+    }
+
+    while let Some(nonterminal) = scratch.queue.pop_front() {
+        for &rule_id in &grammar.rules_by_lhs[nonterminal as usize] {
+            let rule = &grammar.rules[rule_id as usize];
+            let item = Item::new(rule_id, 0, rule.rhs.len() as u32);
+            result.push(item);
+            if let Some(Symbol::Nonterminal(next_nonterminal)) = rule.rhs.first() {
+                scratch.enqueue_once(*next_nonterminal);
+            }
+        }
+    }
+
+    result.sort_unstable();
+    result.dedup();
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(result, lr0_closure(grammar, kernel));
+    result
+}
+
 fn build_lr0_item_sets(
     grammar: &AnalyzedGrammar,
 ) -> (Vec<Lr0State>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    let mut closure_scratch = Lr0ClosureScratch::new(grammar);
     let mut start_kernel = BTreeSet::new();
     start_kernel.insert(Item::new(0, 0, grammar.rules[0].rhs.len() as u32));
-    let start_closure = lr0_closure(grammar, &start_kernel);
+    let start_closure = lr0_closure_fast(grammar, &start_kernel, &mut closure_scratch);
 
     let mut states = vec![Lr0State {
         kernel: start_kernel.clone(),
@@ -1823,7 +2056,7 @@ fn build_lr0_item_sets(
                 target
             } else {
                 let target = states.len() as u32;
-                let closure = lr0_closure(grammar, &adjusted_kernel);
+                let closure = lr0_closure_fast(grammar, &adjusted_kernel, &mut closure_scratch);
                 state_by_kernel.insert(key, target);
                 states.push(Lr0State {
                     kernel: adjusted_kernel,
@@ -1852,14 +2085,38 @@ fn lalr_global_node_id(offsets: &[usize], state: usize, item: usize) -> usize {
     offsets[state] + item
 }
 
+#[inline]
+fn union_lalr_lookahead_nodes(
+    lookaheads: &mut [BitSet],
+    source_node: usize,
+    target_node: usize,
+) -> bool {
+    if source_node == target_node {
+        return false;
+    }
+    if source_node < target_node {
+        let (before_target, target_and_after) = lookaheads.split_at_mut(target_node);
+        target_and_after[0].union_with_changed(&before_target[source_node])
+    } else {
+        let (before_source, source_and_after) = lookaheads.split_at_mut(source_node);
+        before_source[target_node].union_with_changed(&source_and_after[0])
+    }
+}
+
 fn compute_lalr_item_lookaheads(
     grammar: &AnalyzedGrammar,
     states: &[Lr0State],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> Vec<Vec<BitSet>> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let total_started = profile.then(std::time::Instant::now);
     let lookahead_len = grammar.num_terminals as usize + 1;
-    let first = first_bitsets(grammar);
+    let suffix_started = profile.then(std::time::Instant::now);
+    let suffix_first = rule_suffix_first_sets(grammar);
+    let suffix_ms = suffix_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
+    let index_started = profile.then(std::time::Instant::now);
     let mut offsets = Vec::with_capacity(states.len() + 1);
     offsets.push(0usize);
     for state in states {
@@ -1869,17 +2126,21 @@ fn compute_lalr_item_lookaheads(
 
     let mut item_index_by_state = Vec::with_capacity(states.len());
     for state in states {
-        let mut index = BTreeMap::new();
+        let mut index = FxHashMap::default();
+        index.reserve(state.closure.len());
         for (item_index, item) in state.closure.iter().enumerate() {
             index.insert(*item, item_index);
         }
         item_index_by_state.push(index);
     }
+    let index_ms = index_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
+    let alloc_started = profile.then(std::time::Instant::now);
     let mut lookaheads = vec![BitSet::new(lookahead_len); total_nodes];
     let mut edges = vec![Vec::<usize>::new(); total_nodes];
     let mut worklist = VecDeque::<usize>::new();
     let mut queued = vec![false; total_nodes];
+    let alloc_ms = alloc_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
     let start = Item::new(0, 0, grammar.rules[0].rhs.len() as u32);
     if let Some(&start_index) = item_index_by_state[0].get(&start) {
@@ -1889,8 +2150,8 @@ fn compute_lalr_item_lookaheads(
         queued[start_node] = true;
     }
 
-    let empty_lookahead = BitSet::new(lookahead_len);
-
+    let graph_started = profile.then(std::time::Instant::now);
+    let mut spontaneous_updates = 0usize;
     for (state_id, state) in states.iter().enumerate() {
         for (item_index, item) in state.closure.iter().enumerate() {
             let source_node = lalr_global_node_id(&offsets, state_id, item_index);
@@ -1915,16 +2176,10 @@ fn compute_lalr_item_lookaheads(
             let Some(Symbol::Nonterminal(nonterminal)) = item_next_symbol(item, &grammar.rules) else {
                 continue;
             };
-            let rhs = &grammar.rules[item.rule as usize].rhs;
-            let beta = &rhs[(item.dot as usize + 1)..];
-            let spontaneous = first_of_sequence_bits(
-                beta,
-                &empty_lookahead,
-                &first,
-                &grammar.nullable,
-                grammar.num_terminals,
-            );
-            let propagates = sequence_nullable(beta, &grammar.nullable);
+            let suffix = &suffix_first[item.rule as usize];
+            let suffix_index = item.dot as usize + 1;
+            let spontaneous = &suffix.first[suffix_index];
+            let propagates = suffix.nullable[suffix_index];
 
             for &rule_id in &grammar.rules_by_lhs[*nonterminal as usize] {
                 let closure_item = Item::new(rule_id, 0, grammar.rules[rule_id as usize].rhs.len() as u32);
@@ -1933,9 +2188,8 @@ fn compute_lalr_item_lookaheads(
                 };
                 let target_node = lalr_global_node_id(&offsets, state_id, target_item_index);
                 if !spontaneous.is_empty() {
-                    let delta = spontaneous.difference(&lookaheads[target_node]);
-                    if !delta.is_empty() {
-                        lookaheads[target_node].union_with(&delta);
+                    if lookaheads[target_node].union_with_changed(spontaneous) {
+                        spontaneous_updates += 1;
                         if !queued[target_node] {
                             queued[target_node] = true;
                             worklist.push_back(target_node);
@@ -1948,39 +2202,164 @@ fn compute_lalr_item_lookaheads(
             }
         }
     }
+    let graph_ms = graph_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
+    let dedup_started = profile.then(std::time::Instant::now);
+    for targets in &mut edges {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    let dedup_ms = dedup_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+    let edge_count = profile
+        .then(|| edges.iter().map(Vec::len).sum::<usize>())
+        .unwrap_or(0);
+
+    let propagation_started = profile.then(std::time::Instant::now);
+    let mut propagation_pops = 0usize;
+    let mut propagation_updates = 0usize;
     while let Some(source_node) = worklist.pop_front() {
+        propagation_pops += 1;
         queued[source_node] = false;
-        let source_lookahead = lookaheads[source_node].clone();
         for &target_node in &edges[source_node] {
-            let delta = source_lookahead.difference(&lookaheads[target_node]);
-            if delta.is_empty() {
+            if !union_lalr_lookahead_nodes(&mut lookaheads, source_node, target_node) {
                 continue;
             }
-            lookaheads[target_node].union_with(&delta);
+            propagation_updates += 1;
             if !queued[target_node] {
                 queued[target_node] = true;
                 worklist.push_back(target_node);
             }
         }
     }
+    let propagation_ms = propagation_started
+        .map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
 
-    states
+    let collect_started = profile.then(std::time::Instant::now);
+    let mut flat_lookaheads = lookaheads.into_iter();
+    let result = states
         .iter()
-        .enumerate()
-        .map(|(state_id, state)| {
-            (0..state.closure.len())
-                .map(|item_index| lookaheads[lalr_global_node_id(&offsets, state_id, item_index)].clone())
-                .collect()
-        })
-        .collect()
+        .map(|state| flat_lookaheads.by_ref().take(state.closure.len()).collect())
+        .collect();
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][lalr_lookahead] states={} total_nodes={} edges={} spontaneous_updates={} propagation_pops={} propagation_updates={} suffix_ms={:.3} index_ms={:.3} alloc_ms={:.3} graph_ms={:.3} dedup_ms={:.3} propagation_ms={:.3} collect_ms={:.3} total_ms={:.3}",
+            states.len(),
+            total_nodes,
+            edge_count,
+            spontaneous_updates,
+            propagation_pops,
+            propagation_updates,
+            suffix_ms,
+            index_ms,
+            alloc_ms,
+            graph_ms,
+            dedup_ms,
+            propagation_ms,
+            collect_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
 }
 
-fn build_lalr_table(grammar: &AnalyzedGrammar) -> GLRTable {
-    let (states, transitions) = build_lr0_item_sets(grammar);
-    let lookaheads = compute_lalr_item_lookaheads(grammar, &states, &transitions);
-    let (mut pending, goto, forwarded_shifts) = initialize_pending_and_goto(&transitions);
+fn pending_action_has_conflict(action: &PendingAction) -> bool {
+    let mut branches = usize::from(action.shift.is_some()) + usize::from(action.accept);
+    let mut unique_reduces = 0usize;
+    for (index, reduce) in action.reduces.iter().enumerate() {
+        if !action.reduces[..index].contains(reduce) {
+            unique_reduces += 1;
+            if branches + unique_reduces > 1 {
+                return true;
+            }
+        }
+    }
+    branches += unique_reduces;
+    branches > 1
+}
 
+fn pending_table_has_conflict(pending: &[FxHashMap<TerminalID, PendingAction>]) -> bool {
+    pending
+        .iter()
+        .flat_map(FxHashMap::values)
+        .any(pending_action_has_conflict)
+}
+
+/// Check whether FOLLOW-set (SLR) reductions would introduce any parse-table
+/// conflict without actually materializing them. The adaptive SLR path used to
+/// insert all broad FOLLOW reductions into `PendingAction`, scan the completed
+/// table, then throw that work away on the grammars which need LALR. Tail JSON
+/// schemas can have thousands of LR(0) states, so that failed speculation is a
+/// material fraction of compile time.
+///
+/// This mirrors `pending_action_has_conflict` exactly: one existing terminal
+/// shift is one branch, accept is one branch, and duplicate identical reduces
+/// count only once.
+fn slr_reductions_would_conflict(
+    grammar: &AnalyzedGrammar,
+    states: &[Lr0State],
+    transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
+) -> bool {
+    let lookahead_len = grammar.num_terminals as usize + 1;
+    // Per-lookahead state for one LR(0) state. A generation stamp avoids
+    // clearing these small arrays for every parser state.
+    let mut stamp = vec![0u32; lookahead_len];
+    let mut first_reduce = vec![(0u32, 0u32); lookahead_len];
+    let mut saw_accept = vec![false; lookahead_len];
+    let mut generation = 0u32;
+
+    for (state_id, state) in states.iter().enumerate() {
+        generation = generation.wrapping_add(1);
+        if generation == 0 {
+            stamp.fill(0);
+            generation = 1;
+        }
+        let by_symbol = &transitions[state_id];
+        for item in &state.closure {
+            let rule = &grammar.rules[item.rule as usize];
+            if item.dot as usize != rule.rhs.len() {
+                continue;
+            }
+            let reduce = (rule.lhs, item.stack_depth);
+            for bit in grammar.follow[rule.lhs as usize].iter_ones() {
+                let lookahead = bit_lookahead(bit, grammar.num_terminals);
+                let slot = bit;
+                let has_shift = by_symbol.contains_key(&Symbol::Terminal(lookahead));
+                if stamp[slot] != generation {
+                    stamp[slot] = generation;
+                    saw_accept[slot] = item.rule == 0;
+                    first_reduce[slot] = reduce;
+                    if has_shift {
+                        return true;
+                    }
+                    continue;
+                }
+
+                if has_shift {
+                    return true;
+                }
+                if item.rule == 0 {
+                    // Repeated accepts are one branch; accept plus any reduce
+                    // is a conflict.
+                    if !saw_accept[slot] {
+                        return true;
+                    }
+                } else {
+                    if saw_accept[slot] || first_reduce[slot] != reduce {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn add_completed_lr0_reductions(
+    grammar: &AnalyzedGrammar,
+    states: &[Lr0State],
+    lookaheads: Option<&[Vec<BitSet>]>,
+    pending: &mut [FxHashMap<TerminalID, PendingAction>],
+) {
     for (state_id, state) in states.iter().enumerate() {
         for (item_index, item) in state.closure.iter().enumerate() {
             let rule = &grammar.rules[item.rule as usize];
@@ -1988,10 +2367,17 @@ fn build_lalr_table(grammar: &AnalyzedGrammar) -> GLRTable {
                 continue;
             }
 
-            for bit in lookaheads[state_id][item_index].iter_ones() {
+            let reduction_lookaheads = lookaheads.map_or_else(
+                || &grammar.follow[rule.lhs as usize],
+                |lookaheads| &lookaheads[state_id][item_index],
+            );
+            for bit in reduction_lookaheads.iter_ones() {
                 let lookahead = bit_lookahead(bit, grammar.num_terminals);
                 if item.rule == 0 {
-                    pending[state_id].entry(lookahead).or_default().push_accept();
+                    pending[state_id]
+                        .entry(lookahead)
+                        .or_default()
+                        .push_accept();
                 } else {
                     pending[state_id]
                         .entry(lookahead)
@@ -2001,15 +2387,100 @@ fn build_lalr_table(grammar: &AnalyzedGrammar) -> GLRTable {
             }
         }
     }
+}
 
-    finish_table(
-        grammar,
-        pending,
-        goto,
-        forwarded_shifts,
-        GlrTableConstruction::Lalr,
-        AdmissionPolicy::ExactSimulation,
-    )
+fn build_lalr_table(grammar: &AnalyzedGrammar) -> GLRTable {
+    build_lalr_table_impl(grammar, lalr_early_identity_quotient_enabled(), false)
+}
+
+fn lalr_early_identity_quotient_enabled() -> bool {
+    std::env::var("GLRMASK_LALR_EARLY_IDENTITY_QUOTIENT")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn build_lalr_table_impl(
+    grammar: &AnalyzedGrammar,
+    early_identity_quotient: bool,
+    early_identity_fixed_point: bool,
+) -> GLRTable {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let total_started = profile.then(std::time::Instant::now);
+    let started = profile.then(std::time::Instant::now);
+    let (states, transitions) = build_lr0_item_sets(grammar);
+    let lr0_ms = started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+
+    let try_slr_fast_path = std::env::var("GLRMASK_LALR_TRY_SLR_FAST_PATH")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+
+    let started = profile.then(std::time::Instant::now);
+    let (mut pending, goto, forwarded_shifts) = initialize_pending_and_goto(&transitions);
+    let init_ms = started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+
+    let reduce_started = profile.then(std::time::Instant::now);
+    let mut selected_slr = false;
+    let mut slr_conflict = false;
+    let mut lookahead_ms = 0.0;
+    if try_slr_fast_path {
+        slr_conflict = slr_reductions_would_conflict(grammar, &states, &transitions);
+        if !slr_conflict {
+            add_completed_lr0_reductions(grammar, &states, None, &mut pending);
+            selected_slr = true;
+        }
+    }
+    if !selected_slr {
+        let started = profile.then(std::time::Instant::now);
+        let lookaheads = compute_lalr_item_lookaheads(grammar, &states, &transitions);
+        lookahead_ms = started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+        add_completed_lr0_reductions(grammar, &states, Some(&lookaheads), &mut pending);
+    }
+
+    let reduce_ms = reduce_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
+    let finish_started = profile.then(std::time::Instant::now);
+    let table = if early_identity_quotient {
+        finish_table_with_early_identity_quotient(
+            grammar,
+            pending,
+            goto,
+            forwarded_shifts,
+            GlrTableConstruction::Lalr,
+            AdmissionPolicy::ExactSimulation,
+            early_identity_fixed_point,
+        )
+    } else {
+        finish_table(
+            grammar,
+            pending,
+            goto,
+            forwarded_shifts,
+            GlrTableConstruction::Lalr,
+            AdmissionPolicy::ExactSimulation,
+        )
+    };
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][lalr_detail] try_slr={} selected_slr={} slr_conflict={} lr0_ms={:.3} lookahead_ms={:.3} init_ms={:.3} reduce_ms={:.3} finish_ms={:.3} total_ms={:.3} states={} transitions={}",
+            try_slr_fast_path,
+            selected_slr,
+            slr_conflict,
+            lr0_ms,
+            lookahead_ms,
+            init_ms,
+            reduce_ms,
+            finish_started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+            states.len(),
+            transitions.len(),
+        );
+    }
+    table
 }
 
 // LR(1) item set construction.
@@ -3265,9 +3736,12 @@ fn grouped_item_lookahead_counts(grammar: &AnalyzedGrammar) -> Vec<Vec<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::{
-        build_experimental_core_merged_table, build_lalr_table, build_lr1_item_sets,
+        add_completed_lr0_reductions, build_experimental_core_merged_table, build_lalr_table,
+        build_lalr_table_impl,
+        build_lr0_item_sets, build_lr1_item_sets,
         build_lr1_item_sets_with_preclosure_reuse, build_table,
         build_table_with_default_construction, grouped_item_lookahead_counts,
+        initialize_pending_and_goto, pending_table_has_conflict, slr_reductions_would_conflict,
         selected_glr_table_construction, try_build_direct_regular_table,
         try_build_direct_regular_table_reference,
     };
@@ -3312,6 +3786,41 @@ mod tests {
             ..GrammarDef::default()
         };
         AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    fn assert_early_lalr_identity_quotient_exact(grammar: &AnalyzedGrammar) {
+        let mut ordinary = build_lalr_table_impl(grammar, false, false);
+        let mut early = build_lalr_table_impl(grammar, true, false);
+        let fixed_point = build_lalr_table_impl(grammar, true, true);
+        ordinary.merge_identical_rows();
+        early.merge_identical_rows();
+
+        assert_eq!(ordinary.num_states, early.num_states);
+        assert_eq!(ordinary.action, early.action);
+        assert_eq!(ordinary.goto, early.goto);
+        assert_eq!(ordinary.rules, early.rules);
+        assert_eq!(ordinary.forwarded_shifts, early.forwarded_shifts);
+        assert_eq!(ordinary.num_terminals, early.num_terminals);
+        assert_eq!(ordinary.num_rules, early.num_rules);
+        assert_eq!(ordinary.construction, early.construction);
+        assert_eq!(ordinary.admission_policy, early.admission_policy);
+
+        assert_eq!(ordinary.num_states, fixed_point.num_states);
+        assert_eq!(ordinary.action, fixed_point.action);
+        assert_eq!(ordinary.goto, fixed_point.goto);
+        assert_eq!(ordinary.rules, fixed_point.rules);
+        assert_eq!(ordinary.forwarded_shifts, fixed_point.forwarded_shifts);
+        assert_eq!(ordinary.num_terminals, fixed_point.num_terminals);
+        assert_eq!(ordinary.num_rules, fixed_point.num_rules);
+        assert_eq!(ordinary.construction, fixed_point.construction);
+        assert_eq!(ordinary.admission_policy, fixed_point.admission_policy);
+    }
+
+    #[test]
+    fn early_lalr_identity_quotient_matches_ordinary_row_fixed_point() {
+        assert_early_lalr_identity_quotient_exact(&multi_lookahead_grammar());
+        assert_early_lalr_identity_quotient_exact(&mysterious_conflict_grammar());
+        assert_early_lalr_identity_quotient_exact(&generated_unit_dag_grammar(5, 3, true, true));
     }
 
     #[test]
@@ -4032,6 +4541,121 @@ mod tests {
         assert_eq!(table.construction, GlrTableConstruction::Lalr);
         assert_eq!(table.admission_policy, AdmissionPolicy::ExactSimulation);
         assert!(!table.has_ambiguity(), "{:#?}", table.ambiguous_actions());
+    }
+
+    #[test]
+    fn lalr_nullable_unit_chain_matches_legacy_recognition() {
+        let grammar = nullable_unit_chain_grammar();
+        let legacy = build_table_with_default_construction(
+            &grammar,
+            GlrTableConstruction::LegacyRowBisim,
+        );
+        let lalr = build_lalr_table(&grammar);
+        let start = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        let mut queue = VecDeque::from([(Vec::<u32>::new(), start.clone(), start)]);
+        let mut visited = 0usize;
+
+        while let Some((prefix, left, right)) = queue.pop_front() {
+            visited += 1;
+            assert_eq!(
+                stacks_finished(&legacy, &left),
+                stacks_finished(&lalr, &right),
+                "completion mismatch at {prefix:?}",
+            );
+            if prefix.len() == 6 {
+                continue;
+            }
+            for terminal in 0..legacy.num_terminals {
+                assert_eq!(
+                    stack_may_advance_on(&legacy, &left, terminal),
+                    stack_may_advance_on(&lalr, &right, terminal),
+                    "admission mismatch at {prefix:?} on {terminal}",
+                );
+                let left_next = advance_stacks(&legacy, &left, terminal);
+                let right_next = advance_stacks(&lalr, &right, terminal);
+                assert_eq!(
+                    left_next.is_empty(),
+                    right_next.is_empty(),
+                    "recognition mismatch at {prefix:?} on {terminal}",
+                );
+                if !left_next.is_empty() {
+                    let mut next = prefix.clone();
+                    next.push(terminal);
+                    queue.push_back((next, left_next, right_next));
+                }
+            }
+        }
+        assert!(visited > 4);
+    }
+
+    #[test]
+    fn lalr_matches_legacy_on_generated_nullable_grammars() {
+        for chain_len in 1..=5 {
+            for branches in 1..=3 {
+                    let recursive_tail = false;
+                    let grammar = generated_unit_dag_grammar(chain_len, branches, true, false);
+                    let legacy = build_table_with_default_construction(
+                        &grammar,
+                        GlrTableConstruction::LegacyRowBisim,
+                    );
+                    let lalr = build_lalr_table(&grammar);
+                    let start = ParserGSS::from_single_stack(
+                        vec![0],
+                        TerminalsDisallowed::new(),
+                    );
+                    let mut queue = VecDeque::from([(
+                        Vec::<u32>::new(),
+                        start.clone(),
+                        start,
+                    )]);
+                    while let Some((prefix, left, right)) = queue.pop_front() {
+                        assert_eq!(
+                            stacks_finished(&legacy, &left),
+                            stacks_finished(&lalr, &right),
+                            "completion mismatch chain={chain_len} branches={branches} recursive={recursive_tail} prefix={prefix:?}",
+                        );
+                        if prefix.len() == 7 {
+                            continue;
+                        }
+                        for terminal in 0..legacy.num_terminals {
+                            assert_eq!(
+                                stack_may_advance_on(&legacy, &left, terminal),
+                                stack_may_advance_on(&lalr, &right, terminal),
+                                "admission mismatch chain={chain_len} branches={branches} recursive={recursive_tail} prefix={prefix:?} terminal={terminal}",
+                            );
+                            let left_next = advance_stacks(&legacy, &left, terminal);
+                            let right_next = advance_stacks(&lalr, &right, terminal);
+                            assert_eq!(
+                                left_next.is_empty(),
+                                right_next.is_empty(),
+                                "recognition mismatch chain={chain_len} branches={branches} recursive={recursive_tail} prefix={prefix:?} terminal={terminal}",
+                            );
+                            if !left_next.is_empty() {
+                                let mut next = prefix.clone();
+                                next.push(terminal);
+                                queue.push_back((next, left_next, right_next));
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    #[test]
+    fn slr_conflict_preflight_matches_materialized_reductions() {
+        for grammar in [
+            multi_lookahead_grammar(),
+            mysterious_conflict_grammar(),
+            recursive_ambiguous_grammar(),
+            template_like_grammar(),
+        ] {
+            let (states, transitions) = build_lr0_item_sets(&grammar);
+            let (mut pending, _, _) = initialize_pending_and_goto(&transitions);
+            add_completed_lr0_reductions(&grammar, &states, None, &mut pending);
+            let materialized = pending_table_has_conflict(&pending);
+            let preflight = slr_reductions_would_conflict(&grammar, &states, &transitions);
+            assert_eq!(preflight, materialized);
+        }
     }
 
     #[test]

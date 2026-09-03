@@ -7,7 +7,7 @@ use regex_syntax::Parser;
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::StringSchema;
-use super::config::QuoteMerge;
+use super::config::{JsonSchemaConfig, QuoteMerge};
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
@@ -27,6 +27,74 @@ use super::pattern_splitting::{
 
 
 const PROGRAMMATIC_JS_WS_REGEX: &str = r"[ \t\n\r]*";
+// Keep this aligned with the dynamic compiler's giant-repeat threshold. Below
+// this bound the established chunked representation is both compact and fast;
+// the lazy residual form is intended for bounds large enough that eager
+// repetition would otherwise dominate compilation.
+const LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX: usize = 4_096;
+
+fn use_lazy_ordinary_bounded_string(config: &JsonSchemaConfig, max_length: usize) -> bool {
+    config.lazy_ordinary_bounded_strings
+        && max_length >= LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
+}
+
+/// Recognize the deliberately small subset of regex syntax whose decoded
+/// string language is exactly one printable ASCII value. This is used only for
+/// schema-level reasoning over already-decoded JSON values; lexical lowering
+/// must still preserve alternate JSON escape spellings for the same value.
+pub(super) fn plain_fully_anchored_ascii_literal(pattern: &str) -> Option<&str> {
+    let body = pattern.strip_prefix('^')?.strip_suffix('$')?;
+    if body.bytes().all(|byte| {
+        byte.is_ascii_graphic()
+            && !matches!(
+                byte,
+                b'\\' | b'.' | b'+' | b'*' | b'?' | b'(' | b')' | b'|'
+                    | b'[' | b']' | b'{' | b'}' | b'^' | b'$' | b'"'
+            )
+    }) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn exact_hex_digit_expr(nibble: u8) -> GrammarExpr {
+    debug_assert!(nibble < 16);
+    if nibble < 10 {
+        lit_bytes(vec![b'0' + nibble])
+    } else {
+        let upper = b'A' + (nibble - 10);
+        choice(vec![lit_bytes(vec![upper]), lit_bytes(vec![upper + (b'a' - b'A')])])
+    }
+}
+
+/// Exact JSON byte spellings for one decoded printable ASCII character in an
+/// anchored singleton value pattern. Keeping this structural avoids invoking
+/// the regex parser once per character on what is already a finite language.
+fn plain_ascii_pattern_char_expr(byte: u8, mode: JsonStringCompatMode, at_start: bool) -> GrammarExpr {
+    debug_assert!(byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'));
+
+    let raw = if byte == b'/' && mode == JsonStringCompatMode::JsonSchema {
+        choice(vec![lit_bytes(vec![b'/']), lit_bytes(br"\/".to_vec())])
+    } else {
+        lit_bytes(vec![byte])
+    };
+
+    let allow_unicode_escape = mode == JsonStringCompatMode::JsonSchema
+        || (mode == JsonStringCompatMode::LlGuidanceNative && at_start);
+    if !allow_unicode_escape {
+        return raw;
+    }
+
+    choice(vec![
+        raw,
+        seq(vec![
+            lit("\\u00"),
+            exact_hex_digit_expr(byte >> 4),
+            exact_hex_digit_expr(byte & 0x0f),
+        ]),
+    ])
+}
 
 fn is_ascii_js_identifier_name(value: &str) -> bool {
     let mut bytes = value.bytes();
@@ -115,6 +183,35 @@ impl<'a> Lowerer<'a> {
                     } else {
                         "json_string_constrained"
                     });
+                    if schema.min_length == 0
+                        && schema.max_length.is_none()
+                        && schema.format.is_none()
+                        && let Some(pattern) = schema.pattern.as_deref()
+                        && let Some(literal) = plain_fully_anchored_ascii_literal(pattern)
+                    {
+                        // JSON Schema patterns constrain the decoded string, not
+                        // one particular JSON byte spelling. Keep the singleton
+                        // fast path exact by accepting every spelling already
+                        // recognized by the ordinary pattern-literal machinery
+                        // (for example `/`, `\/`, and `\u002f` in JSON-Schema
+                        // mode), rather than serializing only the canonical form.
+                        let mode = json_string_compat_mode();
+                        let mut parts = Vec::with_capacity(literal.len() + 2);
+                        parts.push(lit("\""));
+                        parts.extend(
+                            literal
+                                .bytes()
+                                .enumerate()
+                                .map(|(index, byte)| plain_ascii_pattern_char_expr(
+                                    byte,
+                                    mode,
+                                    index == 0,
+                                )),
+                        );
+                        parts.push(lit("\""));
+                        lowerer.add_terminal_rule(&name, seq(parts));
+                        return Ok(r(&name));
+                    }
                     if let Some(expr) = lowerer.lower_anchored_prefix_any_suffix_bounded_pattern_expr(schema)? {
                         lowerer.add_nonterminal_rule(&name, expr);
                         return Ok(r(&name));
@@ -144,10 +241,11 @@ impl<'a> Lowerer<'a> {
             } else {
                 "json_string_constrained"
             });
-            let expr = if self.config.lazy_ordinary_bounded_strings
+            let expr = if schema
+                .max_length
+                .is_some_and(|max| use_lazy_ordinary_bounded_string(&self.config, max))
                 && schema.pattern.is_none()
                 && schema.format.is_none()
-                && schema.max_length.is_some()
             {
                 self.lower_lazy_ordinary_bounded_string_terminal_expr(schema)
             } else {
@@ -777,7 +875,9 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
         {
-            if self.config.lazy_ordinary_bounded_strings && schema.format.is_none() {
+            if use_lazy_ordinary_bounded_string(&self.config, max_length)
+                && schema.format.is_none()
+            {
                 return Ok(self.lower_lazy_ordinary_bounded_string_terminal_expr(schema));
             }
             // Keep both JSON-string quotes in the bounded terminal. Leaving the
@@ -1360,7 +1460,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn should_split_ordinary_bounded_string(&self, min: usize, max: usize) -> bool {
-        !self.config.lazy_ordinary_bounded_strings
+        !use_lazy_ordinary_bounded_string(&self.config, max)
             && self.should_split_bounded_string(min, max)
     }
 
@@ -4538,9 +4638,44 @@ mod tests {
 
     use super::{
         clamp_absolute_single_fixed_width_repetition, preprocess_ascii_shorthand,
-        quoted_string_body_regex, string_pattern_as_body_regex, FixedWidthRepeatClamp,
-        JsonStringCompatMode, JsonStringContext, TEST_COMPAT_MODE,
+        plain_fully_anchored_ascii_literal, quoted_string_body_regex,
+        string_pattern_as_body_regex, use_lazy_ordinary_bounded_string, FixedWidthRepeatClamp,
+        JsonStringCompatMode, JsonStringContext,
+        LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX, TEST_COMPAT_MODE,
     };
+    use crate::json_schema::config::JsonSchemaConfig;
+
+    #[test]
+    fn lazy_ordinary_bounded_strings_start_at_dynamic_giant_threshold() {
+        let mut config = JsonSchemaConfig::default();
+        assert!(!use_lazy_ordinary_bounded_string(
+            &config,
+            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
+        ));
+        config.lazy_ordinary_bounded_strings = true;
+        assert!(!use_lazy_ordinary_bounded_string(
+            &config,
+            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX - 1
+        ));
+        assert!(use_lazy_ordinary_bounded_string(
+            &config,
+            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
+        ));
+    }
+
+    #[test]
+    fn recognizes_only_plain_fully_anchored_ascii_literals_for_decoded_reasoning() {
+        assert_eq!(
+            plain_fully_anchored_ascii_literal("^PowerShell@1$"),
+            Some("PowerShell@1")
+        );
+        assert_eq!(plain_fully_anchored_ascii_literal("^a-b_c/1$"), Some("a-b_c/1"));
+        assert_eq!(plain_fully_anchored_ascii_literal("PowerShell@1"), None);
+        assert_eq!(plain_fully_anchored_ascii_literal("^PowerShell.*$"), None);
+        assert_eq!(plain_fully_anchored_ascii_literal(r"^PowerShell\@1$"), None);
+        assert_eq!(plain_fully_anchored_ascii_literal("^a b$"), None);
+        assert_eq!(plain_fully_anchored_ascii_literal("^é$"), None);
+    }
 
     #[test]
     fn fixed_width_repeat_clamp_matches_literal_language_intersection_exhaustively() {

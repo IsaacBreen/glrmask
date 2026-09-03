@@ -324,7 +324,21 @@ fn dynamic_named_alternatives(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<Vec<ast::NamedGrammar>> {
-    dynamic_named_alternatives_from_named(parse(source)?, transform, end_token_ids)
+    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let parse_started = profile_top.then(std::time::Instant::now);
+    let named = parse(source)?;
+    let parse_ms = parse_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let alternatives_started = profile_top.then(std::time::Instant::now);
+    let alternatives = dynamic_named_alternatives_from_named(named, transform, end_token_ids)?;
+    if let Some(started) = alternatives_started {
+        eprintln!(
+            "[glrmask/profile][dynamic_import_top] parse_named_ms={:.3} alternatives_ms={:.3}",
+            parse_ms,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(alternatives)
 }
 
 fn dynamic_named_alternatives_from_named(
@@ -332,10 +346,19 @@ fn dynamic_named_alternatives_from_named(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<Vec<ast::NamedGrammar>> {
+    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let factor_started = profile_top.then(std::time::Instant::now);
     let mut factored = factor_named_grammar(named);
+    let factor_ms = factor_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let transform_started = profile_top.then(std::time::Instant::now);
     if let Some(transform) = transform {
         transform(&mut factored)?;
     }
+    let transform_ms = transform_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let extract_started = profile_top.then(std::time::Instant::now);
 
     let start_index = factored
         .rules
@@ -357,6 +380,14 @@ fn dynamic_named_alternatives_from_named(
 
     if !has_embedded_region || options.is_none() {
         append_end_token_choice(&mut factored, end_token_ids);
+        if let Some(started) = extract_started {
+            eprintln!(
+                "[glrmask/profile][dynamic_alternatives_top] factor_ms={:.3} transform_ms={:.3} extract_ms={:.3} alternatives=1 embedded_region=false",
+                factor_ms,
+                transform_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         return Ok(vec![factored]);
     }
 
@@ -378,6 +409,15 @@ fn dynamic_named_alternatives_from_named(
         crate::grammar::right_linear::retain_reachable_rules(&mut alternative);
         append_end_token_choice(&mut alternative, end_token_ids);
         alternatives.push(alternative);
+    }
+    if let Some(started) = extract_started {
+        eprintln!(
+            "[glrmask/profile][dynamic_alternatives_top] factor_ms={:.3} transform_ms={:.3} extract_ms={:.3} alternatives={} embedded_region=true",
+            factor_ms,
+            transform_ms,
+            started.elapsed().as_secs_f64() * 1000.0,
+            alternatives.len(),
+        );
     }
     Ok(alternatives)
 }
@@ -409,17 +449,44 @@ fn compile_dynamic_from_source(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<DynamicConstraint> {
+    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let total_started = profile_top.then(std::time::Instant::now);
+    let import_started = profile_top.then(std::time::Instant::now);
     let alternatives = dynamic_named_alternatives(source, parse, transform, end_token_ids)?;
+    let import_ms = import_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let mut compiled = Vec::with_capacity(alternatives.len());
+    let mut lower_ms = 0.0;
+    let mut compile_ms = 0.0;
     for alternative in alternatives {
+        let lower_started = profile_top.then(std::time::Instant::now);
         let grammar = ast::lower(&alternative)?;
+        lower_ms += lower_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let compile_started = profile_top.then(std::time::Instant::now);
         compiled.push(compile_dynamic_owned_with_table_construction(
             grammar,
             vocab,
             default_table_construction,
         )?);
+        compile_ms += compile_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     }
-    Ok(DynamicConstraint::from_alternatives(compiled))
+    let wrap_started = profile_top.then(std::time::Instant::now);
+    let result = DynamicConstraint::from_alternatives(compiled);
+    let wrap_ms = wrap_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][dynamic_top] import_ms={:.3} ast_lower_ms={:.3} compile_ms={:.3} wrap_ms={:.3} total_ms={:.3}",
+            import_ms,
+            lower_ms,
+            compile_ms,
+            wrap_ms,
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(result)
 }
 
 fn compile_dynamic_serialized_from_source_profiled(
@@ -514,14 +581,26 @@ pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
 }
 
 fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
+    let profile_top = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
+    let parse_top_started = profile_top.then(std::time::Instant::now);
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
+    let parse_top_ms = parse_top_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    let lower_top_started = profile_top.then(std::time::Instant::now);
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = json_schema::schema_to_named_grammar(&schema);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
+    if let Some(started) = lower_top_started {
+        eprintln!(
+            "[glrmask/profile][json_parse_top] serde_json_ms={:.3} schema_to_named_ms={:.3}",
+            parse_top_ms,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Ok(named?)
 }
 

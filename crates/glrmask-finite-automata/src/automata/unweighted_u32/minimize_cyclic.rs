@@ -4,19 +4,11 @@
 //! `minimize_acyclic`, this works on DFAs with cycles (self-loops,
 //! back-edges, etc.) at the cost of slightly higher constant factors.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+
+use rustc_hash::FxHashMap;
 
 use super::dfa::{DFA, DFAState, Label};
-
-fn collect_reachable_alphabet(dfa: &DFA, reachable: &[usize]) -> Vec<Label> {
-    let mut labels = BTreeSet::new();
-    for &state_id in reachable {
-        for &label in dfa.states[state_id].transitions.keys() {
-            labels.insert(label);
-        }
-    }
-    labels.into_iter().collect()
-}
 
 fn dense_reachable_states(reachable: &[usize]) -> (HashMap<usize, usize>, Vec<usize>) {
     let mut state_to_dense = HashMap::new();
@@ -52,27 +44,47 @@ fn initial_partition(dfa: &DFA, dense_to_state: &[usize], dead: usize) -> Vec<us
     class_of
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SparseRefinementSignature {
+    previous_class: usize,
+    /// Only transitions whose current target class differs from the implicit
+    /// dead sink. Missing transitions and explicit transitions into the dead
+    /// class are equivalent under partial-DFA semantics and are omitted.
+    transitions: Vec<(Label, usize)>,
+}
+
 fn refine_partition(
+    dfa: &DFA,
     class_of: &[usize],
     dead: usize,
-    alphabet: &[Label],
     dense_to_state: &[usize],
-    target_dense: impl Fn(usize, Label) -> usize,
+    state_to_dense: &HashMap<usize, usize>,
 ) -> Vec<usize> {
-    let mut signature_to_class = HashMap::<Vec<usize>, usize>::new();
+    let dead_class = class_of[dead];
+    let mut signature_to_class = FxHashMap::<SparseRefinementSignature, usize>::default();
     let mut new_class_of = vec![0usize; dense_to_state.len() + 1];
     let mut next_class = 0usize;
 
     for dense_id in 0..=dead {
-        let mut signature = Vec::with_capacity(1 + alphabet.len());
-        signature.push(class_of[dense_id]);
-        if dense_id == dead {
-            signature.extend(std::iter::repeat(class_of[dead]).take(alphabet.len()));
-        } else {
-            for &label in alphabet {
-                signature.push(class_of[target_dense(dense_to_state[dense_id], label)]);
+        let mut transitions = Vec::new();
+        if dense_id != dead {
+            let state = &dfa.states[dense_to_state[dense_id]];
+            transitions.reserve(state.transitions.len());
+            for (&label, &target) in &state.transitions {
+                let target_dense = state_to_dense
+                    .get(&(target as usize))
+                    .copied()
+                    .unwrap_or(dead);
+                let target_class = class_of[target_dense];
+                if target_class != dead_class {
+                    transitions.push((label, target_class));
+                }
             }
         }
+        let signature = SparseRefinementSignature {
+            previous_class: class_of[dense_id],
+            transitions,
+        };
 
         let class = if let Some(&existing) = signature_to_class.get(&signature) {
             existing
@@ -160,28 +172,23 @@ pub fn minimize_cyclic(dfa: &DFA) -> DFA {
         return DFA::new();
     }
 
-    let alphabet = collect_reachable_alphabet(dfa, &reachable);
-
     let (state_to_dense, dense_to_state) = dense_reachable_states(&reachable);
     let n = dense_to_state.len();
 
     // Use an implicit DEAD sink for missing transitions (dense id = n).
     let dead = n;
 
-    // Resolve a transition target to a dense id (DEAD if missing or unreachable).
-    let target_dense = |state_idx: usize, label: Label| -> usize {
-        dfa.states[state_idx]
-            .transitions
-            .get(&label)
-            .and_then(|&t| state_to_dense.get(&(t as usize)).copied())
-            .unwrap_or(dead)
-    };
-
     let mut class_of = initial_partition(dfa, &dense_to_state, dead);
 
     // Refine partitions with composite signatures.
     loop {
-        let new_class_of = refine_partition(&class_of, dead, &alphabet, &dense_to_state, target_dense);
+        let new_class_of = refine_partition(
+            dfa,
+            &class_of,
+            dead,
+            &dense_to_state,
+            &state_to_dense,
+        );
 
         if new_class_of == class_of {
             break;
@@ -213,4 +220,106 @@ fn reachable_states(dfa: &DFA) -> Vec<usize> {
     }
     result.sort_unstable();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use super::*;
+
+    fn dense_reference(dfa: &DFA) -> DFA {
+        if dfa.states.is_empty() {
+            return dfa.clone();
+        }
+        let reachable = reachable_states(dfa);
+        if reachable.is_empty() {
+            return DFA::new();
+        }
+        let alphabet = reachable
+            .iter()
+            .flat_map(|&state| dfa.states[state].transitions.keys().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let (state_to_dense, dense_to_state) = dense_reachable_states(&reachable);
+        let dead = dense_to_state.len();
+        let mut class_of = initial_partition(dfa, &dense_to_state, dead);
+
+        loop {
+            let mut signature_to_class = HashMap::<Vec<usize>, usize>::new();
+            let mut new_class_of = vec![0usize; dense_to_state.len() + 1];
+            let mut next_class = 0usize;
+            for dense_id in 0..=dead {
+                let mut signature = Vec::with_capacity(1 + alphabet.len());
+                signature.push(class_of[dense_id]);
+                if dense_id == dead {
+                    signature.extend(std::iter::repeat_n(class_of[dead], alphabet.len()));
+                } else {
+                    let state = dense_to_state[dense_id];
+                    for &label in &alphabet {
+                        let target_dense = dfa.states[state]
+                            .transitions
+                            .get(&label)
+                            .and_then(|&target| state_to_dense.get(&(target as usize)).copied())
+                            .unwrap_or(dead);
+                        signature.push(class_of[target_dense]);
+                    }
+                }
+                let class = if let Some(&existing) = signature_to_class.get(&signature) {
+                    existing
+                } else {
+                    let class = next_class;
+                    next_class += 1;
+                    signature_to_class.insert(signature, class);
+                    class
+                };
+                new_class_of[dense_id] = class;
+            }
+            if new_class_of == class_of {
+                break;
+            }
+            class_of = new_class_of;
+        }
+
+        let dead_class = class_of[dead];
+        build_minimized_cyclic_dfa(
+            dfa,
+            &state_to_dense,
+            &dense_to_state,
+            &class_of,
+            dead_class,
+        )
+    }
+
+    fn generated_dfa(seed: u64) -> DFA {
+        let mut dfa = DFA::new();
+        const STATES: usize = 64;
+        const LABELS: i32 = 9;
+        for _ in 1..STATES {
+            dfa.add_state();
+        }
+        let mut x = seed;
+        for state in 0..STATES {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            dfa.set_accepting(state as u32, (x >> 61) == 0);
+            for label in 0..LABELS {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                if (x & 3) == 0 {
+                    continue;
+                }
+                let target = ((x >> 17) as usize % STATES) as u32;
+                dfa.add_transition(state as u32, label, target);
+            }
+        }
+        dfa
+    }
+
+    #[test]
+    fn sparse_refinement_matches_dense_reference() {
+        for seed in 0..32u64 {
+            let dfa = generated_dfa(seed.wrapping_mul(17).wrapping_add(3));
+            assert_eq!(minimize_cyclic(&dfa), dense_reference(&dfa), "seed={seed}");
+        }
+    }
 }

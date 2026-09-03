@@ -926,6 +926,8 @@ fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
     let schema = json!({"type": "string", "pattern": "^/$"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
     assert!(schema_accepts_bytes(&schema, br#""/""#));
+    assert!(schema_accepts_bytes(&schema, br#""\u002F""#));
+    assert!(schema_accepts_bytes(&schema, br#""\u002f""#));
 }
 
 #[test]
@@ -6313,7 +6315,7 @@ fn object_const_uses_json_separator_rules() {
 }
 
 #[test]
-fn large_string_enum_at_root_uses_raw_regex() {
+fn large_string_enum_at_root_uses_exact_literal_choice() {
     let values = (0..80)
         .map(|index| json!(format!("value-{index:02}")))
         .collect::<Vec<_>>();
@@ -6328,7 +6330,11 @@ fn large_string_enum_at_root_uses_raw_regex() {
         .iter()
         .find(|rule| rule.name == *rule_name)
         .expect("literal-enum terminal rule");
-    assert!(matches!(enum_rule.expr, GrammarExpr::RawRegex(_)));
+    let GrammarExpr::Choice(options) = &enum_rule.expr else {
+        panic!("large string enum should remain one exact literal-choice terminal: {:?}", enum_rule.expr);
+    };
+    assert_eq!(options.len(), 80);
+    assert!(options.iter().all(|option| matches!(option, GrammarExpr::Literal(_))));
     assert_eq!(
         grammar.lexer_partitions.get(rule_name).map(String::as_str),
         Some(super::lower::JSON_LITERAL_LEXER_PARTITION),

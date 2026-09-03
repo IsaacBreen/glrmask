@@ -484,6 +484,184 @@ fn factor_choice_common_suffix(options: &[Expr]) -> Option<Expr> {
     ]))
 }
 
+/// Factor one repeated leading atom even when it is shared by only a subset
+/// of the choice arms. This is the exact identity
+///
+///     A B | A C | D  ==  A (B | C) | D
+///
+/// and is particularly important for mixed anchored/unanchored JSON-schema
+/// string patterns: the unanchored arms often share a `JSON_STRING_CHAR*`
+/// prefix while an anchored arm does not. Requiring every arm to share the
+/// prefix leaves subset construction to rediscover that factoring through a
+/// potentially enormous intermediate DFA.
+fn factor_choice_repeated_prefix_subset(options: &[Expr]) -> Option<Expr> {
+    // Group once instead of rescanning the whole choice for every candidate.
+    // Large finite literal languages routinely have thousands of distinct
+    // arms; the old nested scan made a no-op subset-factor probe quadratic.
+    // Iterating `options` again below preserves the historical deterministic
+    // choice of the first repeated leading atom.
+    let mut groups = FxHashMap::<&Expr, Vec<usize>>::default();
+    for (index, option) in options.iter().enumerate() {
+        if let Some(prefix) = choice_first_part(option) {
+            groups.entry(prefix).or_default().push(index);
+        }
+    }
+
+    for (first_index, option) in options.iter().enumerate() {
+        let Some(prefix) = choice_first_part(option) else {
+            continue;
+        };
+        let Some(matching) = groups.get(prefix) else {
+            continue;
+        };
+        if matching.len() < 2 || matching.len() == options.len() {
+            continue;
+        }
+        let prefix = prefix.clone();
+
+        let remainders = matching
+            .iter()
+            .map(|&index| choice_without_first_part(&options[index]))
+            .collect::<Vec<_>>();
+        let factored_group = seq_from_parts(vec![
+            prefix,
+            factor_regex_expr(Expr::Choice(remainders)),
+        ]);
+        let mut is_matching = vec![false; options.len()];
+        for &index in matching {
+            is_matching[index] = true;
+        }
+        let mut rewritten = Vec::with_capacity(options.len() - matching.len() + 1);
+        for (index, option) in options.iter().enumerate() {
+            if index == first_index {
+                rewritten.push(factored_group.clone());
+            } else if !is_matching[index] {
+                rewritten.push(option.clone());
+            }
+        }
+        return Some(factor_regex_expr(Expr::Choice(rewritten)));
+    }
+    None
+}
+
+/// Suffix counterpart of `factor_choice_repeated_prefix_subset`:
+///
+///     B A | C A | D  ==  (B | C) A | D
+fn factor_choice_repeated_suffix_subset(options: &[Expr]) -> Option<Expr> {
+    let mut groups = FxHashMap::<&Expr, Vec<usize>>::default();
+    for (index, option) in options.iter().enumerate() {
+        if let Some(suffix) = choice_last_part(option) {
+            groups.entry(suffix).or_default().push(index);
+        }
+    }
+
+    for (first_index, option) in options.iter().enumerate() {
+        let Some(suffix) = choice_last_part(option) else {
+            continue;
+        };
+        let Some(matching) = groups.get(suffix) else {
+            continue;
+        };
+        if matching.len() < 2 || matching.len() == options.len() {
+            continue;
+        }
+        let suffix = suffix.clone();
+
+        let prefixes = matching
+            .iter()
+            .map(|&index| choice_without_last_part(&options[index]))
+            .collect::<Vec<_>>();
+        let factored_group = seq_from_parts(vec![
+            factor_regex_expr(Expr::Choice(prefixes)),
+            suffix,
+        ]);
+        let mut is_matching = vec![false; options.len()];
+        for &index in matching {
+            is_matching[index] = true;
+        }
+        let mut rewritten = Vec::with_capacity(options.len() - matching.len() + 1);
+        for (index, option) in options.iter().enumerate() {
+            if index == first_index {
+                rewritten.push(factored_group.clone());
+            } else if !is_matching[index] {
+                rewritten.push(option.clone());
+            }
+        }
+        return Some(factor_regex_expr(Expr::Choice(rewritten)));
+    }
+    None
+}
+
+/// Factor sibling exclusions that subtract the same language:
+///
+///     (A \\ B) | (C \\ B) | D  ==  ((A | C) \\ B) | D
+///
+/// This is ordinary set algebra on languages. Keeping the subtraction outside
+/// the union matters for schema-generated key languages: otherwise every arm
+/// is materialized as an independent DFA before the union is determinized.
+fn factor_choice_repeated_exclusion_rhs(options: &[Expr]) -> Option<Expr> {
+    let mut groups = FxHashMap::<&Expr, Vec<usize>>::default();
+    for (index, option) in options.iter().enumerate() {
+        if let Expr::Exclude { exclude, .. } = unwrap_shared(option) {
+            groups.entry(unwrap_shared(exclude)).or_default().push(index);
+        }
+    }
+
+    let mut replacement_by_first = FxHashMap::<usize, Expr>::default();
+    let mut remove = vec![false; options.len()];
+    for matching in groups.values() {
+        if matching.len() < 2 {
+            continue;
+        }
+        let first_index = matching[0];
+        let Expr::Exclude { exclude, .. } = unwrap_shared(&options[first_index]) else {
+            unreachable!("repeated exclusion group contains a non-exclusion arm");
+        };
+        let lefts = matching
+            .iter()
+            .map(|&index| match unwrap_shared(&options[index]) {
+                Expr::Exclude { expr, .. } => (**expr).clone(),
+                _ => unreachable!("repeated exclusion group contains a non-exclusion arm"),
+            })
+            .collect::<Vec<_>>();
+        let left = if lefts.len() == 1 {
+            lefts.into_iter().next().unwrap()
+        } else {
+            // `options` were recursively factored before this helper runs, so
+            // every left subtree is already normalized. Do not walk all of
+            // them again merely because the set identity introduced a union.
+            Expr::Choice(lefts)
+        };
+        replacement_by_first.insert(
+            first_index,
+            Expr::Exclude {
+                expr: Box::new(left),
+                exclude: Box::new((**exclude).clone()),
+            },
+        );
+        for &index in matching.iter().skip(1) {
+            remove[index] = true;
+        }
+    }
+
+    if replacement_by_first.is_empty() {
+        return None;
+    }
+    let mut rewritten = Vec::with_capacity(options.len());
+    for (index, option) in options.iter().enumerate() {
+        if let Some(replacement) = replacement_by_first.remove(&index) {
+            rewritten.push(replacement);
+        } else if !remove[index] {
+            rewritten.push(option.clone());
+        }
+    }
+    if rewritten.len() == 1 {
+        rewritten.pop()
+    } else {
+        Some(Expr::Choice(rewritten))
+    }
+}
+
 fn factor_choice_literals(options: &[Expr]) -> Option<Expr> {
     if options.len() < 2 {
         return None;
@@ -948,6 +1126,22 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             seq_from_parts(out)
         }
         Expr::Choice(options) => {
+            // A large finite choice of exact byte strings is already an ideal
+            // input to ordinary subset construction: the resulting DFA is the
+            // shared-prefix trie of those strings. Recursively peeling common
+            // bytes and probing subset prefix/suffix factors only rebuilds and
+            // hashes the entire literal set repeatedly, while providing no
+            // protection against subset-state explosion (there is none for a
+            // finite literal trie). Keep small choices on the historical path,
+            // where syntactic factoring is cheap and can reduce setup overhead.
+            const LARGE_PURE_LITERAL_CHOICE_NO_FACTOR: usize = 64;
+            if options.len() >= LARGE_PURE_LITERAL_CHOICE_NO_FACTOR
+                && options
+                    .iter()
+                    .all(|option| matches!(unwrap_shared(option), Expr::U8Seq(_)))
+            {
+                return Expr::Choice(options);
+            }
             let mut factored_options = options.into_iter().map(factor_regex_expr).collect::<Vec<_>>();
 
             if factored_options.len() == 1 {
@@ -964,6 +1158,15 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
                 return factored;
             }
             if let Some(factored) = factor_choice_common_suffix(&factored_options) {
+                return factored;
+            }
+            if let Some(factored) = factor_choice_repeated_exclusion_rhs(&factored_options) {
+                return factored;
+            }
+            if let Some(factored) = factor_choice_repeated_prefix_subset(&factored_options) {
+                return factored;
+            }
+            if let Some(factored) = factor_choice_repeated_suffix_subset(&factored_options) {
                 return factored;
             }
 
@@ -1018,6 +1221,21 @@ fn expr_contains_group_op(expr: &Expr) -> bool {
         Expr::Repeat { expr, .. } => expr_contains_group_op(expr),
         Expr::Shared(inner) => expr_contains_group_op(inner),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+    }
+}
+
+fn group_op_node_count(expr: &Expr) -> usize {
+    match expr {
+        Expr::Exclude { expr, exclude } => {
+            1 + group_op_node_count(expr) + group_op_node_count(exclude)
+        }
+        Expr::Intersect { expr, intersect } => {
+            1 + group_op_node_count(expr) + group_op_node_count(intersect)
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().map(group_op_node_count).sum(),
+        Expr::Repeat { expr, .. } => group_op_node_count(expr),
+        Expr::Shared(expr) => group_op_node_count(expr),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => 0,
     }
 }
 
@@ -1801,7 +2019,18 @@ fn build_exclusion_compile_plan_with_labels_and_cache(
         );
     }
 
-    let parallel_materialize = visible_groups >= 64
+    // Parallelize nested group-op materialization only when there is enough
+    // actual set-operation work to amortize per-expression caches and Rayon
+    // scheduling. `visible_groups` alone is a poor proxy: a medium-sized
+    // partition can contain hundreds of nested exclusions, while a much larger
+    // literal partition may contain none.
+    const PARALLEL_NESTED_GROUP_PLAN_MIN_VISIBLE_GROUPS: usize = 16;
+    const PARALLEL_NESTED_GROUP_PLAN_MIN_GROUP_OPS: usize = 128;
+    let nested_group_ops = (visible_groups >= PARALLEL_NESTED_GROUP_PLAN_MIN_VISIBLE_GROUPS)
+        .then(|| exprs.iter().map(group_op_node_count).sum::<usize>())
+        .unwrap_or(0);
+    let parallel_materialize = visible_groups >= PARALLEL_NESTED_GROUP_PLAN_MIN_VISIBLE_GROUPS
+        && nested_group_ops >= PARALLEL_NESTED_GROUP_PLAN_MIN_GROUP_OPS
         && nested_group_op_cache.shared_duplicates.is_none()
         && std::env::var_os("GLRMASK_DISABLE_PARALLEL_NESTED_GROUP_PLAN").is_none();
     if parallel_materialize {
@@ -4481,7 +4710,13 @@ fn compile_single_expr_dfa(expr: &Expr) -> DFA {
     let condense_ms =
         condense_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let determinize_started_at = profile_timing.then(Instant::now);
-    let dfa = nfa.to_dfa();
+    // Minimize over the NFA's byte-equivalence classes before expanding the
+    // surviving transitions back to bytes.  Large JSON string/property regexes
+    // can determinize to thousands of states with ~150k byte transitions only
+    // to collapse to a few hundred states immediately afterward.  The class
+    // alphabet path is language-equivalent and avoids materializing that large
+    // transient byte graph.
+    let dfa = nfa.to_minimized_dfa();
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] single_expr_path path=nfa_dfa states={} transitions={} direct_attempt_ms={:.3} nfa_ms={:.3} condense_ms={:.3} determinize_ms={:.3}",
@@ -5137,6 +5372,9 @@ fn compile_terminal_ids_with_shared_duplicate_cache(
     terminal_ids: &[usize],
     shared_duplicates: Option<&Arc<SharedDuplicateNestedGroupOpCache>>,
 ) -> DFA {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started_at = profile.then(Instant::now);
+    let clone_started_at = profile.then(Instant::now);
     let local_exprs = terminal_ids
         .iter()
         .map(|&terminal| exprs[terminal].clone())
@@ -5147,15 +5385,42 @@ fn compile_terminal_ids_with_shared_duplicate_cache(
             .map(|&terminal| labels[terminal].clone())
             .collect::<Vec<_>>()
     });
+    let clone_ms = clone_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let mut nested_group_op_cache = NestedGroupOpCache {
         shared_duplicates: shared_duplicates.cloned(),
         ..NestedGroupOpCache::default()
     };
-    compile_with_plan(build_exclusion_compile_plan_with_labels_and_cache(
+    let plan_started_at = profile.then(Instant::now);
+    let plan = build_exclusion_compile_plan_with_labels_and_cache(
         &local_exprs,
         local_labels.as_deref(),
         &mut nested_group_op_cache,
-    ))
+    );
+    let plan_ms = plan_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let compile_started_at = profile.then(Instant::now);
+    let dfa = compile_with_plan(plan);
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] partition_plan_detail terminals={} clone_ms={:.3} plan_ms={:.3} nested_entries={} nested_hits={} nested_misses={} nested_compiled_ms={:.3} nested_max_compile_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+            terminal_ids.len(),
+            clone_ms,
+            plan_ms,
+            nested_group_op_cache.compiled.len(),
+            nested_group_op_cache.cache_hits,
+            nested_group_op_cache.cache_misses,
+            nested_group_op_cache.compiled_ms,
+            nested_group_op_cache.max_compile_ms,
+            compile_started_at
+                .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    dfa
 }
 
 struct LexerComponent {
@@ -5376,8 +5641,13 @@ fn compile_partition_components(
     residual_isolation_classes: Option<&[Option<u32>]>,
 ) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let profile_top = profile
+        || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOKENIZER_TOP").is_some();
+    let rewrite_started_at = Instant::now();
     let rewritten_exprs = materialize_repeated_subexpression_dfas(exprs);
+    let rewrite_ms = rewrite_started_at.elapsed().as_secs_f64() * 1000.0;
     let exprs = rewritten_exprs.as_deref().unwrap_or(exprs);
+    let setup_started_at = Instant::now();
     let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
@@ -5410,11 +5680,15 @@ fn compile_partition_components(
         }
     }
     let shared_duplicates = shared_duplicate_nested_group_op_cache(exprs, &grouped);
+    let prewarm_started_at = Instant::now();
     if let Some(shared_duplicates) = &shared_duplicates {
         prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
     }
+    let prewarm_ms = prewarm_started_at.elapsed().as_secs_f64() * 1000.0;
+    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0 - prewarm_ms;
 
-    grouped
+    let compile_started_at = Instant::now();
+    let components: Vec<LexerComponent> = grouped
         .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()
@@ -5427,10 +5701,22 @@ fn compile_partition_components(
                 shared_duplicates.as_ref(),
             );
             if profile {
+                let single_label = (terminal_ids.len() == 1)
+                    .then(|| {
+                        visible_labels
+                            .and_then(|labels| labels.get(terminal_ids[0]))
+                            .map(String::as_str)
+                    })
+                    .flatten();
+                let single_expr = (terminal_ids.len() == 1)
+                    .then(|| expr_profile_summary(&exprs[terminal_ids[0]]));
                 eprintln!(
-                    "[glrmask/profile][tokenizer] partition_compile partition={} terminals={} states={} transitions={} total_ms={:.3}",
+                    "[glrmask/profile][tokenizer] partition_compile partition={} terminals={} terminal_ids={:?} single_label={:?} single_expr={:?} states={} transitions={} total_ms={:.3}",
                     partition,
                     terminal_ids.len(),
+                    terminal_ids,
+                    single_label,
+                    single_expr,
                     dfa.num_states(),
                     dfa_transition_count(&dfa),
                     started_at.elapsed().as_secs_f64() * 1000.0,
@@ -5447,7 +5733,20 @@ fn compile_partition_components(
                 protected_residual,
             }
         })
-        .collect()
+        .collect();
+    if profile_top {
+        eprintln!(
+            "[glrmask/profile][tokenizer_partition_components_top] terminals={} components={} rewrite_ms={:.3} setup_ms={:.3} prewarm_ms={:.3} compile_wall_ms={:.3} total_ms={:.3}",
+            exprs.len(),
+            components.len(),
+            rewrite_ms,
+            setup_ms,
+            prewarm_ms,
+            compile_started_at.elapsed().as_secs_f64() * 1000.0,
+            rewrite_ms + setup_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    components
 }
 
 fn lexer_component_product_metadata(
@@ -6020,7 +6319,8 @@ fn compile_terminal_partitions(
     residual_isolation_classes: Option<&[Option<u32>]>,
     adaptive: bool,
 ) -> DFA {
-    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOKENIZER_TOP").is_some();
     let total_started_at = Instant::now();
     assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
     if let Some(classes) = residual_isolation_classes {
@@ -7726,6 +8026,7 @@ fn build_dfas_with_literal_choice(expr: &Expr) -> Option<DFA> {
         trie[node].accepting = true;
     }
     let trie_nodes = trie.len();
+
     let mut literal_dfa = DFA::new(trie.len());
     literal_dfa.ensure_group_capacity(1);
     literal_dfa.set_group_u8set(0, expr_u8set(expr));
@@ -7977,7 +8278,7 @@ fn compile_product_component_materialized_dfa_with_options_and_cache(
 ) -> DFA {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let direct_started_at = profile_timing.then(Instant::now);
-    if let Some((mut dfa, needs_future_recompute)) =
+    let dfa = if let Some((mut dfa, needs_future_recompute)) =
         compile_product_component_dfa_direct_with_options_and_cache(
             expr,
             preserve_coordinates,
@@ -8017,7 +8318,8 @@ fn compile_product_component_materialized_dfa_with_options_and_cache(
             );
         }
         dfa
-    }
+    };
+    dfa
 }
 
 fn compile_product_component_materialized_dfa_with_options(
@@ -10650,7 +10952,7 @@ fn compile_product_components_profiled(
     let repeat_base_cache = build_repeat_base_dfa_cache(&unique_exprs, local_small_product);
     let repeat_base_cache = (!repeat_base_cache.is_empty()).then_some(&repeat_base_cache);
 
-    let compile_component = |expr: &&Expr| {
+    let compile_component = |(_index, expr): (usize, &&Expr)| {
         if profile_detail {
             let started_at = Instant::now();
             let component = compile_product_component_with_options(
@@ -10677,9 +10979,9 @@ fn compile_product_components_profiled(
     };
     let compiled: Vec<(ProductComponent, Option<f64>)> =
         if local_small_product_work_enabled(unique_exprs.len(), local_small_product) {
-            unique_exprs.iter().map(compile_component).collect()
+            unique_exprs.iter().enumerate().map(compile_component).collect()
         } else {
-            unique_exprs.par_iter().map(compile_component).collect()
+            unique_exprs.par_iter().enumerate().map(compile_component).collect()
         };
     let (unique_components, compile_times): (Vec<_>, Vec<_>) = compiled.into_iter().unzip();
     let cache_hits = exprs.len() - unique_components.len();
@@ -10814,10 +11116,11 @@ fn build_product_dfa(
                 .and_then(|labels| labels.get(index))
                 .map(|label| {
                     format!(
-                        " name={:?} origin={} shared={}",
+                        " name={:?} origin={} shared={} expr={:?}",
                         label.name,
                         label.origin,
-                        label.shared
+                        label.shared,
+                        expr_profile_summary(&exprs[index]),
                     )
                 })
                 .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(&exprs[index])));
@@ -12692,7 +12995,13 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
         return Ok((DeferredDfa::Ready(dfa), Some(trace)));
     }
     let (components, component_cache_hits, _, _) =
-        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true, false);
+        compile_product_components_profiled(
+            &plan.compiled_exprs,
+            profile_detail,
+            true,
+            true,
+            false,
+        );
     let pair_cells = components
         .first()
         .and_then(ProductComponent::materialized_dfa)
@@ -12744,6 +13053,35 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
 /// Return whether one terminal expression has the exact pure binary-product
 /// shape supported by the compressed runtime tokenizer builder.
 pub fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
+    // `build_exclusion_compile_plan([expr])` can be expensive because it
+    // materializes nested group operations before returning its outer plan.
+    // A pure binary intersection is possible only when the top-level group-op
+    // chain contributes exactly one intersection and no exclusions. Nested
+    // group operations inside either operand are materialized into that
+    // operand and cannot create another outer plan component. Reject every
+    // other shape before doing the expensive exact plan construction; all
+    // plausible candidates still go through the historical proof below.
+    fn outer_group_op_counts(expr: &Expr) -> (usize, usize) {
+        match expr {
+            Expr::Exclude { expr, .. } => {
+                let (exclusions, intersections) = outer_group_op_counts(expr);
+                (exclusions + 1, intersections)
+            }
+            Expr::Intersect { expr, .. } => {
+                let (exclusions, intersections) = outer_group_op_counts(expr);
+                (exclusions, intersections + 1)
+            }
+            Expr::Shared(inner)
+                if matches!(inner.as_ref(), Expr::Exclude { .. } | Expr::Intersect { .. }) =>
+            {
+                outer_group_op_counts(inner)
+            }
+            _ => (0, 0),
+        }
+    }
+    if outer_group_op_counts(expr) != (0, 1) {
+        return false;
+    }
     let plan = build_exclusion_compile_plan(std::slice::from_ref(expr));
     plan.visible_groups == 1
         && plan.compiled_exprs.len() == 2
@@ -14668,6 +15006,91 @@ mod tests {
         assert!(accept(br#""interval": "XXXINTERVAL_M1YYY""#));
         assert!(accept(br#""interval": "INTERVAL_TICK""#));
         assert!(!accept(br#""interval": "NOPE""#));
+    }
+
+    #[test]
+    fn factors_repeated_choice_edges_shared_by_only_some_arms() {
+        let char = Expr::U8Class(U8Set::from_bytes(b"abcdefghijklmnopqrstuvwxyz"));
+        let star = Expr::Repeat {
+            expr: Box::new(char),
+            min: 0,
+            max: None,
+        };
+        let original = Expr::Choice(vec![
+            Expr::Seq(vec![Expr::U8Seq(b"list".to_vec()), star.clone()]),
+            Expr::Seq(vec![
+                star.clone(),
+                Expr::U8Seq(b"date".to_vec()),
+                star.clone(),
+            ]),
+            Expr::Seq(vec![
+                star.clone(),
+                Expr::U8Seq(b"time".to_vec()),
+                star.clone(),
+            ]),
+            Expr::Seq(vec![star.clone(), Expr::U8Seq(b"number".to_vec())]),
+        ]);
+        let factored = factor_regex_expr(original.clone());
+
+        for input in [
+            b"list".as_slice(),
+            b"listanything".as_slice(),
+            b"xxdateyy".as_slice(),
+            b"time".as_slice(),
+            b"prefixnumbersuffix".as_slice(),
+            b"prefixnumber".as_slice(),
+            b"nothing".as_slice(),
+        ] {
+            assert_eq!(
+                terminal_matches(original.clone(), input),
+                terminal_matches(factored.clone(), input),
+                "subset choice-edge factoring changed acceptance for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn factors_repeated_exclusion_rhs_across_choice_arms_exactly() {
+        let literal_choice = |a: &[u8], b: &[u8]| {
+            Expr::Choice(vec![Expr::U8Seq(a.to_vec()), Expr::U8Seq(b.to_vec())])
+        };
+        let original = Expr::Choice(vec![
+            Expr::Exclude {
+                expr: Box::new(literal_choice(b"bad", b"cat")),
+                exclude: Box::new(Expr::U8Seq(b"bad".to_vec())),
+            },
+            Expr::Exclude {
+                expr: Box::new(literal_choice(b"bad", b"dog")),
+                exclude: Box::new(Expr::U8Seq(b"bad".to_vec())),
+            },
+            Expr::Exclude {
+                expr: Box::new(literal_choice(b"fox", b"yak")),
+                exclude: Box::new(Expr::U8Seq(b"yak".to_vec())),
+            },
+            Expr::U8Seq(b"eel".to_vec()),
+        ]);
+        let factored = factor_regex_expr(original.clone());
+        assert!(
+            super::group_op_node_count(&factored) < super::group_op_node_count(&original),
+            "repeated exclusion RHS should collapse sibling set-difference nodes",
+        );
+
+        for input in [
+            b"".as_slice(),
+            b"bad".as_slice(),
+            b"cat".as_slice(),
+            b"dog".as_slice(),
+            b"fox".as_slice(),
+            b"yak".as_slice(),
+            b"eel".as_slice(),
+            b"other".as_slice(),
+        ] {
+            assert_eq!(
+                terminal_matches(original.clone(), input),
+                terminal_matches(factored.clone(), input),
+                "repeated exclusion-RHS factoring changed acceptance for {input:?}",
+            );
+        }
     }
 
     #[test]

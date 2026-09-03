@@ -242,18 +242,27 @@ pub fn load_document_with_features(
     root: &Value,
     features: &DocumentFeatures,
 ) -> ImportResult<SchemaDocument> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let total_started = profile.then(std::time::Instant::now);
+    let definitions_started = profile.then(std::time::Instant::now);
     let mut definitions = Vec::new();
     if features.has_definitions {
         collect_definitions(root, "#", &mut definitions)?;
     }
+    let definitions_ms = definitions_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
     // JSON-pointer references are materialized below only if named by a $ref.
     // The independent index is needed solely for explicit local id aliases.
+    let aliases_started = profile.then(std::time::Instant::now);
     let mut ref_targets = Vec::new();
     if features.has_local_id_alias {
         collect_local_id_aliases(root, "#", &mut ref_targets)?;
     }
+    let aliases_ms = aliases_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    let refs_started = profile.then(std::time::Instant::now);
     for reference in &features.ref_pointers {
         if reference == "#" || !reference.starts_with("#/") {
             continue;
@@ -271,9 +280,29 @@ pub fn load_document_with_features(
             });
         }
     }
+    let refs_ms = refs_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let root_started = profile.then(std::time::Instant::now);
+    let loaded_root = load_schema_at(root, "#")?;
+    let root_ms = root_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][json_schema_load] definitions={} ref_targets={} definitions_ms={:.3} aliases_ms={:.3} refs_ms={:.3} root_ms={:.3} total_ms={:.3}",
+            definitions.len(),
+            ref_targets.len(),
+            definitions_ms,
+            aliases_ms,
+            refs_ms,
+            root_ms,
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(SchemaDocument {
-        root: load_schema_at(root, "#")?,
+        root: loaded_root,
         definitions,
         ref_targets,
     })
@@ -290,13 +319,47 @@ fn collect_definitions(
 
     for container_key in ["$defs", "definitions"] {
         if let Some(defs) = object.get(container_key).and_then(Value::as_object) {
-            for (name, schema_value) in defs {
-                let pointer = format!("{location}/{}/{}", escape_pointer_segment(container_key), escape_pointer_segment(name));
-                out.push(SchemaDefinition {
-                    pointer: pointer.clone(),
-                    schema: load_schema_at(schema_value, &pointer)?,
-                });
-                collect_definitions(schema_value, &pointer, out)?;
+            let parallel = defs.len() >= 16
+                && std::env::var("GLRMASK_JSON_SCHEMA_PARALLEL_DEFINITIONS")
+                    .map(|value| {
+                        !matches!(
+                            value.trim().to_ascii_lowercase().as_str(),
+                            "" | "0" | "false" | "no" | "off"
+                        )
+                    })
+                    .unwrap_or(true);
+            if parallel {
+                let entries = defs.iter().collect::<Vec<_>>();
+                let batches = entries
+                    .par_iter()
+                    .map(|(name, schema_value)| {
+                        let pointer = format!(
+                            "{location}/{}/{}",
+                            escape_pointer_segment(container_key),
+                            escape_pointer_segment(name),
+                        );
+                        let mut local = vec![SchemaDefinition {
+                            pointer: pointer.clone(),
+                            schema: load_schema_at(schema_value, &pointer)?,
+                        }];
+                        collect_definitions(schema_value, &pointer, &mut local)?;
+                        Ok(local)
+                    })
+                    .collect::<ImportResult<Vec<_>>>()?;
+                out.extend(batches.into_iter().flatten());
+            } else {
+                for (name, schema_value) in defs {
+                    let pointer = format!(
+                        "{location}/{}/{}",
+                        escape_pointer_segment(container_key),
+                        escape_pointer_segment(name),
+                    );
+                    out.push(SchemaDefinition {
+                        pointer: pointer.clone(),
+                        schema: load_schema_at(schema_value, &pointer)?,
+                    });
+                    collect_definitions(schema_value, &pointer, out)?;
+                }
             }
         }
     }

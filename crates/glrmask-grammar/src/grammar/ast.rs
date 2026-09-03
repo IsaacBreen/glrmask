@@ -623,6 +623,11 @@ struct Lowerer<'a> {
     terminal_bodies: FxHashMap<String, &'a GrammarExpr>,
     terminal_expr_cache: FxHashMap<String, Arc<Expr>>,
     nonnullable_named_rule_cache: FxHashMap<String, NonterminalID>,
+    /// Large literal subsets recur inside many ExprNFA edge labels (notably
+    /// JSON-Schema anyOf object unions).  Share their parser productions
+    /// globally instead of re-emitting hundreds of identical literal arms for
+    /// every slightly-different surrounding Choice.
+    literal_choice_nonterminal_cache: FxHashMap<Vec<Vec<u8>>, NonterminalID>,
     /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
     repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
     /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
@@ -739,6 +744,7 @@ impl<'a> Lowerer<'a> {
             terminal_bodies: FxHashMap::default(),
             terminal_expr_cache: FxHashMap::default(),
             nonnullable_named_rule_cache: FxHashMap::default(),
+            literal_choice_nonterminal_cache: FxHashMap::default(),
             repeat_exact_cache: BTreeMap::new(),
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
@@ -2266,6 +2272,57 @@ impl<'a> Lowerer<'a> {
         self.emit_expr_dfa_leftlinear_nonnullable(lhs, expr_nfa, &dfa)
     }
 
+    fn try_emit_shared_literal_choice_subset(
+        &mut self,
+        lhs: NonterminalID,
+        options: &[GrammarExpr],
+    ) -> Result<bool, GlrMaskError> {
+        const MIN_SHARED_LITERAL_ARMS: usize = 16;
+
+        fn literal_bytes(expr: &GrammarExpr) -> Option<&[u8]> {
+            match expr {
+                GrammarExpr::Grouped(inner) => literal_bytes(inner),
+                GrammarExpr::Literal(bytes) if !bytes.is_empty() => Some(bytes),
+                _ => None,
+            }
+        }
+
+        let literal_key = options
+            .iter()
+            .filter_map(literal_bytes)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if literal_key.len() < MIN_SHARED_LITERAL_ARMS {
+            return Ok(false);
+        }
+
+        let shared_nt = if let Some(&cached) = self.literal_choice_nonterminal_cache.get(&literal_key) {
+            cached
+        } else {
+            let (_, nt) = self.fresh_nonterminal("shared_literal_choice");
+            for bytes in &literal_key {
+                let pattern = bytes
+                    .iter()
+                    .map(|&byte| regex_escape_byte(byte))
+                    .collect::<String>();
+                let terminal = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
+                self.rules.push(Rule {
+                    lhs: nt,
+                    rhs: vec![Symbol::Terminal(terminal)],
+                });
+            }
+            self.literal_choice_nonterminal_cache
+                .insert(literal_key, nt);
+            nt
+        };
+
+        self.rules.push(Rule {
+            lhs,
+            rhs: vec![Symbol::Nonterminal(shared_nt)],
+        });
+        Ok(true)
+    }
+
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
@@ -2278,7 +2335,21 @@ impl<'a> Lowerer<'a> {
                     lowerer.rules.push(Rule { lhs, rhs });
                 }
                 GrammarExpr::Choice(options) => {
+                    let shared_literals =
+                        lowerer.try_emit_shared_literal_choice_subset(lhs, options)?;
                     for option in options {
+                        if shared_literals {
+                            let is_nonempty_literal = match option {
+                                GrammarExpr::Grouped(inner) => {
+                                    matches!(inner.as_ref(), GrammarExpr::Literal(bytes) if !bytes.is_empty())
+                                }
+                                GrammarExpr::Literal(bytes) => !bytes.is_empty(),
+                                _ => false,
+                            };
+                            if is_nonempty_literal {
+                                continue;
+                            }
+                        }
                         emit(lowerer, lhs, option)?;
                     }
                 }

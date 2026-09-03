@@ -331,7 +331,7 @@ pub mod artifact_serde {
     const SIMPLE_ACTION_MIN_ROWS: usize = 512;
     const DEFERRED_META_MAGIC: &[u8; 4] = b"GTM2";
     const DEFERRED_META_HEADER_LEN: usize = 4 + 4 + 8 + 8;
-    const CHUNKED_RULES_MIN_ROWS: usize = 8_192;
+    const CHUNKED_RULES_MIN_ROWS: usize = 1_024;
 
     #[inline]
     fn put_fixed_u32(out: &mut Vec<u8>, value: u32) {
@@ -716,7 +716,7 @@ pub mod artifact_serde {
     }
 
     fn encode_meta(table: &GLRTable) -> Vec<u8> {
-        if table.rules.len() < CHUNKED_RULES_MIN_ROWS || rayon::current_num_threads() == 1 {
+        if table.rules.len() < CHUNKED_RULES_MIN_ROWS {
             return bincode::serialize(&CompactTableMetaRef {
                 num_states: table.num_states,
                 num_terminals: table.num_terminals,
@@ -732,25 +732,34 @@ pub mod artifact_serde {
             })
             .expect("GLR metadata serialization should succeed");
         }
-        let (rules, rest) = rayon::join(
-            || bincode::serialize(&table.rules).expect("GLR rules serialization should succeed"),
-            || {
-                bincode::serialize(&CompactTableMetaNoRulesRef {
-                    num_states: table.num_states,
-                    num_terminals: table.num_terminals,
-                    num_rules: table.num_rules,
-                    first_rule: table.rules.first(),
-                    nonterminal_display_names: &table.nonterminal_display_names,
-                    construction: table.construction,
-                    admission_policy: table.admission_policy,
-                    forwarded_shifts: &table.forwarded_shifts,
-                    control_terminals: &table.control_terminals,
-                    skip_terminals: &table.skip_terminals,
-                    direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
-                })
-                .expect("GLR metadata serialization should succeed")
-            },
-        );
+        let encode_rules = || {
+            bincode::serialize(&table.rules).expect("GLR rules serialization should succeed")
+        };
+        let encode_rest = || {
+            bincode::serialize(&CompactTableMetaNoRulesRef {
+                num_states: table.num_states,
+                num_terminals: table.num_terminals,
+                num_rules: table.num_rules,
+                first_rule: table.rules.first(),
+                nonterminal_display_names: &table.nonterminal_display_names,
+                construction: table.construction,
+                admission_policy: table.admission_policy,
+                forwarded_shifts: &table.forwarded_shifts,
+                control_terminals: &table.control_terminals,
+                skip_terminals: &table.skip_terminals,
+                direct_regular_wide_frontiers: &table.direct_regular_wide_frontiers,
+            })
+            .expect("GLR metadata serialization should succeed")
+        };
+        // Deferred source rules are a wire-format choice, not a parallelism
+        // choice. Even a single-threaded load should not rebuild thousands of
+        // source Rule trees that runtime parsing never reads. Only the encoding
+        // schedule depends on Rayon availability.
+        let (rules, rest) = if rayon::current_num_threads() == 1 {
+            (encode_rules(), encode_rest())
+        } else {
+            rayon::join(encode_rules, encode_rest)
+        };
         let mut out = Vec::with_capacity(DEFERRED_META_HEADER_LEN + rules.len() + rest.len());
         out.extend_from_slice(DEFERRED_META_MAGIC);
         out.extend_from_slice(&(table.rules.len() as u32).to_le_bytes());
@@ -1675,6 +1684,20 @@ impl GLRTable {
             use rayon::prelude::*;
             self.guarded_shift_index = self.action.par_iter().map(build_row).collect();
         }
+    }
+
+    /// Whether any parser cell actually contains a guarded stack shift.
+    ///
+    /// Dynamic artifacts deliberately omit `guarded_shift_index` because it is
+    /// derived. Most ordinary schema tables contain no guarded shifts at all;
+    /// in that common case rebuilding an all-empty Vec<FxHashMap<..>> after
+    /// every load is pure allocation work. A linear action scan is both much
+    /// cheaper and sufficient to decide whether the index is needed.
+    pub fn has_guarded_stack_shifts(&self) -> bool {
+        self.action.iter().any(|row| {
+            row.iter()
+                .any(|(_, action)| matches!(action, Action::GuardedStackShifts(_)))
+        })
     }
 
     #[inline]

@@ -199,7 +199,13 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         return dfa.clone();
     }
 
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        && dfa.states.len() >= 1024;
+    let total_started = profile.then(std::time::Instant::now);
+    let topo_started = profile.then(std::time::Instant::now);
     let topo = reverse_topological_order(dfa);
+    let topo_ms = topo_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
     const DEAD_CLASS: usize = 0;
     let dead_signature = StateSignature {
@@ -213,6 +219,7 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
     let mut class_representatives = vec![None];
     let mut next_class_id = 1usize;
 
+    let classify_started = profile.then(std::time::Instant::now);
     for &state_id in &topo {
         let signature = state_signature(
             state_id,
@@ -232,13 +239,29 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         };
         class_of_state[state_id] = class_id;
     }
+    let classify_ms = classify_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    build_minimized_acyclic_dfa(
+    let build_started = profile.then(std::time::Instant::now);
+    let minimized = build_minimized_acyclic_dfa(
         dfa,
         &class_of_state,
         &class_representatives,
         DEAD_CLASS,
-    )
+    );
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][minimize_acyclic] states={} transitions={} classes={} topo_ms={:.3} classify_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            dfa.states.len(),
+            dfa.states.iter().map(|state| state.transitions.len()).sum::<usize>(),
+            class_representatives.len().saturating_sub(1),
+            topo_ms,
+            classify_ms,
+            build_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    minimized
 }
 
 #[cfg(test)]

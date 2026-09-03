@@ -5690,7 +5690,8 @@ impl Constraint {
                             .copy_from_slice(&(base_len as u64).to_le_bytes());
                         let expr_start = encoded.len();
                         if let Some(blob) = self.deferred_terminal_exprs_blob.as_ref() {
-                            encoded.extend_from_slice(blob.as_slice());
+                            blob.append_raw_serialized(&mut encoded)
+                                .expect("deferred terminal expression serialization should succeed");
                         } else if let Some(exprs) = self.tokenizer.terminal_exprs() {
                             bincode::serialize_into(&mut encoded, exprs)
                                 .expect("terminal expression serialization should succeed");

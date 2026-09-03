@@ -7,7 +7,7 @@ use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::glr::analysis::{
     eliminate_right_recursion, has_indirect_left_recursion, merge_identical_nonterminals,
-    normalize_grammar,
+    normalize_dynamic_glr_grammar, normalize_grammar,
 };
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
@@ -1008,6 +1008,43 @@ pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef
     std::mem::take(&mut normalized)
 }
 
+/// Dynamic-runtime preparation that preserves CFG recursion and performs only
+/// the normalization required by the GLR execution table.
+pub(crate) fn prepare_dynamic_glr_transforms_only(grammar: GrammarDef) -> GrammarDef {
+    let profiling = compile_profile_enabled();
+    let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+    let mut normalized = grammar;
+    expand_nullable_terminals(&mut normalized.rules, &nullable_terminals);
+
+    let started = profiling.then(Instant::now);
+    let before = normalized.rules.len();
+    normalize_dynamic_glr_grammar(&mut normalized.rules, normalized.start);
+    if let Some(started) = started {
+        emit_grammar_transform_profile(
+            "normalize_dynamic_glr_grammar",
+            elapsed_ms(started),
+            before,
+            normalized.rules.len(),
+            "",
+        );
+    }
+
+    let protected_nonterminals = collect_protected_nonterminals(&normalized);
+    inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
+    bound_runtime_reduction_length(&mut normalized, max_reduction_len);
+    inline_post_bound_single_use_nonterminals(
+        &mut normalized.rules,
+        &protected_nonterminals,
+        max_reduction_len,
+    );
+    compact_unused_terminals(&mut normalized);
+    normalized
+}
+
 /// The shared grammar transform steps (without tokenizer build).
 fn prepare_grammar_transforms_impl(
     normalized: &mut GrammarDef,
@@ -1066,23 +1103,28 @@ fn prepare_grammar_transforms_impl(
         );
     }
 
-    let mut merge_iteration = 0usize;
-    loop {
-        merge_iteration += 1;
-        let prev_len = normalized.rules.len();
-        let merge_started_at = profiling.then(Instant::now);
-        normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
-        if let Some(started_at) = merge_started_at {
-            emit_grammar_transform_profile(
-                "merge_identical_nonterminals",
-                elapsed_ms(started_at),
-                prev_len,
-                normalized.rules.len(),
-                &format!(" pass=pre_bound iteration={merge_iteration}"),
-            );
-        }
-        if normalized.rules.len() == prev_len {
-            break;
+    let skip_identical_merges = std::env::var("GLRMASK_SKIP_IDENTICAL_NT_MERGE")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+    if !skip_identical_merges {
+        let mut merge_iteration = 0usize;
+        loop {
+            merge_iteration += 1;
+            let prev_len = normalized.rules.len();
+            let merge_started_at = profiling.then(Instant::now);
+            normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+            if let Some(started_at) = merge_started_at {
+                emit_grammar_transform_profile(
+                    "merge_identical_nonterminals",
+                    elapsed_ms(started_at),
+                    prev_len,
+                    normalized.rules.len(),
+                    &format!(" pass=pre_bound iteration={merge_iteration}"),
+                );
+            }
+            if normalized.rules.len() == prev_len {
+                break;
+            }
         }
     }
 
@@ -1121,7 +1163,7 @@ fn prepare_grammar_transforms_impl(
         );
     }
 
-    if bound_changed || post_inline_changed {
+    if (bound_changed || post_inline_changed) && !skip_identical_merges {
         let mut final_merge_iteration = 0usize;
         loop {
             final_merge_iteration += 1;

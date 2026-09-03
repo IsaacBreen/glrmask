@@ -157,6 +157,14 @@ pub fn finalize_lexer_partitions(grammar: &mut NamedGrammar) -> crate::Result<()
 }
 
 pub fn prepare_named_grammar(grammar: &mut NamedGrammar) -> crate::Result<()> {
+    let reuse_imported_partitions = std::env::var("GLRMASK_JSON_SCHEMA_REUSE_IMPORTED_PARTITIONS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true);
     if simplify_grammar_enabled() {
         simplify_named_grammar(grammar);
     }
@@ -165,6 +173,30 @@ pub fn prepare_named_grammar(grammar: &mut NamedGrammar) -> crate::Result<()> {
     }
     if promote_literal_choices_enabled() {
         promote_choice_terminals_exact(grammar, false);
+    }
+    if reuse_imported_partitions
+        && !simplify_grammar_enabled()
+        && !lower_exact_subtractions_enabled()
+        && !promote_literal_choices_enabled()
+        && json_pattern_singletons_enabled()
+        && !grammar.lexer_partitions.is_empty()
+        && grammar
+            .lexer_partitions
+            .values()
+            .all(|partition| partition != lower::JSON_PATTERN_LEXER_PARTITION)
+    {
+        // The JSON importer already assigned partitions from exact resolved
+        // terminal identity. The generic named-grammar factorer only rewrites
+        // nonterminal rules, so under the no-transform/default-singleton path
+        // above the named-terminal definitions and their partition provenance
+        // are unchanged. Anonymous parser literals *can* change when factoring
+        // rewrites nonterminal expressions, however, so refresh only that cheap
+        // literal partition while avoiding regex resolution and named-partition
+        // reconstruction.
+        grammar.lexer_literal_partitions.clear();
+        let literals = grammar.emitted_anonymous_literals();
+        grammar.set_literal_lexer_partition(lower::JSON_LITERAL_LEXER_PARTITION, literals);
+        return Ok(());
     }
     finalize_lexer_partitions(grammar)?;
     Ok(())
@@ -336,7 +368,8 @@ fn schema_to_named_grammar_with_config(
     schema: &Value,
     config: JsonSchemaConfig,
 ) -> Result<NamedGrammar, GlrMaskError> {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
     // This scan is also reused by typed loading, avoiding separate walks for
     // oneOf coercion, definitions, local aliases, and references.

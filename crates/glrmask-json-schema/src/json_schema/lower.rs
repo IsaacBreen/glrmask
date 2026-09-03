@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::Hasher;
 use std::sync::{Arc, Mutex};
 
-use regex::{Regex, escape as regex_escape};
+use regex::Regex;
 use rustc_hash::FxHasher;
 use serde::Serialize;
 use serde_json::Value;
@@ -48,8 +48,8 @@ pub const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
 pub const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
 pub const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
-const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
-const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
+const LARGE_STRING_ENUM_MIN_VALUES: usize = 64;
+const LARGE_STRING_ENUM_MIN_ENCODED_BYTES: usize = 1024;
 const DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV: &str =
     "GLRMASK_DISABLE_JSON_SCHEMA_STRUCTURAL_MEMO";
 pub const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
@@ -83,8 +83,8 @@ impl StructuralSchemaCacheKey {
         // The fingerprint is only a bucket selector. Cache lookup always
         // confirms full typed equality, so hash collisions cannot change the
         // imported language.
-        let encoded = serde_json::to_vec(self)
-            .expect("loaded JSON Schema AST must remain JSON-serializable");
+        let encoded = bincode::serialize(self)
+            .expect("loaded JSON Schema AST must remain binary-serializable");
         let mut hasher = FxHasher::default();
         hasher.write(&encoded);
         hasher.finish()
@@ -169,7 +169,8 @@ pub fn lower_document(
     document: &SchemaDocument,
     config: JsonSchemaConfig,
 ) -> ImportResult<NamedGrammar> {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let started_at = profile_enabled.then(std::time::Instant::now);
     let lowerer = Lowerer::new(document, config);
     let setup_ms = started_at
@@ -434,7 +435,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn finish(mut self) -> ImportResult<NamedGrammar> {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
         let root_started_at = profile_enabled.then(std::time::Instant::now);
         let root_rule = self.fresh_rule_name("schema_root");
         self.definition_rules.insert("#".to_string(), root_rule.clone());
@@ -488,7 +490,11 @@ impl<'a> Lowerer<'a> {
             );
         }
         let simplify_started_at = profile_enabled.then(std::time::Instant::now);
+        let terminal_simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_terminal_rules(&mut self.rules);
+        let terminal_simplify_ms = terminal_simplify_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let mut grammar = NamedGrammar {
             rules: self.rules,
             start: "start".to_string(),
@@ -497,28 +503,49 @@ impl<'a> Lowerer<'a> {
             lexer_literal_partitions: Default::default(),
             default_lexer_partition: None,
         };
+        let expr_simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_named_grammar_expressions(&mut grammar);
+        let expr_simplify_ms = expr_simplify_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let resolve_started_at = profile_enabled.then(std::time::Instant::now);
         let resolved_terminals = resolved_named_terminal_exprs(&grammar)
             .map_err(|error| SchemaImportError::new(error.to_string()))?;
+        let resolve_ms = resolve_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let partition_started_at = profile_enabled.then(std::time::Instant::now);
         grammar.lexer_partitions = build_json_lexer_partition_classes(
             &grammar,
             &self.terminal_partition_classes,
             &self.terminal_pattern_partition_keys,
             &resolved_terminals,
         );
+        let partition_ms = partition_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let repeat_audit_started_at = profile_enabled.then(std::time::Instant::now);
         emit_repeated_single_byte_terminal_warnings(&grammar, &resolved_terminals);
         let repeat_audit_ms = repeat_audit_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        let literals_started_at = profile_enabled.then(std::time::Instant::now);
         let literals = grammar.emitted_anonymous_literals();
         grammar.set_literal_lexer_partition(JSON_LITERAL_LEXER_PARTITION, literals);
+        let literals_ms = literals_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         if let Some(simplify_started_at) = simplify_started_at {
             eprintln!(
-                "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} repeated_single_byte_terminal_audit_ms={:.3} rules={}",
+                "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} terminal_simplify_ms={:.3} expr_simplify_ms={:.3} resolve_terminals_ms={:.3} partition_ms={:.3} repeated_single_byte_terminal_audit_ms={:.3} literals_ms={:.3} rules={}",
                 root_lower_ms,
                 simplify_started_at.elapsed().as_secs_f64() * 1000.0,
+                terminal_simplify_ms,
+                expr_simplify_ms,
+                resolve_ms,
+                partition_ms,
                 repeat_audit_ms,
+                literals_ms,
                 grammar.rules.len(),
             );
         }
@@ -657,6 +684,12 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        if let SchemaKind::Assertions(assertions) = &schema.kind
+            && !assertions.all_of.is_empty()
+            && let Some(expr) = self.try_lower_early_finite_string_allof(assertions)?
+        {
+            return Ok(expr);
+        }
         if !self.structural_schema_memo_enabled
             || !matches!(schema.kind, SchemaKind::Assertions(_))
         {
@@ -686,17 +719,17 @@ impl<'a> Lowerer<'a> {
                 .collect(),
         };
         let fingerprint = key.fingerprint();
-        if let Some(entry) = self
+        let hit_expr = self
             .structural_schema_expr_cache
             .get(&fingerprint)
             .and_then(|bucket| bucket.iter().find(|entry| entry.key == key))
-        {
+            .map(|entry| entry.expr.clone());
+        if let Some(expr) = hit_expr {
             // The cached expression references helper rules emitted by the
             // original miss. Cache entries never cross Lowerer instances, and
             // the key includes every mutable semantic context that can affect
             // those rules, so a hit needs neither rule re-emission nor
             // terminal-provenance replay.
-            let expr = entry.expr.clone();
             self.structural_schema_cache_hits += 1;
             return Ok(expr);
         }
@@ -787,11 +820,16 @@ impl<'a> Lowerer<'a> {
                     }
                 })
                 .collect::<ImportResult<Vec<_>>>()?;
-            if let Some(encoded_literals) = large_string_enum_regex_literals(assertions, &values)? {
+            if let Some(encoded_literals) = large_string_enum_literals(assertions, &values)? {
                 let name = self.fresh_rule_name("json_literal_string_enum");
                 self.add_literal_terminal_rule(
                     &name,
-                    GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)),
+                    choice(
+                        encoded_literals
+                            .into_iter()
+                            .map(|literal| lit_bytes(literal.into_bytes()))
+                            .collect(),
+                    ),
                 );
                 return Ok(r(&name));
             }
@@ -1862,7 +1900,7 @@ fn build_json_lexer_partition_classes(
     terminal_pattern_partition_keys: &BTreeMap<String, JsonPatternPartitionKey>,
     resolved_terminals: &BTreeMap<String, Expr>,
 ) -> BTreeMap<String, String> {
-    let mut class_by_terminal_expr = HashMap::new();
+    let mut class_by_terminal_expr = HashMap::<&Expr, JsonTerminalPartitionClass>::new();
     let pattern_partition_by_key = terminal_pattern_partition_keys
         .values()
         .cloned()
@@ -1876,7 +1914,7 @@ fn build_json_lexer_partition_classes(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut pattern_partition_by_terminal_expr = HashMap::new();
+    let mut pattern_partition_by_terminal_expr = HashMap::<&Expr, String>::new();
 
     // Terminal lowering deduplicates equal resolved lexer expressions to one
     // TerminalID. Merge importer provenance on that same identity before
@@ -1895,7 +1933,7 @@ fn build_json_lexer_partition_classes(
             .copied()
             .unwrap_or(JsonTerminalPartitionClass::Other);
         class_by_terminal_expr
-            .entry(terminal_expr.clone())
+            .entry(terminal_expr)
             .and_modify(|existing: &mut JsonTerminalPartitionClass| {
                 *existing = existing.merge(class);
             })
@@ -1905,7 +1943,7 @@ fn build_json_lexer_partition_classes(
                 .get(key)
                 .expect("pattern partition key must have an assigned family");
             pattern_partition_by_terminal_expr
-                .entry(terminal_expr.clone())
+                .entry(terminal_expr)
                 .and_modify(|existing: &mut String| {
                     if partition < existing {
                         *existing = partition.clone();
@@ -1923,7 +1961,10 @@ fn build_json_lexer_partition_classes(
             let terminal_expr = resolved_terminals
                 .get(&rule.name)
                 .expect("resolved emitting JSON terminal expression");
-            let partition = match class_by_terminal_expr[terminal_expr] {
+            let partition = match *class_by_terminal_expr
+                .get(terminal_expr)
+                .expect("resolved JSON terminal has a partition class")
+            {
                 JsonTerminalPartitionClass::Other => JSON_OTHER_LEXER_PARTITION,
                 JsonTerminalPartitionClass::Literal => JSON_LITERAL_LEXER_PARTITION,
                 JsonTerminalPartitionClass::Pattern => pattern_partition_by_terminal_expr
@@ -2003,7 +2044,7 @@ fn json_number_is_integer(number: &serde_json::Number) -> bool {
             .is_some_and(|value| value.is_finite() && value.fract() == 0.0)
 }
 
-fn large_string_enum_regex_literals(
+fn large_string_enum_literals(
     assertions: &SchemaAssertions,
     values: &[&Value],
 ) -> ImportResult<Option<Vec<String>>> {
@@ -2044,24 +2085,13 @@ fn large_string_enum_regex_literals(
     }
 
     let encoded_bytes = encoded_literals.iter().map(|literal| literal.len()).sum::<usize>();
-    if encoded_literals.len() < STRING_ENUM_REGEX_MIN_VALUES
-        && encoded_bytes < STRING_ENUM_REGEX_MIN_ENCODED_BYTES
+    if encoded_literals.len() < LARGE_STRING_ENUM_MIN_VALUES
+        && encoded_bytes < LARGE_STRING_ENUM_MIN_ENCODED_BYTES
     {
         return Ok(None);
     }
 
     Ok(Some(encoded_literals))
-}
-
-fn string_enum_regex(encoded_literals: &[String]) -> String {
-    format!(
-        "(?:{})",
-        encoded_literals
-            .iter()
-            .map(|literal| regex_escape(literal))
-            .collect::<Vec<_>>()
-            .join("|")
-    )
 }
 
 fn factored_small_string_enum_expr(values: &[&Value]) -> Option<GrammarExpr> {
@@ -2401,6 +2431,45 @@ mod structural_schema_memo_tests {
                 ..SchemaAssertions::default()
             },
         )
+    }
+
+    #[test]
+    fn large_string_enum_uses_exact_literal_choice_terminal() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let mut values = (0..LARGE_STRING_ENUM_MIN_VALUES)
+            .map(|index| Value::String(format!("enum-value-{index}")))
+            .collect::<Vec<_>>();
+        values[0] = Value::String("quoted \" slash \\ unicode λ".to_string());
+        let schema = Schema::assertions(
+            "#/enum",
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                enum_values: Some(values.clone()),
+                ..SchemaAssertions::default()
+            },
+        );
+
+        lowerer.lower_schema(&schema).unwrap();
+
+        let rule = lowerer
+            .rules
+            .iter()
+            .find(|rule| rule.name.starts_with("json_literal_string_enum_"))
+            .expect("large string enum should lower to one dedicated terminal");
+        let GrammarExpr::Choice(options) = &rule.expr else {
+            panic!("large string enum terminal must stay an exact literal choice");
+        };
+        assert_eq!(options.len(), values.len());
+        for (option, value) in options.iter().zip(values) {
+            let Value::String(value) = value else {
+                unreachable!();
+            };
+            assert_eq!(
+                option,
+                &GrammarExpr::Literal(serde_json::to_string(&value).unwrap().into_bytes())
+            );
+        }
     }
 
     #[test]

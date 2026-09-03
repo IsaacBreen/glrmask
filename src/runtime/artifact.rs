@@ -943,12 +943,20 @@ impl FastTokenizerTransitions {
         if num_states >= 0x8000 {
             return None;
         }
+        // Build finalizer metadata once per state before populating transition
+        // cells. The old implementation called `matched_terminals_slice()` for
+        // every edge merely to set the high-bit hint, then scanned every state
+        // again below to construct these exact metadata arrays. Fresh compiler
+        // DFAs make that per-edge lookup materially more expensive than loaded
+        // packed tokenizers.
+        let (finalizer_code, single_finalizer_continues) =
+            Self::full_walk_finalizer_metadata(tokenizer);
         let mut flat = vec![u16::MAX; num_states as usize * 256];
         let fill_row = |(state, row): (usize, &mut [u16])| {
             for (byte, target) in tokenizer.transitions_from(state as u32) {
                 let mut encoded = u16::try_from(target)
                     .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
-                if !tokenizer.matched_terminals_slice(target).is_empty() {
+                if finalizer_code[target as usize] != u32::MAX {
                     encoded |= 0x8000;
                 }
                 row[byte as usize] = encoded;
@@ -959,12 +967,38 @@ impl FastTokenizerTransitions {
         } else {
             flat.chunks_mut(256).enumerate().for_each(fill_row);
         }
-        let (finalizer_code, single_finalizer_continues) =
-            Self::full_walk_finalizer_metadata(tokenizer);
         Some(Self::Flat16 {
             transitions: Arc::from(flat),
             finalizer_code,
             single_finalizer_continues,
+        })
+    }
+
+    /// Dense u16 transition slab for ordinary tokenizer execution. Unlike the
+    /// strict full-vocabulary walker, commit/scan only asks this object for the
+    /// target state, so constructing per-state finalizer certificates (and
+    /// probing finalizers for every transition target) is pure load-time waste.
+    pub(crate) fn flat16_transitions_only_for(tokenizer: &Tokenizer) -> Option<Self> {
+        let num_states = tokenizer.num_states();
+        if num_states >= 0x8000 {
+            return None;
+        }
+        let mut flat = vec![u16::MAX; num_states as usize * 256];
+        let fill_row = |(state, row): (usize, &mut [u16])| {
+            for (byte, target) in tokenizer.transitions_from(state as u32) {
+                row[byte as usize] = u16::try_from(target)
+                    .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
+            }
+        };
+        if num_states >= 1_024 && rayon::current_num_threads() > 1 {
+            flat.par_chunks_mut(256).enumerate().for_each(fill_row);
+        } else {
+            flat.chunks_mut(256).enumerate().for_each(fill_row);
+        }
+        Some(Self::Flat16 {
+            transitions: Arc::from(flat),
+            finalizer_code: Arc::from([]),
+            single_finalizer_continues: Arc::from([]),
         })
     }
 
@@ -973,13 +1007,15 @@ impl FastTokenizerTransitions {
         if num_states >= 0x8000_0000 {
             return None;
         }
+        let (finalizer_code, single_finalizer_continues) =
+            Self::full_walk_finalizer_metadata(tokenizer);
         let cell_count = (num_states as usize).checked_mul(256)?;
         let mut flat = vec![u32::MAX; cell_count];
         let fill_row = |(state, row): (usize, &mut [u32])| {
             for (byte, target) in tokenizer.transitions_from(state as u32) {
                 debug_assert!(target < 0x8000_0000);
                 let mut encoded = target;
-                if !tokenizer.matched_terminals_slice(target).is_empty() {
+                if finalizer_code[target as usize] != u32::MAX {
                     encoded |= 0x8000_0000;
                 }
                 row[byte as usize] = encoded;
@@ -990,8 +1026,6 @@ impl FastTokenizerTransitions {
         } else {
             flat.chunks_mut(256).enumerate().for_each(fill_row);
         }
-        let (finalizer_code, single_finalizer_continues) =
-            Self::full_walk_finalizer_metadata(tokenizer);
         Some(Self::Flat32 {
             transitions: Arc::from(flat),
             finalizer_code,
@@ -3767,6 +3801,10 @@ impl DynamicMaskVocab {
         self.mask_tokenizer_fast_transitions.as_ref()
     }
 
+    pub(crate) fn clear_mask_projection_fast_transitions(&mut self) {
+        self.mask_tokenizer_fast_transitions = None;
+    }
+
     #[cfg(test)]
     pub(crate) fn disable_prepared_mask_execution_for_test(&mut self) {
         self.mask_tokenizer = None;
@@ -6154,6 +6192,17 @@ pub(crate) enum DeferredTerminalExprBytes {
         start: usize,
         len: usize,
     },
+    /// Dynamic worker-transfer artifacts keep the terminal-expression section
+    /// compressed until a later composition actually asks for source
+    /// expressions. Ordinary mask/commit execution never needs these trees.
+    CompressedOwned(Arc<[u8]>),
+    /// Same compressed representation, retained directly inside an owned
+    /// sectioned transfer backing allocation.
+    CompressedBacked {
+        backing: Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
 }
 
 impl DeferredTerminalExprBytes {
@@ -6166,7 +6215,66 @@ impl DeferredTerminalExprBytes {
                 start,
                 len,
             } => &backing[*start..*start + *len],
+            Self::CompressedOwned(bytes) => bytes,
+            Self::CompressedBacked {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
         }
+    }
+
+    pub(crate) fn decode_exprs(&self) -> Result<Vec<Expr>, String> {
+        let raw;
+        let bytes = match self {
+            Self::Owned(bytes) => bytes.as_ref(),
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => &backing[*start..*start + *len],
+            Self::CompressedOwned(bytes) => {
+                raw = zstd::stream::decode_all(bytes.as_ref()).map_err(|err| err.to_string())?;
+                raw.as_slice()
+            }
+            Self::CompressedBacked {
+                backing,
+                start,
+                len,
+            } => {
+                raw = zstd::stream::decode_all(&backing[*start..*start + *len])
+                    .map_err(|err| err.to_string())?;
+                raw.as_slice()
+            }
+        };
+        bincode::deserialize(bytes).map_err(|err| err.to_string())
+    }
+
+    /// Append the canonical uncompressed bincode expression section used by
+    /// the self-contained Constraint artifact format. A transfer-loaded
+    /// compressed blob therefore remains lazy until either composition or a
+    /// later explicit save requests it.
+    pub(crate) fn append_raw_serialized(&self, out: &mut Vec<u8>) -> Result<(), String> {
+        match self {
+            Self::Owned(bytes) => out.extend_from_slice(bytes),
+            Self::Backed {
+                backing,
+                start,
+                len,
+            } => out.extend_from_slice(&backing[*start..*start + *len]),
+            Self::CompressedOwned(bytes) => {
+                zstd::stream::copy_decode(bytes.as_ref(), out).map_err(|err| err.to_string())?;
+            }
+            Self::CompressedBacked {
+                backing,
+                start,
+                len,
+            } => {
+                zstd::stream::copy_decode(&backing[*start..*start + *len], out)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -699,11 +699,15 @@ fn build_dynamic_virtual_tokenizer(
         .iter()
         .enumerate()
         .filter_map(|(terminal, expression)| {
-            let supported = if preserve_residual_oracle_coordinates {
-                expression_may_support_bounded_code_residual_runtime(expression)
-            } else {
-                expression_supports_bounded_code_residual_runtime(expression)
-            };
+            // The exact dynamic liveness proof can compile substantial operand
+            // automata before discovering that an expression does not even
+            // have the bounded-code intersection shape. Apply the same cheap
+            // necessary structural predicate first. Positives still go through
+            // the exact proof when canonical coordinates are required.
+            let may_support = expression_may_support_bounded_code_residual_runtime(expression);
+            let supported = may_support
+                && (preserve_residual_oracle_coordinates
+                    || expression_supports_bounded_code_residual_runtime(expression));
             supported.then_some(terminal as TerminalID)
         })
         .collect::<Vec<_>>();

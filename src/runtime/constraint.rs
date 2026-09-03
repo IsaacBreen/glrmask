@@ -1274,8 +1274,7 @@ impl Constraint {
         if let Some(exprs) = self.deferred_terminal_exprs.get() {
             return Some(exprs.as_ref());
         }
-        let blob = self.deferred_terminal_exprs_blob.as_ref()?.as_slice();
-        let decoded = bincode::deserialize::<Vec<Expr>>(blob).ok()?;
+        let decoded = self.deferred_terminal_exprs_blob.as_ref()?.decode_exprs().ok()?;
         if decoded.len() != self.tokenizer.num_terminals() as usize {
             return None;
         }
@@ -6651,6 +6650,12 @@ impl Constraint {
         if self.dynamic_mask_vocab.has_terminal_observation_classes() {
             return;
         }
+        if std::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "0" | "false" | "no" | "off"))
+        {
+            return;
+        }
         let classes = self.build_dynamic_terminal_observation_classes();
         self.dynamic_mask_vocab
             .set_terminal_observation_classes(classes);
@@ -6666,6 +6671,14 @@ impl Constraint {
             .dynamic_mask_vocab
             .projected_terminal_quotients_prepared()
         {
+            return;
+        }
+        if std::env::var("GLRMASK_DYNAMIC_PROJECTED_TERMINAL_QUOTIENTS")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "0" | "false" | "no" | "off"))
+        {
+            self.dynamic_mask_vocab
+                .set_projected_terminal_quotients(Vec::new());
             return;
         }
         let quotients = self
@@ -6694,20 +6707,28 @@ impl Constraint {
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
-        self.table.rebuild_unconditional_advance_rows();
+        if self.table.unconditional_advance.len() != self.table.num_states as usize
+            || self
+                .table
+                .unconditional_advance
+                .iter()
+                .any(|row| row.len() != self.table.num_terminals as usize)
+        {
+            self.table.rebuild_unconditional_advance_rows();
+        }
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
-        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
-            self.terminal_live_states = self.compute_terminal_live_states();
-        }
+        // `terminal_live_states` is a legacy/static derived cache. Dynamic mask
+        // and commit paths do not consume it, so rebuilding it here only adds
+        // dynamic compile/load latency and allocations.
+        self.terminal_live_states.clear();
         let started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
-            if self.table.num_rules == 0 {
-                self.table.guarded_shift_index =
-                    vec![FxHashMap::default(); self.table.num_states as usize];
-            } else {
+            if self.table.has_guarded_stack_shifts() {
                 self.table.rebuild_guarded_shift_index();
+            } else {
+                self.table.guarded_shift_index.clear();
             }
         }
         let guarded_shift_ms = started_at
@@ -6766,11 +6787,46 @@ impl Constraint {
         // The strict vocabulary walker now executes epsilon-NFA configurations
         // directly. Do not second-guess the lexer's adaptive determinization
         // policy by fully determinizing the runtime tokenizer again for masks.
-        if dynamic_mask_vocab.mask_projection_tokenizer().is_none() {
+        let virtual_residual_mask_projection_enabled = std::env::var(
+            "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION",
+        )
+        .ok()
+        .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
+        const DEFAULT_VIRTUAL_RESIDUAL_PROJECTION_MAX_DENSE_STATES: usize = 16 * 1024;
+        let virtual_residual_projection_max_dense_states = std::env::var(
+            "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION_MAX_DENSE_STATES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_VIRTUAL_RESIDUAL_PROJECTION_MAX_DENSE_STATES);
+        if dynamic_mask_vocab.mask_projection_tokenizer().is_none()
+            && self.tokenizer.has_any_virtual_runtime()
+        {
             let max_token_len = self.max_token_byte_len();
-            if let Some((mask_tokenizer, projections)) = self
+            let virtual_residual_projection_dense_work = self
                 .tokenizer
-                .virtual_residuals_mask_tokenizer(max_token_len)
+                .virtual_residual_mask_projection_dense_state_work(max_token_len);
+            let virtual_residual_projection_within_budget =
+                virtual_residual_projection_dense_work.is_some_and(|work| {
+                    work <= virtual_residual_projection_max_dense_states
+                });
+            if profile
+                && virtual_residual_mask_projection_enabled
+                && self.tokenizer.has_virtual_residual_runtime()
+                && !virtual_residual_projection_within_budget
+            {
+                eprintln!(
+                    "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=virtual_residual skipped=projection_dense_state_budget estimated_dense_states={:?} max_dense_states={} horizon={}",
+                    virtual_residual_projection_dense_work,
+                    virtual_residual_projection_max_dense_states,
+                    max_token_len,
+                );
+            }
+            if virtual_residual_mask_projection_enabled
+                && virtual_residual_projection_within_budget
+                && let Some((mask_tokenizer, projections)) = self
+                    .tokenizer
+                    .virtual_residuals_mask_tokenizer(max_token_len)
             {
                 if profile {
                     eprintln!(
@@ -6816,7 +6872,11 @@ impl Constraint {
         let mask_execution_source = dynamic_mask_vocab
             .mask_projection_tokenizer()
             .unwrap_or(&self.tokenizer);
-        if mask_execution_source.has_epsilon_transitions()
+        let eager_mask_execution = std::env::var("GLRMASK_DYNAMIC_EAGER_MASK_EXECUTION")
+            .ok()
+            .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
+        if eager_mask_execution
+            && mask_execution_source.has_epsilon_transitions()
             && !mask_execution_source.has_any_virtual_runtime()
         {
             let source_states = mask_execution_source.num_states();
@@ -6841,7 +6901,12 @@ impl Constraint {
         dynamic_mask_vocab.prepare_full_walk_fast_transitions(&self.tokenizer);
         let has_dense_mask_projection =
             dynamic_mask_vocab.has_dense_mask_tokenizer_projection();
-        let terminal_observation_classes = if has_dense_mask_projection {
+        let terminal_observation_enabled = std::env::var("GLRMASK_DYNAMIC_TERMINAL_OBSERVATION_CLASSES")
+            .ok()
+            .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
+        let terminal_observation_classes = if !terminal_observation_enabled {
+            Vec::new()
+        } else if has_dense_mask_projection {
             dynamic_mask_vocab.terminal_observation_classes_cloned()
         } else if dynamic_mask_vocab.has_terminal_observation_classes() {
             dynamic_mask_vocab.terminal_observation_classes_cloned()
@@ -9265,7 +9330,7 @@ impl Constraint {
         // transition cell per consumed byte. Keep this bounded so large exact
         // tokenizers retain their existing sparse/packed runtime layout.
         if num_states <= 8_192
-            && let Some(flat16) = FastTokenizerTransitions::flat16_for(tokenizer)
+            && let Some(flat16) = FastTokenizerTransitions::flat16_transitions_only_for(tokenizer)
         {
             return flat16;
         }

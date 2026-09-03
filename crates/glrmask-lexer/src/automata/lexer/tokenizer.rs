@@ -1,7 +1,7 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -24,7 +24,9 @@ pub use super::runtime_residual::{
 #[doc(hidden)]
 pub type VirtualResidualMaskProjectionArtifactRef<'a> =
     super::runtime_residual::VirtualResidualMaskProjectionArtifactRef<'a>;
-use super::runtime_residual::VirtualResidualRuntime;
+use super::runtime_residual::{
+    VirtualResidualRuntime, build_bounded_code_liveness_oracle,
+};
 pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
@@ -8079,6 +8081,15 @@ impl Tokenizer {
         metadata
     }
 
+    #[doc(hidden)]
+    pub fn virtual_residual_runtime_oracles(&self) -> Vec<(TerminalID, Vec<u8>)> {
+        self.virtual_residuals
+            .iter()
+            .filter(|runtime| runtime.has_bounded_code_liveness_oracle())
+            .map(|runtime| (runtime.terminal(), runtime.serialized_bounded_code_oracle()))
+            .collect()
+    }
+
     fn restore_terminal_exprs_only(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
         let Some(exprs) = exprs else {
             self.exprs = None;
@@ -8139,6 +8150,25 @@ impl Tokenizer {
             allow_legacy_exact_dead_residual_roots,
             false,
             None,
+            None,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn restore_terminal_exprs_with_virtual_runtime_metadata_and_oracles(
+        &mut self,
+        exprs: Option<Vec<Expr>>,
+        metadata: &[VirtualTokenizerRuntimeMetadata],
+        residual_oracles: &[(TerminalID, Vec<u8>)],
+        allow_legacy_exact_dead_residual_roots: bool,
+    ) -> Result<(), String> {
+        self.restore_terminal_exprs_with_virtual_runtime_metadata_impl(
+            exprs,
+            metadata,
+            allow_legacy_exact_dead_residual_roots,
+            false,
+            None,
+            Some(residual_oracles),
         )
     }
 
@@ -8159,6 +8189,7 @@ impl Tokenizer {
             metadata,
             allow_legacy_exact_dead_residual_roots,
             true,
+            None,
             None,
         )
     }
@@ -8274,6 +8305,7 @@ impl Tokenizer {
             allow_legacy_exact_dead_residual_roots,
             true,
             Some(projections),
+            None,
         )
     }
 
@@ -8284,6 +8316,7 @@ impl Tokenizer {
         allow_legacy_exact_dead_residual_roots: bool,
         preserve_residual_oracle_coordinates: bool,
         precompiled_static_residual_projections: Option<&[VirtualResidualMaskProjectionArtifact]>,
+        precompiled_dynamic_residual_oracles: Option<&[(TerminalID, Vec<u8>)]>,
     ) -> Result<(), String> {
         self.restore_terminal_exprs_only(exprs)?;
         self.virtual_unit_repeat = None;
@@ -8303,6 +8336,13 @@ impl Tokenizer {
         let physical_state_count = self.num_states();
         let mut required_virtual_terminals = BTreeSet::<TerminalID>::new();
         let mut certified_bounded_code_terminals = BTreeSet::<TerminalID>::new();
+        // Dynamic transfer loading used to construct an exact bounded-code
+        // oracle here solely to certify each below-threshold residual owner,
+        // drop it, and then construct the identical oracle again while
+        // attaching the runtime below. Retain the certification result and
+        // move it into the runtime instead.
+        let mut certified_dynamic_residual_oracles =
+            BTreeMap::<TerminalID, super::runtime_residual::BoundedCodeIntersectionOracle>::new();
         let mut any_finalizer = BitSet::new(self.num_terminals as usize);
         let mut any_future = BitSet::new(self.num_terminals as usize);
         if precompiled_static_residual_projections.is_some() {
@@ -8326,10 +8366,13 @@ impl Tokenizer {
                 }
                 continue;
             }
-            if !super::compile::expression_supports_bounded_code_residual_runtime(expression) {
+            let Some(oracle) = build_bounded_code_liveness_oracle(expression) else {
                 continue;
-            }
+            };
             certified_bounded_code_terminals.insert(terminal);
+            if declared_terminals.contains(&terminal) {
+                certified_dynamic_residual_oracles.insert(terminal, oracle);
+            }
             let mut has_physical_finalizer = false;
             let mut has_physical_future = false;
             for state in 0..physical_state_count {
@@ -8521,6 +8564,39 @@ impl Tokenizer {
                             Arc::clone(&owners),
                         )
                     }
+                } else if let Some(oracle_bytes) = precompiled_dynamic_residual_oracles
+                    .and_then(|oracles| {
+                        oracles
+                            .iter()
+                            .find(|(terminal, _)| *terminal == entry.terminal)
+                            .map(|(_, bytes)| bytes.as_slice())
+                    })
+                {
+                    VirtualResidualRuntime::new_from_oracle_bytes(
+                        expression,
+                        oracle_bytes,
+                        runtime_index,
+                        entry.terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        entry.root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )
+                } else if let Some(oracle) =
+                    certified_dynamic_residual_oracles.remove(&entry.terminal)
+                {
+                    VirtualResidualRuntime::new_with_liveness_oracle(
+                        expression,
+                        oracle,
+                        runtime_index,
+                        entry.terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        entry.root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )
                 } else {
                     VirtualResidualRuntime::new(
                         expression,
@@ -8892,7 +8968,18 @@ impl Tokenizer {
         &mut self,
         components: Vec<(Expr, TerminalID)>,
     ) -> Option<()> {
-        self.install_virtual_residual_components_impl(components, false)
+        self.install_virtual_residual_components_impl(components, false, false)
+    }
+
+    /// Install residual proxy/runtime metadata for a transfer-producing
+    /// dynamic compile without eagerly constructing bounded-code liveness
+    /// oracles that are not serialized in the compact artifact.
+    #[doc(hidden)]
+    pub fn install_virtual_residual_components_without_liveness_oracles(
+        &mut self,
+        components: Vec<(Expr, TerminalID)>,
+    ) -> Option<()> {
+        self.install_virtual_residual_components_impl(components, false, true)
     }
 
     #[doc(hidden)]
@@ -8900,13 +8987,14 @@ impl Tokenizer {
         &mut self,
         components: Vec<(Expr, TerminalID)>,
     ) -> Option<()> {
-        self.install_virtual_residual_components_impl(components, true)
+        self.install_virtual_residual_components_impl(components, true, false)
     }
 
     fn install_virtual_residual_components_impl(
         &mut self,
         components: Vec<(Expr, TerminalID)>,
         preserve_oracle_coordinate: bool,
+        suppress_dynamic_liveness_oracle: bool,
     ) -> Option<()> {
         if self.virtual_unit_repeat.is_some()
             || !self.virtual_repeat_intersections.is_empty()
@@ -8940,6 +9028,17 @@ impl Tokenizer {
             let byte_support = super::compile::expr_u8set(&expression);
             let runtime = if preserve_oracle_coordinate {
                 VirtualResidualRuntime::new_preserving_oracle_coordinate(
+                    &expression,
+                    u32::try_from(index).ok()?,
+                    terminal,
+                    self.num_terminals,
+                    physical_state_count,
+                    root_state,
+                    Arc::clone(&allocator),
+                    Arc::clone(&owners),
+                )?
+            } else if suppress_dynamic_liveness_oracle {
+                VirtualResidualRuntime::new_without_liveness_oracle(
                     &expression,
                     u32::try_from(index).ok()?,
                     terminal,
@@ -9026,6 +9125,22 @@ impl Tokenizer {
             .iter()
             .filter(|runtime| runtime.has_bounded_code_liveness_oracle())
             .count()
+    }
+
+    /// Cheap upper-coordinate work estimate for the finite one-token mask
+    /// projection of every virtual residual component. `None` means at least
+    /// one component cannot use that projection at this horizon.
+    #[doc(hidden)]
+    pub fn virtual_residual_mask_projection_dense_state_work(
+        &self,
+        horizon: usize,
+    ) -> Option<usize> {
+        if self.virtual_residuals.is_empty() {
+            return None;
+        }
+        self.virtual_residuals.iter().try_fold(0usize, |total, runtime| {
+            total.checked_add(runtime.finite_mask_projection_dense_state_count(horizon)?)
+        })
     }
 
     /// Exact liveness at a dynamic token boundary. Ordinary, specialized, and
@@ -9170,6 +9285,20 @@ impl Tokenizer {
     ) -> Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)> {
         if self.virtual_residuals.is_empty() {
             return None;
+        }
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_VIRTUAL_RESIDUAL_PROJECTION").is_some() {
+            let estimates = self
+                .virtual_residuals
+                .iter()
+                .map(|runtime| runtime.finite_mask_projection_dense_state_count(horizon))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/profile][virtual_residual_projection_estimate] source_states={} horizon={} residuals={} dense_state_estimates={:?}",
+                self.num_states(),
+                horizon,
+                self.virtual_residuals.len(),
+                estimates,
+            );
         }
         let mut mask = self.clone();
         mask.virtual_unit_repeat = None;
@@ -10903,7 +11032,17 @@ impl Tokenizer {
         for state in initial_closure {
             self.dfa.clear_finalizers_for_state(state);
         }
-        self.dfa.recompute_possible_futures();
+        // `possible_future_group_ids` is a strict (one-or-more-byte) property.
+        // Draining the initial closure changes only zero-byte acceptance. Every
+        // byte transition that formerly entered that closure now enters an
+        // exact clone with the original finalizers and future metadata, and
+        // epsilon entries from post-byte states are redirected likewise. Thus
+        // every language reachable after consuming at least one byte is
+        // unchanged, so the existing strict-future metadata remains exact.
+        // Recomputing it here is especially expensive for a partitioned lexer:
+        // the epsilon-aware generic fixpoint repeatedly closes every state of
+        // the whole union even though this transformation preserves all strict
+        // futures by construction.
         nullable
     }
 
@@ -13146,6 +13285,10 @@ mod tests {
             .install_virtual_residual_components_preserving_oracle_coordinates(vec![(expression, 0)])
             .expect("bounded-code residual runtime must install");
         assert_eq!(exact.virtual_residual_bounded_code_liveness_oracle_count(), 1);
+        assert_eq!(
+            exact.virtual_residual_mask_projection_dense_state_work(HORIZON),
+            Some(72),
+        );
         let (mask, projections) = exact
             .virtual_residuals_mask_tokenizer(HORIZON)
             .expect("bounded-code residual must admit a finite mask projection");
@@ -13279,6 +13422,10 @@ mod tests {
         exact
             .install_virtual_residual_components_preserving_oracle_coordinates(vec![(expression, 0)])
             .expect("bounded-code residual runtime must install");
+        assert_eq!(
+            exact.virtual_residual_mask_projection_dense_state_work(HORIZON),
+            Some(30),
+        );
         let (mask, projections) = exact
             .virtual_residuals_mask_tokenizer(HORIZON)
             .expect("a cheap full-bound finite projection must remain available");

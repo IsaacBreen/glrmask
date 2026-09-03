@@ -58,11 +58,33 @@ const LEGACY_DYNAMIC_TRANSFER_VERSION_V6: u16 = 6;
 const LEGACY_DYNAMIC_TRANSFER_VERSION_V7: u16 = 7;
 // v9 also carries exact terminal-projected lexer quotients so a compile worker
 // and runtime process never rebuild them independently.
-const DYNAMIC_TRANSFER_VERSION: u16 = 9;
+const LEGACY_DYNAMIC_TRANSFER_VERSION_V9: u16 = 9;
+// v10 stores the GLR table through the shared compact sectioned table codec.
+// This avoids generic serde traversal of thousands of parser rows/rules and
+// allows source rules to remain deferred after load until composition needs them.
+const LEGACY_DYNAMIC_TRANSFER_VERSION_V10: u16 = 10;
+// v11 moves the large GLR-table, tokenizer, terminal-expression, and recursive
+// artifact byte blobs out of the bincode metadata object into raw top-level
+// sections. The loader can therefore decode table/tokenizer views directly
+// against one owned backing allocation instead of first copying each blob into
+// an intermediate Vec.
+const DYNAMIC_TRANSFER_VERSION: u16 = 11;
+const DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN: usize = 8;
+const DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN: usize = 5 * 8;
 
 mod compressed_terminal_exprs_serde {
     use super::Expr;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn encode(exprs: &[Expr]) -> Result<Vec<u8>, String> {
+        let raw = bincode::serialize(exprs).map_err(|err| err.to_string())?;
+        zstd::bulk::compress(&raw, 1).map_err(|err| err.to_string())
+    }
+
+    pub fn decode(compressed: &[u8]) -> Result<Vec<Expr>, String> {
+        let raw = zstd::stream::decode_all(compressed).map_err(|err| err.to_string())?;
+        bincode::deserialize(&raw).map_err(|err| err.to_string())
+    }
 
     pub fn serialize<S>(exprs: &Option<Vec<Expr>>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -71,10 +93,7 @@ mod compressed_terminal_exprs_serde {
         use serde::ser::Error as _;
         let compressed = match exprs {
             None => None,
-            Some(exprs) => {
-                let raw = bincode::serialize(exprs).map_err(S::Error::custom)?;
-                Some(zstd::bulk::compress(&raw, 1).map_err(S::Error::custom)?)
-            }
+            Some(exprs) => Some(encode(exprs).map_err(S::Error::custom)?),
         };
         compressed.serialize(serializer)
     }
@@ -88,9 +107,7 @@ mod compressed_terminal_exprs_serde {
         let Some(compressed) = compressed else {
             return Ok(None);
         };
-        let raw = zstd::stream::decode_all(compressed.as_slice()).map_err(D::Error::custom)?;
-        let exprs = bincode::deserialize(&raw).map_err(D::Error::custom)?;
-        Ok(Some(exprs))
+        decode(&compressed).map(Some).map_err(D::Error::custom)
     }
 }
 
@@ -106,6 +123,38 @@ impl serde::Serialize for CompactTransferTokenizer {
     }
 }
 
+/// Runtime-native tokenizer wire used by the current worker transfer. The
+/// older dynamic compact serde reconstructs every DFA row through generic
+/// serde on load. TKF3 instead restores the packed runtime transition and
+/// metadata representation already used by current Constraint artifacts.
+#[derive(Debug)]
+struct FastTransferTokenizer(Tokenizer);
+
+impl serde::Serialize for FastTransferTokenizer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes_with_packed_metadata(
+            &self.0,
+        )
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FastTransferTokenizer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes(&bytes)
+            .map(Self)
+            .map_err(D::Error::custom)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for CompactTransferTokenizer {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -113,6 +162,56 @@ impl<'de> serde::Deserialize<'de> for CompactTransferTokenizer {
     {
         crate::automata::lexer::tokenizer::compact_artifact_serde::deserialize(deserializer)
             .map(Self)
+    }
+}
+
+#[derive(Debug)]
+struct CompactTransferTable {
+    table: GLRTable,
+    deferred_rules: Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
+}
+
+impl serde::Serialize for CompactTransferTable {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error as _;
+        let materialized;
+        let table = if let Some(rules) = self.deferred_rules.as_ref() {
+            let decoded = bincode::deserialize::<Vec<crate::grammar::flat::Rule>>(rules.as_slice())
+                .map_err(S::Error::custom)?;
+            if decoded.len() != self.table.num_rules as usize
+                || decoded.first() != self.table.rules.first()
+            {
+                return Err(S::Error::custom("invalid deferred GLR rules in dynamic transfer"));
+            }
+            materialized = {
+                let mut table = self.table.clone();
+                table.rules = decoded;
+                table
+            };
+            &materialized
+        } else {
+            &self.table
+        };
+        crate::compiler::glr::table::artifact_serde::to_compact_bytes(table).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CompactTransferTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let decoded = crate::compiler::glr::table::artifact_serde::from_compact_bytes_deferred(&bytes)
+            .map_err(D::Error::custom)?;
+        Ok(Self {
+            table: decoded.table,
+            deferred_rules: decoded.deferred_rules,
+        })
     }
 }
 
@@ -400,6 +499,61 @@ struct DynamicConstraintTransferAlternativeV4 {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintTransferPayloadV4 {
     alternatives: Vec<DynamicConstraintTransferAlternativeV4>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DynamicConstraintTransferAlternativeV5 {
+    table: CompactTransferTable,
+    terminal_display_names: Vec<String>,
+    tokenizer: FastTransferTokenizer,
+    ignore_terminal: Option<TerminalID>,
+    direct_regular_automaton: Option<DirectRegularAutomaton>,
+    special_token_terminals: Vec<SpecialTokenTerminal>,
+    #[serde(default)]
+    ignore_expr: Option<Expr>,
+    /// Opaque zstd-compressed bincode terminal-expression section. Keeping the
+    /// bytes opaque is important: ordinary execution never needs source
+    /// expression trees, while later composition can materialize them lazily.
+    terminal_exprs_compressed: Option<Vec<u8>>,
+    mask_tokenizer: Option<CompactTransferTokenizer>,
+    full_to_mask_state: Vec<u32>,
+    virtual_runtimes: Vec<VirtualTokenizerRuntimeMetadata>,
+    terminal_observation_classes: Vec<(TerminalID, Vec<u32>)>,
+    projected_terminal_quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
+    boundary_trigger: DynamicBoundaryTriggerWire,
+    recursive_constraint_artifact: Option<Vec<u8>>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DynamicConstraintTransferPayloadV5 {
+    alternatives: Vec<DynamicConstraintTransferAlternativeV5>,
+}
+
+/// Small structured metadata for one v11 transfer alternative. Large runtime
+/// byte sections deliberately live outside this bincode object.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DynamicConstraintTransferMetadataV11 {
+    terminal_display_names: Vec<String>,
+    ignore_terminal: Option<TerminalID>,
+    direct_regular_automaton: Option<DirectRegularAutomaton>,
+    special_token_terminals: Vec<SpecialTokenTerminal>,
+    ignore_expr: Option<Expr>,
+    mask_tokenizer: Option<CompactTransferTokenizer>,
+    full_to_mask_state: Vec<u32>,
+    virtual_runtimes: Vec<VirtualTokenizerRuntimeMetadata>,
+    #[serde(default)]
+    residual_runtime_oracles: Vec<(TerminalID, Vec<u8>)>,
+    terminal_observation_classes: Vec<(TerminalID, Vec<u32>)>,
+    projected_terminal_quotients: Vec<(TerminalID, TerminalProjectedQuotient)>,
+    boundary_trigger: DynamicBoundaryTriggerWire,
+}
+
+struct DynamicConstraintTransferSectionsV11 {
+    table: Vec<u8>,
+    tokenizer: Vec<u8>,
+    terminal_exprs_compressed: Vec<u8>,
+    recursive_constraint_artifact: Vec<u8>,
+    metadata: Vec<u8>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -966,7 +1120,12 @@ impl DynamicConstraint {
     }
 
     fn payload_for_constraint(constraint: &Constraint) -> DynamicConstraintPayloadV2 {
-        let terminal_exprs = constraint.tokenizer.terminal_exprs().map(ToOwned::to_owned);
+        let retain_terminal_exprs = std::env::var("GLRMASK_DYNAMIC_TRANSFER_TERMINAL_EXPRS")
+            .ok()
+            .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"));
+        let terminal_exprs = retain_terminal_exprs
+            .then(|| constraint.tokenizer.terminal_exprs().map(ToOwned::to_owned))
+            .flatten();
         DynamicConstraintPayloadV2 {
             v1: DynamicConstraintPayloadV1 {
                 table: constraint.table.clone(),
@@ -1074,10 +1233,16 @@ impl DynamicConstraint {
         Ok(())
     }
 
-    fn transfer_payload_v3_from_constraint_owned(
+    fn transfer_payload_from_constraint_owned(
         constraint: Constraint,
-    ) -> DynamicConstraintTransferAlternativeV3 {
-        let terminal_exprs = constraint.tokenizer.terminal_exprs().map(ToOwned::to_owned);
+    ) -> DynamicConstraintTransferAlternativeV5 {
+        let terminal_exprs_compressed = constraint
+            .tokenizer
+            .terminal_exprs()
+            .map(|exprs| {
+                compressed_terminal_exprs_serde::encode(exprs)
+                    .expect("dynamic transfer terminal expression compression should succeed")
+            });
         let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
         let mask_quotient = constraint
             .dynamic_mask_vocab
@@ -1085,32 +1250,6 @@ impl DynamicConstraint {
         let terminal_observation_classes = constraint
             .dynamic_mask_vocab
             .terminal_observation_classes_for_artifact();
-
-        DynamicConstraintTransferAlternativeV3 {
-            base: DynamicConstraintTransferAlternativeV2 {
-                v1: DynamicConstraintTransferAlternativeV1 {
-                    table: constraint.table,
-                    terminal_display_names: constraint.terminal_display_names,
-                    tokenizer: constraint.tokenizer,
-                    ignore_terminal: constraint.ignore_terminal,
-                    direct_regular_automaton: constraint.direct_regular_automaton,
-                    special_token_terminals: constraint.special_token_terminals,
-                    ignore_expr: constraint.ignore_expr,
-                    terminal_exprs,
-                    mask_tokenizer: mask_quotient
-                        .as_ref()
-                        .map(|(tokenizer, _)| CompactTransferTokenizer(tokenizer.clone())),
-                    full_to_mask_state: mask_quotient.map_or_else(Vec::new, |(_, mapping)| mapping),
-                },
-                virtual_runtimes,
-            },
-            terminal_observation_classes,
-        }
-    }
-
-    fn transfer_payload_from_constraint_owned(
-        constraint: Constraint,
-    ) -> DynamicConstraintTransferAlternativeV4 {
         let projected_terminal_quotients = constraint
             .dynamic_mask_vocab
             .projected_terminal_quotients_for_artifact();
@@ -1118,29 +1257,470 @@ impl DynamicConstraint {
         let recursive_constraint_artifact = constraint
             .uses_compact_segmented_parser_runtime()
             .then(|| constraint.save());
-        DynamicConstraintTransferAlternativeV4 {
-            base: Self::transfer_payload_v3_from_constraint_owned(constraint),
+        DynamicConstraintTransferAlternativeV5 {
+            table: CompactTransferTable {
+                table: constraint.table,
+                deferred_rules: constraint.deferred_table_rules_blob,
+            },
+            terminal_display_names: constraint.terminal_display_names,
+            tokenizer: FastTransferTokenizer(constraint.tokenizer),
+            ignore_terminal: constraint.ignore_terminal,
+            direct_regular_automaton: constraint.direct_regular_automaton,
+            special_token_terminals: constraint.special_token_terminals,
+            ignore_expr: constraint.ignore_expr,
+            terminal_exprs_compressed,
+            mask_tokenizer: mask_quotient
+                .as_ref()
+                .map(|(tokenizer, _)| CompactTransferTokenizer(tokenizer.clone())),
+            full_to_mask_state: mask_quotient.map_or_else(Vec::new, |(_, mapping)| mapping),
+            virtual_runtimes,
+            terminal_observation_classes,
             projected_terminal_quotients,
             boundary_trigger,
             recursive_constraint_artifact,
         }
     }
 
-    pub(crate) fn into_saved(self) -> Vec<u8> {
-        let payload = DynamicConstraintTransferPayloadV4 {
-            alternatives: std::iter::once(self.inner)
-                .chain(self.alternatives)
-                .map(Self::transfer_payload_from_constraint_owned)
-                .collect(),
+    fn compact_table_bytes_for_transfer(constraint: &Constraint) -> Vec<u8> {
+        let materialized;
+        let table = if let Some(rules) = constraint.deferred_table_rules_blob.as_ref() {
+            let decoded = bincode::deserialize::<Vec<crate::grammar::flat::Rule>>(rules.as_slice())
+                .expect("loaded deferred GLR rules must remain valid");
+            assert_eq!(
+                decoded.len(),
+                constraint.table.num_rules as usize,
+                "loaded deferred GLR rule count changed before transfer save",
+            );
+            assert_eq!(
+                decoded.first(),
+                constraint.table.rules.first(),
+                "loaded deferred GLR augmented rule changed before transfer save",
+            );
+            materialized = {
+                let mut table = constraint.table.clone();
+                table.rules = decoded;
+                table
+            };
+            &materialized
+        } else {
+            &constraint.table
         };
-        let payload = bincode::serialize(&payload)
-            .expect("DynamicConstraint transfer serialization should succeed");
-        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload.len());
+        crate::compiler::glr::table::artifact_serde::to_compact_bytes(table)
+    }
+
+    fn transfer_sections_v11_from_constraint(
+        constraint: &Constraint,
+    ) -> DynamicConstraintTransferSectionsV11 {
+        let table = Self::compact_table_bytes_for_transfer(constraint);
+        let tokenizer =
+            crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes_with_packed_metadata(
+                &constraint.tokenizer,
+            );
+        let terminal_exprs_compressed = if let Some(exprs) = constraint.tokenizer.terminal_exprs() {
+            compressed_terminal_exprs_serde::encode(exprs)
+                .expect("dynamic transfer terminal expression compression should succeed")
+        } else if let Some(blob) = constraint.deferred_terminal_exprs_blob.as_ref() {
+            match blob {
+                crate::runtime::DeferredTerminalExprBytes::CompressedOwned(_)
+                | crate::runtime::DeferredTerminalExprBytes::CompressedBacked { .. } => {
+                    blob.as_slice().to_vec()
+                }
+                crate::runtime::DeferredTerminalExprBytes::Owned(_)
+                | crate::runtime::DeferredTerminalExprBytes::Backed { .. } => {
+                    zstd::bulk::compress(blob.as_slice(), 1)
+                        .expect("deferred terminal expression compression should succeed")
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let virtual_runtimes = constraint.tokenizer.virtual_runtime_metadata();
+        let residual_runtime_oracles = std::env::var("GLRMASK_DYNAMIC_TRANSFER_RESIDUAL_ORACLE_SIDECAR")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+            .then(|| constraint.tokenizer.virtual_residual_runtime_oracles())
+            .unwrap_or_default();
+        let mask_quotient = constraint
+            .dynamic_mask_vocab
+            .mask_tokenizer_quotient_for_transfer();
+        let terminal_observation_classes = constraint
+            .dynamic_mask_vocab
+            .terminal_observation_classes_for_artifact();
+        let projected_terminal_quotients = constraint
+            .dynamic_mask_vocab
+            .projected_terminal_quotients_for_artifact();
+        let boundary_trigger = DynamicBoundaryTriggerWire::from_trigger(&constraint.boundary_trigger);
+        let recursive_constraint_artifact = constraint
+            .uses_compact_segmented_parser_runtime()
+            .then(|| constraint.save())
+            .unwrap_or_default();
+        let metadata = DynamicConstraintTransferMetadataV11 {
+            terminal_display_names: constraint.terminal_display_names.clone(),
+            ignore_terminal: constraint.ignore_terminal,
+            direct_regular_automaton: constraint.direct_regular_automaton.clone(),
+            special_token_terminals: constraint.special_token_terminals.clone(),
+            ignore_expr: constraint.ignore_expr.clone(),
+            mask_tokenizer: mask_quotient
+                .as_ref()
+                .map(|(tokenizer, _)| CompactTransferTokenizer(tokenizer.clone())),
+            full_to_mask_state: mask_quotient.map_or_else(Vec::new, |(_, mapping)| mapping),
+            virtual_runtimes,
+            residual_runtime_oracles,
+            terminal_observation_classes,
+            projected_terminal_quotients,
+            boundary_trigger,
+        };
+        DynamicConstraintTransferSectionsV11 {
+            table,
+            tokenizer,
+            terminal_exprs_compressed,
+            recursive_constraint_artifact,
+            metadata: bincode::serialize(&metadata)
+                .expect("dynamic v11 transfer metadata serialization should succeed"),
+        }
+    }
+
+    /// Compact transfer artifact that deliberately omits vocabulary bytes.
+    /// Pair with `load_with_vocab`. This is the natural persisted format for
+    /// APIs (such as Python) whose load operation already requires a Vocab.
+    pub fn save_with_external_vocab(&self) -> Vec<u8> {
+        let alternatives = std::iter::once(&self.inner)
+            .chain(self.alternatives.iter())
+            .map(Self::transfer_sections_v11_from_constraint)
+            .collect::<Vec<_>>();
+        let alternative_count = u32::try_from(alternatives.len())
+            .expect("dynamic transfer alternative count exceeds u32");
+        let descriptor_bytes = alternatives
+            .len()
+            .checked_mul(DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN)
+            .expect("dynamic transfer descriptor size overflow");
+        let section_bytes = alternatives.iter().fold(0usize, |total, alternative| {
+            total
+                .checked_add(alternative.table.len())
+                .and_then(|total| total.checked_add(alternative.tokenizer.len()))
+                .and_then(|total| total.checked_add(alternative.terminal_exprs_compressed.len()))
+                .and_then(|total| total.checked_add(alternative.recursive_constraint_artifact.len()))
+                .and_then(|total| total.checked_add(alternative.metadata.len()))
+                .expect("dynamic transfer section size overflow")
+        });
+        let payload_capacity = DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN
+            .checked_add(descriptor_bytes)
+            .and_then(|total| total.checked_add(section_bytes))
+            .expect("dynamic transfer payload size overflow");
+        let mut bytes = Vec::with_capacity(DYNAMIC_CONSTRAINT_HEADER_LEN + payload_capacity);
         bytes.extend_from_slice(&DYNAMIC_TRANSFER_MAGIC);
         bytes.extend_from_slice(&DYNAMIC_TRANSFER_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&alternative_count.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let descriptor_start = bytes.len();
+        bytes.resize(descriptor_start + descriptor_bytes, 0);
+        for (index, alternative) in alternatives.into_iter().enumerate() {
+            let lengths = [
+                alternative.table.len(),
+                alternative.tokenizer.len(),
+                alternative.terminal_exprs_compressed.len(),
+                alternative.recursive_constraint_artifact.len(),
+                alternative.metadata.len(),
+            ];
+            let mut descriptor_pos =
+                descriptor_start + index * DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN;
+            for length in lengths {
+                let length = u64::try_from(length)
+                    .expect("dynamic transfer section length exceeds u64");
+                bytes[descriptor_pos..descriptor_pos + 8].copy_from_slice(&length.to_le_bytes());
+                descriptor_pos += 8;
+            }
+            bytes.extend_from_slice(&alternative.table);
+            bytes.extend_from_slice(&alternative.tokenizer);
+            bytes.extend_from_slice(&alternative.terminal_exprs_compressed);
+            bytes.extend_from_slice(&alternative.recursive_constraint_artifact);
+            bytes.extend_from_slice(&alternative.metadata);
+        }
+        let payload_len = bytes.len() - DYNAMIC_CONSTRAINT_HEADER_LEN;
+        bytes[10..18].copy_from_slice(&(payload_len as u64).to_le_bytes());
         bytes
+    }
+
+    pub(crate) fn into_saved(self) -> Vec<u8> {
+        self.save_with_external_vocab()
+    }
+
+    fn load_transfer_v11(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let total_started = profile.then(std::time::Instant::now);
+
+        // `load_with_vocab` is a borrowed API, while the backed table/tokenizer
+        // decoders retain views beyond this call. Copy the complete artifact
+        // once into one shared backing allocation; importantly, do not allocate
+        // separate table/tokenizer/expression Vecs as v10 bincode did.
+        let backing_started = profile.then(std::time::Instant::now);
+        let backing = Arc::new(bytes.to_vec());
+        let backing_ms = backing_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let framing_started = profile.then(std::time::Instant::now);
+        let payload_start = DYNAMIC_CONSTRAINT_HEADER_LEN;
+        let payload = backing.get(payload_start..).ok_or_else(|| {
+            crate::GlrMaskError::Serialization("missing dynamic v11 transfer payload".to_owned())
+        })?;
+        if payload.len() < DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN {
+            return Err(crate::GlrMaskError::Serialization(
+                "truncated dynamic v11 transfer payload header".to_owned(),
+            ));
+        }
+        let alternative_count = usize::try_from(u32::from_le_bytes(
+            payload[0..4]
+                .try_into()
+                .expect("dynamic v11 alternative count has fixed width"),
+        ))
+        .expect("u32 alternative count fits usize on supported platforms");
+        if alternative_count == 0 {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic v11 transfer artifact has no alternatives".to_owned(),
+            ));
+        }
+        let flags = u32::from_le_bytes(
+            payload[4..8]
+                .try_into()
+                .expect("dynamic v11 transfer flags have fixed width"),
+        );
+        if flags != 0 {
+            return Err(crate::GlrMaskError::Serialization(
+                "unsupported dynamic v11 transfer flags".to_owned(),
+            ));
+        }
+        let descriptor_bytes = alternative_count
+            .checked_mul(DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN)
+            .ok_or_else(|| {
+                crate::GlrMaskError::Serialization(
+                    "dynamic v11 transfer descriptor size overflow".to_owned(),
+                )
+            })?;
+        let descriptor_end = payload_start
+            .checked_add(DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN)
+            .and_then(|value| value.checked_add(descriptor_bytes))
+            .ok_or_else(|| {
+                crate::GlrMaskError::Serialization(
+                    "dynamic v11 transfer descriptor range overflow".to_owned(),
+                )
+            })?;
+        if descriptor_end > backing.len() {
+            return Err(crate::GlrMaskError::Serialization(
+                "truncated dynamic v11 transfer descriptors".to_owned(),
+            ));
+        }
+
+        let mut descriptors = Vec::<[usize; 5]>::with_capacity(alternative_count);
+        let descriptor_start = payload_start + DYNAMIC_TRANSFER_V11_PAYLOAD_HEADER_LEN;
+        for index in 0..alternative_count {
+            let mut pos = descriptor_start + index * DYNAMIC_TRANSFER_V11_ALT_DESCRIPTOR_LEN;
+            let mut lengths = [0usize; 5];
+            for length in &mut lengths {
+                let raw = u64::from_le_bytes(
+                    backing[pos..pos + 8]
+                        .try_into()
+                        .expect("validated v11 descriptor has fixed-width field"),
+                );
+                *length = usize::try_from(raw).map_err(|_| {
+                    crate::GlrMaskError::Serialization(
+                        "dynamic v11 transfer section length does not fit platform".to_owned(),
+                    )
+                })?;
+                pos += 8;
+            }
+            if lengths[0] == 0 || lengths[1] == 0 || lengths[4] == 0 {
+                return Err(crate::GlrMaskError::Serialization(
+                    "dynamic v11 transfer has an empty required section".to_owned(),
+                ));
+            }
+            descriptors.push(lengths);
+        }
+        let expected_end = descriptors.iter().try_fold(descriptor_end, |cursor, lengths| {
+            lengths
+                .iter()
+                .try_fold(cursor, |cursor, &length| cursor.checked_add(length))
+        });
+        if expected_end != Some(backing.len()) {
+            return Err(crate::GlrMaskError::Serialization(
+                "invalid dynamic v11 transfer section lengths".to_owned(),
+            ));
+        }
+        let framing_ms = framing_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let decode_started = profile.then(std::time::Instant::now);
+        let token_bytes = vocab.entries_arc();
+        let mut cursor = descriptor_end;
+        let mut alternatives = Vec::with_capacity(alternative_count);
+        for lengths in descriptors {
+            let section = |cursor: &mut usize, length: usize| -> std::ops::Range<usize> {
+                let start = *cursor;
+                *cursor += length;
+                start..*cursor
+            };
+            let table_range = section(&mut cursor, lengths[0]);
+            let tokenizer_range = section(&mut cursor, lengths[1]);
+            let terminal_exprs_range = section(&mut cursor, lengths[2]);
+            let recursive_range = section(&mut cursor, lengths[3]);
+            let metadata_range = section(&mut cursor, lengths[4]);
+
+            let metadata_started = profile.then(std::time::Instant::now);
+            let metadata: DynamicConstraintTransferMetadataV11 =
+                bincode::deserialize(&backing[metadata_range]).map_err(|err| {
+                    crate::GlrMaskError::Serialization(format!(
+                        "invalid dynamic v11 transfer metadata: {err}"
+                    ))
+                })?;
+            let metadata_ms = metadata_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+            if !recursive_range.is_empty() {
+                let mut inner = Constraint::load_with_vocab(&backing[recursive_range], vocab)?;
+                Self::restore_projected_terminal_quotients(
+                    &mut inner,
+                    metadata.projected_terminal_quotients,
+                )?;
+                inner.boundary_trigger = metadata.boundary_trigger.into_trigger();
+                alternatives.push(Self {
+                    inner,
+                    alternatives: Vec::new(),
+                    composition_grammars: vec![None],
+                });
+                continue;
+            }
+
+            let table_start = table_range.start;
+            let tokenizer_start = tokenizer_range.start;
+            let table_tokenizer_started = profile.then(std::time::Instant::now);
+            let ((table_result, tokenizer_result), ()) = rayon::join(
+                || {
+                    rayon::join(
+                        || {
+                            crate::compiler::glr::table::artifact_serde::from_compact_bytes_deferred_backed(
+                                &backing[table_range],
+                                Arc::clone(&backing),
+                                table_start,
+                            )
+                        },
+                        || {
+                            crate::automata::lexer::tokenizer::artifact_serde::from_fast_bytes_backed(
+                                &backing[tokenizer_range],
+                                Arc::clone(&backing),
+                                tokenizer_start,
+                            )
+                        },
+                    )
+                },
+                || (),
+            );
+            let decoded_table = table_result.map_err(crate::GlrMaskError::Serialization)?;
+            let mut tokenizer = tokenizer_result.map_err(crate::GlrMaskError::Serialization)?;
+            let table_tokenizer_ms = table_tokenizer_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+            let deferred_terminal_exprs = (!terminal_exprs_range.is_empty()).then(|| {
+                crate::runtime::DeferredTerminalExprBytes::CompressedBacked {
+                    backing: Arc::clone(&backing),
+                    start: terminal_exprs_range.start,
+                    len: terminal_exprs_range.len(),
+                }
+            });
+            if !metadata.virtual_runtimes.is_empty() {
+                let expressions = deferred_terminal_exprs
+                    .as_ref()
+                    .ok_or_else(|| {
+                        crate::GlrMaskError::Serialization(
+                            "dynamic v11 virtual runtime metadata has no terminal expressions"
+                                .to_owned(),
+                        )
+                    })?
+                    .decode_exprs()
+                    .map_err(crate::GlrMaskError::Serialization)?;
+                tokenizer
+                    .restore_terminal_exprs_with_virtual_runtime_metadata_and_oracles(
+                        Some(expressions),
+                        &metadata.virtual_runtimes,
+                        &metadata.residual_runtime_oracles,
+                        false,
+                    )
+                    .map_err(crate::GlrMaskError::Serialization)?;
+            }
+
+            let assemble_started = profile.then(std::time::Instant::now);
+            let mut inner = Self::constraint_from_payload_v2_with_dynamic_vocab(
+                DynamicConstraintPayloadV2 {
+                    v1: DynamicConstraintPayloadV1 {
+                        table: decoded_table.table,
+                        terminal_display_names: metadata.terminal_display_names,
+                        tokenizer,
+                        ignore_terminal: metadata.ignore_terminal,
+                        direct_regular_automaton: metadata.direct_regular_automaton,
+                        token_bytes: Arc::clone(&token_bytes),
+                        ignore_expr: metadata.ignore_expr,
+                        terminal_exprs: None,
+                    },
+                    special_token_terminals: metadata.special_token_terminals,
+                },
+                crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab),
+            );
+            if let Some(mask_tokenizer) = metadata.mask_tokenizer {
+                inner.dynamic_mask_vocab.set_mask_tokenizer_quotient(
+                    mask_tokenizer.0,
+                    metadata.full_to_mask_state,
+                );
+            }
+            Self::restore_terminal_observation_classes(
+                &mut inner,
+                metadata.terminal_observation_classes,
+            )?;
+            Self::restore_projected_terminal_quotients(
+                &mut inner,
+                metadata.projected_terminal_quotients,
+            )?;
+            inner.boundary_trigger = metadata.boundary_trigger.into_trigger();
+            inner.deferred_table_rules_blob = decoded_table.deferred_rules;
+            inner.deferred_table_rules = std::sync::OnceLock::new();
+            if inner.tokenizer.terminal_exprs().is_none() {
+                inner.deferred_terminal_exprs_blob = deferred_terminal_exprs;
+                inner.deferred_terminal_exprs = std::sync::OnceLock::new();
+            }
+            let assemble_ms = assemble_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let rebuild_started = profile.then(std::time::Instant::now);
+            inner.rebuild_dynamic_runtime_caches();
+            let rebuild_ms = rebuild_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][dynamic_transfer_v11_alt] metadata_ms={:.3} table_tokenizer_ms={:.3} assemble_ms={:.3} rebuild_ms={:.3}",
+                    metadata_ms,
+                    table_tokenizer_ms,
+                    assemble_ms,
+                    rebuild_ms,
+                );
+            }
+            alternatives.push(Self {
+                inner,
+                alternatives: Vec::new(),
+                composition_grammars: vec![None],
+            });
+        }
+        let payload_decode_ms = decode_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let loaded = Self::from_alternatives(alternatives);
+        if let Some(started) = total_started {
+            eprintln!(
+                "[glrmask/profile][dynamic_transfer_load] version={} bytes={} backing_ms={:.3} framing_ms={:.3} payload_decode_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
+                DYNAMIC_TRANSFER_VERSION,
+                bytes.len(),
+                backing_ms,
+                framing_ms,
+                payload_decode_ms,
+                0.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(loaded)
     }
 
     fn migrate_legacy_v10_payload(
@@ -1623,6 +2203,8 @@ impl DynamicConstraint {
                 | LEGACY_DYNAMIC_TRANSFER_VERSION_V5
                 | LEGACY_DYNAMIC_TRANSFER_VERSION_V6
                 | LEGACY_DYNAMIC_TRANSFER_VERSION_V7
+                | LEGACY_DYNAMIC_TRANSFER_VERSION_V9
+                | LEGACY_DYNAMIC_TRANSFER_VERSION_V10
                 | DYNAMIC_TRANSFER_VERSION
         ) {
             return Err(crate::GlrMaskError::Serialization(format!(
@@ -1644,12 +2226,19 @@ impl DynamicConstraint {
                 "invalid dynamic transfer artifact payload length".to_owned(),
             ));
         }
+        if version == DYNAMIC_TRANSFER_VERSION {
+            return Self::load_transfer_v11(bytes, vocab);
+        }
+        let load_profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_LOAD").is_some();
+        let load_total_started = load_profile.then(std::time::Instant::now);
+        let payload_decode_started = load_profile.then(std::time::Instant::now);
         let exact_virtual_metadata = matches!(
             version,
             LEGACY_DYNAMIC_TRANSFER_VERSION_V5
                 | LEGACY_DYNAMIC_TRANSFER_VERSION_V6
                 | LEGACY_DYNAMIC_TRANSFER_VERSION_V7
-                | DYNAMIC_TRANSFER_VERSION
+                | LEGACY_DYNAMIC_TRANSFER_VERSION_V9
+                | LEGACY_DYNAMIC_TRANSFER_VERSION_V10
         );
         let allow_legacy_exact_dead_residual_roots =
             version == LEGACY_DYNAMIC_TRANSFER_VERSION_V5;
@@ -1660,8 +2249,46 @@ impl DynamicConstraint {
             bool,
             DynamicBoundaryTriggerWire,
             Option<Vec<u8>>,
+            Option<crate::compiler::glr::table::artifact_serde::DeferredRuleBytes>,
+            Option<Vec<u8>>,
         )> = match version {
-            DYNAMIC_TRANSFER_VERSION => {
+            LEGACY_DYNAMIC_TRANSFER_VERSION_V10 => {
+                bincode::deserialize::<DynamicConstraintTransferPayloadV5>(
+                    &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
+                )
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .alternatives
+                .into_iter()
+                .map(|alternative| {
+                    let CompactTransferTable { table, deferred_rules } = alternative.table;
+                    (
+                        DynamicConstraintTransferAlternativeV2 {
+                            v1: DynamicConstraintTransferAlternativeV1 {
+                                table,
+                                terminal_display_names: alternative.terminal_display_names,
+                                tokenizer: alternative.tokenizer.0,
+                                ignore_terminal: alternative.ignore_terminal,
+                                direct_regular_automaton: alternative.direct_regular_automaton,
+                                special_token_terminals: alternative.special_token_terminals,
+                                ignore_expr: alternative.ignore_expr,
+                                terminal_exprs: None,
+                                mask_tokenizer: alternative.mask_tokenizer,
+                                full_to_mask_state: alternative.full_to_mask_state,
+                            },
+                            virtual_runtimes: alternative.virtual_runtimes,
+                        },
+                        alternative.terminal_observation_classes,
+                        alternative.projected_terminal_quotients,
+                        true,
+                        alternative.boundary_trigger,
+                        alternative.recursive_constraint_artifact,
+                        deferred_rules,
+                        alternative.terminal_exprs_compressed,
+                    )
+                })
+                .collect()
+            }
+            LEGACY_DYNAMIC_TRANSFER_VERSION_V9 => {
                 bincode::deserialize::<DynamicConstraintTransferPayloadV4>(
                     &bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..],
                 )
@@ -1676,6 +2303,8 @@ impl DynamicConstraint {
                         true,
                         alternative.boundary_trigger,
                         alternative.recursive_constraint_artifact,
+                        None,
+                        None,
                     )
                 })
                 .collect()
@@ -1695,6 +2324,8 @@ impl DynamicConstraint {
                         false,
                         DynamicBoundaryTriggerWire::None,
                         None,
+                        None,
+                        None,
                     )
                 })
                 .collect()
@@ -1713,6 +2344,8 @@ impl DynamicConstraint {
                         Vec::new(),
                         false,
                         DynamicBoundaryTriggerWire::None,
+                        None,
+                        None,
                         None,
                     )
                 })
@@ -1736,6 +2369,8 @@ impl DynamicConstraint {
                             Vec::new(),
                             false,
                             DynamicBoundaryTriggerWire::None,
+                            None,
+                            None,
                             None,
                         )
                     })
@@ -1768,6 +2403,8 @@ impl DynamicConstraint {
                         false,
                         DynamicBoundaryTriggerWire::None,
                         None,
+                        None,
+                        None,
                     )
                 }).collect()
             }
@@ -1797,6 +2434,8 @@ impl DynamicConstraint {
                         Vec::new(),
                         false,
                         DynamicBoundaryTriggerWire::None,
+                        None,
+                        None,
                         None,
                     )
                 }).collect()
@@ -1828,11 +2467,16 @@ impl DynamicConstraint {
                         false,
                         DynamicBoundaryTriggerWire::None,
                         None,
+                        None,
+                        None,
                     )
                 }).collect()
             }
             _ => unreachable!("transfer version was validated above"),
         };
+        let payload_decode_ms = payload_decode_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let finalize_started = load_profile.then(std::time::Instant::now);
         let token_bytes = vocab.entries_arc();
         let mut alternatives = payload_alternatives
             .into_iter()
@@ -1843,6 +2487,8 @@ impl DynamicConstraint {
                 projected_terminal_quotients_prepared,
                 boundary_trigger,
                 recursive_artifact,
+                deferred_table_rules,
+                deferred_terminal_exprs_compressed,
             )| -> crate::Result<Self> {
                 if let Some(recursive_artifact) = recursive_artifact {
                     let mut inner = Constraint::load_with_vocab(recursive_artifact, vocab)?;
@@ -1860,6 +2506,15 @@ impl DynamicConstraint {
                     });
                 }
                 if exact_virtual_metadata {
+                    if alternative.v1.terminal_exprs.is_none()
+                        && !alternative.virtual_runtimes.is_empty()
+                        && let Some(compressed) = deferred_terminal_exprs_compressed.as_deref()
+                    {
+                        alternative.v1.terminal_exprs = Some(
+                            compressed_terminal_exprs_serde::decode(compressed)
+                                .map_err(crate::GlrMaskError::Serialization)?,
+                        );
+                    }
                     let exprs = alternative.v1.terminal_exprs.clone();
                     alternative
                         .v1
@@ -1907,6 +2562,18 @@ impl DynamicConstraint {
                     )?;
                 }
                 inner.boundary_trigger = boundary_trigger.into_trigger();
+                inner.deferred_table_rules_blob = deferred_table_rules;
+                inner.deferred_table_rules = std::sync::OnceLock::new();
+                if inner.tokenizer.terminal_exprs().is_none()
+                    && let Some(compressed) = deferred_terminal_exprs_compressed
+                {
+                    inner.deferred_terminal_exprs_blob = Some(
+                        crate::runtime::DeferredTerminalExprBytes::CompressedOwned(Arc::from(
+                            compressed.into_boxed_slice(),
+                        )),
+                    );
+                    inner.deferred_terminal_exprs = std::sync::OnceLock::new();
+                }
                 inner.rebuild_dynamic_runtime_caches();
                 Ok(Self {
                     inner,
@@ -1920,7 +2587,18 @@ impl DynamicConstraint {
                 "dynamic union transfer artifact has no alternatives".to_owned(),
             ));
         }
-        Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
+        let loaded = Self::from_alternatives(std::mem::take(&mut alternatives));
+        if let Some(total_started) = load_total_started {
+            eprintln!(
+                "[glrmask/profile][dynamic_transfer_load] version={} bytes={} payload_decode_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
+                version,
+                bytes.len(),
+                payload_decode_ms,
+                finalize_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(loaded)
     }
 
     /// Load an artifact produced by [`DynamicConstraint::save`].
@@ -2089,7 +2767,7 @@ impl DynamicConstraint {
         DynamicConstraintState {
             alternatives: std::iter::once(&self.inner)
                 .chain(self.alternatives.iter())
-                .map(Constraint::start)
+                .map(Constraint::start_dynamic)
                 .collect(),
             mask_len: self.mask_len(),
         }
@@ -2888,6 +3566,57 @@ mod tests {
         assert!(
             error.to_string().contains("byte support"),
             "unexpected byte-support mismatch error: {error}",
+        );
+    }
+
+    #[test]
+    fn current_dynamic_transfer_defers_terminal_expression_trees() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+        ]);
+        let constraint = DynamicConstraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= /a+/;
+                t B ::= /b+/;
+                nt start ::= A B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let expected = constraint
+            .inner
+            .tokenizer
+            .terminal_exprs()
+            .expect("fresh constraint retains terminal expressions")
+            .to_vec();
+        assert!(constraint.inner.tokenizer.virtual_runtime_metadata().is_empty());
+
+        let transfer = constraint.into_saved();
+        let loaded = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert!(
+            loaded.inner.tokenizer.terminal_exprs().is_none(),
+            "ordinary transfer load must not eagerly materialize source expression trees",
+        );
+        assert!(matches!(
+            loaded.inner.deferred_terminal_exprs_blob,
+            Some(crate::runtime::DeferredTerminalExprBytes::CompressedBacked { .. })
+        ));
+        assert_eq!(
+            loaded
+                .inner
+                .retained_terminal_exprs()
+                .expect("composition must recover deferred source expressions"),
+            expected,
+        );
+        assert_eq!(
+            loaded
+                .inner
+                .retained_terminal_exprs()
+                .expect("decoded expressions should stay cached"),
+            expected,
         );
     }
 
