@@ -2879,6 +2879,18 @@ pub(crate) struct DynamicMaskVocab {
     /// determinization is active.
     mask_projection_to_determinized: Arc<[u32]>,
     mask_tokenizer_fast_transitions: Option<FastTokenizerTransitions>,
+    /// Exact parser-transparent vocabulary-slice certificates for the strict
+    /// dynamic mask walk. For each deterministic mask lexer state this stores
+    /// one bit per zero-byte structural vocabulary root. A set bit proves that
+    /// every token below that root stays within an H16/H64 observation-stable
+    /// byte family (or an unbounded literal self-loop family): no lexer
+    /// finalizer fires on any prefix and the complete possible-future-terminal
+    /// set at every token end is unchanged. The lexer state itself may advance;
+    /// the parser therefore remains unchanged while the token is consumed.
+    /// Runtime still checks that the unchanged future-terminal set intersects
+    /// the parser-admissible terminals before skipping the subtree.
+    transparent_partition_root_count: u32,
+    transparent_partition_bits: Arc<[u64]>,
     full_to_mask_state: Arc<[u32]>,
     /// Derived exact subset provenance for the dense mask tokenizer. Keys are
     /// epsilon-closed source-tokenizer state sets and values are the already
@@ -2916,6 +2928,136 @@ impl DynamicMaskVocab {
             .or(self.mask_tokenizer.as_deref())
             .unwrap_or(source);
         self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(tokenizer);
+        let certificates = self
+            .mask_tokenizer_fast_transitions
+            .as_ref()
+            .and_then(|_| Self::build_transparent_partition_certificates(self.trie.as_ref(), tokenizer));
+        if let Some((root_count, bits)) = certificates {
+            self.transparent_partition_root_count = root_count;
+            self.transparent_partition_bits = bits;
+        } else {
+            self.transparent_partition_root_count = 0;
+            self.transparent_partition_bits = Arc::from(Vec::<u64>::new());
+        }
+    }
+
+    fn build_transparent_partition_certificates(
+        trie: &DynamicMaskTrie,
+        tokenizer: &Tokenizer,
+    ) -> Option<(u32, Arc<[u64]>)> {
+        if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_PARTITION_SLICER").is_some()
+            || tokenizer.has_epsilon_transitions()
+            || tokenizer.has_any_virtual_runtime()
+        {
+            return None;
+        }
+        let root_edges = trie.children(0);
+        if root_edges.is_empty()
+            || root_edges
+                .iter()
+                .any(|edge| !trie.edge_bytes(edge).is_empty())
+        {
+            return None;
+        }
+
+        let started = std::time::Instant::now();
+        let state_count = tokenizer.num_states() as usize;
+        let root_count = root_edges.len();
+        let words_per_state = root_count.div_ceil(64);
+        let word_count = state_count.checked_mul(words_per_state)?;
+        // This accelerator must stay cheap relative to dynamic compilation.
+        // Decline before the H16/H64 proof when either the lexer coordinate or
+        // the auxiliary bit table is large; the strict full walker remains the
+        // exact fallback. The byte cap is usually the tighter bound for normal
+        // partitioned LLM vocabularies, while the state cap also bounds work
+        // for unusually small vocabularies with very few structural roots.
+        const MAX_CERTIFICATE_STATES: usize = 32 * 1024;
+        const MAX_CERTIFICATE_BYTES: usize = 1024 * 1024;
+        if state_count > MAX_CERTIFICATE_STATES
+            || word_count.checked_mul(std::mem::size_of::<u64>())? > MAX_CERTIFICATE_BYTES
+        {
+            return None;
+        }
+
+        let root_metadata = root_edges
+            .iter()
+            .map(|edge| {
+                (
+                    U8Set::from_words(trie.subtree_bytes(edge.child)),
+                    trie.subtree_max_byte_len(edge.child),
+                )
+            })
+            .collect::<Vec<_>>();
+        let observation_started = std::time::Instant::now();
+        let (safe16, safe64) = tokenizer.precompute_bounded_observation_safe_byte_sets();
+        let observation_ms = observation_started.elapsed().as_secs_f64() * 1000.0;
+        let self_loop_bytes = tokenizer.all_self_loop_bytes();
+        let mut bits = vec![0u64; word_count];
+        bits.par_chunks_mut(words_per_state)
+            .enumerate()
+            .for_each(|(state, row)| {
+                // Bounded observation stability preserves the source finalizer
+                // set. The parser is transparent only when that set is empty.
+                if !tokenizer.matched_terminal_bitset(state as u32).is_empty() {
+                    return;
+                }
+                for (root_slot, (bytes, max_len)) in root_metadata.iter().enumerate() {
+                    let safe = if *max_len <= 16 {
+                        &safe16[state]
+                    } else if *max_len <= 64 {
+                        &safe64[state]
+                    } else {
+                        // H64 cannot prove a longer token. Literal self-loops
+                        // are horizon-independent and remain a sound fallback.
+                        &self_loop_bytes[state]
+                    };
+                    if bytes.is_subset(safe) {
+                        row[root_slot / 64] |= 1u64 << (root_slot % 64);
+                    }
+                }
+            });
+        let certified_entries = bits
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>();
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][dynamic_partition_slicer_build] states={} roots={} certified_entries={} bytes={} bounded_observation_ms={:.3} elapsed_ms={:.3}",
+                state_count,
+                root_count,
+                certified_entries,
+                bits.len() * std::mem::size_of::<u64>(),
+                observation_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        (certified_entries != 0).then(|| (root_count as u32, Arc::from(bits)))
+    }
+
+    #[inline(always)]
+    pub(crate) fn has_transparent_partition_certificates(&self) -> bool {
+        self.transparent_partition_root_count != 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn transparent_partition_is_certified(
+        &self,
+        lexer_state: u32,
+        root_slot: usize,
+    ) -> bool {
+        let root_count = self.transparent_partition_root_count as usize;
+        if root_count == 0 || root_slot >= root_count {
+            return false;
+        }
+        let words_per_state = root_count.div_ceil(64);
+        let index = (lexer_state as usize)
+            .checked_mul(words_per_state)
+            .and_then(|base| base.checked_add(root_slot / 64));
+        index
+            .and_then(|index| self.transparent_partition_bits.get(index))
+            .is_some_and(|word| word & (1u64 << (root_slot % 64)) != 0)
     }
 
     /// Prepare a deterministic execution representation for the exact finite
@@ -3056,6 +3198,8 @@ impl DynamicMaskVocab {
             mask_determinized_tokenizer: None,
             mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
             mask_tokenizer_fast_transitions: None,
+            transparent_partition_root_count: 0,
+            transparent_partition_bits: Arc::from(Vec::<u64>::new()),
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
@@ -3114,6 +3258,8 @@ impl DynamicMaskVocab {
             mask_determinized_tokenizer: None,
             mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
             mask_tokenizer_fast_transitions: None,
+            transparent_partition_root_count: 0,
+            transparent_partition_bits: Arc::from(Vec::<u64>::new()),
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
@@ -3155,6 +3301,8 @@ impl DynamicMaskVocab {
             mask_determinized_tokenizer: None,
             mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
             mask_tokenizer_fast_transitions: None,
+            transparent_partition_root_count: 0,
+            transparent_partition_bits: Arc::from(Vec::<u64>::new()),
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
@@ -3217,6 +3365,8 @@ impl DynamicMaskVocab {
             mask_determinized_tokenizer: None,
             mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
             mask_tokenizer_fast_transitions: None,
+            transparent_partition_root_count: 0,
+            transparent_partition_bits: Arc::from(Vec::<u64>::new()),
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
@@ -3713,6 +3863,8 @@ impl DynamicMaskVocab {
         self.mask_projection_to_determinized =
             Arc::clone(&source.mask_projection_to_determinized);
         self.mask_tokenizer_fast_transitions = source.mask_tokenizer_fast_transitions.clone();
+        self.transparent_partition_root_count = 0;
+        self.transparent_partition_bits = Arc::from(Vec::<u64>::new());
         self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
         self.mask_state_source_subsets = Arc::clone(&source.mask_state_source_subsets);
         self.mask_source_subset_to_state = Arc::clone(&source.mask_source_subset_to_state);
@@ -3768,11 +3920,19 @@ impl DynamicMaskVocab {
     }
 
     #[cfg(test)]
+    pub(crate) fn disable_transparent_partition_certificates_for_test(&mut self) {
+        self.transparent_partition_root_count = 0;
+        self.transparent_partition_bits = Arc::from(Vec::<u64>::new());
+    }
+
+    #[cfg(test)]
     pub(crate) fn disable_prepared_mask_execution_for_test(&mut self) {
         self.mask_tokenizer = None;
         self.mask_determinized_tokenizer = None;
         self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
         self.mask_tokenizer_fast_transitions = None;
+        self.transparent_partition_root_count = 0;
+        self.transparent_partition_bits = Arc::from(Vec::<u64>::new());
         self.full_to_mask_state = Arc::from(Vec::<u32>::new());
         self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
         self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
@@ -4672,6 +4832,8 @@ impl Default for DynamicMaskVocab {
             mask_determinized_tokenizer: None,
             mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
             mask_tokenizer_fast_transitions: None,
+            transparent_partition_root_count: 0,
+            transparent_partition_bits: Arc::from(Vec::<u64>::new()),
             full_to_mask_state: Arc::from(Vec::<u32>::new()),
             mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
             mask_source_subset_to_state: Arc::new(FxHashMap::default()),
