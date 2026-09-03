@@ -36,6 +36,7 @@ type ParserStacks = LeveledGSS<u32, ()>;
 thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_CONFIG_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_PARTITION_SLICER_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 trait FullWalkTransitionTable {
@@ -4344,6 +4345,65 @@ nt start ::= A C | B D;
         state.commit_token(1).unwrap();
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
+    }
+
+    #[test]
+    fn dynamic_partition_slicer_matches_uncertified_bounded_string_mask() {
+        // Keep several distinct structural root classes, including quote/control
+        // families which are invalid inside a JSON string. This catches a
+        // root-slot/DFS-index mixup as well as the bounded advancing-state proof.
+        let vocab = Vocab::new(vec![
+            (0, b"alpha".to_vec()),
+            (1, b" beta".to_vec()),
+            (2, b"123".to_vec()),
+            (3, b"!!!".to_vec()),
+            (4, b"_name".to_vec()),
+            (5, b"longword".to_vec()),
+            (6, b" quote".to_vec()),
+            (7, b"\"".to_vec()),
+            (8, b" \"\n".to_vec()),
+            (9, b"\\n".to_vec()),
+            (10, "é".as_bytes().to_vec()),
+            (11, b"a-b".to_vec()),
+            (12, b"{".to_vec()),
+            (13, b"}".to_vec()),
+            (14, b":".to_vec()),
+            (15, b"x".to_vec()),
+            // Keep the finite mask-only bounded-repeat horizon well beyond H64.
+            (16, vec![b'z'; 128]),
+        ]);
+        let schema = r#"{"type":"string","maxLength":1000000000000}"#;
+        let accelerated = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(
+            accelerated
+                .inner
+                .dynamic_mask_vocab
+                .has_transparent_partition_certificates(),
+            "test must exercise the partition slicer certificate table",
+        );
+        let mut reference = accelerated.clone();
+        reference
+            .inner
+            .dynamic_mask_vocab
+            .disable_transparent_partition_certificates_for_test();
+
+        let mut accelerated_state = accelerated.inner.start();
+        let mut reference_state = reference.inner.start();
+        let prefix = b"\"inside a bounded string ";
+        accelerated_state.commit_bytes(prefix).unwrap();
+        reference_state.commit_bytes(prefix).unwrap();
+
+        TEST_PARTITION_SLICER_HITS.with(|hits| hits.set(0));
+        let accelerated_mask = direct_mask(&accelerated_state);
+        TEST_PARTITION_SLICER_HITS.with(|hits| {
+            assert!(hits.get() > 0, "test state did not exercise the partition slicer")
+        });
+        let reference_mask = direct_mask(&reference_state);
+        assert_eq!(accelerated_mask, reference_mask);
+        for token in [0, 1, 2, 3, 4, 5, 6, 10, 11, 15] {
+            assert!(token_allowed(&accelerated_mask, token), "token {token} should remain inside the string");
+        }
+        assert!(!token_allowed(&accelerated_mask, 8));
     }
 
     #[test]
